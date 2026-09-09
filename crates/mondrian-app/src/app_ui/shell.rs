@@ -491,6 +491,47 @@ pub fn try_resolve_app_shell_action(
                     ))
                 }))
         }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == crate::app::ui_actions::APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG =>
+        {
+            let Some(paths) = platform
+                .open_file_dialog(
+                    "导入 ANC / 广播字幕",
+                    &[FileFilter::new(
+                        "ANC JSON / SCC V1.0 / 原始 CDP",
+                        vec!["json", "mdanc", "scc", "cdp"],
+                    )],
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+            else {
+                return Ok(None);
+            };
+            Ok(paths
+                .into_iter()
+                .next()
+                .map(|path| export_edit_draft_action(ExportDraftEdit::ImportAncillary(path))))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == crate::app::ui_actions::APP_SHELL_IMPORT_EXPORT_PSE_DIALOG =>
+        {
+            let Some(paths) = platform
+                .open_file_dialog(
+                    "导入监管 PSE 配置",
+                    &[FileFilter::new("Regulatory PSE JSON", vec!["json"])],
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+            else {
+                return Ok(None);
+            };
+            Ok(paths
+                .into_iter()
+                .next()
+                .map(|path| export_edit_draft_action(ExportDraftEdit::ImportRegulatoryPse(path))))
+        }
         Action::Custom { namespace, name, .. } if namespace == APP_SHELL_NAMESPACE => {
             Err(unknown_app_shell_action_error(&name))
         }
@@ -4299,6 +4340,60 @@ mod tests {
             resolve_app_shell_action(app_shell_open_project_dialog_action(), &platform, None);
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn ancillary_dialog_yields_typed_import_and_cancellation_keeps_the_draft() {
+        let path = PathBuf::from("E:/broadcast/canonical.json");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone()]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action(),
+            &platform,
+            None,
+        )
+        .expect("selection");
+        assert_eq!(
+            action,
+            export_edit_draft_action(ExportDraftEdit::ImportAncillary(path))
+        );
+        assert_eq!(
+            resolve_app_shell_action(
+                crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action(),
+                &FakePlatform::default(),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn regulatory_pse_dialog_yields_typed_import_and_retains_cancellation() {
+        let path = PathBuf::from("E:/broadcast/pse.json");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone()]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_import_export_pse_dialog_action(),
+            &platform,
+            None,
+        )
+        .expect("selection");
+        assert_eq!(
+            action,
+            export_edit_draft_action(ExportDraftEdit::ImportRegulatoryPse(path))
+        );
+        assert_eq!(
+            resolve_app_shell_action(
+                crate::app::ui_actions::app_shell_import_export_pse_dialog_action(),
+                &FakePlatform::default(),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

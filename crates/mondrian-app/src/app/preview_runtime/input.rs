@@ -40,6 +40,9 @@ pub(crate) enum PreviewFrameExecutionPurpose {
     /// A Presentation Adapter may retain the resulting ticketless frame only
     /// until that exact coordinate becomes the immediate successor.
     LookaheadPreparation,
+    /// Prepare backend objects for one farther cold source activation without
+    /// retaining its frame evaluation in the ordinary four-entry LRU.
+    ColdActivationPreparation,
 }
 
 /// Narrow command seam used when Preview source resolution discovers missing
@@ -214,6 +217,7 @@ pub(crate) struct PreviewTransportSnapshot {
     runtime_scale: PreviewResolutionScale,
     seek_source: TimelineSeekSource,
     demand: Option<PreviewFrameDemandSnapshot>,
+    priming_work_deadline: Option<Instant>,
     purpose: PreviewFrameExecutionPurpose,
 }
 
@@ -238,6 +242,7 @@ impl PreviewTransportSnapshot {
             runtime_scale,
             seek_source,
             demand,
+            priming_work_deadline: None,
             purpose: PreviewFrameExecutionPurpose::Current,
         }
     }
@@ -318,6 +323,25 @@ impl PreviewTransportSnapshot {
         self.demand
     }
 
+    /// Bind a read-only work horizon; this never creates presentation authority.
+    pub(crate) const fn with_priming_work_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.priming_work_deadline = deadline;
+        self
+    }
+
+    /// Original active Priming horizon, including after current presentation.
+    pub(crate) const fn priming_work_deadline(self) -> Option<Instant> {
+        self.priming_work_deadline
+    }
+
+    /// Whether optional media may start without preempting the initial picture.
+    /// A consumed ticket is necessary but is never itself a media Ready proof.
+    pub(crate) fn allows_future_media_admission(self, observed_at: Instant) -> bool {
+        !self.is_priming()
+            || (self.demand.is_none()
+                && self.priming_work_deadline.is_some_and(|deadline| observed_at < deadline))
+    }
+
     /// Whether this snapshot describes bounded immediate-successor preparation.
     pub(crate) const fn is_successor_preparation(self) -> bool {
         matches!(
@@ -332,6 +356,7 @@ impl PreviewTransportSnapshot {
             self.purpose,
             PreviewFrameExecutionPurpose::SuccessorPreparation
                 | PreviewFrameExecutionPurpose::LookaheadPreparation
+                | PreviewFrameExecutionPurpose::ColdActivationPreparation
         )
     }
 
@@ -340,6 +365,15 @@ impl PreviewTransportSnapshot {
         matches!(
             self.purpose,
             PreviewFrameExecutionPurpose::LookaheadPreparation
+                | PreviewFrameExecutionPurpose::ColdActivationPreparation
+        )
+    }
+
+    /// Whether this request is the ephemeral farther cold-source prewarm.
+    pub(crate) const fn is_cold_activation_preparation(self) -> bool {
+        matches!(
+            self.purpose,
+            PreviewFrameExecutionPurpose::ColdActivationPreparation
         )
     }
 
@@ -444,6 +478,25 @@ impl<'a> PreviewFrameExecutionRequest<'a> {
     ) -> Option<Self> {
         snapshot.transport = snapshot.transport.for_lookahead_preparation(offset)?;
         Some(Self { snapshot, proxy_demands })
+    }
+
+    /// Bind one exact farther playback coordinate already discovered by the
+    /// bounded cold-activation planner.
+    pub(crate) fn lookahead_frame(
+        snapshot: PreviewExecutionSnapshot<'a>,
+        proxy_demands: &'a dyn PreviewProxyDemandSink,
+        frame: i64,
+    ) -> Option<Self> {
+        let transport = snapshot.transport();
+        let distance = match transport.playback_direction() {
+            PreviewPlaybackDirection::Forward => frame.checked_sub(transport.current_frame())?,
+            PreviewPlaybackDirection::Reverse => transport.current_frame().checked_sub(frame)?,
+        };
+        let offset = usize::try_from(distance).ok()?;
+        let mut request = Self::lookahead(snapshot, proxy_demands, offset)?;
+        request.snapshot.transport.purpose =
+            PreviewFrameExecutionPurpose::ColdActivationPreparation;
+        Some(request)
     }
 
     /// Immutable execution facts.

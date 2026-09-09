@@ -1823,17 +1823,20 @@ pub(super) fn execute_visual_stage(
 }
 
 #[cfg(test)]
-fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<GoldenVisualReport> {
+fn execute_visual_slice(
+    root: &Path,
+    paths: &GoldenRunPaths,
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenVisualReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Visual",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    execute_visual_stage(&contract, &mut workflow)
+    workflow.run_with(|workflow| execute_visual_stage(&contract, workflow))
 }
 
 #[test]

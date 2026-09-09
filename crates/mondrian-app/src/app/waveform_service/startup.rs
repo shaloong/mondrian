@@ -4,7 +4,7 @@
 use super::*;
 
 /// Actual inventory installed before Waveform startup failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioWaveformStartupStage {
     /// Only inert channels/state exist; no decoder or analysis worker started.
@@ -26,7 +26,7 @@ pub struct AudioWaveformStartupPanic {
 }
 
 /// Actual partial inventory and its unmodified consuming shutdown receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioWaveformStartupShutdownEvidence {
     /// Installed inventory, captured before any shutdown operation.
     pub stage: AudioWaveformStartupStage,

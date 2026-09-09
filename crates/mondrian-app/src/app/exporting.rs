@@ -1,5 +1,10 @@
 //! Timeline export orchestration shared by all UI frontends.
 
+mod ancillary;
+pub use ancillary::ImportedAncillaryProgram;
+mod regulatory_pse;
+pub use regulatory_pse::ImportedRegulatoryPseConfiguration;
+
 use super::*;
 use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::delivery::resolve_export_delivery;
@@ -31,6 +36,12 @@ pub struct TimelineExportRequest {
     /// Optional broadcaster-specific QC profile frozen with the request.
     #[serde(default)]
     pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
+    /// Explicit fixed-version external PSE analyzer and externally approved profile.
+    #[serde(default)]
+    pub regulatory_pse: Option<mondrian_export::RegulatoryPseProviderConfig>,
+    /// Optional canonical ANC program frozen with the exact export selection.
+    #[serde(default)]
+    pub frozen_ancillary: Option<mondrian_broadcast::FrozenAncillaryProgram>,
 }
 
 /// UI-stable draft state for timeline export panels.
@@ -49,6 +60,10 @@ pub struct TimelineExportDraft {
     pub range: TimelineExportRange,
     /// User-entered output file path.
     pub output_path: String,
+    /// Validated immutable ANC selected explicitly for this export draft.
+    pub ancillary: Option<ImportedAncillaryProgram>,
+    /// Explicit external PSE installation and matching regulatory QC profile.
+    pub regulatory_pse: Option<ImportedRegulatoryPseConfiguration>,
 }
 
 impl Default for TimelineExportDraft {
@@ -60,6 +75,8 @@ impl Default for TimelineExportDraft {
             selected_sequence_id: None,
             range: TimelineExportRange::SequenceInOut,
             output_path: String::new(),
+            ancillary: None,
+            regulatory_pse: None,
         }
     }
 }
@@ -250,6 +267,9 @@ impl AppState {
             output_policy: request.output_policy,
             smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
             broadcast_qc: request.broadcast_qc,
+            regulatory_pse: request.regulatory_pse,
+            frozen_ancillary: request.frozen_ancillary,
+            approved_bmx: None,
         })
     }
 
@@ -895,6 +915,8 @@ mod tests {
                 output_path: PathBuf::new(),
                 output_policy: ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             })
             .expect_err("empty output path should be rejected");
 
@@ -993,6 +1015,8 @@ mod tests {
                 output_path: PathBuf::from("E:/renders/out.mp4"),
                 output_policy: ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             })
             .expect_err("stale explicit sequence id should be rejected");
 

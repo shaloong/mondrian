@@ -26,7 +26,9 @@ impl ThumbnailLifecycle {
 }
 
 /// Another caller currently owns native startup or consuming shutdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize,
+)]
 pub enum ThumbnailShutdownUnavailable {
     /// No inventory is inferred while the lifecycle owner is unavailable.
     #[error("thumbnail lifecycle is already owned by another operation")]
@@ -34,7 +36,7 @@ pub enum ThumbnailShutdownUnavailable {
 }
 
 /// Immutable original-deadline receipt for the thumbnail worker and its transports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThumbnailShutdownEvidence {
     /// Receipt schema.
     pub schema_version: u32,

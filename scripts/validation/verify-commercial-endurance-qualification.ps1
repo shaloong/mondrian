@@ -1,4 +1,6 @@
 param(
+    [string]$PreloaderReportPath,
+    [string]$ExpectedPreloaderReportSha256,
     [string]$ProfilePath = "tests/validation/commercial-endurance-qualification.json",
     [Parameter(Mandatory = $true)][string]$RunManifestPath,
     [Parameter(Mandatory = $true)][string]$ChunkDirectory,
@@ -22,9 +24,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "window-owner-closure.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "native-preloader-closure.psm1") -Force
 $script:ObservedJsonHashes = [System.Collections.Generic.Dictionary[string,string]]::new(
     [StringComparer]::Ordinal
 )
+$script:ObservedAncillaryHashes = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
 
 function Assert-NoReparseAncestry([string]$Path, [string]$Description) {
     $current = Get-Item -LiteralPath ([IO.Path]::GetFullPath($Path)) -Force
@@ -58,6 +63,126 @@ function Resolve-ExistingDirectory([string]$Path, [string]$Description) {
     }
     Assert-NoReparseAncestry $resolved $Description
     return $resolved.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+}
+
+function Get-EnduranceMeasurementProjection($Object, $Phase, $Requirement, $MachineTimeouts) {
+    if ('measurement_timing' -cnotin @($Object.PSObject.Properties.Name)) { throw 'Started phase has no owner-derived measurement timing' }
+    $timing=$Object.measurement_timing
+    Assert-PhaseMeasurementTiming $timing
+    $startupMs=120000
+    if ('startup_ms' -cin @($MachineTimeouts.PSObject.Properties | ForEach-Object { $_.Name })) { $startupMs=$MachineTimeouts.startup_ms }
+    Assert-JsonUnsignedInteger $startupMs 'Startup timeout'
+    if ([bigint]$startupMs -le 0 -or
+        [bigint]$timing.startup_deadline_at_run_us - [bigint]$timing.startup_started_at_run_us -ne [bigint]$startupMs * 1000 -or
+        [bigint]$timing.measurement_deadline_at_run_us - [bigint]$timing.measurement_started_at_run_us -ne [bigint]$Requirement.minimum_duration_us -or
+        [bigint]$Phase.started_at_run_us -ne [bigint]$timing.measurement_started_at_run_us -or
+        [bigint]$Phase.completed_at_run_us -lt [bigint]$timing.measurement_deadline_at_run_us) {
+        throw 'Phase measurement window differs from original startup budget or full required duration'
+    }
+    $projection=[ordered]@{}
+    foreach ($field in @('startup_started_at_run_us','startup_deadline_at_run_us','owners_ready_at_run_us','measurement_started_at_run_us','measurement_deadline_at_run_us')) { $projection[$field]=$timing.$field }
+    return $projection | ConvertTo-Json -Compress
+}
+function Assert-EnduranceAncillaryBinding($Object, [string]$ExpectedSha256, [string]$Description) {
+    $declared = 'ancillary_program_sha256' -cin @($Object.PSObject.Properties.Name)
+    if ([string]::IsNullOrEmpty($ExpectedSha256)) {
+        if ($declared -or 'ancillary_export_artifacts' -cin @($Object.PSObject.Properties.Name) -or 'wire_journals' -cin @($Object.PSObject.Properties.Name)) { throw "$Description invents an unapproved ancillary program." }
+        return
+    }
+    if (-not $declared -or $Object.ancillary_program_sha256 -isnot [string] -or
+        $Object.ancillary_program_sha256 -cne $ExpectedSha256) {
+        throw "$Description differs from the approved shared ancillary program."
+    }
+}
+
+function Get-EnduranceAncillaryProjection($Object) {
+    return [ordered]@{ancillary_program_sha256=$Object.ancillary_program_sha256;ancillary_export_artifacts=$Object.ancillary_export_artifacts;wire_journals=$Object.wire_journals} | ConvertTo-Json -Depth 30 -Compress
+}
+
+function Read-EnduranceWireIdentity([string]$Path, [uint64]$MaximumBytes) {
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -le 0 -or [uint64]$stream.Length -gt $MaximumBytes) { throw 'Wire journal exceeds its approved bound.' }
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false,$true), $false, 4096, $true)
+        try {
+            $line = [Text.StringBuilder]::new()
+            for ($index=0; $index -lt 65536; $index++) {
+                $character = $reader.Read()
+                if ($character -eq -1) { throw 'Wire identity has no complete JSONL record.' }
+                if ($character -eq 10) { return ConvertFrom-EnduranceStrictJson $line.ToString() }
+                [void]$line.Append([char]$character)
+            }
+            throw 'Wire identity exceeds its bounded record size.'
+        } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
+function Assert-EnduranceAncillaryFiles($Raw, $Events, $Plan, $Program, [string]$PhaseId, [string]$PhaseKind) {
+    $paths = [Collections.Generic.List[string]]::new()
+    $exports = @($Events | Where-Object { $_.kind -ceq 'export_artifact_verified' })
+    if ($Raw.ancillary_export_artifacts -isnot [array] -or $Raw.ancillary_export_artifacts.Count -ne $exports.Count -or $exports.Count -gt 256) { throw 'Ancillary artifact inventory differs from actual verified events.' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $exportPlan = @($Plan.exports | Where-Object { $_.phase_id -ceq $PhaseId })
+    foreach ($entry in $Raw.ancillary_export_artifacts) {
+        Assert-ExactJsonProperties $entry @('artifact_id','verification_path','verification_sha256') 'Ancillary verification file'
+        if (-not $seen.Add([string]$entry.artifact_id) -or $exportPlan.Count -ne 1) { throw 'Ancillary artifact is repeated or has no exact export plan.' }
+        $matching = @($exports | Where-Object { $_.artifact_id -ceq $entry.artifact_id })
+        if ($matching.Count -ne 1) { throw 'Ancillary artifact has no unique verified event.' }
+        $path = Resolve-ExistingLeaf $entry.verification_path 'Ancillary verification file'
+        $directory = Resolve-ExistingDirectory $exportPlan[0].output_directory 'Approved export directory'
+        if ((Split-Path -Parent $path) -cne $directory) { throw 'Ancillary verification file escaped the approved output directory.' }
+        Assert-LowerSha256 $entry.verification_sha256 'Ancillary verification file digest'
+        $sidecar = Read-BoundedJson $path 'Ancillary verification file' 2097152
+        if ($script:ObservedJsonHashes[$path] -cne $entry.verification_sha256 -or $sidecar.schema_version -ne 1 -or $sidecar.status -cne 'verified') { throw 'Ancillary verification file hash or success state differs.' }
+        Assert-EnduranceAncillaryBinding $sidecar.request $Raw.ancillary_program_sha256 'Verified export request'
+        Assert-EnduranceAncillaryBinding $sidecar.ancillary_mxf_rescan $Raw.ancillary_program_sha256 'Actual MXF rescan'
+        Assert-JsonUnsignedInteger $sidecar.ancillary_mxf_rescan.frames_verified 'MXF rescan frames'
+        if ($sidecar.ancillary_mxf_rescan.frames_verified -ne $Program.frame_count -or $Program.frame_count -le 0) { throw 'MXF rescan did not verify the complete frozen program.' }
+        if ($sidecar.request.artifact_id -cne $entry.artifact_id -or $sidecar.evidence.report.artifact_id -cne $entry.artifact_id -or $sidecar.evidence.validation_report_sha256 -cne $matching[0].validation_report_sha256 -or $sidecar.evidence.report.artifact_sha256 -cne $matching[0].artifact_sha256) { throw 'Ancillary verification differs from the actual artifact event.' }
+        $artifact = Resolve-ExistingLeaf $sidecar.request.path 'Verified MXF artifact'
+        if ((Split-Path -Parent $artifact) -cne $directory -or $path -cne ($artifact + '.independent-verification.json') -or (Get-LowerSha256 $artifact) -cne $matching[0].artifact_sha256) { throw 'Final MXF artifact differs from independent verification.' }
+        [void]$paths.Add($path)
+        [void]$paths.Add($artifact)
+        $script:ObservedAncillaryHashes[$artifact] = [string]$matching[0].artifact_sha256
+    }
+    if ($Raw.wire_journals -isnot [array] -or $Raw.wire_journals.Count -gt 256 -or ($PhaseKind -ceq 'continuous_export' -and $Raw.wire_journals.Count -ne 0) -or ($PhaseKind -cne 'continuous_export' -and $Raw.wire_journals.Count -eq 0)) { throw 'Ancillary wire journal inventory differs from the physical phase.' }
+    $journalPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $Raw.wire_journals) {
+        Assert-ExactJsonProperties $entry @('path','sha256') 'Ancillary wire journal'
+        $path = Resolve-ExistingLeaf $entry.path 'Ancillary wire journal'
+        $wire = $Plan.reference_output.wire_readback
+        $directory = Resolve-ExistingDirectory $wire.receipt_directory 'Approved wire journal directory'
+        if (-not $journalPaths.Add($path) -or (Split-Path -Parent $path) -cne $directory) { throw 'Wire journal is repeated or escaped its approved directory.' }
+        Assert-LowerSha256 $entry.sha256 'Wire journal digest'
+        if ((Get-LowerSha256 $path) -cne $entry.sha256) { throw 'Closed wire journal digest differs.' }
+        $identity = Read-EnduranceWireIdentity $path $wire.maximum_receipt_bytes
+        Assert-EnduranceAncillaryBinding $identity $Raw.ancillary_program_sha256 'Physical wire session'
+        if ($identity.schema_version -ne 1 -or $identity.event -cne 'session_identity' -or $identity.phase_id -cne $PhaseId) { throw 'Physical wire session identity differs.' }
+        if ($identity.output_device -cne $Plan.reference_output.device_id -or $identity.output_generation -ne $Plan.reference_output.device_generation -or $identity.receiver_device -cne $wire.device_id -or $identity.receiver_generation -ne $wire.device_generation) { throw 'Wire journal differs from the approved physical devices.' }
+        [void]$paths.Add($path)
+        $script:ObservedAncillaryHashes[$path] = [string]$entry.sha256
+    }
+    return $paths.ToArray()
+}
+
+function Assert-EnduranceUniqueJsonProperties([System.Text.Json.JsonElement]$Element) {
+    if ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) { throw 'Endurance evidence contains duplicate or case-colliding JSON properties.' }
+            Assert-EnduranceUniqueJsonProperties $property.Value
+        }
+    } elseif ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+        foreach ($item in $Element.EnumerateArray()) { Assert-EnduranceUniqueJsonProperties $item }
+    }
+}
+
+function ConvertFrom-EnduranceStrictJson([string]$Text) {
+    $options = [System.Text.Json.JsonDocumentOptions]::new()
+    $options.MaxDepth = 128
+    $document = [System.Text.Json.JsonDocument]::Parse($Text, $options)
+    try { Assert-EnduranceUniqueJsonProperties $document.RootElement } finally { $document.Dispose() }
+    return $Text | ConvertFrom-Json -Depth 128 -DateKind String
 }
 
 function Read-BoundedJson([string]$Path, [string]$Description, [int64]$MaximumBytes = 8388608) {
@@ -96,7 +221,7 @@ function Read-BoundedJson([string]$Path, [string]$Description, [int64]$MaximumBy
     }
     $script:ObservedJsonHashes[$absolute] = $digest
     $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
-    return $text | ConvertFrom-Json
+    return ConvertFrom-EnduranceStrictJson $text
 }
 
 function Assert-LowerSha256([string]$Value, [string]$Description) {
@@ -121,9 +246,32 @@ function Get-LowerUtf8Sha256([string]$Value) {
 function Assert-ExactJsonProperties([object]$Object, [string[]]$Expected, [string]$Description) {
     $actual = @($Object.PSObject.Properties.Name | Sort-Object)
     $expectedSorted = @($Expected | Sort-Object)
-    if (@(Compare-Object $expectedSorted $actual).Count -ne 0) {
+    if (@(Compare-Object $expectedSorted $actual -CaseSensitive).Count -ne 0) {
         throw "$Description has unknown or missing properties."
     }
+}
+
+function ConvertTo-WindowHistoryCanonicalValue([object]$Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($key in @($Value.Keys | Sort-Object -CaseSensitive)) { $result[$key] = ConvertTo-WindowHistoryCanonicalValue $Value[$key] }
+        return $result
+    }
+    if ($Value -is [pscustomobject]) {
+        $result = [ordered]@{}
+        foreach ($key in @($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)) { $result[$key] = ConvertTo-WindowHistoryCanonicalValue $Value.$key }
+        return $result
+    }
+    if ($Value -is [Array]) {
+        $result = @($Value | ForEach-Object { ConvertTo-WindowHistoryCanonicalValue $_ })
+        return ,$result
+    }
+    return $Value
+}
+
+function ConvertTo-WindowHistoryCanonicalJson([object]$Value) {
+    ConvertTo-Json -InputObject (ConvertTo-WindowHistoryCanonicalValue $Value) -Depth 100 -Compress
 }
 
 function Assert-CanonicalJson([string]$Json, [object]$Parsed, [string]$Description) {
@@ -170,9 +318,12 @@ function Assert-JsonUnsignedU32([object]$Value, [string]$Description) {
 
 function Get-ClosureSnapshot([string[]]$Paths) {
     $rows = [System.Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($path in $Paths) {
+        $absolute = [IO.Path]::GetFullPath($path)
+        if (-not $seen.Add($absolute)) { continue }
         [void]$rows.Add([pscustomobject]@{
-            path = [IO.Path]::GetFullPath($path)
+            path = $absolute
             length = (Get-Item -LiteralPath $path -Force).Length
             sha256 = Get-LowerSha256 $path
         })
@@ -189,7 +340,7 @@ function Assert-SnapshotAnchor(
     $absolute = [IO.Path]::GetFullPath($Path)
     $matches = @($Snapshot | Where-Object { [string]$_.path -ceq $absolute })
     if ($matches.Count -ne 1 -or [string]$matches[0].sha256 -cne $ExpectedSha256) {
-        throw "$Description changed before the immutable replay snapshot."
+        throw "$Description changed before the immutable replay snapshot: $absolute"
     }
 }
 
@@ -245,9 +396,56 @@ $profileObject = Read-BoundedJson $profile "Endurance profile"
 $manifest = Read-BoundedJson $manifestPath "Endurance run manifest"
 $captureAuthority = Read-BoundedJson $captureAuthorityPath "Endurance capture authority"
 $machinePlan = Read-BoundedJson $machinePlanPath "Commercial endurance machine plan" 262144
-if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 3 -or
+$ancillaryProgramPath = $null
+$ancillaryProgram = $null
+$approvedToolPaths = [Collections.Generic.List[string]]::new()
+$exportPresetPaths = [Collections.Generic.List[string]]::new()
+$approvedBmx = $null
+if ('bmx' -cin @($machinePlan.verifier_tools.PSObject.Properties.Name)) { $approvedBmx = $machinePlan.verifier_tools.bmx }
+if ($null -ne $approvedBmx) {
+    Assert-ExactJsonProperties $approvedBmx @('raw2bmx','mxf2raw','raw2bmx_version_output_sha256','mxf2raw_version_output_sha256','runtime_files') 'Approved BMX toolchain'
+    Assert-LowerSha256 $approvedBmx.raw2bmx_version_output_sha256 'Approved raw2bmx version output'
+    Assert-LowerSha256 $approvedBmx.mxf2raw_version_output_sha256 'Approved mxf2raw version output'
+    if ($null -ne $approvedBmx.runtime_files -and ($approvedBmx.runtime_files -isnot [array] -or $approvedBmx.runtime_files.Count -gt 256)) { throw 'Approved BMX runtime closure exceeds its bound.' }
+    foreach ($binding in @($approvedBmx.raw2bmx, $approvedBmx.mxf2raw) + @($approvedBmx.runtime_files | Where-Object { $null -ne $_ })) {
+        Assert-ExactJsonProperties $binding @('path','sha256') 'Approved BMX file binding'
+        Assert-LowerSha256 $binding.sha256 'Approved BMX file digest'
+        $path = Resolve-ExistingLeaf $binding.path 'Approved BMX file'
+        if ((Get-LowerSha256 $path) -cne $binding.sha256) { throw 'BMX file differs from external approval.' }
+        $script:ObservedAncillaryHashes[$path] = [string]$binding.sha256
+        [void]$approvedToolPaths.Add($path)
+    }
+}
+$ancillaryProgramSha256 = ''
+if ('ancillary_program' -cin @($machinePlan.PSObject.Properties.Name) -and $null -ne $machinePlan.ancillary_program) {
+    $ancillaryBinding = $machinePlan.ancillary_program
+    Assert-ExactJsonProperties $ancillaryBinding @('path','sha256') 'Shared ancillary program binding'
+    Assert-JsonString $ancillaryBinding.path 'Shared ancillary program path'
+    if (-not [IO.Path]::IsPathFullyQualified($ancillaryBinding.path)) { throw 'Shared ancillary program path must be absolute.' }
+    $ancillaryProgramSha256 = [string]$ancillaryBinding.sha256
+    Assert-LowerSha256 $ancillaryProgramSha256 'Shared ancillary program digest'
+    $ancillaryProgramPath = Resolve-ExistingLeaf $ancillaryBinding.path 'Shared ancillary program'
+    $ancillaryProgram = Read-BoundedJson $ancillaryProgramPath 'Shared ancillary program' 8388608
+    Assert-JsonUnsignedInteger $ancillaryProgram.frame_count 'Shared ancillary program frame count'
+    if ($ancillaryProgram.frame_count -eq 0 -or $ancillaryProgram.frame_count -gt 100000000) { throw 'Shared ancillary program duration is outside its declared bound.' }
+    if ($script:ObservedJsonHashes[$ancillaryProgramPath] -cne $ancillaryProgramSha256) { throw 'Shared ancillary program differs from the externally approved machine plan.' }
+}
+$preloaderReceiptPath = $null
+if (@($manifest.phases | Where-Object { [string]$_.terminal.status -cne 'not_run' }).Count -gt 0) {
+    if ([string]::IsNullOrWhiteSpace($PreloaderReportPath) -or [string]::IsNullOrWhiteSpace($ExpectedPreloaderReportSha256)) {
+        throw 'Started phases require an externally bound native pre-loader outer-owner report.'
+    }
+    Assert-LowerSha256 $ExpectedPreloaderReportSha256 'Native pre-loader report SHA-256'
+    $preloaderReceiptPath = Resolve-ExistingLeaf $PreloaderReportPath 'Native pre-loader outer-owner report'
+    $preloaderReport = Read-BoundedJson $preloaderReceiptPath 'Native pre-loader outer-owner report' 1048576
+    if ($script:ObservedJsonHashes[$preloaderReceiptPath] -cne $ExpectedPreloaderReportSha256) {
+        throw 'Native pre-loader report differs from external approval.'
+    }
+    Assert-NativePreloaderReport $preloaderReport $manifestPath (Get-LowerSha256 $manifestPath) $machinePlan $ExpectedMachinePlanSha256 $ExpectedRuntimeImageSha256
+}
+if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 4 -or
     [int]$captureAuthority.schema_version -ne 2 -or [int]$machinePlan.schema_version -ne 2) {
-    throw "Endurance profile must use schema 1; run schema 3; authority and machine plan schema 2."
+    throw "Endurance profile must use schema 1; run schema 4; authority and machine plan schema 2."
 }
 $bindings = @(
     @([string]$manifest.source_revision, $ExpectedSourceRevision, "source revision"),
@@ -295,7 +493,83 @@ if (@($captureAuthority.phases).Count -ne @($profileObject.phases).Count -or
 if ([string]$manifest.environment_before_sha256 -cne [string]$manifest.environment_after_sha256) {
     throw "Endurance environment changed during the serial run."
 }
+Import-Module (Join-Path $PSScriptRoot 'phase-owner-closure.psm1') -Force
+$phaseOwnerNames = [System.Collections.Generic.List[string]]::new()
+$phaseOwnerPaths = [System.Collections.Generic.List[string]]::new()
+$phaseOwnerBodies = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+$startedOwnerPhases = @($manifest.phases | Where-Object { $_.terminal.status -cne 'not_run' })
+if ($manifest.phase_owner_history -isnot [array] -or $manifest.phase_owner_history.Count -ne $startedOwnerPhases.Count) { throw 'Phase owner history does not match every started phase' }
+for ($ordinal = 0; $ordinal -lt $startedOwnerPhases.Count; $ordinal++) {
+    $phase = $startedOwnerPhases[$ordinal]
+    $owner = $manifest.phase_owner_history[$ordinal]
+    $requirement = @($profileObject.phases | Where-Object { $_.phase_id -ceq $phase.phase_id })
+    if ($requirement.Count -ne 1) { throw 'Phase owner report has no exact profile requirement' }
+    Assert-MondrianPhaseOwnerReceipt $owner $manifest.run_id $phase.phase_id $ordinal $requirement[0].kind
+    $ownerBody = $owner.canonical_json | ConvertFrom-Json -Depth 80 -DateKind String
+    $null = Get-EnduranceMeasurementProjection $ownerBody $phase $requirement[0] $machinePlan.timeouts
+    if ($ordinal -gt 0 -and [bigint]$ownerBody.measurement_timing.startup_started_at_run_us -lt [bigint]$startedOwnerPhases[$ordinal-1].completed_at_run_us) {
+        throw 'Phase preparation overlaps the previous phase owner lifetime'
+    }
+    Assert-EnduranceAncillaryBinding $ownerBody $ancillaryProgramSha256 'Complete phase owner report'
+    $phaseOwnerBodies.Add([string]$phase.phase_id, $ownerBody)
+    if ([string]$requirement[0].kind -cne 'playback_reference') {
+        $exports = @($machinePlan.exports | Where-Object { $_.phase_id -ceq $phase.phase_id })
+        if ($exports.Count -ne 1) { throw 'Started Export phase has no unique approved preset.' }
+        $presetPath = Resolve-ExistingLeaf $exports[0].preset.path 'Approved phase export preset'
+        $preset = Read-BoundedJson $presetPath 'Approved phase export preset' 262144
+        if ($script:ObservedJsonHashes[$presetPath] -cne $exports[0].preset.sha256) { throw 'Started phase preset differs from external approval.' }
+        [void]$exportPresetPaths.Add($presetPath)
+        $requiresBmx = $preset.artifact.kind -ceq 'professional_delivery' -and $preset.artifact.profile -ceq 'as11_x9_naba_hd720p5994'
+        if ($requiresBmx -and ($null -eq $approvedBmx -or $null -eq $approvedBmx.runtime_files -or 'bmx_runtime' -cnotin @($ownerBody.terminal.PSObject.Properties.Name) -or $null -eq $ownerBody.terminal.bmx_runtime)) { throw 'Started AS-11 phase has no approved, consumed BMX runtime.' }
+    }
+    $ownerPath = Resolve-ExistingLeaf $owner.report_path 'Complete phase owner report'
+    if ((Split-Path -Parent $ownerPath) -cne $chunkRoot) { throw 'Phase owner report must belong to the closed evidence directory' }
+    $ownerName = Split-Path -Leaf $ownerPath
+    if ($phaseOwnerNames.Contains($ownerName)) { throw 'Repeated phase owner report path' }
+    [void]$phaseOwnerNames.Add($ownerName)
+    [void]$phaseOwnerPaths.Add($ownerPath)
+    $published = Read-BoundedJson $ownerPath 'Complete phase owner report' 4194304
+    if (($published | ConvertTo-Json -Depth 80 -Compress) -cne ($owner | ConvertTo-Json -Depth 80 -Compress)) { throw 'Durable phase owner report differs from manifest history' }
+}
 $closure = $manifest.owner_closure
+Assert-JsonObject $closure 'Run owner closure'
+if ([string]$closure.kind -ceq 'with_ffmpeg') {
+    $fields = @($closure.PSObject.Properties.Name)
+    if ($fields.Count -ne 3 -or 'kind' -cnotin $fields -or 'surface' -cnotin $fields -or 'ffmpeg' -cnotin $fields) {
+        throw 'Combined owner closure must retain exactly Surface and FFmpeg owners.'
+    }
+    $capsule = $closure.ffmpeg
+    Assert-JsonObject $capsule 'FFmpeg capsule closure'
+    $expected = @('namespace_seal_verified', 'children_admitted', 'children_settled', 'children_remaining', 'children_abandoned', 'child_cleanup_failures', 'deadline_exceeded', 'capsule_removed', 'cleanup_error')
+    $actual = @($capsule.PSObject.Properties.Name)
+    if ($actual.Count -ne $expected.Count -or @($actual | Where-Object { $_ -cnotin $expected }).Count -ne 0) {
+        throw 'FFmpeg capsule closure fields differ from the exact shared contract.'
+    }
+    foreach ($field in @('namespace_seal_verified', 'deadline_exceeded', 'capsule_removed')) { Assert-JsonBoolean $capsule.$field "Capsule $field" }
+    foreach ($field in @('children_admitted', 'children_settled', 'children_remaining', 'children_abandoned')) { Assert-JsonUnsignedInteger $capsule.$field "Capsule $field" }
+    if ($capsule.child_cleanup_failures -isnot [System.Array] -or $capsule.child_cleanup_failures.Count -gt 256) { throw 'Capsule child cleanup facts are not a bounded array.' }
+    foreach ($childFailure in $capsule.child_cleanup_failures) {
+        Assert-JsonObject $childFailure 'Capsule native child cleanup'
+        $expectedChildFields = @('child_pid','native_exit_observed','kill_error','wait_error','deadline_exceeded','stdin_error','stdout_error','stderr_error')
+        $actualChildFields = @($childFailure.PSObject.Properties.Name)
+        if ($actualChildFields.Count -ne $expectedChildFields.Count -or @($actualChildFields | Where-Object { $_ -cnotin $expectedChildFields }).Count -ne 0) { throw 'Capsule child cleanup has missing or unknown raw fields.' }
+        Assert-JsonUnsignedInteger $childFailure.child_pid 'Capsule child PID'
+        foreach ($field in @('native_exit_observed','deadline_exceeded')) { Assert-JsonBoolean $childFailure.$field "Child cleanup $field" }
+        foreach ($field in @('kill_error','wait_error','stdin_error','stdout_error','stderr_error')) {
+            if ($null -ne $childFailure.$field -and ($childFailure.$field -isnot [string] -or $childFailure.$field.Length -eq 0)) { throw "Child cleanup $field is not null or original error text." }
+        }
+    }
+    if (-not $capsule.namespace_seal_verified -or -not $capsule.capsule_removed -or $capsule.deadline_exceeded -or
+        [decimal]$capsule.children_admitted -ne [decimal]$capsule.children_settled -or
+        [decimal]$capsule.children_remaining -ne 0 -or [decimal]$capsule.children_abandoned -ne 0 -or
+        $capsule.child_cleanup_failures -isnot [System.Array] -or @($capsule.child_cleanup_failures).Count -ne 0 -or $null -ne $capsule.cleanup_error) {
+        throw 'FFmpeg capsule has incomplete native owner/namespace cleanup evidence.'
+    }
+    $closure = $closure.surface
+    Assert-JsonObject $closure 'Surface owner closure'
+} elseif (@($manifest.phases | Where-Object { [string]$_.terminal.status -cne 'not_run' }).Count -ne 0) {
+    throw 'A started phase requires the exact-runtime capsule closure.'
+}
 $closureProperties = @($closure.PSObject.Properties.Name)
 if ([string]$closure.kind -ceq "event_loop") {
     if ($closureProperties.Count -ne 2 -or "kind" -notin $closureProperties -or
@@ -338,6 +612,9 @@ if ([string]$closure.kind -ceq "event_loop") {
 
 $declaredNames = [System.Collections.Generic.List[string]]::new()
 $evidencePaths = [System.Collections.Generic.List[string]]::new()
+foreach ($name in $phaseOwnerNames) { [void]$declaredNames.Add($name) }
+foreach ($path in $phaseOwnerPaths) { [void]$evidencePaths.Add($path) }
+foreach ($path in @($approvedToolPaths) + @($exportPresetPaths)) { [void]$evidencePaths.Add($path) }
 foreach ($phase in @($manifest.phases)) {
     $profileMatches = @($profileObject.phases | Where-Object { [string]$_.phase_id -ceq [string]$phase.phase_id })
     $authorityMatches = @($captureAuthority.phases | Where-Object { [string]$_.phase_id -ceq [string]$phase.phase_id })
@@ -380,6 +657,24 @@ foreach ($phase in @($manifest.phases)) {
     }
     $producerReport = Read-BoundedJson $producerPaths["producer report"] "Endurance producer report"
     $rawEvidence = Read-BoundedJson $producerPaths["producer raw evidence"] "Endurance producer raw evidence"
+    if ([string]$phase.terminal.status -cne 'not_run') {
+        $measurement = Get-EnduranceMeasurementProjection $rawEvidence $phase $profilePhase $machinePlan.timeouts
+        foreach ($copy in @($producerReport, $phase.producer, $phaseOwnerBodies[[string]$phase.phase_id])) {
+            if ((Get-EnduranceMeasurementProjection $copy $phase $profilePhase $machinePlan.timeouts) -cne $measurement) { throw 'Owner-derived measurement timing differs across sealed phase reports' }
+        }
+        Assert-EnduranceAncillaryBinding $producerReport $ancillaryProgramSha256 'Endurance producer report'
+        Assert-EnduranceAncillaryBinding $rawEvidence $ancillaryProgramSha256 'Endurance raw producer evidence'
+        Assert-EnduranceAncillaryBinding $phase.producer $ancillaryProgramSha256 'Manifest producer'
+        if (-not [string]::IsNullOrEmpty($ancillaryProgramSha256)) {
+            $projection = Get-EnduranceAncillaryProjection $rawEvidence
+            foreach ($copy in @($producerReport, $phase.producer, $phaseOwnerBodies[[string]$phase.phase_id])) {
+                if ((Get-EnduranceAncillaryProjection $copy) -cne $projection) { throw 'Shared ancillary owner inventories differ across sealed phase reports.' }
+            }
+            foreach ($path in @(Assert-EnduranceAncillaryFiles $rawEvidence @($rawEvidence.events) $machinePlan $ancillaryProgram ([string]$phase.phase_id) ([string]$profilePhase.kind))) {
+                [void]$evidencePaths.Add($path)
+            }
+        }
+    }
     foreach ($binding in @(
         @([string]$producerReport.schema_version, [string]$phase.producer.report_schema_version, "owner report schema"),
         @([string]$producerReport.phase_id, [string]$phase.phase_id, "owner report phase"),
@@ -511,9 +806,9 @@ foreach ($phase in @($manifest.phases)) {
                                 "runtime_shutdown_sha256", "host_shutdown_json",
                                 "host_shutdown_sha256", "gpu_shutdown_json",
                                 "gpu_shutdown_sha256", "native_return_json",
-                                "native_return_sha256"
+                                "native_return_sha256", "generation_history"
                             ) "Window-run receipt"
-                            if ([int]$windowRun.schema_version -ne 2 -or
+                            if ([int]$windowRun.schema_version -ne 3 -or
                                 [string]$windowRun.outcome -cne "active_exited" -or
                                 [string]$windowRun.recovery_receipt_json -cne $receiptJson -or
                                 [string]$windowRun.recovery_receipt_sha256 -cne [string]$event.operation_receipt_sha256) {
@@ -533,6 +828,9 @@ foreach ($phase in @($manifest.phases)) {
                                 $leafValue = $leaf.Json | ConvertFrom-Json
                                 Assert-CanonicalJson $leaf.Json $leafValue "Window-run embedded receipt"
                             }
+                            Assert-MondrianWindowOwnerClosure `
+                                ($windowRun.runtime_shutdown_json | ConvertFrom-Json) `
+                                ($windowRun.host_shutdown_json | ConvertFrom-Json)
                             $nativeReturn = ([string]$windowRun.native_return_json) | ConvertFrom-Json
                             Assert-ExactJsonProperties $nativeReturn @(
                                 "event_loop_borrow_returned", "window_owner_scope_exited",
@@ -557,11 +855,13 @@ foreach ($phase in @($manifest.phases)) {
                             Assert-ExactJsonProperties $finalGpu.retirement @("retired") "Window GPU retirement outcome"
                             $finalRetirement = $finalGpu.retirement.retired
                             Assert-ExactJsonProperties $finalRetirement @(
+                                "worker_shutdown", "wake_callbacks", "native_wake_failures", "wake_registration_rejections",
                                 "worker_started", "worker_terminated", "worker_panicked",
                                 "timed_out", "retirement_requested", "retirement_handoff_accepted",
                                 "retirement_completed", "renderer_retirement",
                                 "generation_terminal_kind"
                             ) "Window final GPU retirement receipt"
+                            Assert-MondrianGpuWakeClosure $finalRetirement $true
                             foreach ($field in @(
                                 "worker_started", "worker_terminated", "worker_panicked", "timed_out",
                                 "retirement_requested", "retirement_handoff_accepted", "retirement_completed"
@@ -623,12 +923,14 @@ foreach ($phase in @($manifest.phases)) {
                         Assert-CanonicalJson $shutdownJson $shutdown "Surface/device shutdown evidence"
                         Assert-CanonicalJson $reopenedJson $reopened "Reopened Surface contract"
                         Assert-ExactJsonProperties $shutdown @(
+                            "worker_shutdown", "wake_callbacks", "native_wake_failures", "wake_registration_rejections",
                             "schema_version", "surface_generation", "device_generation",
                             "worker_started", "worker_terminated",
                             "worker_panicked", "timed_out", "retirement_requested",
                             "retirement_handoff_accepted", "retirement_completed",
                             "renderer_retirement", "generation_terminal_kind"
                         ) "Surface/device shutdown evidence"
+                        Assert-MondrianGpuWakeClosure $shutdown $true
                         Assert-JsonUnsignedInteger $shutdown.schema_version "Surface shutdown schema"
                         Assert-JsonUnsignedInteger $shutdown.surface_generation "Old Surface generation"
                         Assert-JsonUnsignedInteger $shutdown.device_generation "Old Device generation"
@@ -643,6 +945,52 @@ foreach ($phase in @($manifest.phases)) {
                         ) "Surface/device Renderer retirement receipt"
                         Assert-JsonString $shutdown.renderer_retirement.cpu_yuv_upload "Old GPU upload-worker exit"
                         Assert-JsonBoolean $shutdown.renderer_retirement.native_device_removed "Old native-device removal"
+                        if ($null -ne $windowRun) {
+                            $history = $windowRun.generation_history
+                            Assert-ExactJsonProperties $history @('schema_version', 'overflowed', 'events') 'Window generation history'
+                            Assert-JsonUnsignedU32 $history.schema_version 'Window history schema'
+                            Assert-JsonBoolean $history.overflowed 'Window history overflow'
+                            if ($history.schema_version -ne 1 -or $history.overflowed -or
+                                $history.events -isnot [Array] -or $history.events.Count -ne 4) {
+                                throw 'Window history is incomplete or overflowed'
+                            }
+                            $windowHistoryEvents = $history.events
+                            for ($i = 0; $i -lt 2; $i++) {
+                                Assert-ExactJsonProperties $windowHistoryEvents[$i] @('event', 'surface_generation', 'device_generation') 'Window generation activation'
+                                Assert-JsonUnsignedInteger $windowHistoryEvents[$i].surface_generation 'Window history Surface'
+                                Assert-JsonUnsignedInteger $windowHistoryEvents[$i].device_generation 'Window history Device'
+                            }
+                            for ($i = 2; $i -lt 4; $i++) {
+                                Assert-ExactJsonProperties $windowHistoryEvents[$i] @('event', 'shutdown') 'Window generation retirement'
+                            }
+                            if ($windowHistoryEvents[0].event -cne 'began' -or $windowHistoryEvents[1].event -cne 'activated' -or
+                                $windowHistoryEvents[2].event -cne 'retired' -or $windowHistoryEvents[3].event -cne 'final' -or
+                                $windowHistoryEvents[0].surface_generation -ne $receipt.surface_generation_before -or
+                                $windowHistoryEvents[0].device_generation -ne $receipt.device_generation_before -or
+                                $windowHistoryEvents[1].surface_generation -ne $receipt.surface_generation_after -or
+                                $windowHistoryEvents[1].device_generation -ne $receipt.device_generation_after) {
+                                throw 'Window generation order or identity does not match recovery'
+                            }
+                            $historyOld = $windowHistoryEvents[2].shutdown
+                            Assert-ExactJsonProperties $historyOld @('surface_generation', 'device_generation', 'publication_cleanup', 'retirement') 'Window old generation history'
+                            Assert-JsonUnsignedInteger $historyOld.surface_generation 'Window old history Surface'
+                            Assert-JsonUnsignedInteger $historyOld.device_generation 'Window old history Device'
+                            Assert-ExactJsonProperties $historyOld.publication_cleanup @('Ok') 'Window old publication cleanup'
+                            Assert-ExactJsonProperties $historyOld.retirement @('retired') 'Window old retirement'
+                            if ($null -ne $historyOld.publication_cleanup.Ok -or
+                                $historyOld.surface_generation -ne $shutdown.surface_generation -or
+                                $historyOld.device_generation -ne $shutdown.device_generation) {
+                                throw 'Window old generation history has dirty publication or wrong identity'
+                            }
+                            $expectedOld = [ordered]@{}
+                            foreach ($field in $shutdown.PSObject.Properties.Name) {
+                                if ($field -cnotin @('schema_version', 'surface_generation', 'device_generation')) { $expectedOld[$field] = $shutdown.$field }
+                            }
+                            if ((ConvertTo-WindowHistoryCanonicalJson $historyOld.retirement.retired) -cne (ConvertTo-WindowHistoryCanonicalJson $expectedOld) -or
+                                (ConvertTo-WindowHistoryCanonicalJson $windowHistoryEvents[3].shutdown) -cne (ConvertTo-WindowHistoryCanonicalJson $finalGpu)) {
+                                throw 'Window history raw retirement differs from the independent GPU receipts'
+                            }
+                        }
                         Assert-ExactJsonProperties $reopened @(
                             "schema_version", "surface_generation", "device_generation",
                             "actual_surface_presented", "original_picture_sha256",
@@ -744,7 +1092,7 @@ foreach ($phase in @($manifest.phases)) {
                             [uint64]$receipt.device_generation_before -eq 0 -or
                             [uint64]$receipt.device_generation_after -eq 0 -or
                             [uint64]$receipt.device_generation_before -eq [uint64]$receipt.device_generation_after -or
-                            [int]$shutdown.schema_version -ne 3 -or
+                            [int]$shutdown.schema_version -ne 4 -or
                             [uint64]$shutdown.surface_generation -ne [uint64]$receipt.surface_generation_before -or
                             [uint64]$shutdown.device_generation -ne [uint64]$receipt.device_generation_before -or
                             -not [bool]$shutdown.worker_started -or
@@ -875,15 +1223,20 @@ foreach ($phase in @($manifest.phases)) {
         [void]$evidencePaths.Add($path)
     }
 }
-$replayInputs = @($profile, $manifestPath, $replayBinary, $captureAuthorityPath, $machinePlanPath) + @($evidencePaths)
+$replayInputs = @($preloaderReceiptPath, $ancillaryProgramPath | Where-Object { $null -ne $_ }) + @($profile, $manifestPath, $replayBinary, $captureAuthorityPath, $machinePlanPath) + @($evidencePaths)
 $before = Get-ClosureSnapshot $replayInputs
 foreach ($observed in $script:ObservedJsonHashes.GetEnumerator()) {
     Assert-SnapshotAnchor $before $observed.Key $observed.Value "Parsed endurance JSON input"
+}
+foreach ($observed in $script:ObservedAncillaryHashes.GetEnumerator()) {
+    Assert-SnapshotAnchor $before $observed.Key $observed.Value 'Approved ancillary artifact or wire journal'
 }
 Assert-SnapshotAnchor $before $replayBinary $ReplayBinarySha256 "Endurance replay binary"
 Assert-SnapshotAnchor $before $profile $ExpectedProfileFileSha256 "Endurance profile"
 Assert-SnapshotAnchor $before $captureAuthorityPath $ExpectedCaptureAuthoritySha256 "Endurance capture authority"
 Assert-SnapshotAnchor $before $machinePlanPath $ExpectedMachinePlanSha256 "Endurance machine plan"
+if ($null -ne $ancillaryProgramPath) { Assert-SnapshotAnchor $before $ancillaryProgramPath $ancillaryProgramSha256 'Shared ancillary program' }
+if ($null -ne $preloaderReceiptPath) { Assert-SnapshotAnchor $before $preloaderReceiptPath $ExpectedPreloaderReportSha256 "Native pre-loader report" }
 
 $startInfo = [Diagnostics.ProcessStartInfo]::new()
 $startInfo.FileName = $replayBinary
@@ -921,12 +1274,21 @@ Assert-EvidenceDirectoryClosure $chunkRoot @($declaredNames)
 $resolvedOutput = Resolve-ExistingLeaf $output "Endurance qualification report"
 $outputHashBefore = Get-LowerSha256 $resolvedOutput
 $report = Read-BoundedJson $resolvedOutput "Endurance qualification report"
-if ([int]$report.schema_version -ne 3 -or [string]$report.status -cne "qualified" -or
+if ([int]$report.schema_version -ne 4 -or [string]$report.status -cne "qualified" -or
     @($report.missing_phases).Count -ne 0 -or [string]$report.evidence_sha256 -notmatch '^[0-9a-f]{64}$') {
     throw "Endurance replay output is not a complete qualified schema-3 report."
 }
-if (($report.owner_closure | ConvertTo-Json -Depth 4 -Compress) -cne
-    ($manifest.owner_closure | ConvertTo-Json -Depth 4 -Compress)) {
+if (($report.phase_owner_history | ConvertTo-Json -Depth 80 -Compress) -cne ($manifest.phase_owner_history | ConvertTo-Json -Depth 80 -Compress)) { throw "Qualification report changed complete phase owner history" }
+if ($report.phases -isnot [array] -or $report.phases.Count -ne $manifest.phases.Count) { throw 'Normalized report changed phase inventory' }
+foreach ($measuredPhase in $manifest.phases) {
+    $normalized=@($report.phases | Where-Object { $_.phase_id -ceq $measuredPhase.phase_id })
+    $requirement=@($profileObject.phases | Where-Object { $_.phase_id -ceq $measuredPhase.phase_id })
+    if ($normalized.Count -ne 1 -or $requirement.Count -ne 1) { throw 'Normalized report has no unique phase measurement' }
+    $expectedTiming=Get-EnduranceMeasurementProjection $measuredPhase.producer $measuredPhase $requirement[0] $machinePlan.timeouts
+    if ((Get-EnduranceMeasurementProjection $normalized[0] $measuredPhase $requirement[0] $machinePlan.timeouts) -cne $expectedTiming) { throw 'Normalized report changed owner-derived measurement timing' }
+}
+if (($report.owner_closure | ConvertTo-Json -Depth 8 -Compress) -cne
+    ($manifest.owner_closure | ConvertTo-Json -Depth 8 -Compress)) {
     throw "Endurance qualification report lost or changed run owner closure evidence."
 }
 foreach ($binding in @(

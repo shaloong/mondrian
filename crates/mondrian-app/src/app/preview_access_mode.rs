@@ -20,7 +20,7 @@ use mondrian_media::{
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 2_000_000;
 pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
 /// Stable identity for one decoded media preview request.
@@ -580,7 +580,7 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub in_flight_scrub_lane_jobs: usize,
     /// Execution leases on the still-frame-reserved lane.
     pub in_flight_still_lane_jobs: usize,
-    /// Execution leases on the shared non-playback lane.
+    /// Execution leases on the shared lane reserved from ordinary playback-current work.
     pub in_flight_non_playback_lane_jobs: usize,
     /// Current execution leases whose lane does not accept their work class.
     pub in_flight_cross_lane_current_jobs: usize,
@@ -592,7 +592,7 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_scrub_lane_eligible_jobs: usize,
     /// Jobs directly eligible for a deterministic still worker lane.
     pub queued_still_lane_eligible_jobs: usize,
-    /// Jobs eligible for a shared non-playback worker lane.
+    /// Jobs eligible for the shared worker lane, including playback Prefetch.
     pub queued_non_playback_lane_eligible_jobs: usize,
     /// Whether the broker has closed worker transport.
     pub closed: bool,
@@ -688,6 +688,7 @@ impl MediaPreviewJobQueueSender {
         map_enqueue_submission(self.broker.submit(frame_work_request(
             job,
             mondrian_playback::FrameWorkResourceScope::Shared,
+            None,
         )))
     }
 
@@ -816,12 +817,14 @@ impl MediaPreviewJobQueueReceiver {
 fn frame_work_request(
     job: MediaPreviewJob,
     resource_scope: mondrian_playback::FrameWorkResourceScope,
+    worker_affinity: Option<MediaPreviewWorkerLane>,
 ) -> mondrian_playback::FrameWorkRequest<MediaPreviewKey, Instant, MediaPreviewJob> {
     mondrian_playback::FrameWorkRequest {
         key: job.key.clone(),
         generation: job.generation,
         priority: frame_work_priority(job.priority),
         work_class: media_preview_frame_work_class(job.access_mode),
+        worker_affinity: worker_affinity.map(frame_worker_lane),
         resource_scope,
         demand_identity: job.demand_identity,
         deadline: frame_work_deadline(job.deadline_at),
@@ -957,7 +960,8 @@ fn media_preview_job_queue_diagnostics(
         queued_still_lane_eligible_jobs: state.queued_still,
         queued_non_playback_lane_eligible_jobs: state
             .queued_interactive
-            .saturating_add(state.queued_still),
+            .saturating_add(state.queued_still)
+            .saturating_add(state.queued_prefetch),
         closed: state.closed,
     }
 }
@@ -976,6 +980,7 @@ fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWo
         MediaPreviewWorkerLane::Any => mondrian_playback::FrameWorkerLane::Any,
         MediaPreviewWorkerLane::Playback => mondrian_playback::FrameWorkerLane::Playback,
         MediaPreviewWorkerLane::NonPlayback => mondrian_playback::FrameWorkerLane::NonPlayback,
+        MediaPreviewWorkerLane::Still => mondrian_playback::FrameWorkerLane::Still,
     }
 }
 
@@ -1035,6 +1040,8 @@ pub(crate) enum MediaPreviewWorkerLane {
     Any,
     Playback,
     NonPlayback,
+    /// Worker reserved for static-image and deterministic still decode.
+    Still,
 }
 
 pub(crate) fn media_preview_worker_lane(
@@ -1046,7 +1053,8 @@ pub(crate) fn media_preview_worker_lane(
     } else {
         match worker_index {
             0 => MediaPreviewWorkerLane::Playback,
-            _ => MediaPreviewWorkerLane::NonPlayback,
+            1 => MediaPreviewWorkerLane::NonPlayback,
+            _ => MediaPreviewWorkerLane::Still,
         }
     }
 }
@@ -1082,11 +1090,16 @@ impl MediaPreviewScheduler {
     pub(crate) fn job_queue(&self) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
         (
             MediaPreviewJobQueueSender { broker: self.broker.clone() },
-            MediaPreviewJobQueueReceiver {
-                observed_lifecycle_revision: Cell::new(self.broker.worker_lifecycle_revision()),
-                broker: self.broker.clone(),
-            },
+            self.job_receiver(),
         )
+    }
+
+    /// Derive a worker receiver without creating another admission-closing owner.
+    pub(crate) fn job_receiver(&self) -> MediaPreviewJobQueueReceiver {
+        MediaPreviewJobQueueReceiver {
+            observed_lifecycle_revision: Cell::new(self.broker.worker_lifecycle_revision()),
+            broker: self.broker.clone(),
+        }
     }
 
     /// Close admission and wake every worker waiting on this scheduler.
@@ -1110,9 +1123,10 @@ impl MediaPreviewScheduler {
         &self,
         mut job: MediaPreviewJob,
         resource_scope: mondrian_playback::FrameWorkResourceScope,
+        worker_affinity: Option<MediaPreviewWorkerLane>,
     ) -> MediaPreviewRequestStatus {
         job.execution_id = None;
-        match self.broker.submit(frame_work_request(job, resource_scope)) {
+        match self.broker.submit(frame_work_request(job, resource_scope, worker_affinity)) {
             mondrian_playback::FrameWorkSubmission::Queued { evicted_prefetch, evicted_still } => {
                 MediaPreviewRequestStatus::Scheduled {
                     evicted_prefetch: evicted_prefetch.map(Box::new),
@@ -1251,6 +1265,7 @@ impl MediaPreviewScheduler {
                 residency_work: None,
             },
             mondrian_playback::FrameWorkResourceScope::Shared,
+            None,
         );
         match status {
             MediaPreviewRequestStatus::UpdatedQueued { access_mode_changed, .. } => {
@@ -1515,7 +1530,6 @@ impl MediaPreviewScheduler {
         self.diagnostics().pending_requests
     }
 
-    #[cfg(test)]
     pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
         self.broker.has_pending_key(key)
     }

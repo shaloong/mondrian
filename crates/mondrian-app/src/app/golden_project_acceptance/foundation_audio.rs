@@ -520,17 +520,17 @@ pub(super) fn execute_foundation_stage(
 fn execute_foundation_slice(
     root: &Path,
     paths: &GoldenRunPaths,
-) -> anyhow::Result<GoldenFoundationReport> {
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenFoundationReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Foundation",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    execute_foundation_stage(root, &contract, &mut workflow)
+    workflow.run_with(|workflow| execute_foundation_stage(root, &contract, workflow))
 }
 
 #[test]

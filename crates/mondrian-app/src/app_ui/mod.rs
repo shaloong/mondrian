@@ -53,5 +53,7 @@ pub mod title_bar;
 pub mod window;
 pub mod window_controls;
 #[cfg(any(test, feature = "validation"))]
+pub(crate) mod window_generation_history;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod window_outer_receipt;
 pub mod workspace_layout;

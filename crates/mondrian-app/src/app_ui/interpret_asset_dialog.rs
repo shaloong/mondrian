@@ -1169,7 +1169,13 @@ mod tests {
             AssetMediaInterpretation::default(),
             None,
         )
-        .with_input_diagnostics(Some(camera_raw_signal()), None);
+        .with_input_diagnostics(
+            Some(camera_raw_signal()),
+            Some(AppShellInputColorPipelineDiagnostics {
+                engine: mondrian_core::ColorEngine::mondrian_standard(),
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+            }),
+        );
         let dialog = InterpretAssetDialog::new(draft);
 
         assert!(dialog.raw_active());

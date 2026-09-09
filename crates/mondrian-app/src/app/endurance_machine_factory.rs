@@ -113,85 +113,182 @@ impl FreshEndurancePhaseFactory for ContinuousExportEnduranceMachineFactory {
                 "Continuous Export factory token does not match the exact phase/workload",
             );
         }
-        let export = match exact_export_plan(machine_plan.as_ref(), &requirement.phase_id) {
-            Ok(export) => export.clone(),
-            Err(error) => return FreshEndurancePhaseBuild::rejected(error.to_string()),
-        };
-        let verification_policy = match IndependentExportArtifactPolicy::new(
-            export.maximum_artifact_bytes,
-            Duration::from_millis(export.decode_timeout_ms),
-        ) {
-            Ok(policy) => policy,
-            Err(error) => {
-                return FreshEndurancePhaseBuild::rejected(format!(
-                    "Continuous Export verification policy is invalid: {error}"
-                ));
-            }
-        };
+        build_machine_phase(machine_plan, requirement, None)
+    }
+}
 
-        let mut app = AppState::new();
-        let project = match app.open_endurance_project_fixture(machine_plan.as_ref()) {
-            Ok(project) => project,
-            Err(error) => {
-                return FreshEndurancePhaseBuild::failed(
-                    app,
-                    format!("install exact Continuous Export Project: {error}"),
-                );
-            }
-        };
-        let sources = match PreparedEnduranceSourceInventory::prepare(
-            &app,
-            machine_plan.as_ref(),
-            &project,
-        ) {
+/// A discovered physical Adapter transferred intact from admission to phase build.
+pub(super) struct PreparedMachineReference {
+    pub(super) adapter: Box<dyn mondrian_reference_output::ReferenceOutputAdapter>,
+    pub(super) device: mondrian_reference_output::ReferenceOutputDeviceDescriptor,
+    pub(super) wire_correlation: Option<mondrian_broadcast::AncillaryWireCorrelation>,
+}
+
+/// Shared Project/source/Export composition for every machine phase.
+pub(super) fn build_machine_phase(
+    machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
+    requirement: &EndurancePhaseRequirement,
+    reference: Option<PreparedMachineReference>,
+) -> FreshEndurancePhaseBuild {
+    let export = if requirement.kind == EndurancePhaseKind::PlaybackReference {
+        None
+    } else {
+        match exact_export_plan(machine_plan.as_ref(), &requirement.phase_id) {
+            Ok(export) => Some(export.clone()),
+            Err(error) => return FreshEndurancePhaseBuild::rejected(error.to_string()),
+        }
+    };
+    if (requirement.kind != EndurancePhaseKind::ContinuousExport) != reference.is_some() {
+        return FreshEndurancePhaseBuild::rejected("physical Adapter does not match phase kind");
+    }
+    let mut app = AppState::new();
+    let project = match app.open_endurance_project_fixture(machine_plan.as_ref()) {
+        Ok(project) => project,
+        Err(error) => {
+            return FreshEndurancePhaseBuild::failed(app, format!("install exact Project: {error}"))
+        }
+    };
+    let sources =
+        match PreparedEnduranceSourceInventory::prepare(&app, machine_plan.as_ref(), &project) {
             Ok(sources) => sources,
             Err(error) => {
                 return FreshEndurancePhaseBuild::failed(
                     app,
-                    format!("prepare exact Continuous Export sources: {error}"),
-                );
+                    format!("prepare exact sources: {error}"),
+                )
             }
         };
-        let authority =
-            match PreparedEndurancePhaseAuthority::new(&app, Arc::clone(&machine_plan), sources) {
-                Ok(authority) => authority,
-                Err(error) => {
-                    return FreshEndurancePhaseBuild::failed(
-                        app,
-                        format!("bind exact Continuous Export source authority: {error}"),
-                    );
-                }
-            };
+    let authority =
+        match PreparedEndurancePhaseAuthority::new(&app, Arc::clone(&machine_plan), sources) {
+            Ok(authority) => authority,
+            Err(error) => {
+                return FreshEndurancePhaseBuild::failed(
+                    app,
+                    format!("bind source authority: {error}"),
+                )
+            }
+        };
+    let reference = if let Some(reference) = reference {
+        let audio = &machine_plan.plan().audio;
+        if !app.active_sequence().is_some_and(|sequence| {
+            sequence.settings.audio_sample_rate == audio.sample_rate_hz
+                && sequence.settings.audio_channel_layout == audio.channel_layout
+        }) {
+            return FreshEndurancePhaseBuild::failed_with_authority(app, authority,
+                "canonical Sequence Audio contract differs from the admitted physical Audio contract");
+        }
+        app.set_audio_output_device_selection(
+            mondrian_media::RealtimeAudioOutputDeviceSelection::Specific {
+                device_id: audio.device_id.clone(),
+            },
+        );
+        if let Err(error) = app.install_reference_output_adapter(reference.adapter) {
+            return FreshEndurancePhaseBuild::failed_with_authority(
+                app,
+                authority,
+                format!("install admitted physical Reference Adapter: {error}"),
+            );
+        }
+        let planned = &machine_plan.plan().reference_output;
+        Some(
+            super::endurance_product_runtime::EnduranceReferenceOutputPlan::new(
+                reference.device,
+                planned.open_request.production_request(),
+                planned.first_frame_index,
+            )
+            .with_wire_correlation(reference.wire_correlation)
+            .with_ancillary_program(machine_plan.ancillary_program().cloned()),
+        )
+    } else {
+        None
+    };
+    let export = if let Some(export) = export {
         let preset = match authority.source_inventory().export_preset(&requirement.phase_id) {
             Some(preset) => preset.preset().clone(),
             None => {
                 return FreshEndurancePhaseBuild::failed_with_authority(
                     app,
                     authority,
-                    "prepared source inventory omitted the Continuous Export preset",
-                );
+                    "prepared source inventory omitted the exact phase Export preset",
+                )
             }
         };
-        let broadcast_qc = authority
-            .source_inventory()
-            .broadcast_qc_profile(&requirement.phase_id)
-            .map(|profile| profile.profile().clone());
-        let request = FrozenRepeatedExportRequest {
+        if let Some(owner) = machine_plan.ancillary_program() {
+            let readiness = app
+                .sequence_by_id(export.sequence_id)
+                .ok_or_else(|| "ANC Export Sequence is absent".to_owned())
+                .and_then(|sequence| {
+                    mondrian_export::queue::check_ancillary_export_selection(
+                        owner.program(),
+                        &preset,
+                        sequence,
+                        export.range.timeline_range(),
+                        app.project_color_environment(),
+                    )
+                });
+            if let Err(error) = readiness {
+                return FreshEndurancePhaseBuild::failed_with_authority(app, authority, error);
+            }
+        }
+        let verification_policy = match IndependentExportArtifactPolicy::new(
+            export.maximum_artifact_bytes,
+            Duration::from_millis(export.decode_timeout_ms),
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                return FreshEndurancePhaseBuild::failed_with_authority(
+                    app,
+                    authority,
+                    format!("independent Export policy is invalid: {error}"),
+                )
+            }
+        };
+        Some(FrozenRepeatedExportRequest {
+            phase_id: requirement.phase_id.clone(),
+            frozen_ancillary: machine_plan.ancillary_program().cloned(),
+            approved_bmx: None,
+            regulatory_pse: export.regulatory_pse,
             preset,
             sequence_id: Some(export.sequence_id),
             range: export.range.timeline_range(),
             output_directory: export.output_directory,
             artifact_prefix: export.artifact_prefix,
-            broadcast_qc,
+            broadcast_qc: authority
+                .source_inventory()
+                .broadcast_qc_profile(&requirement.phase_id)
+                .map(|profile| profile.profile().clone()),
             verification_policy,
-        };
-        FreshEndurancePhaseBuild::ready(FreshEndurancePhase::continuous_export(
-            app, authority, request,
-        ))
-    }
+        })
+    } else {
+        None
+    };
+    let fresh = match (requirement.kind, reference, export) {
+        (EndurancePhaseKind::PlaybackReference, Some(reference), None) => {
+            FreshEndurancePhase::playback_reference(app, authority, reference)
+        }
+        (EndurancePhaseKind::ContinuousExport, None, Some(export)) => {
+            FreshEndurancePhase::continuous_export(app, authority, export)
+        }
+        (EndurancePhaseKind::ConcurrentRecovery, Some(reference), Some(export)) => {
+            FreshEndurancePhase::concurrent_recovery(
+                app,
+                authority,
+                reference,
+                export,
+                machine_plan.plan().recovery_seek_targets.clone(),
+            )
+        }
+        _ => {
+            return FreshEndurancePhaseBuild::failed_with_authority(
+                app,
+                authority,
+                "prepared machine owners do not cover the exact phase kind",
+            )
+        }
+    };
+    FreshEndurancePhaseBuild::ready(fresh)
 }
-
-fn validate_phase_binding(
+pub(super) fn validate_phase_binding(
     requirement: &EndurancePhaseRequirement,
     workload: &PreparedEnduranceWorkload,
 ) -> Result<(), EnduranceCampaignError> {
@@ -203,7 +300,7 @@ fn validate_phase_binding(
     Ok(())
 }
 
-fn exact_export_plan<'a>(
+pub(super) fn exact_export_plan<'a>(
     machine_plan: &'a PreparedCommercialEnduranceMachinePlan,
     phase_id: &str,
 ) -> Result<&'a EnduranceMachineExportPlan, EnduranceCampaignError> {
@@ -215,12 +312,12 @@ fn exact_export_plan<'a>(
         .ok_or_else(|| factory_error("machine plan has no exact Continuous Export phase contract"))
 }
 
-fn regular_direct_file(path: &Path) -> bool {
+pub(super) fn regular_direct_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
 }
 
-fn direct_directory(path: &Path) -> bool {
+pub(super) fn direct_directory(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.file_type().is_dir() && !metadata.file_type().is_symlink())
 }
@@ -289,8 +386,12 @@ mod tests {
         let ready = factory
             .pre_start_capability_inventory(&plan, requirement, &workload)
             .expect("observe reachable declarations");
-        let token = workload.prepare_start(&ready).expect("admit exact declarations");
-        assert_eq!(token.phase_id(), requirement.phase_id);
-        assert_eq!(token.kind(), EndurancePhaseKind::ContinuousExport);
+        let missing = workload
+            .prepare_start(&ready)
+            .expect_err("declarations alone cannot attest mapped native images");
+        assert_eq!(
+            missing.missing_capabilities(),
+            vec![EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared]
+        );
     }
 }

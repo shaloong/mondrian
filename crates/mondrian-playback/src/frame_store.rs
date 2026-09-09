@@ -101,6 +101,20 @@ pub enum MediaWorkReservationAdmission {
     RejectedAggregateCapacity,
 }
 
+/// Atomic admission result for one complete speculative dependency closure.
+#[derive(Debug)]
+pub enum MediaPrefetchBatchReservationAdmission {
+    /// Every requested attempt received one independently owned physical lease.
+    Reserved(Vec<MediaWorkResourceLease>),
+    /// At least one key became resident or the batch repeated a key.
+    ///
+    /// The caller must rebuild the dependency closure instead of reserving a
+    /// stale subset.
+    RetryPlan,
+    /// The complete dependency closure does not fit the optional grant.
+    RejectedAggregateCapacity,
+}
+
 /// Complete admission intent for one physical decoded-media execution attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaWorkReservationIntent {
@@ -128,7 +142,7 @@ impl MediaWorkReservationIntent {
 
 /// Visibility priority attached to one decoded-media work reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaWorkReservationClass {
+pub enum MediaWorkReservationClass {
     /// Exact current-frame work; may request queued Prefetch preemption.
     Current,
     /// Speculative work; never displaces another outstanding reservation.
@@ -695,6 +709,61 @@ impl MediaResourceLedger {
         Some(id)
     }
 
+    fn reserve_batch(
+        &mut self,
+        class: MediaWorkReservationClass,
+        demand_id: Option<MediaWorkDemandId>,
+        charges: &[MediaResourceCharge],
+    ) -> Option<Vec<u64>> {
+        let aggregate_charge = charges.iter().copied().fold(
+            MediaResourceCharge::default(),
+            MediaResourceCharge::saturating_add,
+        );
+        let current_demand_fits = match (class, demand_id) {
+            (MediaWorkReservationClass::Current, Some(demand_id)) => {
+                self.current_demand_can_add(demand_id, None, aggregate_charge)
+            }
+            (MediaWorkReservationClass::Current, None) => false,
+            (MediaWorkReservationClass::Prefetch, _) => true,
+        };
+        if charges.is_empty()
+            || !aggregate_charge.fits(self.policy.limit_for(class))
+            || !self.can_reserve(class, aggregate_charge)
+            || !current_demand_fits
+        {
+            return None;
+        }
+        let count = u64::try_from(charges.len()).ok()?;
+        let next_id = self.next_id.checked_add(count)?;
+        let ids = (self.next_id..next_id).collect::<Vec<_>>();
+        if ids.iter().any(|id| self.records.contains_key(id)) {
+            return None;
+        }
+        self.next_id = next_id;
+        for (id, charge) in ids.iter().copied().zip(charges.iter().copied()) {
+            let used_current_working_set_grant = class == MediaWorkReservationClass::Current
+                && !self.aggregate.saturating_add(charge).fits(self.policy.optional);
+            self.records.insert(
+                id,
+                MediaResourceRecord {
+                    charge,
+                    class,
+                    demand_id,
+                    phase: MediaResourcePhase::Work,
+                    used_current_working_set_grant,
+                    protections: HashMap::new(),
+                },
+            );
+            if used_current_working_set_grant {
+                self.current_working_set_grant_admissions =
+                    self.current_working_set_grant_admissions.saturating_add(1);
+            }
+        }
+        self.recompute_aggregate();
+        self.observe();
+        Some(ids)
+    }
+
     fn can_commit(&self, id: u64, charge: MediaResourceCharge) -> bool {
         let Some(record) = self.records.get(&id) else {
             return false;
@@ -950,7 +1019,8 @@ impl MediaWorkResourceLease {
         Arc::ptr_eq(&self.allocation.ledger, ledger)
     }
 
-    fn admission_class(&self) -> MediaWorkReservationClass {
+    /// Physical admission class retained by this execution's resource owner.
+    pub fn admission_class(&self) -> MediaWorkReservationClass {
         self.allocation.class
     }
 
@@ -1199,6 +1269,70 @@ where
                 ledger: Arc::clone(&self.media_ledger),
             }),
         })
+    }
+
+    /// Atomically reserve every attempt in one speculative media closure.
+    ///
+    /// No lease is published unless the complete batch fits after releasable
+    /// Store-only LRU residency is retired. Each returned lease remains
+    /// independently move-only so Broker cancellation and worker completion
+    /// release the exact attempt through ordinary ownership.
+    pub fn reserve_media_prefetch_work_batch(
+        &mut self,
+        requests: &[(&MK, usize, usize)],
+    ) -> MediaPrefetchBatchReservationAdmission {
+        if requests.is_empty() {
+            return MediaPrefetchBatchReservationAdmission::RetryPlan;
+        }
+        let mut keys = HashSet::with_capacity(requests.len());
+        if requests.iter().any(|(key, _, _)| {
+            !keys.insert(*key)
+                || self.media.contains_key(*key)
+                || self.current_media_overflow.contains_key(*key)
+        }) {
+            return MediaPrefetchBatchReservationAdmission::RetryPlan;
+        }
+        let charges = requests
+            .iter()
+            .map(|(_, bytes, resource_units)| MediaResourceCharge::one(*bytes, *resource_units))
+            .collect::<Vec<_>>();
+        let aggregate_charge = charges.iter().copied().fold(
+            MediaResourceCharge::default(),
+            MediaResourceCharge::saturating_add,
+        );
+        {
+            let mut ledger = lock_media_ledger(&self.media_ledger);
+            if !aggregate_charge.fits(ledger.policy.optional) {
+                ledger.record_rejection();
+                return MediaPrefetchBatchReservationAdmission::RejectedAggregateCapacity;
+            }
+        }
+        while !lock_media_ledger(&self.media_ledger).can_reserve_optional(aggregate_charge) {
+            if !self.evict_one_releasable_media_for_work() {
+                break;
+            }
+        }
+        let ids = {
+            let mut ledger = lock_media_ledger(&self.media_ledger);
+            let Some(ids) =
+                ledger.reserve_batch(MediaWorkReservationClass::Prefetch, None, &charges)
+            else {
+                ledger.record_rejection();
+                return MediaPrefetchBatchReservationAdmission::RejectedAggregateCapacity;
+            };
+            ids
+        };
+        MediaPrefetchBatchReservationAdmission::Reserved(
+            ids.into_iter()
+                .map(|id| MediaWorkResourceLease {
+                    allocation: Arc::new(MediaResourceAllocation {
+                        id,
+                        class: MediaWorkReservationClass::Prefetch,
+                        ledger: Arc::clone(&self.media_ledger),
+                    }),
+                })
+                .collect(),
+        )
     }
 
     /// Commit one successful physical decode attempt into frame residency.
@@ -1976,6 +2110,48 @@ mod tests {
         assert_eq!(diagnostics.media_aggregate_reserved_bytes, 8);
         drop(first);
         assert_eq!(store.diagnostics().media_aggregate_entries, 0);
+    }
+
+    #[test]
+    fn speculative_batch_reservation_is_all_or_none_across_resource_units() {
+        let mut store = TestStore::new(config(32));
+        let mut occupied = (1..=3)
+            .map(|key| {
+                reserve(
+                    &mut store,
+                    key,
+                    MediaWorkReservationClass::Prefetch,
+                    key,
+                    1,
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let first_key = 10;
+        let second_key = 11;
+        assert!(matches!(
+            store.reserve_media_prefetch_work_batch(&[(&first_key, 1, 1), (&second_key, 1, 1),]),
+            MediaPrefetchBatchReservationAdmission::RejectedAggregateCapacity
+        ));
+        let rejected = store.diagnostics();
+        assert_eq!(rejected.media_work_reservations, 3);
+        assert_eq!(rejected.media_aggregate_resource_units, 3);
+
+        drop(occupied.pop());
+        let batch = match store
+            .reserve_media_prefetch_work_batch(&[(&first_key, 1, 1), (&second_key, 1, 1)])
+        {
+            MediaPrefetchBatchReservationAdmission::Reserved(batch) => batch,
+            admission => panic!("expected complete batch reservation, received {admission:?}"),
+        };
+        assert_eq!(batch.len(), 2);
+        let admitted = store.diagnostics();
+        assert_eq!(admitted.media_work_reservations, 4);
+        assert_eq!(admitted.media_aggregate_resource_units, 4);
+
+        drop(batch);
+        drop(occupied);
+        assert_eq!(store.diagnostics().media_aggregate_resource_units, 0);
     }
 
     #[test]

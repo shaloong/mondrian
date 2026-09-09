@@ -12,6 +12,7 @@ use crate::app_ui::window::SurfaceDeviceReopenFacts;
 
 const RECOVERY_RECEIPT_SCHEMA_VERSION: u32 = 3;
 const SURFACE_DEVICE_REOPEN_RECEIPT_SCHEMA_VERSION: u32 = 4;
+const CACHE_PRESSURE_RECEIPT_SCHEMA_VERSION: u32 = 4;
 pub(crate) const MAXIMUM_RECOVERY_RECEIPT_JSON_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +65,12 @@ enum EnduranceRecoveryOperationEvidence {
         cache_bytes_before_pressure: u64,
         cache_bytes_after_pressure: u64,
         pressure_trimmed_bytes: u64,
+        cache_entries_before_pressure: u64,
+        cache_entries_after_pressure: u64,
+        pressure_trimmed_entries: u64,
+        cache_resource_units_before_pressure: u64,
+        cache_resource_units_after_pressure: u64,
+        pressure_trimmed_resource_units: u64,
         residual_owned_resources: u64,
         recovered_nominal: bool,
         exact_picture_ready: bool,
@@ -117,9 +124,8 @@ impl EnduranceRecoveryOperationEvidence {
         };
         let expected_schema_version = match self {
             Self::SurfaceDeviceReopen { .. } => SURFACE_DEVICE_REOPEN_RECEIPT_SCHEMA_VERSION,
-            Self::Seek { .. } | Self::ExportCancelRetry { .. } | Self::CachePressure { .. } => {
-                RECOVERY_RECEIPT_SCHEMA_VERSION
-            }
+            Self::CachePressure { .. } => CACHE_PRESSURE_RECEIPT_SCHEMA_VERSION,
+            Self::Seek { .. } | Self::ExportCancelRetry { .. } => RECOVERY_RECEIPT_SCHEMA_VERSION,
         };
         if schema_version != expected_schema_version || !valid_token(operation_id) {
             return Err(EnduranceRecoveryReceiptError::InvalidCommonEvidence);
@@ -201,6 +207,12 @@ impl EnduranceRecoveryOperationEvidence {
                 cache_bytes_before_pressure,
                 cache_bytes_after_pressure,
                 pressure_trimmed_bytes,
+                cache_entries_before_pressure,
+                cache_entries_after_pressure,
+                pressure_trimmed_entries,
+                cache_resource_units_before_pressure,
+                cache_resource_units_after_pressure,
+                pressure_trimmed_resource_units,
                 residual_owned_resources,
                 recovered_nominal,
                 exact_picture_ready,
@@ -215,10 +227,22 @@ impl EnduranceRecoveryOperationEvidence {
                 ..
             } if decision_generation_before < pressure_decision_generation
                 && pressure_decision_generation < recovered_decision_generation
-                && cache_bytes_after_pressure < cache_bytes_before_pressure
+                && cache_bytes_after_pressure <= cache_bytes_before_pressure
                 && cache_bytes_before_pressure.checked_sub(*cache_bytes_after_pressure)
                     == Some(*pressure_trimmed_bytes)
-                && *pressure_trimmed_bytes != 0
+                && cache_entries_after_pressure <= cache_entries_before_pressure
+                && cache_entries_before_pressure.checked_sub(*cache_entries_after_pressure)
+                    == Some(*pressure_trimmed_entries)
+                && cache_resource_units_after_pressure <= cache_resource_units_before_pressure
+                && cache_resource_units_before_pressure
+                    .checked_sub(*cache_resource_units_after_pressure)
+                    == Some(*pressure_trimmed_resource_units)
+                && (*pressure_trimmed_bytes != 0
+                    || *pressure_trimmed_entries != 0
+                    || *pressure_trimmed_resource_units != 0)
+                && *cache_bytes_after_pressure == 0
+                && *cache_entries_after_pressure == 0
+                && *cache_resource_units_after_pressure == 0
                 && *residual_owned_resources == 0
                 && *recovered_nominal
                 && *exact_picture_ready
@@ -286,6 +310,16 @@ impl EnduranceRecoveryOperationReceipt {
         &self.sha256
     }
 
+    pub(crate) fn surface_device_shutdown_json(&self) -> Option<&str> {
+        match &self.evidence {
+            EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
+                shutdown_receipt_json,
+                ..
+            } => Some(shutdown_receipt_json),
+            _ => None,
+        }
+    }
+
     pub(crate) fn surface_device_generations(&self) -> Option<(u64, u64, u64, u64)> {
         match &self.evidence {
             EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
@@ -326,7 +360,7 @@ impl EnduranceRecoveryOperationReceipt {
         facts: CachePressureRecoveryFacts,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
         Self::seal(EnduranceRecoveryOperationEvidence::CachePressure {
-            schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
+            schema_version: CACHE_PRESSURE_RECEIPT_SCHEMA_VERSION,
             cycle_index: facts.cycle_index(),
             operation_id: facts.operation_id().to_owned(),
             decision_generation_before: facts.decision_generation_before(),
@@ -335,6 +369,12 @@ impl EnduranceRecoveryOperationReceipt {
             cache_bytes_before_pressure: facts.cache_bytes_before_pressure(),
             cache_bytes_after_pressure: facts.cache_bytes_after_pressure(),
             pressure_trimmed_bytes: facts.pressure_trimmed_bytes(),
+            cache_entries_before_pressure: facts.cache_entries_before_pressure(),
+            cache_entries_after_pressure: facts.cache_entries_after_pressure(),
+            pressure_trimmed_entries: facts.pressure_trimmed_entries(),
+            cache_resource_units_before_pressure: facts.cache_resource_units_before_pressure(),
+            cache_resource_units_after_pressure: facts.cache_resource_units_after_pressure(),
+            pressure_trimmed_resource_units: facts.pressure_trimmed_resource_units(),
             residual_owned_resources: facts.residual_owned_resources(),
             recovered_nominal: true,
             exact_picture_ready: facts.exact_picture_ready(),
@@ -421,9 +461,35 @@ impl EnduranceRecoveryOperationReceipt {
         device_generation_before: u64,
         device_generation_after: u64,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
-        let shutdown_receipt_json = format!(
-            r#"{{"schema_version":3,"surface_generation":{surface_generation_before},"device_generation":{device_generation_before},"worker_started":true,"worker_terminated":true,"worker_panicked":false,"timed_out":false,"retirement_requested":true,"retirement_handoff_accepted":true,"retirement_completed":true,"renderer_retirement":{{"cpu_yuv_upload":"returned","native_device_removed":false}},"generation_terminal_kind":null}}"#,
-        );
+        let shutdown_receipt_json = serde_json::to_string(&SurfaceShutdownReceiptEvidence {
+            schema_version: 4,
+            surface_generation: surface_generation_before,
+            device_generation: device_generation_before,
+            worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+            wake_callbacks: serde_json::from_value(
+                serde_json::from_str::<serde_json::Value>(include_str!(
+                    "../../../../tests/validation/fixtures/window-owner-closure.json"
+                ))
+                .expect("owner fixture")["host_shutdown"]["preview"]["work_callbacks"]
+                    .clone(),
+            )
+            .expect("callback fixture"),
+            native_wake_failures: 0,
+            wake_registration_rejections: 0,
+            worker_started: true,
+            worker_terminated: true,
+            worker_panicked: false,
+            timed_out: false,
+            retirement_requested: true,
+            retirement_handoff_accepted: true,
+            retirement_completed: true,
+            renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
+                native_device_removed: false,
+            }),
+            generation_terminal_kind: None,
+        })
+        .expect("canonical test GPU shutdown receipt");
         let display_contract_sha256 =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let reopened_picture_json = format!(
@@ -500,6 +566,12 @@ impl EnduranceRecoveryOperationReceipt {
         cache_bytes_before_pressure: u64,
         cache_bytes_after_pressure: u64,
         pressure_trimmed_bytes: u64,
+        cache_entries_before_pressure: u64,
+        cache_entries_after_pressure: u64,
+        pressure_trimmed_entries: u64,
+        cache_resource_units_before_pressure: u64,
+        cache_resource_units_after_pressure: u64,
+        pressure_trimmed_resource_units: u64,
         residual_owned_resources: u64,
         recovered_nominal: bool,
         exact_picture_ready: bool,
@@ -513,7 +585,7 @@ impl EnduranceRecoveryOperationReceipt {
         recovered_decision_sha256: String,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
         Self::seal(EnduranceRecoveryOperationEvidence::CachePressure {
-            schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
+            schema_version: CACHE_PRESSURE_RECEIPT_SCHEMA_VERSION,
             cycle_index,
             operation_id,
             decision_generation_before,
@@ -522,6 +594,12 @@ impl EnduranceRecoveryOperationReceipt {
             cache_bytes_before_pressure,
             cache_bytes_after_pressure,
             pressure_trimmed_bytes,
+            cache_entries_before_pressure,
+            cache_entries_after_pressure,
+            pressure_trimmed_entries,
+            cache_resource_units_before_pressure,
+            cache_resource_units_after_pressure,
+            pressure_trimmed_resource_units,
             residual_owned_resources,
             recovered_nominal,
             exact_picture_ready,
@@ -578,6 +656,10 @@ struct SurfaceShutdownReceiptEvidence {
     schema_version: u32,
     surface_generation: u64,
     device_generation: u64,
+    worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown,
+    wake_callbacks: super::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_wake_failures: u64,
+    wake_registration_rejections: u64,
     worker_started: bool,
     worker_terminated: bool,
     worker_panicked: bool,
@@ -598,7 +680,15 @@ fn valid_surface_shutdown_receipt(
         .ok()
         .is_some_and(|receipt| {
             serde_json::to_string(&receipt).is_ok_and(|normalized| normalized == canonical_json)
-                && receipt.schema_version == 3
+                && receipt.schema_version == 4
+                && matches!(
+                    receipt.worker_shutdown,
+                    super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated
+                )
+                && receipt.wake_callbacks.all_resources_released()
+                && receipt.wake_callbacks.registrations_accepted > 0
+                && receipt.native_wake_failures == 0
+                && receipt.wake_registration_rejections == 0
                 && receipt.surface_generation == expected_surface_generation
                 && receipt.device_generation == expected_device_generation
                 && receipt.worker_started
@@ -808,8 +898,14 @@ mod tests {
                 11,
                 12,
                 4096,
-                1024,
-                3072,
+                0,
+                4096,
+                2,
+                0,
+                2,
+                0,
+                0,
+                0,
                 0,
                 true,
                 true,
@@ -878,6 +974,12 @@ mod tests {
             4096,
             0,
             4096,
+            2,
+            0,
+            2,
+            1,
+            0,
+            1,
             0,
             true,
             true,
@@ -891,6 +993,35 @@ mod tests {
             SHA.to_owned(),
         )
         .is_err());
+
+        assert!(EnduranceRecoveryOperationReceipt::cache_pressure(
+            0,
+            "cache-native-0".to_owned(),
+            1,
+            2,
+            3,
+            0,
+            0,
+            0,
+            2,
+            0,
+            2,
+            1,
+            0,
+            1,
+            0,
+            true,
+            true,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            SHA.to_owned(),
+            SHA.to_owned(),
+        )
+        .is_ok());
     }
 
     #[test]

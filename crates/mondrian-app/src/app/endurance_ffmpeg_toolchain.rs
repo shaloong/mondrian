@@ -55,6 +55,14 @@ impl PreparedEnduranceFfmpegToolchain {
         })
     }
 
+    /// Close the exact process capsule after all child-producing phase owners.
+    pub fn shutdown_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> mondrian_media::QualifiedFfmpegShutdownReceipt {
+        self.prepared.shutdown_until(deadline)
+    }
+
     /// Exact machine-plan digest that authorized this pair.
     pub fn machine_plan_sha256(&self) -> &str {
         &self.machine_plan_sha256

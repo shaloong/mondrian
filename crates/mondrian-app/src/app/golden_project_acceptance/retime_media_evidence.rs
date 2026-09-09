@@ -81,6 +81,7 @@ struct RetimeFixtureEvidence {
     reverse_hold: RetimeScenarioEvidence,
     presentations: Vec<GoldenViewerPresentationEvidence>,
     viewer: GoldenHeadlessViewerEvidence,
+    viewer_shutdown: Option<super::headless_preview::GoldenViewerShutdownEvidence>,
     export: ExportEvidence,
     reimport: RetimeReimportEvidence,
 }
@@ -474,219 +475,225 @@ fn execute_fixture_retime_media_evidence(
     )?;
 
     state.seek(sample_frame)?;
-    let mut viewer =
-        GoldenHeadlessPreview::new(std::time::Instant::now() + VIEWER_PRESENTATION_TIMEOUT)?;
-    let reverse_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+    let (mut evidence, viewer_shutdown) = GoldenHeadlessPreview::run_with(|viewer| {
+        let reverse_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
 
-    let reverse_hold = dispatch_author_transition(
-        state,
-        "hold-proxy-relink-reverse-frame",
-        crate::app::ui_actions::clip_hold_frame_action(
-            crate::app::product_action::ClipHoldFramePayload {
-                clip_id,
-                sequence_time: FramePosition::new(sample_frame, time_base),
+        let reverse_hold = dispatch_author_transition(
+            state,
+            "hold-proxy-relink-reverse-frame",
+            crate::app::ui_actions::clip_hold_frame_action(
+                crate::app::product_action::ClipHoldFramePayload {
+                    clip_id,
+                    sequence_time: FramePosition::new(sample_frame, time_base),
+                },
+            ),
+        )?;
+        let held_sequence = state
+            .active_sequence()
+            .cloned()
+            .context("held Retime Hero Sequence is absent")?;
+        let hold_time =
+            TimelineTime::from_frame_position(FramePosition::new(hold_frame, time_base))?;
+        let expected_hold_sample =
+            find_clip(&held_sequence, clip_id)?.timeline_to_source_sample(hold_time)?;
+        ensure!(
+            find_clip(&held_sequence, clip_id)?.source_time_scale() == TimeScale::ZERO
+                && expected_hold_sample == expected_reverse_sample,
+            "reverse hold did not retain the complete captured source sample"
+        );
+        let (hold_preview_sample, hold_export_sample) =
+            plan_source_samples(&held_sequence, asset_id, hold_frame, expected_hold_sample)?;
+        let hold_expected = render_program_reference(
+            state,
+            &held_sequence,
+            hold_frame,
+            output_resolution,
+            asset_id,
+            expected_hold_sample,
+            &mut decode_context,
+        )?;
+        let hold_adjacent_sequence =
+            covering_hold_counterfactual(&held_sequence, clip_id, expected_hold_sample.time())?;
+        let hold_adjacent = render_program_reference(
+            state,
+            &hold_adjacent_sequence,
+            hold_frame,
+            output_resolution,
+            asset_id,
+            SourceSampleTarget::covering(expected_hold_sample.time()),
+            &mut decode_context,
+        )?;
+        let hold_wrong_direction_sample =
+            find_clip(&forward_sequence, clip_id)?.timeline_to_source_sample(hold_time)?;
+        let hold_wrong_direction = render_program_reference(
+            state,
+            &forward_sequence,
+            hold_frame,
+            output_resolution,
+            asset_id,
+            hold_wrong_direction_sample,
+            &mut decode_context,
+        )?;
+        ensure_strict_predecessor_selection(&hold_expected, &hold_adjacent, cadence)?;
+        ensure!(
+            hold_expected.evidence.source_rgba_sha256
+                == reverse_expected.evidence.source_rgba_sha256,
+            "reverse hold did not retain the decoded picture captured before the hold"
+        );
+        ensure_distinct_programs(
+            &hold_expected,
+            [
+                ("adjacent-covering", &hold_adjacent),
+                ("wrong-direction", &hold_wrong_direction),
+            ],
+        )?;
+        let hold_proxy = render_program_reference_with_preference(
+            state,
+            &held_sequence,
+            hold_frame,
+            output_resolution,
+            asset_id,
+            ProgramReferenceDecodeRequest::proxy(expected_hold_sample),
+            &mut decode_context,
+        )?;
+        let hold_proxy_evidence = prove_proxy_program(
+            hold_proxy,
+            &hold_expected,
+            [
+                ("adjacent-covering", &hold_adjacent),
+                ("wrong-direction", &hold_wrong_direction),
+            ],
+        )?;
+        decode_context.clear();
+
+        state.seek(hold_frame)?;
+        let hold_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+        let viewer_evidence = viewer.evidence()?;
+        ensure!(
+            viewer_evidence.presentations == 2 && viewer_evidence.completed_demands == 2,
+            "retimed Headless Viewer did not complete reverse and held proxy demands"
+        );
+
+        let export_contract = contract
+            .exports
+            .iter()
+            .find(|export| export.id == RETIME_EXPORT_ID)
+            .context("Golden H.264 export contract is absent")?;
+        let export = export_and_probe(
+            state,
+            export_contract,
+            output_directory.join(export_file_name),
+            TimelineExportRange::WorkArea {
+                start_frame: hold_frame,
+                end_frame_exclusive: export_end_frame,
             },
-        ),
-    )?;
-    let held_sequence = state
-        .active_sequence()
-        .cloned()
-        .context("held Retime Hero Sequence is absent")?;
-    let hold_time = TimelineTime::from_frame_position(FramePosition::new(hold_frame, time_base))?;
-    let expected_hold_sample =
-        find_clip(&held_sequence, clip_id)?.timeline_to_source_sample(hold_time)?;
-    ensure!(
-        find_clip(&held_sequence, clip_id)?.source_time_scale() == TimeScale::ZERO
-            && expected_hold_sample == expected_reverse_sample,
-        "reverse hold did not retain the complete captured source sample"
-    );
-    let (hold_preview_sample, hold_export_sample) =
-        plan_source_samples(&held_sequence, asset_id, hold_frame, expected_hold_sample)?;
-    let hold_expected = render_program_reference(
-        state,
-        &held_sequence,
-        hold_frame,
-        output_resolution,
-        asset_id,
-        expected_hold_sample,
-        &mut decode_context,
-    )?;
-    let hold_adjacent_sequence =
-        covering_hold_counterfactual(&held_sequence, clip_id, expected_hold_sample.time())?;
-    let hold_adjacent = render_program_reference(
-        state,
-        &hold_adjacent_sequence,
-        hold_frame,
-        output_resolution,
-        asset_id,
-        SourceSampleTarget::covering(expected_hold_sample.time()),
-        &mut decode_context,
-    )?;
-    let hold_wrong_direction_sample =
-        find_clip(&forward_sequence, clip_id)?.timeline_to_source_sample(hold_time)?;
-    let hold_wrong_direction = render_program_reference(
-        state,
-        &forward_sequence,
-        hold_frame,
-        output_resolution,
-        asset_id,
-        hold_wrong_direction_sample,
-        &mut decode_context,
-    )?;
-    ensure_strict_predecessor_selection(&hold_expected, &hold_adjacent, cadence)?;
-    ensure!(
-        hold_expected.evidence.source_rgba_sha256 == reverse_expected.evidence.source_rgba_sha256,
-        "reverse hold did not retain the decoded picture captured before the hold"
-    );
-    ensure_distinct_programs(
-        &hold_expected,
-        [
-            ("adjacent-covering", &hold_adjacent),
-            ("wrong-direction", &hold_wrong_direction),
-        ],
-    )?;
-    let hold_proxy = render_program_reference_with_preference(
-        state,
-        &held_sequence,
-        hold_frame,
-        output_resolution,
-        asset_id,
-        ProgramReferenceDecodeRequest::proxy(expected_hold_sample),
-        &mut decode_context,
-    )?;
-    let hold_proxy_evidence = prove_proxy_program(
-        hold_proxy,
-        &hold_expected,
-        [
-            ("adjacent-covering", &hold_adjacent),
-            ("wrong-direction", &hold_wrong_direction),
-        ],
-    )?;
-    decode_context.clear();
-
-    state.seek(hold_frame)?;
-    let hold_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
-    let viewer_evidence = viewer.evidence();
-    ensure!(
-        viewer_evidence.presentations == 2 && viewer_evidence.completed_demands == 2,
-        "retimed Headless Viewer did not complete reverse and held proxy demands"
-    );
-
-    let export_contract = contract
-        .exports
-        .iter()
-        .find(|export| export.id == RETIME_EXPORT_ID)
-        .context("Golden H.264 export contract is absent")?;
-    let export = export_and_probe(
-        state,
-        export_contract,
-        output_directory.join(export_file_name),
-        TimelineExportRange::WorkArea {
-            start_frame: hold_frame,
-            end_frame_exclusive: export_end_frame,
-        },
-        held_sequence.settings.frame_rate,
-        EXPORT_DURATION_FRAMES,
-        contract.acceptance.duration_error_max_frames,
-        contract.acceptance.av_boundary_error_max_ms,
-        held_sequence.settings.audio_sample_rate,
-    )?;
-    let (_, undo_hold) = author_transition(state, "undo-proxy-relink-reverse-hold", |state| {
-        ensure!(state.undo_timeline()?, "reverse hold had no Undo entry");
-        Ok(())
-    })?;
-    let (_, undo_reverse) = author_transition(state, "undo-proxy-relink-reverse-rate", |state| {
-        ensure!(state.undo_timeline()?, "reverse retime had no Undo entry");
-        Ok(())
-    })?;
-    let restored_sequence =
-        state.active_sequence().context("restored Retime Hero Sequence is absent")?;
-    ensure!(
-        find_clip(restored_sequence, clip_id)?.source_time_scale() == forward_rate
-            && find_clip(restored_sequence, clip_id)?.timeline_to_source_sample(sample_time)?
-                == expected_forward_sample,
-        "signed retime evidence did not restore the retained 50% authoring anchor"
-    );
-    let reimport = reimport_and_compare(
-        state,
-        &export,
-        &hold_expected,
-        [
-            ("adjacent-covering", &hold_adjacent),
-            ("wrong-direction", &hold_wrong_direction),
-        ],
-    )?;
-
-    Ok(RetimeFixtureEvidence {
-        fixture_id,
-        cadence,
-        author: RetimeAuthorEvidence {
-            forward_half,
-            reverse_half,
-            reverse_hold,
-            undo_hold,
-            undo_reverse,
-        },
-        media_binding: RetimeMediaBindingEvidence { preview_proxy, immutable_export_source },
-        forward: RetimeScenarioEvidence {
-            id: "forward-half",
-            rate: forward_rate,
-            sample_frame,
-            expected_source_sample: expected_forward_sample,
-            preview_source_sample: forward_preview_sample,
-            export_source_sample: forward_export_sample,
-            expected_program: forward_expected.evidence,
-            preview_proxy: forward_proxy_evidence,
-            counterfactual_programs: vec![LabeledProgramReferenceEvidence {
-                id: "full-rate",
-                program: forward_counterfactual.evidence,
-            }],
-        },
-        reverse: RetimeScenarioEvidence {
-            id: "reverse-half",
-            rate: reverse_rate,
-            sample_frame,
-            expected_source_sample: expected_reverse_sample,
-            preview_source_sample: reverse_preview_sample,
-            export_source_sample: reverse_export_sample,
-            expected_program: reverse_expected.evidence,
-            preview_proxy: reverse_proxy_evidence,
-            counterfactual_programs: vec![
-                LabeledProgramReferenceEvidence {
-                    id: "adjacent-covering",
-                    program: reverse_adjacent.evidence,
-                },
-                LabeledProgramReferenceEvidence {
-                    id: "wrong-direction",
-                    program: reverse_wrong_direction.evidence,
-                },
+            held_sequence.settings.frame_rate,
+            EXPORT_DURATION_FRAMES,
+            contract.acceptance.duration_error_max_frames,
+            contract.acceptance.av_boundary_error_max_ms,
+            held_sequence.settings.audio_sample_rate,
+        )?;
+        let (_, undo_hold) = author_transition(state, "undo-proxy-relink-reverse-hold", |state| {
+            ensure!(state.undo_timeline()?, "reverse hold had no Undo entry");
+            Ok(())
+        })?;
+        let (_, undo_reverse) =
+            author_transition(state, "undo-proxy-relink-reverse-rate", |state| {
+                ensure!(state.undo_timeline()?, "reverse retime had no Undo entry");
+                Ok(())
+            })?;
+        let restored_sequence =
+            state.active_sequence().context("restored Retime Hero Sequence is absent")?;
+        ensure!(
+            find_clip(restored_sequence, clip_id)?.source_time_scale() == forward_rate
+                && find_clip(restored_sequence, clip_id)?.timeline_to_source_sample(sample_time)?
+                    == expected_forward_sample,
+            "signed retime evidence did not restore the retained 50% authoring anchor"
+        );
+        let reimport = reimport_and_compare(
+            state,
+            &export,
+            &hold_expected,
+            [
+                ("adjacent-covering", &hold_adjacent),
+                ("wrong-direction", &hold_wrong_direction),
             ],
-        },
-        reverse_hold: RetimeScenarioEvidence {
-            id: "reverse-hold",
-            rate: TimeScale::ZERO,
-            sample_frame: hold_frame,
-            expected_source_sample: expected_hold_sample,
-            preview_source_sample: hold_preview_sample,
-            export_source_sample: hold_export_sample,
-            expected_program: hold_expected.evidence,
-            preview_proxy: hold_proxy_evidence,
-            counterfactual_programs: vec![
-                LabeledProgramReferenceEvidence {
-                    id: "adjacent-covering",
-                    program: hold_adjacent.evidence,
-                },
-                LabeledProgramReferenceEvidence {
-                    id: "wrong-direction",
-                    program: hold_wrong_direction.evidence,
-                },
-            ],
-        },
-        presentations: vec![reverse_presentation, hold_presentation],
-        viewer: viewer_evidence,
-        export,
-        reimport,
-    })
+        )?;
+
+        Ok(RetimeFixtureEvidence {
+            fixture_id,
+            cadence,
+            author: RetimeAuthorEvidence {
+                forward_half,
+                reverse_half,
+                reverse_hold,
+                undo_hold,
+                undo_reverse,
+            },
+            media_binding: RetimeMediaBindingEvidence { preview_proxy, immutable_export_source },
+            forward: RetimeScenarioEvidence {
+                id: "forward-half",
+                rate: forward_rate,
+                sample_frame,
+                expected_source_sample: expected_forward_sample,
+                preview_source_sample: forward_preview_sample,
+                export_source_sample: forward_export_sample,
+                expected_program: forward_expected.evidence,
+                preview_proxy: forward_proxy_evidence,
+                counterfactual_programs: vec![LabeledProgramReferenceEvidence {
+                    id: "full-rate",
+                    program: forward_counterfactual.evidence,
+                }],
+            },
+            reverse: RetimeScenarioEvidence {
+                id: "reverse-half",
+                rate: reverse_rate,
+                sample_frame,
+                expected_source_sample: expected_reverse_sample,
+                preview_source_sample: reverse_preview_sample,
+                export_source_sample: reverse_export_sample,
+                expected_program: reverse_expected.evidence,
+                preview_proxy: reverse_proxy_evidence,
+                counterfactual_programs: vec![
+                    LabeledProgramReferenceEvidence {
+                        id: "adjacent-covering",
+                        program: reverse_adjacent.evidence,
+                    },
+                    LabeledProgramReferenceEvidence {
+                        id: "wrong-direction",
+                        program: reverse_wrong_direction.evidence,
+                    },
+                ],
+            },
+            reverse_hold: RetimeScenarioEvidence {
+                id: "reverse-hold",
+                rate: TimeScale::ZERO,
+                sample_frame: hold_frame,
+                expected_source_sample: expected_hold_sample,
+                preview_source_sample: hold_preview_sample,
+                export_source_sample: hold_export_sample,
+                expected_program: hold_expected.evidence,
+                preview_proxy: hold_proxy_evidence,
+                counterfactual_programs: vec![
+                    LabeledProgramReferenceEvidence {
+                        id: "adjacent-covering",
+                        program: hold_adjacent.evidence,
+                    },
+                    LabeledProgramReferenceEvidence {
+                        id: "wrong-direction",
+                        program: hold_wrong_direction.evidence,
+                    },
+                ],
+            },
+            presentations: vec![reverse_presentation, hold_presentation],
+            viewer: viewer_evidence,
+            viewer_shutdown: None,
+            export,
+            reimport,
+        })
+    })?;
+    evidence.viewer_shutdown = Some(viewer_shutdown);
+    Ok(evidence)
 }
 
 fn plan_source_samples(

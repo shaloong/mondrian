@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "workload_id": "mondrian-col047/continuous-export/v1",
+  "phase_id": "02-continuous-export-24h",
+  "wall_clock_hours": 24,
+  "playback_policy": "disabled",
+  "reference_output": "disabled",
+  "export_policy": "repeat-frozen-sequence",
+  "artifact_validation": "independent-reopen-content-verify",
+  "cancellation_policy": "forbidden",
+  "recovery_policy": "none"
+}

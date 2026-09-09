@@ -37,13 +37,13 @@
 use std::sync::Arc;
 
 use mondrian_core::display_contract::DisplayOutputIdentity;
-use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
+use mondrian_core::types::{ColorSpace, SequenceId};
 use mondrian_core::SequenceRevision;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_render_cache::TimelineRenderCacheIdentity;
 use mondrian_timeline::sequence::ProgramColorContext;
 
-use crate::app::preview_access_mode::MediaPreviewRequestPriority;
+use crate::app::preview_access_mode::{MediaPreviewKey, MediaPreviewRequestPriority};
 use crate::app::preview_execution::PreviewOutputKey;
 use crate::app::preview_runtime::PreviewAuthoringSnapshot;
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
@@ -167,14 +167,15 @@ pub(crate) enum EvaluationState {
 
 /// Typed dependency of one frame evaluation.
 ///
-/// Initial granularity is per-asset; future variants may name exact source
-/// PTS, asset revisions, generator resources, or remote media arrivals so
-/// invalidation never cascades to unrelated evaluations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Media dependencies retain the complete physical request identity. This
+/// keeps completion of one source sample, proxy, color interpretation, or
+/// hardware-preparation intent from invalidating another sample of the same
+/// Asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationDependency {
     /// Exact media work has an admitted queued/in-flight producer. Transient
     /// admission deferrals are deliberately never represented here.
-    MediaProducer(AssetId),
+    MediaProducer(MediaPreviewKey),
 }
 
 /// Typed reason why evaluation could not produce a plan.
@@ -253,10 +254,15 @@ struct EvaluationWorkingSetEntry {
     key: FrameEvaluationKey,
     evaluation: Arc<ResolvedFrameEvaluation>,
     last_used: u64,
+    gpu_output_binding: Option<(
+        PreviewOutputKey,
+        crate::app::preview_execution::PreviewPlaybackIntent,
+    )>,
 }
 
 struct EvaluationWaitEntry {
     key: FrameEvaluationKey,
+    priority: MediaPreviewRequestPriority,
     dependencies: Arc<[EvaluationDependency]>,
 }
 
@@ -273,6 +279,69 @@ impl EvaluationWorkingSet {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.waiting.clear();
+    }
+
+    /// Bind a final monitor/scopes output to the exact evaluation and transport intent.
+    pub(crate) fn bind_gpu_output(
+        &mut self,
+        key: FrameEvaluationKey,
+        output_key: PreviewOutputKey,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) {
+        if key.sequence_id != output_key.sequence_id
+            || key.width != output_key.width
+            || key.height != output_key.height
+            || key.frame != intent.frame
+        {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
+            entry.gpu_output_binding = Some((output_key, intent));
+        }
+    }
+
+    /// Drop only the completed CPU evaluation's reuse owner after physical publication.
+    /// Native inputs retain their existing decoder-family retirement rules.
+    pub(crate) fn release_completed_gpu_evaluation(
+        &mut self,
+        output_key: &PreviewOutputKey,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        let Some(index) = self.entries.iter().rposition(|entry| {
+            entry
+                .gpu_output_binding
+                .as_ref()
+                .is_some_and(|(key, bound_intent)| key == output_key && *bound_intent == intent)
+                && !entry.evaluation.elements.iter().any(element_pins_decoder_resource)
+        }) else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
+    }
+
+    /// Drop an exact ticketless preparation owner after the Adapter finishes
+    /// CPU-only/GPU-object prewarming and abandons the frame before submission.
+    ///
+    /// Native inputs are eligible here because no renderer command references
+    /// their decoder surfaces. The Frame Store remains the bounded residency
+    /// authority for later exact presentation.
+    #[cfg(test)]
+    pub(crate) fn release_abandoned_gpu_preparation(
+        &mut self,
+        output_key: &PreviewOutputKey,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        let Some(index) = self.entries.iter().rposition(|entry| {
+            entry
+                .gpu_output_binding
+                .as_ref()
+                .is_some_and(|(key, bound_intent)| key == output_key && *bound_intent == intent)
+        }) else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
     }
 
     /// Release evaluations that pin native decoder resources.
@@ -297,14 +366,24 @@ impl EvaluationWorkingSet {
     }
 
     /// Return the retained wait dependencies for an exact key, if resident.
+    ///
+    /// Ready evaluations are scheduling-independent, but a wait is authority
+    /// for an admitted producer. A speculative producer cannot keep a later
+    /// visible Current request from re-resolving the same picture and either
+    /// consuming its completed residency or acquiring Current work.
     pub(crate) fn waiting_for(
-        &self,
+        &mut self,
         key: FrameEvaluationKey,
+        priority: MediaPreviewRequestPriority,
     ) -> Option<Arc<[EvaluationDependency]>> {
-        self.waiting
-            .iter()
-            .find(|entry| entry.key == key)
-            .map(|entry| Arc::clone(&entry.dependencies))
+        let index = self.waiting.iter().position(|entry| entry.key == key)?;
+        if priority == MediaPreviewRequestPriority::Current
+            && self.waiting[index].priority == MediaPreviewRequestPriority::Prefetch
+        {
+            self.waiting.remove(index);
+            return None;
+        }
+        Some(Arc::clone(&self.waiting[index].dependencies))
     }
 
     /// Retain one evaluation for its key, evicting the least recently used
@@ -318,6 +397,7 @@ impl EvaluationWorkingSet {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
             entry.evaluation = evaluation;
             entry.last_used = clock;
+            entry.gpu_output_binding = None;
             return;
         }
         if self.entries.len() >= Self::capacity()
@@ -330,37 +410,49 @@ impl EvaluationWorkingSet {
         {
             self.entries.remove(least);
         }
-        self.entries
-            .push(EvaluationWorkingSetEntry { key, evaluation, last_used: clock });
+        self.entries.push(EvaluationWorkingSetEntry {
+            key,
+            evaluation,
+            last_used: clock,
+            gpu_output_binding: None,
+        });
     }
 
     /// Retain one unresolved wait entry for an exact key.
     pub(crate) fn insert_waiting(
         &mut self,
         key: FrameEvaluationKey,
+        priority: MediaPreviewRequestPriority,
         dependencies: Arc<[EvaluationDependency]>,
     ) {
         if let Some(entry) = self.waiting.iter_mut().find(|entry| entry.key == key) {
+            if priority == MediaPreviewRequestPriority::Current {
+                entry.priority = priority;
+            }
             entry.dependencies = dependencies;
             return;
         }
-        self.waiting.push(EvaluationWaitEntry { key, dependencies });
+        self.waiting.push(EvaluationWaitEntry { key, priority, dependencies });
     }
 
-    /// Drop wait entries that depend on one asset, plus every retained
-    /// evaluation.
-    ///
-    /// Ready evaluations currently carry no extracted dependencies, so the
-    /// retained set is cleared conservatively alongside the typed wait
-    /// entries; per-dependency Ready invalidation lands with dependency
-    /// extraction.
-    pub(crate) fn invalidate_for_asset(&mut self, asset_id: AssetId) {
+    /// Drop only waits and ready evaluations that consume one exact media key.
+    pub(crate) fn invalidate_for_media_key(&mut self, media_key: &MediaPreviewKey) {
         self.waiting.retain(|entry| {
             !entry.dependencies.iter().any(|dependency| {
-                matches!(dependency, EvaluationDependency::MediaProducer(dep) if *dep == asset_id)
+                matches!(
+                    dependency,
+                    EvaluationDependency::MediaProducer(key) if key == media_key
+                )
             })
         });
-        self.entries.clear();
+        self.entries.retain(|entry| {
+            !entry.evaluation.dependencies.iter().any(|dependency| {
+                matches!(
+                    dependency,
+                    EvaluationDependency::MediaProducer(key) if key == media_key
+                )
+            })
+        });
     }
 }
 

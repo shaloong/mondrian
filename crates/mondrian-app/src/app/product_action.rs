@@ -148,6 +148,8 @@ pub const EXPORT_NAMESPACE: &str = "ui.export";
 pub const EXPORT_EDIT_DRAFT: &str = "edit_draft";
 /// External action name for admitting an immutable Timeline Export Snapshot.
 pub const EXPORT_ENQUEUE: &str = "enqueue";
+/// Freeze and enqueue the current application-owned export draft on dispatch.
+pub const EXPORT_ENQUEUE_DRAFT: &str = "enqueue_draft";
 /// External action name for requesting cancellation of one Export attempt.
 pub const EXPORT_CANCEL: &str = "cancel";
 /// External action name for clearing bounded terminal Export evidence.
@@ -350,6 +352,8 @@ pub enum ExportProductAction {
     EditDraft(Box<ExportDraftEdit>),
     /// Admit one immutable Timeline Export request.
     Enqueue(Box<TimelineExportRequest>),
+    /// Freeze current draft state once, at the user's enqueue action boundary.
+    EnqueueDraft,
     /// Request cancellation for one retained Export attempt.
     Cancel(JobId),
     /// Remove all retained terminal Export evidence.
@@ -839,6 +843,10 @@ impl ProductAction {
                 EXPORT_ENQUEUE => Ok(Some(Self::Export(ExportProductAction::Enqueue(Box::new(
                     decode_payload(namespace, name, payload)?,
                 ))))),
+                EXPORT_ENQUEUE_DRAFT => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Export(ExportProductAction::EnqueueDraft)))
+                }
                 EXPORT_CANCEL => {
                     let target: ExportCancelWirePayload = decode_payload(namespace, name, payload)?;
                     Ok(Some(Self::Export(ExportProductAction::Cancel(
@@ -1280,6 +1288,11 @@ impl ProductAction {
             Self::Export(ExportProductAction::Enqueue(request)) => {
                 (EXPORT_NAMESPACE, EXPORT_ENQUEUE, serde_json::json!(request))
             }
+            Self::Export(ExportProductAction::EnqueueDraft) => (
+                EXPORT_NAMESPACE,
+                EXPORT_ENQUEUE_DRAFT,
+                serde_json::Value::Null,
+            ),
             Self::Export(ExportProductAction::Cancel(job_id)) => (
                 EXPORT_NAMESPACE,
                 EXPORT_CANCEL,
@@ -1983,6 +1996,14 @@ pub enum ExportDraftEdit {
     Range(TimelineExportRange),
     /// Replace the user-entered output path without syntactic correction.
     OutputPath(String),
+    /// Import one explicit canonical ANC JSON file into the immutable draft.
+    ImportAncillary(PathBuf),
+    /// Remove the current ANC attachment from future submissions.
+    ClearAncillary,
+    /// Import one explicit regulatory PSE provider and QC profile selection.
+    ImportRegulatoryPse(PathBuf),
+    /// Remove the regulatory PSE selection from future submissions.
+    ClearRegulatoryPse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2677,6 +2698,12 @@ impl<'a> ProductActionAvailability<'a> {
                 ExportDraftEdit::OutputPath(output_path) => {
                     self.state.export_draft.output_path != *output_path
                 }
+                ExportDraftEdit::ImportAncillary(path) => !path.as_os_str().is_empty(),
+                ExportDraftEdit::ClearAncillary => self.state.export_draft.ancillary.is_some(),
+                ExportDraftEdit::ImportRegulatoryPse(path) => !path.as_os_str().is_empty(),
+                ExportDraftEdit::ClearRegulatoryPse => {
+                    self.state.export_draft.regulatory_pse.is_some()
+                }
             },
             ExportProductAction::Enqueue(request) => {
                 let sequence = request.sequence_id.map_or_else(
@@ -2693,6 +2720,7 @@ impl<'a> ProductActionAvailability<'a> {
                         .is_ok()
                     })
             }
+            ExportProductAction::EnqueueDraft => self.state.can_enqueue_export_draft(),
             ExportProductAction::Cancel(job_id) => self.state.render_queue.can_cancel(*job_id),
             ExportProductAction::ClearTerminalHistory => {
                 self.state.render_queue.has_terminal_history()
@@ -3600,6 +3628,8 @@ mod tests {
                     range: TimelineExportRange::EntireSequence,
                     output_path: PathBuf::from("delivery.mp4"),
                     output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                    regulatory_pse: None,
+                    frozen_ancillary: None,
                     broadcast_qc: Some(mondrian_broadcast::BroadcastQcProfile {
                         id: "external-broadcast-profile".to_owned(),
                         edition: "2026-01".to_owned(),
@@ -3620,6 +3650,11 @@ mod tests {
                 },
             ))),
             ProductAction::Export(ExportProductAction::Cancel(job_id)),
+            ProductAction::Export(ExportProductAction::EnqueueDraft),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ImportAncillary(PathBuf::from("canonical.json"))))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ClearAncillary))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ImportRegulatoryPse(PathBuf::from("pse.json"))))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ClearRegulatoryPse))),
             ProductAction::Export(ExportProductAction::ClearTerminalHistory),
         ];
 
@@ -4492,6 +4527,8 @@ mod tests {
             output_path: PathBuf::from("delivery.mp4"),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
             broadcast_qc: None,
+            regulatory_pse: None,
+            frozen_ancillary: None,
         };
         let valid_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
             valid_request.clone(),
@@ -4512,6 +4549,8 @@ mod tests {
                 output_path: PathBuf::from("delivery.imf"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             },
         )));
         assert!(state.product_action_availability().allows(&imf_enqueue));
@@ -4526,6 +4565,8 @@ mod tests {
                 output_path: PathBuf::from("delivery.dcp"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             },
         )));
         assert!(!state.product_action_availability().allows(&dcp_enqueue));

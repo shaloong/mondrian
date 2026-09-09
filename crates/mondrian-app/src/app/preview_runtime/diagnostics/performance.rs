@@ -2662,8 +2662,8 @@ fn push_preview_render_root_causes_and_actions(
                 "cpu_output_boundary_us={}",
                 summary.max_frame_stage_durations.cpu_output_boundary_us
             ),
-            "move_preview_output_boundary_to_gpu",
-            "Route viewer output color/display transforms through the GPU output boundary.",
+            "profile_cpu_output_and_validate_gpu_route",
+            "Profile the CPU color processor, allocation, and memory bandwidth while preserving required CPU working-frame cache publication. Timing alone does not establish GPU output eligibility: check the typed route, color/alpha contract, readback requirements, and device admission before selecting an existing GPU or hybrid route.",
         ),
         PreviewRenderBottleneck::FramePackaging => push_render_root_cause_with_action(
             root_causes,

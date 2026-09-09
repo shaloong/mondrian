@@ -105,13 +105,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             last_current_media_admission: self.last_current_media_admission.get(),
             preview_execution_generation: self.execution.borrow().generation(),
             media_existing_work_waiters: self.media_existing_work_waiters.borrow().len(),
-            media_existing_work_retry_pending: self.media_existing_work_retry_pending.get(),
-            media_existing_work_waiter_registrations: self
-                .media_existing_work_waiter_registrations
-                .get(),
-            media_existing_work_retry_acknowledgements: self
-                .media_existing_work_retry_acknowledgements
-                .get(),
+            media_execution_pressure_waiters: self.media_execution_pressure_waiters.borrow().len(),
+            media_retry_pending: self.media_retry_pending.get(),
+            media_retry_waiter_registrations: self.media_retry_waiter_registrations.get(),
+            media_retry_acknowledgements: self.media_retry_acknowledgements.get(),
             last_gpu_loading_reason: self.last_gpu_loading_reason.get(),
             decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,

@@ -1264,8 +1264,23 @@ impl AppState {
         &mut self,
         request_id: ProjectPersistenceRequestId,
     ) -> anyhow::Result<()> {
-        let completion = self.wait_for_persistence_completion(request_id)?;
-        match self.apply_persistence_completion(completion).map_err(anyhow::Error::msg)? {
+        self.wait_for_persistence_request_until(
+            request_id,
+            Instant::now() + std::time::Duration::from_secs(300),
+        )
+    }
+
+    /// Await the ordinary persistence authority against a caller-owned deadline.
+    pub(crate) fn wait_for_persistence_request_until(
+        &mut self,
+        request_id: ProjectPersistenceRequestId,
+        deadline: Instant,
+    ) -> anyhow::Result<()> {
+        let completion = self.wait_for_persistence_completion_until(request_id, deadline)?;
+        let result = match self
+            .apply_persistence_completion(completion)
+            .map_err(anyhow::Error::msg)?
+        {
             PersistenceCompletionDisposition::Applied => Ok(()),
             PersistenceCompletionDisposition::AppliedWithRecoveryWarning { reason } => {
                 self.set_status_hint(format!("项目已耐久保存，但恢复点清理失败：{reason}"), true);
@@ -1278,15 +1293,34 @@ impl AppState {
             PersistenceCompletionDisposition::IgnoredStaleSession => {
                 anyhow::bail!("项目持久化完成不再属于当前会话代际")
             }
-        }
+        };
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "project persistence completed after its original deadline"
+        );
+        result
     }
 
     fn wait_for_persistence_completion(
         &mut self,
         request_id: ProjectPersistenceRequestId,
     ) -> anyhow::Result<ProjectPersistenceCompletion> {
-        let deadline = Instant::now() + std::time::Duration::from_secs(300);
+        self.wait_for_persistence_completion_until(
+            request_id,
+            Instant::now() + std::time::Duration::from_secs(300),
+        )
+    }
+
+    fn wait_for_persistence_completion_until(
+        &mut self,
+        request_id: ProjectPersistenceRequestId,
+        deadline: Instant,
+    ) -> anyhow::Result<ProjectPersistenceCompletion> {
         loop {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "project persistence deadline elapsed before polling"
+            );
             let mut requested = None;
             for completion in self.project_persistence.poll_completions() {
                 if completion.request_id == request_id {

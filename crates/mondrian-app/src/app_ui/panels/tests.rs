@@ -924,6 +924,163 @@ fn export_panel_model_reads_app_export_draft() {
 }
 
 #[test]
+fn export_ancillary_import_freezes_selection_and_preflights_format_and_range() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("ANC delivery");
+    sequence.settings.frame_rate = Rational::new(60000, 1001);
+    let sequence_id = sequence.id;
+    state.test_set_sequence(Some(sequence));
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::As11X9NabaHd);
+    state.set_export_draft_sequence_id(Some(sequence_id));
+    state.set_export_draft_range(TimelineExportRange::EntireSequence);
+    state.set_export_draft_output_path("E:/renders/ancillary.mxf");
+    let work = tempfile::tempdir().expect("work");
+    let path = work.path().join("canonical.json");
+    let program = mondrian_broadcast::FrozenAncillaryProgram::new(
+        mondrian_core::TimelineTime::ZERO,
+        Rational::new(60000, 1001),
+        1,
+        vec![],
+    )
+    .expect("program");
+    std::fs::write(&path, serde_json::to_vec(&program).expect("JSON")).expect("file");
+    state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ImportAncillary(
+            path.clone(),
+        )))
+        .expect("typed import");
+    let model = ExportPanelModel::from_app_state(&state);
+    assert!(
+        model.ancillary_error.is_none(),
+        "{:?}",
+        model.ancillary_error
+    );
+    assert!(model.can_enqueue());
+    assert!(state.can_enqueue_export_draft());
+    assert_eq!(
+        model.enqueue_request().expect("request").frozen_ancillary,
+        Some(program)
+    );
+    std::fs::write(&path, b"{}").expect("later source edit");
+    assert!(state.import_export_draft_ancillary(path.clone()).is_err());
+    assert_eq!(
+        state
+            .export_draft
+            .ancillary
+            .as_ref()
+            .expect("retained owner")
+            .program
+            .frame_count(),
+        1
+    );
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);
+    let unsupported = ExportPanelModel::from_app_state(&state);
+    assert!(unsupported.ancillary_error.is_some());
+    assert!(!unsupported.can_enqueue());
+    assert!(unsupported.enqueue_request().is_none());
+    assert!(!state.can_enqueue_export_draft());
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::As11X9NabaHd);
+    let mismatch = mondrian_broadcast::FrozenAncillaryProgram::new(
+        mondrian_core::TimelineTime::ZERO,
+        Rational::new(60000, 1001),
+        2,
+        vec![],
+    )
+    .expect("mismatch");
+    std::fs::write(&path, serde_json::to_vec(&mismatch).expect("JSON")).expect("file");
+    state.import_export_draft_ancillary(path).expect("valid structure");
+    assert!(!ExportPanelModel::from_app_state(&state).can_enqueue());
+    state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ClearAncillary))
+        .expect("typed clear");
+    assert!(state.export_draft.ancillary.is_none());
+    assert!(ExportPanelModel::from_app_state(&state).can_enqueue());
+}
+
+#[test]
+fn export_scc_import_uses_typed_draft_action_and_freezes_caption_transport() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Caption import");
+    sequence.settings.frame_rate = Rational::new(60000, 1001);
+    let sequence_id = sequence.id;
+    state.test_set_sequence(Some(sequence));
+    state.set_export_draft_sequence_id(Some(sequence_id));
+    state.set_export_draft_range(TimelineExportRange::EntireSequence);
+    state.set_export_draft_output_path("E:/renders/caption.mxf");
+    let work = tempfile::tempdir().expect("work");
+    let path = work.path().join("caption.scc");
+    std::fs::write(&path, b"Scenarist_SCC V1.0\n00:00:00:00\t9420").expect("SCC");
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);
+    assert!(state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ImportAncillary(
+            path.clone()
+        )))
+        .is_err());
+    assert!(state.export_draft.ancillary.is_none());
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::As11X9NabaHd);
+    state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ImportAncillary(
+            path.clone(),
+        )))
+        .expect("typed SCC import");
+    let model = ExportPanelModel::from_app_state(&state);
+    assert!(model.can_enqueue());
+    let program = model
+        .enqueue_request()
+        .expect("request")
+        .frozen_ancillary
+        .expect("frozen program");
+    assert_eq!(
+        program.caption_source().expect("format").source_format,
+        mondrian_broadcast::CaptionSourceFormat::ScenaristSccV1
+    );
+    assert_eq!(
+        program.caption_source().expect("channels").cea608_channels,
+        1
+    );
+    assert_eq!(
+        program.frame(0).expect("frame").packets()[0].validation,
+        mondrian_broadcast::AncillaryValidationLevel::Transport
+    );
+    std::fs::write(&path, b"Scenarist_SCC V1.0\n00:00:00:00\t1420").expect("bad parity");
+    assert!(state.import_export_draft_ancillary(path).is_err());
+    assert_eq!(
+        state.export_draft.ancillary.as_ref().expect("retained").program.as_ref(),
+        &program
+    );
+    let cdp_path = work.path().join("caption.cdp");
+    std::fs::write(
+        &cdp_path,
+        program.frame(0).expect("frame").packets()[0]
+            .packet
+            .payload_bytes()
+            .expect("actual CDP bytes"),
+    )
+    .expect("CDP");
+    state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ImportAncillary(
+            cdp_path,
+        )))
+        .expect("typed CDP import");
+    assert_eq!(
+        state
+            .export_draft
+            .ancillary
+            .as_ref()
+            .expect("selection")
+            .program
+            .caption_source()
+            .expect("format")
+            .source_format,
+        mondrian_broadcast::CaptionSourceFormat::RawCdpSt334_2_2015
+    );
+    state
+        .dispatch_action(export_edit_draft_action(ExportDraftEdit::ClearAncillary))
+        .expect("clear");
+    assert!(state.export_draft.ancillary.is_none());
+}
+
+#[test]
 fn export_codec_menu_exposes_the_complete_professional_mezzanine_matrix() {
     let items = export_video_codec_items(&ExportPreset::h264_aac_sdr_1080p());
     let labels = items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();

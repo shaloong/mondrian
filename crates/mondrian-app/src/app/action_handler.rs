@@ -1371,6 +1371,14 @@ impl AppState {
                     ExportDraftEdit::OutputPath(output_path) => {
                         self.set_export_draft_output_path(output_path)
                     }
+                    ExportDraftEdit::ImportAncillary(path) => {
+                        self.import_export_draft_ancillary(path)?
+                    }
+                    ExportDraftEdit::ClearAncillary => self.clear_export_draft_ancillary(),
+                    ExportDraftEdit::ImportRegulatoryPse(path) => {
+                        self.import_export_draft_regulatory_pse(path)?
+                    }
+                    ExportDraftEdit::ClearRegulatoryPse => self.clear_export_draft_regulatory_pse(),
                 };
                 require_action_executed(
                     changed,
@@ -1381,6 +1389,7 @@ impl AppState {
             ExportProductAction::Enqueue(request) => {
                 self.enqueue_timeline_export(*request).map(|_| ())
             }
+            ExportProductAction::EnqueueDraft => self.enqueue_current_export_draft().map(|_| ()),
             ExportProductAction::Cancel(job_id) => match self.cancel_export_job(job_id) {
                 ExportCancelOutcome::Requested => Ok(()),
                 ExportCancelOutcome::AlreadyRequested => Err(action_not_executed(
@@ -2376,6 +2385,8 @@ mod tests {
                 output_path: PathBuf::new(),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             }))
             .expect_err("empty output path should fail");
 

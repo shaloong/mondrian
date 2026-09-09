@@ -181,6 +181,11 @@ impl PreparedEnduranceRunRequest {
         Ok(Self { request, request_sha256 })
     }
 
+    /// Exact application image digest approved by the strict run identity.
+    pub fn runtime_image_sha256(&self) -> &str {
+        &self.request.identity.runtime_image_sha256
+    }
+
     /// SHA-256 of the exact strict request JSON bytes.
     pub fn request_sha256(&self) -> &str {
         &self.request_sha256
@@ -192,7 +197,6 @@ impl PreparedEnduranceRunRequest {
     }
 
     /// Borrow the prepared campaign request.
-    #[cfg(test)]
     pub(crate) const fn request(&self) -> &EnduranceCampaignRequest {
         &self.request
     }

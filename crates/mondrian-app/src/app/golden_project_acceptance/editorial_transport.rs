@@ -205,6 +205,7 @@ pub(super) struct GoldenEditorialReport {
     setup: EditorialSetupEvidence,
     operations: Vec<OperationEvidence>,
     viewer: GoldenHeadlessViewerEvidence,
+    viewer_shutdown: super::headless_preview::GoldenViewerShutdownEvidence,
     persistence: DurableReopenEvidence,
     authoring: GoldenAudioTrackAuthoringAnchor,
 }
@@ -479,18 +480,20 @@ mod range_edit_scope_tests {
         let sequence_id = sequence.id;
         let primary_track_id = sequence.video_tracks[0].id;
         let secondary_track_id = sequence.audio_tracks[0].id;
-        let mut state = AppState::new();
-        state.test_set_sequence(Some(sequence));
+        super::super::workflow::run_golden_app_operation(AppState::new(), |state| {
+            state.test_set_sequence(Some(sequence));
 
-        let evidence = configure_range_edit_scope(
-            &mut state,
-            sequence_id,
-            primary_track_id,
-            secondary_track_id,
-        )?;
+            let evidence = configure_range_edit_scope(
+                state,
+                sequence_id,
+                primary_track_id,
+                secondary_track_id,
+            )?;
 
-        assert_expected_scope(evidence, primary_track_id, secondary_track_id);
-        Ok(())
+            assert_expected_scope(evidence, primary_track_id, secondary_track_id);
+            Ok(())
+        })
+        .map(|_| ())
     }
 
     #[test]
@@ -499,21 +502,23 @@ mod range_edit_scope_tests {
         let sequence_id = sequence.id;
         let primary_track_id = sequence.video_tracks[0].id;
         let secondary_track_id = sequence.audio_tracks[0].id;
-        let mut state = AppState::new();
-        state.test_set_sequence(Some(sequence));
-        state.set_timeline_track_targeted(primary_track_id, false)?;
-        state.set_timeline_track_sync_locked(primary_track_id, false)?;
-        state.set_timeline_track_sync_locked(secondary_track_id, false)?;
+        super::super::workflow::run_golden_app_operation(AppState::new(), |state| {
+            state.test_set_sequence(Some(sequence));
+            state.set_timeline_track_targeted(primary_track_id, false)?;
+            state.set_timeline_track_sync_locked(primary_track_id, false)?;
+            state.set_timeline_track_sync_locked(secondary_track_id, false)?;
 
-        let evidence = configure_range_edit_scope(
-            &mut state,
-            sequence_id,
-            primary_track_id,
-            secondary_track_id,
-        )?;
+            let evidence = configure_range_edit_scope(
+                state,
+                sequence_id,
+                primary_track_id,
+                secondary_track_id,
+            )?;
 
-        assert_expected_scope(evidence, primary_track_id, secondary_track_id);
-        Ok(())
+            assert_expected_scope(evidence, primary_track_id, secondary_track_id);
+            Ok(())
+        })
+        .map(|_| ())
     }
 }
 
@@ -986,128 +991,128 @@ pub(super) fn execute_editorial_stage(
         secondary_after: extract_secondary_after,
     };
 
-    let mut viewer =
-        GoldenHeadlessPreview::new(std::time::Instant::now() + VIEWER_PRESENTATION_TIMEOUT)?;
-    let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
-    let scrub_before = state.playback_evidence_report();
-    let target_frames = vec![5, 15, 30];
-    let mut scrub_presentations = Vec::with_capacity(target_frames.len());
-    for frame in &target_frames {
+    let ((operations, viewer), viewer_shutdown) = GoldenHeadlessPreview::run_with(|viewer| {
+        let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
+        let scrub_before = state.playback_evidence_report();
+        let target_frames = vec![5, 15, 30];
+        let mut scrub_presentations = Vec::with_capacity(target_frames.len());
+        for frame in &target_frames {
+            state.dispatch_action(timeline_seek_with_source_action(
+                FramePosition::new(*frame, time_base),
+                TimelineSeekSource::PointerDrag,
+            ))?;
+            scrub_presentations.push(viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?);
+        }
+        let scrub_report = state.playback_evidence_report();
+        let scrub_ready_deliveries = scrub_report
+            .deliveries
+            .ready
+            .checked_sub(scrub_before.deliveries.ready)
+            .context("scrub ready-delivery counter regressed")?;
+        let warm_seek_count = scrub_report
+            .warm_seek_latency
+            .count
+            .checked_sub(scrub_before.warm_seek_latency.count)
+            .context("warm-seek counter regressed")?;
+        ensure!(
+            state.current_frame() == 30
+                && warm_seek_count == target_frames.len() as u64
+                && scrub_ready_deliveries == target_frames.len() as u64,
+            "pointer-drag seeks did not produce exact stage-local scrub evidence"
+        );
+        let scrub_evidence = OperationEvidence::Scrub {
+            target_frames,
+            final_frame: state.current_frame(),
+            ready_deliveries: scrub_ready_deliveries,
+            warm_seek_count,
+            presentations: scrub_presentations,
+        };
+
+        let accurate_target = 40;
+        let accurate_before = state.playback_evidence_report();
         state.dispatch_action(timeline_seek_with_source_action(
-            FramePosition::new(*frame, time_base),
-            TimelineSeekSource::PointerDrag,
+            FramePosition::new(accurate_target, time_base),
+            TimelineSeekSource::Settled,
         ))?;
-        scrub_presentations.push(viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?);
-    }
-    let scrub_report = state.playback_evidence_report();
-    let scrub_ready_deliveries = scrub_report
-        .deliveries
-        .ready
-        .checked_sub(scrub_before.deliveries.ready)
-        .context("scrub ready-delivery counter regressed")?;
-    let warm_seek_count = scrub_report
-        .warm_seek_latency
-        .count
-        .checked_sub(scrub_before.warm_seek_latency.count)
-        .context("warm-seek counter regressed")?;
-    ensure!(
-        state.current_frame() == 30
-            && warm_seek_count == target_frames.len() as u64
-            && scrub_ready_deliveries == target_frames.len() as u64,
-        "pointer-drag seeks did not produce exact stage-local scrub evidence"
-    );
-    let scrub_evidence = OperationEvidence::Scrub {
-        target_frames,
-        final_frame: state.current_frame(),
-        ready_deliveries: scrub_ready_deliveries,
-        warm_seek_count,
-        presentations: scrub_presentations,
-    };
+        let accurate_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+        let accurate_report = state.playback_evidence_report();
+        let accurate_ready_deliveries = accurate_report
+            .deliveries
+            .ready
+            .checked_sub(accurate_before.deliveries.ready)
+            .context("accurate-seek ready-delivery counter regressed")?;
+        let accurate_seek_count = accurate_report
+            .accurate_seek_latency
+            .count
+            .checked_sub(accurate_before.accurate_seek_latency.count)
+            .context("accurate-seek counter regressed")?;
+        ensure!(
+            state.current_frame() == accurate_target
+                && accurate_seek_count == 1
+                && accurate_ready_deliveries == 1,
+            "settled seek did not produce exact stage-local accurate-seek evidence"
+        );
+        let accurate_evidence = OperationEvidence::AccurateSeek {
+            target_frame: accurate_target,
+            final_frame: state.current_frame(),
+            ready_deliveries: accurate_ready_deliveries,
+            accurate_seek_count,
+            presentation: accurate_presentation,
+        };
 
-    let accurate_target = 40;
-    let accurate_before = state.playback_evidence_report();
-    state.dispatch_action(timeline_seek_with_source_action(
-        FramePosition::new(accurate_target, time_base),
-        TimelineSeekSource::Settled,
-    ))?;
-    let accurate_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
-    let accurate_report = state.playback_evidence_report();
-    let accurate_ready_deliveries = accurate_report
-        .deliveries
-        .ready
-        .checked_sub(accurate_before.deliveries.ready)
-        .context("accurate-seek ready-delivery counter regressed")?;
-    let accurate_seek_count = accurate_report
-        .accurate_seek_latency
-        .count
-        .checked_sub(accurate_before.accurate_seek_latency.count)
-        .context("accurate-seek counter regressed")?;
-    ensure!(
-        state.current_frame() == accurate_target
-            && accurate_seek_count == 1
-            && accurate_ready_deliveries == 1,
-        "settled seek did not produce exact stage-local accurate-seek evidence"
-    );
-    let accurate_evidence = OperationEvidence::AccurateSeek {
-        target_frame: accurate_target,
-        final_frame: state.current_frame(),
-        ready_deliveries: accurate_ready_deliveries,
-        accurate_seek_count,
-        presentation: accurate_presentation,
-    };
+        let play_start = state.current_frame();
+        let play_before = state.playback_evidence_report();
+        state.dispatch_action(Action::Play)?;
+        let play_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+        ensure!(
+            !state.is_playback_priming(),
+            "production Preview preroll did not release the Playback clock anchor"
+        );
+        let advance = state.advance_playback_clock(Duration::from_millis(80));
+        ensure!(
+            advance.status == PlaybackAdvanceStatus::Advanced
+                && advance.current_frame > play_start
+                && state.playback_clock_master() == Some(ClockMaster::Synthetic),
+            "production Transport did not advance from the Synthetic Clock Master"
+        );
+        state.dispatch_action(Action::Pause)?;
+        let play_report = state.playback_evidence_report();
+        let synthetic_clock_residency_us = play_report
+            .clock_residency
+            .synthetic_us
+            .checked_sub(play_before.clock_residency.synthetic_us)
+            .context("Synthetic Clock residency counter regressed")?;
+        ensure!(
+            synthetic_clock_residency_us > 0,
+            "playback evidence retained no stage-local Synthetic Clock residency"
+        );
+        let play_evidence = OperationEvidence::Play {
+            start_frame: play_start,
+            final_frame: advance.current_frame,
+            frames_advanced: advance.frames_advanced,
+            clock_master: "synthetic",
+            synthetic_clock_residency_us,
+            presentation: play_presentation,
+        };
 
-    let play_start = state.current_frame();
-    let play_before = state.playback_evidence_report();
-    state.dispatch_action(Action::Play)?;
-    let play_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
-    ensure!(
-        !state.is_playback_priming(),
-        "production Preview preroll did not release the Playback clock anchor"
-    );
-    let advance = state.advance_playback_clock(Duration::from_millis(80));
-    ensure!(
-        advance.status == PlaybackAdvanceStatus::Advanced
-            && advance.current_frame > play_start
-            && state.playback_clock_master() == Some(ClockMaster::Synthetic),
-        "production Transport did not advance from the Synthetic Clock Master"
-    );
-    state.dispatch_action(Action::Pause)?;
-    let play_report = state.playback_evidence_report();
-    let synthetic_clock_residency_us = play_report
-        .clock_residency
-        .synthetic_us
-        .checked_sub(play_before.clock_residency.synthetic_us)
-        .context("Synthetic Clock residency counter regressed")?;
-    ensure!(
-        synthetic_clock_residency_us > 0,
-        "playback evidence retained no stage-local Synthetic Clock residency"
-    );
-    let play_evidence = OperationEvidence::Play {
-        start_frame: play_start,
-        final_frame: advance.current_frame,
-        frames_advanced: advance.frames_advanced,
-        clock_master: "synthetic",
-        synthetic_clock_residency_us,
-        presentation: play_presentation,
-    };
-
-    let operations = vec![
-        play_evidence,
-        accurate_evidence,
-        scrub_evidence,
-        insert_evidence,
-        overwrite_evidence,
-        ripple_evidence,
-        split_evidence,
-        lift_evidence,
-        extract_evidence,
-    ];
-    ensure_exact_requirement_evidence(
-        &slice.required_operations,
-        operations.iter().map(OperationEvidence::id),
-        "operation",
-    )?;
-    let viewer = viewer.evidence();
+        let operations = vec![
+            play_evidence,
+            accurate_evidence,
+            scrub_evidence,
+            insert_evidence,
+            overwrite_evidence,
+            ripple_evidence,
+            split_evidence,
+            lift_evidence,
+            extract_evidence,
+        ];
+        ensure_exact_requirement_evidence(
+            &slice.required_operations,
+            operations.iter().map(OperationEvidence::id),
+            "operation",
+        )?;
+        Ok((operations, viewer.evidence()?))
+    })?;
     ensure!(
         viewer.presentations == 5
             && viewer.completed_demands == 5
@@ -1127,7 +1132,7 @@ pub(super) fn execute_editorial_stage(
     )?;
 
     Ok(GoldenEditorialReport {
-        schema_version: 4,
+        schema_version: 5,
         profile: EDITORIAL_SLICE_ID,
         contract_id: contract.id.clone(),
         corpus_revision: manifest.corpus_revision,
@@ -1144,6 +1149,7 @@ pub(super) fn execute_editorial_stage(
         },
         operations,
         viewer,
+        viewer_shutdown,
         persistence,
         authoring,
     })

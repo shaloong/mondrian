@@ -1,5 +1,16 @@
 # Execution Resource Coordination
 
+Preview source reservations use Media's frozen sampling precision rather than
+inferring storage precision from transfer function. Initial playback, seek,
+cache recovery and predictive admission use that same key-derived footprint;
+encoded ten-bit HEVC therefore reserves its actual float source plus working
+float frame. No deadline or memory limit changes accompany this accounting.
+The completion pump preserves the physical lease's admission class. A purely
+speculative capacity rejection caused by later Current work retires without
+remembering a source failure for the generation. Missing leases, Current grants
+and completions adopted by the pending current demand retain strict failure
+evidence, including the actual payload bytes and admission class in diagnostics.
+
 `mondrian-app` owns one lightweight product policy Module that coordinates
 resource demand without becoming an execution scheduler. It converts three
 inputs into a versioned immutable decision:
@@ -104,11 +115,13 @@ generation facts. It never receives a job payload and cannot execute, cancel,
 reorder, retry, or terminalize domain work.
 
 The below-minimum/unknown/8 GiB, 16 GiB, and 32 GiB classes admit at most one,
-two, and four domain dispatch seams respectively. Elevated pressure admits one;
-Critical pressure and realtime Preview/Audio admit none. This is deliberately
-a coarse cross-domain concurrency grant, not a claim that every admitted
-domain has the same internal cost. Each domain still applies its own bounded
-parallelism and byte/resource grants.
+two, and four domain dispatch seams respectively. Elevated pressure admits one
+and Critical pressure admits none. Realtime Preview/Audio closes automatic
+heavy work but retains one slot for an explicitly admitted user Export; that
+attempt freezes a CPU-capable execution policy unless its authored closure
+requires GPU execution. This is deliberately a coarse cross-domain concurrency
+grant, not a claim that every admitted domain has the same internal cost. Each
+domain still applies its own bounded parallelism and byte/resource grants.
 
 Allocation follows five invariants:
 
@@ -124,6 +137,15 @@ Allocation follows five invariants:
    close epoch and that same domain has subsequently supplied a fresh
    `running == 0` observation. Domains may complete this proof independently;
    capacity reopens only after the draining set is empty.
+
+Export's cooperative execution gate reports a yielded running attempt
+separately from a physically executing attempt. The App demand projection moves
+that bounded yielded population from `running` to `queued`: the immutable job
+still requests its user slot, while the allocator receives the required fresh
+`running == 0` proof. Keeping a yielded attempt in `running` would make Nominal
+recovery wait for job completion while the same job waits for dispatch to
+reopen after Critical pressure. Queue identity, cancellation, snapshot, and
+publication authority remain unchanged across this slot reacquisition.
 
 Handoff is a close/acknowledge/resample transition. `domains_to_close` repeats
 every draining domain idempotently under the current `close_epoch`. The
@@ -443,6 +465,13 @@ allocation and records an explicit `ActiveWorkingSetRejected` CPU-fallback
 reason rather than silently reducing delivery precision. The queue copies the current
 policy when a pending job becomes one `Running/Preparing` attempt, and that
 immutable value constructs the attempt's single `ExportVisualRenderSession`.
+A realtime decision also freezes whether equivalent CPU-capable visual work
+may use opportunistic GPU acceleration. While Preview or Audio owns realtime
+execution, the one admitted explicit Export uses its exact Float32 CPU route
+for closures that support it, including the final color/output boundary, and
+does not qualify a resident hardware-encode route. A closure whose Effect
+contract has no exact CPU Float32 route retains its required GPU execution;
+the scheduling policy cannot reinterpret authored processing semantics.
 A later resource decision may close dispatch or request a safe-boundary yield,
 but it cannot resize or reinterpret the running attempt. Only a later
 dispatched attempt freezes the later grant.
@@ -456,9 +485,14 @@ finite product-artwork set.
 ## Priority and degradation order
 
 Realtime Preview and Audio are always admitted. When transport is active,
-background Modules stop dispatching new work. Explicit Export, Import, and user
-Proxy requests remain admitted into their bounded domain queues and resume
-after transport becomes idle. The coordinator itself owns no cancellation
+automatic background Modules and explicit Import/Proxy mutation stop dispatching
+new work. One concrete user Export may receive a single bounded offline slot at
+Nominal or Elevated pressure; this is the execution path used by Concurrent
+Recovery qualification. Its CPU-equivalent work yields the GPU to realtime
+Preview and Reference Output; GPU-required Effect work remains explicit and
+bounded by the frozen Export policy. Critical pressure closes that slot as well. Additional
+Export attempts, Import, and user Proxy requests remain admitted into their
+bounded domain queues and resume when policy grants a slot. The coordinator itself owns no cancellation
 token, but each deep Module may implement a cooperative safe-boundary yield
 without terminalizing or recreating the user's intent. Proxy cancel/requeues
 the same running attempt when its backend acknowledges the resource yield;
@@ -481,8 +515,8 @@ allocation to one domain. At Nominal pressure with no explicit heavy demand,
 bounded automatic queues may admit and dispatch normally. This gives the
 product one simple priority order:
 
-1. realtime Preview and Audio;
-2. explicit user Import, existing-Asset mutation, Export, and Proxy work;
+1. realtime Preview and Audio, plus at most one bounded explicit Export;
+2. explicit user Import, existing-Asset mutation, remaining Export, and Proxy work;
 3. automatic derived-media and recovery work.
 
 Whole-process pressure then applies monotonic degradation: Elevated pressure

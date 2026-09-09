@@ -10,11 +10,14 @@ use super::preview_access_mode::MediaPreviewKey;
 use super::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 use super::preview_media_frame::MediaPreviewFrame;
 use super::preview_raster_frame::PreviewRasterFrame;
+use super::preview_scheduler_policy::MediaPreviewResidencyReservation;
 
 pub(crate) type PreviewFrameStoreAdapterConfig = mondrian_playback::PreviewFrameStoreConfig;
 pub(crate) type PreviewFrameStoreAdapterDiagnostics =
     mondrian_playback::PreviewFrameStoreDiagnostics;
 pub(crate) type MediaWorkReservationAdmission = mondrian_playback::MediaWorkReservationAdmission;
+pub(crate) type MediaPrefetchBatchReservationAdmission =
+    mondrian_playback::MediaPrefetchBatchReservationAdmission;
 pub(crate) type MediaFrameStoreAdmission = mondrian_playback::FrameStoreAdmission;
 pub(crate) type MediaFrameProtectionError = mondrian_playback::MediaFrameProtectionError;
 
@@ -107,6 +110,27 @@ impl PreviewFrameStoreAdapter {
             return Err(MediaWorkReservationAdapterError::UnstableMediaIdentity);
         }
         Ok(self.store.reserve_media_work(key, intent, reserved_bytes, resource_units))
+    }
+
+    /// Atomically reserve one complete speculative frame dependency closure.
+    pub(crate) fn reserve_media_prefetch_work_batch(
+        &mut self,
+        requests: &[(MediaPreviewKey, MediaPreviewResidencyReservation)],
+    ) -> Result<MediaPrefetchBatchReservationAdmission, MediaWorkReservationAdapterError> {
+        if requests.iter().any(|(key, _)| !media_key_authorizes_residency(key)) {
+            return Err(MediaWorkReservationAdapterError::UnstableMediaIdentity);
+        }
+        let requests = requests
+            .iter()
+            .map(|(key, reservation)| {
+                (
+                    key,
+                    reservation.cpu_bytes,
+                    reservation.decoder_resource_units,
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(self.store.reserve_media_prefetch_work_batch(&requests))
     }
 
     /// Admit a decoded-media frame under its attempt's physical resource lease.

@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,48 +59,79 @@ impl ViewerGpuDeviceGenerationId {
     }
 }
 
-type ViewerGpuDeviceProgressWakeTarget = Arc<dyn Fn() + Send + Sync + 'static>;
-
-/// Replaceable, panic-isolated wake shared by queue callbacks and failures.
+/// Wake ownership shared with the bounded production callback retirement Module.
 #[derive(Clone)]
 pub(crate) struct ViewerGpuDeviceProgressWake {
-    target: Arc<RwLock<ViewerGpuDeviceProgressWakeTarget>>,
+    notifier: super::preview_work_notification::PreviewWorkNotifier,
+    watch: super::preview_work_notification::PreviewWorkWatch,
+    native_failures: Arc<AtomicU64>,
+    registration_rejections: Arc<AtomicU64>,
 }
 
 impl ViewerGpuDeviceProgressWake {
     /// Construct a wake seam with one concrete Adapter notification.
+    #[cfg(test)]
     pub(crate) fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { target: Arc::new(RwLock::new(Arc::new(wake))) }
+        let owner = Self::default();
+        owner.install_owned(wake);
+        owner
+    }
+
+    /// Record native event delivery failure independently of callback return.
+    #[cfg(test)]
+    pub(crate) fn native(wake: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        let owner = Self::default();
+        owner.install_native(wake);
+        owner
+    }
+
+    fn install_native(&self, wake: impl Fn() -> bool + Send + Sync + 'static) {
+        let failures = Arc::clone(&self.native_failures);
+        self.install_owned(move || {
+            if !wake() {
+                failures.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn install_owned(&self, wake: impl Fn() + Send + Sync + 'static) {
+        if let Err(rejected) = self.watch.install_waker(wake) {
+            let (_, callback) = rejected.into_parts();
+            // No consumer accepted this capture. Never run foreign Drop on
+            // the producer/registration stack; retain the failure explicitly.
+            std::mem::forget(callback);
+            self.registration_rejections.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Replace the concrete notification for a test-owned GPU device.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn install(&self, wake: impl Fn() + Send + Sync + 'static) {
-        let mut target = match self.target.write() {
-            Ok(target) => target,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *target = Arc::new(wake);
+        self.install_owned(wake);
     }
 
     /// Notify without allowing Adapter code to unwind through wgpu.
     pub(crate) fn notify(&self) {
-        let target = {
-            let target = match self.target.read() {
-                Ok(target) => target,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            Arc::clone(&target)
-        };
-        if catch_unwind(AssertUnwindSafe(|| target())).is_err() {
-            tracing::error!("Viewer GPU progress wake callback panicked");
-        }
+        self.notifier.result_became_pollable();
+    }
+
+    fn has_failure(&self) -> bool {
+        self.watch.callback_evidence().has_failure()
+            || self.native_failures.load(Ordering::Acquire) != 0
+            || self.registration_rejections.load(Ordering::Acquire) != 0
     }
 }
 
 impl Default for ViewerGpuDeviceProgressWake {
     fn default() -> Self {
-        Self::new(|| {})
+        let (notifier, watch) =
+            super::preview_work_notification::preview_work_notification_channel();
+        Self {
+            notifier,
+            watch,
+            native_failures: Arc::new(AtomicU64::new(0)),
+            registration_rejections: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
@@ -320,6 +351,14 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerGpuDeviceProgressShutdownEvidence {
+    /// Exact native-thread consuming join outcome, never an exit-channel hint.
+    pub worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown,
+    /// Complete callback capture, invocation, destruction, and retirement inventory.
+    pub wake_callbacks: super::preview_work_notification::PreviewWorkCallbackEvidence,
+    /// Native event-loop delivery rejections observed by the concrete Adapter.
+    pub native_wake_failures: u64,
+    /// Unaccepted callback captures deliberately retained without running foreign Drop.
+    pub wake_registration_rejections: u64,
     /// Whether this exact progress worker started.
     pub worker_started: bool,
     /// Whether its actual thread was joined within the deadline.
@@ -355,6 +394,13 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
     /// missing retirement receipt or use this predicate to release live owners.
     pub(crate) const fn qualifies_created_inventory(self, renderer_created: bool) -> bool {
         self.worker_started
+            && matches!(
+                self.worker_shutdown,
+                super::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated
+            )
+            && self.wake_callbacks.all_resources_released()
+            && self.native_wake_failures == 0
+            && self.wake_registration_rejections == 0
             && self.worker_terminated
             && !self.worker_panicked
             && !self.timed_out
@@ -600,6 +646,13 @@ impl ViewerGpuDeviceGenerationHealth {
     }
 
     fn terminal(&self) -> Option<ViewerGpuDeviceGenerationTerminal> {
+        if self.wake.has_failure() {
+            self.mark_progress_failure(
+                None,
+                "Viewer GPU wake ownership or native event delivery failed".to_owned(),
+                Instant::now(),
+            );
+        }
         self.state.terminal()
     }
 
@@ -848,6 +901,11 @@ impl ViewerGpuDeviceProgressOwner {
         self.generation_id
     }
 
+    /// Register native wake only after the progress domain has a consuming owner.
+    pub(crate) fn install_native_waker(&self, wake: impl Fn() -> bool + Send + Sync + 'static) {
+        self.worker.wake.install_native(wake);
+    }
+
     /// Install the Headless validation notification target.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn install_waker(&self, wake: impl Fn() + Send + Sync + 'static) {
@@ -1026,74 +1084,58 @@ where
         retirement_handoff_accepted: bool,
         deadline: Instant,
     ) -> ViewerGpuDeviceProgressShutdownEvidence {
-        let Some(join_handle) = self.join_handle.take() else {
-            return ViewerGpuDeviceProgressShutdownEvidence {
-                worker_started: false,
-                worker_terminated: false,
-                worker_panicked: false,
-                timed_out: false,
-                retirement_requested,
-                retirement_handoff_accepted,
-                retirement_completed: false,
-                renderer_retirement: None,
-                generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
-            };
-        };
+        use super::owned_worker_lifecycle::OwnedWorkerShutdown;
+        self.wake.watch.begin_shutdown();
         drop(self.command_sender.take());
-        match self
-            .exit_receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
-            Ok(exit) => {
-                let worker_panicked = join_handle.join().is_err()
-                    || matches!(exit, ViewerGpuDeviceProgressExit::WorkerPanicked);
-                let receipt = match exit {
-                    ViewerGpuDeviceProgressExit::Retired(receipt) => Some(receipt),
-                    _ => None,
-                };
-                ViewerGpuDeviceProgressShutdownEvidence {
-                    worker_started: true,
-                    worker_terminated: true,
-                    worker_panicked,
-                    timed_out: false,
-                    retirement_requested,
-                    retirement_handoff_accepted,
-                    retirement_completed: receipt.is_some(),
-                    renderer_retirement: receipt.and_then(|receipt| receipt.renderer),
-                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
-                }
+        let (worker_started, worker_shutdown, exit) = match self.join_handle.take() {
+            Some(worker) => {
+                let exit = self
+                    .exit_receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .ok();
+                // Exit publication precedes final captured-value destruction.
+                // Only the real join can prove termination within this deadline.
+                (
+                    true,
+                    OwnedWorkerShutdown::join_until(worker, deadline),
+                    exit,
+                )
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                drop(join_handle);
-                ViewerGpuDeviceProgressShutdownEvidence {
-                    worker_started: true,
-                    worker_terminated: false,
-                    worker_panicked: false,
-                    timed_out: true,
-                    retirement_requested,
-                    retirement_handoff_accepted,
-                    retirement_completed: false,
-                    renderer_retirement: None,
-                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let worker_panicked = join_handle.join().is_err();
-                ViewerGpuDeviceProgressShutdownEvidence {
-                    worker_started: true,
-                    worker_terminated: true,
-                    worker_panicked,
-                    timed_out: false,
-                    retirement_requested,
-                    retirement_handoff_accepted,
-                    retirement_completed: false,
-                    renderer_retirement: None,
-                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
-                }
-            }
+            None => (false, OwnedWorkerShutdown::NotStarted, None),
+        };
+        let wake_callbacks = self.wake.watch.shutdown_until(deadline);
+        let receipt = match exit {
+            Some(ViewerGpuDeviceProgressExit::Retired(receipt)) => Some(receipt),
+            _ => None,
+        };
+        let worker_terminated = matches!(
+            worker_shutdown,
+            OwnedWorkerShutdown::Terminated
+                | OwnedWorkerShutdown::Panicked
+                | OwnedWorkerShutdown::PanickedPayloadAbandoned
+        );
+        let worker_panicked =
+            matches!(
+                worker_shutdown,
+                OwnedWorkerShutdown::Panicked | OwnedWorkerShutdown::PanickedPayloadAbandoned
+            ) || matches!(exit, Some(ViewerGpuDeviceProgressExit::WorkerPanicked));
+        ViewerGpuDeviceProgressShutdownEvidence {
+            worker_shutdown,
+            wake_callbacks,
+            native_wake_failures: self.wake.native_failures.load(Ordering::Acquire),
+            wake_registration_rejections: self.wake.registration_rejections.load(Ordering::Acquire),
+            worker_started,
+            worker_terminated,
+            worker_panicked,
+            timed_out: matches!(worker_shutdown, OwnedWorkerShutdown::TimedOutDetached)
+                || !wake_callbacks.deadline_met,
+            retirement_requested,
+            retirement_handoff_accepted,
+            retirement_completed: receipt.is_some(),
+            renderer_retirement: receipt.and_then(|receipt| receipt.renderer),
+            generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
         }
     }
-
     fn enqueue_generation_retirement(
         &mut self,
         retirement: Box<dyn ViewerGpuDeviceGenerationRetirement>,
@@ -1681,7 +1723,8 @@ fn panic_payload_message(panic: Box<dyn Any + Send + 'static>) -> String {
     } else if let Some(message) = panic.downcast_ref::<String>() {
         message.clone()
     } else {
-        "non-string panic payload".to_owned()
+        std::mem::forget(panic);
+        "non-string panic payload deliberately retained".to_owned()
     }
 }
 
@@ -2156,10 +2199,10 @@ mod tests {
             } if submission_id == test_submission_id(9)
         ));
         let wake_deadline = Instant::now() + Duration::from_secs(1);
-        while wakes.load(Ordering::Relaxed) < 2 && Instant::now() < wake_deadline {
+        while wakes.load(Ordering::Relaxed) < 3 && Instant::now() < wake_deadline {
             thread::yield_now();
         }
-        assert_eq!(wakes.load(Ordering::Relaxed), 2);
+        assert_eq!(wakes.load(Ordering::Relaxed), 3);
         worker.shutdown().expect("shutdown worker");
     }
 
@@ -2444,6 +2487,134 @@ mod tests {
         wake.notify();
         wake.install(|| {});
         wake.notify();
+        let receipt = wake.watch.shutdown_until(Instant::now() + Duration::from_secs(2));
+        assert!(!receipt.all_resources_released());
+        assert_eq!(receipt.invocation_panics, 1);
+    }
+
+    #[test]
+    fn native_wake_rejection_terminalizes_the_generation() {
+        let wake = ViewerGpuDeviceProgressWake::native(|| false);
+        let health = ViewerGpuDeviceGenerationHealth::for_test(wake.clone());
+        assert!(matches!(
+            health.terminal().map(|terminal| terminal.kind),
+            Some(ViewerGpuDeviceGenerationTerminalKind::ProgressFailure)
+        ));
+        assert_eq!(wake.native_failures.load(Ordering::Acquire), 1);
+        assert!(wake
+            .watch
+            .shutdown_until(Instant::now() + Duration::from_secs(2))
+            .all_resources_released());
+    }
+
+    #[test]
+    fn opaque_wake_panic_payload_never_drops_on_the_producer() {
+        struct Opaque(Arc<AtomicUsize>);
+        impl Drop for Opaque {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&drops);
+        let wake = ViewerGpuDeviceProgressWake::new(move || {
+            std::panic::panic_any(Opaque(Arc::clone(&captured)))
+        });
+        wake.notify();
+        let receipt = wake.watch.shutdown_until(Instant::now() + Duration::from_secs(2));
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(receipt.opaque_payloads_abandoned, 1);
+        assert_eq!(receipt.invocation_panics, 1);
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn wake_capture_destruction_is_owned_off_the_shutdown_thread() {
+        struct Capture(mpsc::Sender<thread::ThreadId>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                let _ = self.0.send(thread::current().id());
+            }
+        }
+        let (returned, observed) = mpsc::channel();
+        let capture = Capture(returned);
+        let wake = ViewerGpuDeviceProgressWake::new(move || {
+            let _ = &capture;
+        });
+        let receipt = wake.watch.shutdown_until(Instant::now() + Duration::from_secs(2));
+        assert!(receipt.all_resources_released(), "{receipt:?}");
+        assert_ne!(
+            observed.recv_timeout(Duration::from_secs(1)).expect("capture retired"),
+            thread::current().id()
+        );
+        assert_eq!(receipt.registrations_accepted, 1);
+        assert_eq!(receipt.registrations_released, 1);
+    }
+
+    #[test]
+    fn progress_exit_hint_does_not_extend_the_native_join_deadline() {
+        use super::super::owned_worker_lifecycle::OwnedWorkerShutdown;
+        let (mut worker, _) = scripted_worker([]);
+        worker.shutdown().expect("close scripted worker");
+        let (exited, exit_receiver) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (finished, finish_receiver) = mpsc::channel();
+        worker.exit_receiver = exit_receiver;
+        worker.join_handle = Some(thread::spawn(move || {
+            exited
+                .send(ViewerGpuDeviceProgressExit::DrainedWithoutRetirement)
+                .expect("exit hint");
+            let _ = released.recv();
+            let _ = finished.send(());
+        }));
+        let start = Instant::now();
+        let receipt = worker.shutdown_until(false, false, start + Duration::from_millis(20));
+        // Release before assertions so a test failure cannot strand the worker.
+        let _ = release.send(());
+        finish_receiver.recv_timeout(Duration::from_secs(2)).expect("tail released");
+        assert_eq!(
+            receipt.worker_shutdown,
+            OwnedWorkerShutdown::TimedOutDetached
+        );
+        assert!(!receipt.worker_terminated);
+        assert!(receipt.timed_out);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timed_out_gpu_wake_capture_retains_its_first_dirty_receipt() {
+        struct Capture {
+            started: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            returned: mpsc::Sender<()>,
+        }
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                let _ = self.started.send(());
+                let _ = self.release.get_mut().expect("capture gate").recv();
+                let _ = self.returned.send(());
+            }
+        }
+        let (started, observe_start) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (returned, observe_return) = mpsc::channel();
+        let capture = Capture { started, release: Mutex::new(released), returned };
+        let wake = ViewerGpuDeviceProgressWake::new(move || {
+            let _ = &capture;
+        });
+        wake.watch.begin_shutdown();
+        observe_start
+            .recv_timeout(Duration::from_secs(2))
+            .expect("capture destruction started");
+        let receipt = wake.watch.shutdown_until(Instant::now() + Duration::from_millis(20));
+        let _ = release.send(());
+        observe_return.recv_timeout(Duration::from_secs(2)).expect("capture released");
+        assert!(!receipt.all_resources_released());
+        assert!(!receipt.deadline_met);
+        assert_eq!(
+            receipt,
+            wake.watch.shutdown_until(Instant::now() + Duration::from_secs(2))
+        );
     }
 
     #[test]

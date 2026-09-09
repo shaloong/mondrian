@@ -15,7 +15,7 @@ use super::viewer_gpu_device_progress::{
 };
 
 /// Exact created inventory and bounded retirement of a partial GPU generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ViewerGpuStartupShutdownEvidence {
     /// Observed before retirement, not inferred from an absent terminal receipt.
     pub renderer_created: bool,
@@ -54,6 +54,15 @@ impl ViewerGpuStartupOwner {
             progress: Some(progress),
             runtime: None,
         })
+    }
+
+    /// Attach native wake after this partial owner is retained by the caller.
+    /// Failed progress admission therefore creates no callback retirement worker.
+    pub(crate) fn install_native_waker(&self, wake: impl Fn() -> bool + Send + Sync + 'static) {
+        self.progress
+            .as_ref()
+            .expect("unactivated startup progress owner")
+            .install_native_waker(wake);
     }
 
     /// Retain a successfully created Renderer before any later setup can fail.

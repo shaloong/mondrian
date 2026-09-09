@@ -670,6 +670,8 @@ mod tests {
                 output_path: std::path::PathBuf::from("delivery.mp4"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
                 broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             }),
             &state,
         ));

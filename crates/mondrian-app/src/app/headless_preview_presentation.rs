@@ -12,7 +12,7 @@ use super::headless_viewer_gpu::{
 };
 use super::playback_preview::{
     observe_playback_video_preroll, observe_playback_video_preroll_with_presentation_readiness,
-    pump_playback_preview,
+    pump_playback_preview, PlaybackPreviewAdapter,
 };
 use super::preview_execution::{PreviewGpuFrameState, PreviewOutputKey};
 use super::preview_raster_frame::PreviewRasterFrame;
@@ -38,6 +38,27 @@ fn headless_gpu_output_is_exact_current(
     preview.has_gpu_output_artifact(output_key, |registered| {
         gpu.has_current_physical_output_artifact(output_key, registered)
     })
+}
+
+fn exact_visible_output_at<K: PartialEq>(
+    candidate_key: &K,
+    visible: Option<&(K, Instant)>,
+) -> Option<Instant> {
+    visible
+        .filter(|(visible_key, _)| visible_key == candidate_key)
+        .map(|(_, visible_at)| *visible_at)
+}
+
+fn current_candidate_prior_publication_at(
+    was_already_visible: bool,
+    exact_visible_at: Option<Instant>,
+    exact_prepared_at: Option<Instant>,
+) -> Option<Instant> {
+    if was_already_visible {
+        exact_visible_at
+    } else {
+        exact_prepared_at
+    }
 }
 
 fn clear_mismatched_headless_gpu_output(
@@ -152,19 +173,58 @@ pub(crate) fn present_headless_preview_candidate_at(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     already_visible_at: Option<Instant>,
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
-    // Resource coordination is part of the Headless production turn, not
-    // merely preparation for a new Preview evaluation. Completion polling,
-    // prepared-successor promotion, and exact-current alias reuse may all
-    // return before the Runtime asks for new work, but long-running validation
-    // still has to advance native memory observation and apply pressure policy
-    // on those turns.
-    let viewer_resource_decision = advance_headless_execution_resource_policy(preview, state);
-    if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
-        return Ok(candidate);
+    let candidate = present_headless_preview_candidate_inner(
+        preview,
+        state,
+        gpu,
+        gpu_completion_deadline,
+        already_visible_at,
+    );
+    // Resource coordination remains part of every successful Headless turn.
+    // Run it after arbitration so an already-rendered successor can cross its
+    // frame boundary before native-memory observation or unrelated domain
+    // projections spend that frame's presentation budget. Promotion allocates
+    // no new GPU resource; a fresh submission still sees the previously
+    // applied immutable decision, and an idle Adapter applies the new one now.
+    if candidate.is_ok() {
+        let viewer_resource_decision = advance_headless_execution_resource_policy(preview, state);
+        if !gpu.has_submission_in_flight() {
+            gpu.apply_resource_decision(&viewer_resource_decision)?;
+        }
     }
+    candidate
+}
+
+fn present_headless_preview_candidate_inner(
+    preview: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+    gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+    already_visible_at: Option<Instant>,
+) -> anyhow::Result<HeadlessPreviewCandidate> {
     let sampled_at = Instant::now();
+    let visible_gpu_output = preview
+        .registered_gpu_output_artifact()
+        .filter(|(key, output)| gpu.has_current_physical_output_artifact(key, output));
+    let visible_output_at = visible_gpu_output
+        .as_ref()
+        .map(|(key, _)| (key.clone(), already_visible_at.unwrap_or(sampled_at)));
     let current_playback_intent =
         state.preview_execution_snapshot(sampled_at).transport().playback_intent();
+    let exact_prepared_current = preview
+        .registered_relevant_prepared_gpu_output_key(current_playback_intent, None)
+        .is_some_and(|key| gpu.has_prepared_physical_output_for_key(&key));
+    let exact_prepared_at =
+        exact_prepared_current.then_some(already_visible_at.unwrap_or(sampled_at));
+    // A queue-ordered successor is already a usable physical publication.
+    // At its exact frame boundary, promote it before polling callback cleanup:
+    // retiring the submitted owner is maintenance, while consuming the fresh
+    // Frame Demand is deadline-bound presentation work.
+    if !exact_prepared_current
+        && let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)?
+    {
+        return Ok(candidate);
+    }
     let immediate_successor_intent = state
         .preview_successor_execution_request(sampled_at)
         .map(|request| request.snapshot().transport().playback_intent());
@@ -205,7 +265,6 @@ pub(crate) fn present_headless_preview_candidate_at(
     }
     let prepared_current_is_queue_ordered =
         preview.has_prepared_successor_for_intent(current_playback_intent);
-    let submission_in_flight = gpu.has_submission_in_flight();
     // A queue-ordered successor is already a usable physical publication even
     // while its completion callback still owns submission cleanup. Permit its
     // exact current promotion; otherwise one accepted successor is reported as
@@ -213,23 +272,12 @@ pub(crate) fn present_headless_preview_candidate_at(
     if gpu.submission_capacity_is_full() && !prepared_current_is_queue_ordered {
         return Ok(HeadlessPreviewCandidate::Backpressured);
     }
-    // Reconfiguration may trim pools still referenced by submitted owners.
-    // Apply fresh resource policy only on an idle turn; an
-    // in-flight exact-current promotion records no replacement work.
-    if !submission_in_flight {
-        gpu.apply_resource_decision(&viewer_resource_decision)?;
-    }
-    match state
-        .preflight_pending_frame_presentation(already_visible_at.unwrap_or_else(Instant::now))
-    {
-        FramePresentationPreflight::MaySubmit => {}
-        FramePresentationPreflight::DroppedLate(_) => {
-            return Ok(HeadlessPreviewCandidate::DroppedLate);
-        }
-        FramePresentationPreflight::LostAuthority => {
-            return Ok(HeadlessPreviewCandidate::Loading);
-        }
-    }
+    // Resolve the CPU candidate before terminal preflight. The complete
+    // current plan can prove that the exact physical artifact was already
+    // visible for the whole demand interval; consuming the demand as Late
+    // before that proof is observed would reject a frame that required no
+    // physical publication. Fresh Ready and distinct prepared-current
+    // candidates still preflight below before any GPU recording or promotion.
     let current_request = state.preview_frame_execution_request(Instant::now());
     let candidate = gpu
         .take_staged_successor_for_intent(current_playback_intent)
@@ -242,6 +290,34 @@ pub(crate) fn present_headless_preview_candidate_at(
         );
     match candidate {
         PreviewGpuFrameState::Ready(frame) => {
+            let exact_visible_at =
+                exact_visible_output_at(&frame.output_key, visible_output_at.as_ref());
+            let visible_artifact_still_exact =
+                visible_gpu_output.as_ref().is_some_and(|(key, output)| {
+                    key == &frame.output_key
+                        && preview.has_gpu_output_artifact(key, |current| current == output)
+                        && gpu.has_current_physical_output_artifact(key, output)
+                });
+            if let Some(visible_at) = exact_visible_at
+                && visible_artifact_still_exact
+                && preview.revalidate_registered_gpu_output_for_key(&frame.output_key)
+            {
+                let presentation = state.finalize_already_visible_frame_presentation(
+                    frame.presentation_ticket(),
+                    visible_at,
+                    FramePresentationPublication::prepared(|| {}),
+                );
+                let Some(completed_demand) =
+                    headless_published_demand_completion(preview, presentation)?
+                else {
+                    return Ok(HeadlessPreviewCandidate::DroppedLate);
+                };
+                observe_playback_video_preroll(state, preview);
+                return Ok(HeadlessPreviewCandidate::Ready {
+                    output: HeadlessPresentedOutput::CurrentGpu,
+                    completed_demand,
+                });
+            }
             let presentation_ticket = frame.presentation_ticket();
             match state.preflight_frame_presentation(presentation_ticket, Instant::now()) {
                 FramePresentationPreflight::MaySubmit => {}
@@ -345,29 +421,44 @@ pub(crate) fn present_headless_preview_candidate_at(
             }
         }
         PreviewGpuFrameState::Current(candidate) => {
-            ensure!(
-                already_visible_at.is_none() || candidate.was_already_visible(),
-                "Headless successor reused an earlier visibility timestamp for a replacement output"
-            );
             let output_key = preview
                 .registered_gpu_output_key()
                 .context("exact-current Headless GPU candidate omitted its output key")?;
+            let prior_publication_at = current_candidate_prior_publication_at(
+                candidate.was_already_visible(),
+                exact_visible_output_at(&output_key, visible_output_at.as_ref()),
+                exact_prepared_at,
+            );
+            if prior_publication_at.is_none() {
+                match state
+                    .preflight_frame_presentation(candidate.presentation_ticket(), Instant::now())
+                {
+                    FramePresentationPreflight::MaySubmit => {}
+                    FramePresentationPreflight::DroppedLate(_) => {
+                        return Ok(HeadlessPreviewCandidate::DroppedLate);
+                    }
+                    FramePresentationPreflight::LostAuthority => {
+                        return Ok(HeadlessPreviewCandidate::Loading);
+                    }
+                }
+            }
             gpu.promote_prepared_successor(&output_key);
             if !headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
                 clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
                 gpu.clear_physical_outputs();
                 return Ok(HeadlessPreviewCandidate::Loading);
             }
-            let presentation = match already_visible_at {
-                Some(visible_at) => state.finalize_already_visible_frame_presentation(
+            let presentation = if let Some(published_at) = prior_publication_at {
+                state.finalize_already_visible_frame_presentation(
                     candidate.presentation_ticket(),
-                    visible_at,
+                    published_at,
                     FramePresentationPublication::prepared(|| {}),
-                ),
-                None => state.finalize_frame_presentation(
+                )
+            } else {
+                state.finalize_frame_presentation(
                     candidate.presentation_ticket(),
                     FramePresentationPublication::prepared(|| {}),
-                ),
+                )
             };
             let Some(completed_demand) =
                 headless_published_demand_completion(preview, presentation)?
@@ -413,8 +504,9 @@ pub(crate) fn present_headless_preview_candidate_at(
 /// external facts are empty. AppState still samples every App-owned execution
 /// Module, advances the native-memory cadence, applies all internal domain
 /// projections, and returns the narrow Viewer GPU projection for the concrete
-/// Adapter. Keeping this operation ahead of candidate arbitration prevents a
-/// successful fast path from starving pressure observation.
+/// Adapter. Candidate turns invoke it after deadline-bound arbitration so
+/// memory sampling cannot delay an already-prepared frame at its presentation
+/// boundary while successful fast paths still advance pressure observation.
 fn advance_headless_execution_resource_policy(
     preview: &HeadlessPreviewRuntime,
     state: &AppState,
@@ -436,6 +528,7 @@ pub(crate) fn prepare_headless_preview_successor(
     state: &mut AppState,
     gpu: &mut HeadlessViewerGpuAdapter,
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+    publish_preroll_readiness: bool,
 ) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
         return Ok(None);
@@ -452,10 +545,10 @@ pub(crate) fn prepare_headless_preview_successor(
         return Ok(None);
     }
     let playback_intent = request.snapshot().transport().playback_intent();
-    let candidate = gpu.take_staged_successor_for_intent(playback_intent).map_or_else(
-        || preview.gpu_preview_frame(request),
-        PreviewGpuFrameState::Ready,
-    );
+    let staged = gpu.take_staged_successor_for_intent(playback_intent);
+    let candidate = staged
+        .map(PreviewGpuFrameState::Ready)
+        .unwrap_or_else(|| preview.gpu_preview_frame(request));
     match candidate {
         PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
         PreviewGpuFrameState::Ready(frame) => {
@@ -483,7 +576,9 @@ pub(crate) fn prepare_headless_preview_successor(
                     output.clone(),
                 );
             })?;
-            observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
+            if publish_preroll_readiness {
+                observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
+            }
             Ok(Some(playback_intent))
         }
         PreviewGpuFrameState::Current(_)
@@ -493,16 +588,43 @@ pub(crate) fn prepare_headless_preview_successor(
     }
 }
 
-/// Warm a bounded CPU-complete horizon beyond the immediate successor without
-/// taking GPU submission or physical presentation capacity.
+/// Opportunistically warm CPU-complete frames beyond the immediate successor
+/// and prove the discovered cold activation's GPU input contract.
+///
+/// The return value is the cold-activation GPU-prewarm fact. Playback owns the
+/// complete near-media prefix separately, and the exact immediate successor has
+/// its own physical preparation fact. Farther ticketless evaluations can reduce
+/// later work but cannot delay Audio clock admission after both owner facts are
+/// already satisfied.
 #[cfg(any(test, feature = "validation"))]
 pub(crate) fn stage_headless_preview_lookahead(
     preview: &HeadlessPreviewRuntime,
     state: &AppState,
     gpu: &mut HeadlessViewerGpuAdapter,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    maintain_headless_preview_lookahead(preview, state, gpu, true)
+}
+
+/// Retain the already prepared future horizon without executing a new future
+/// frame on the realtime coordinator thread.
+#[cfg(any(test, feature = "validation"))]
+pub(crate) fn retain_headless_preview_lookahead(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+) -> anyhow::Result<bool> {
+    maintain_headless_preview_lookahead(preview, state, gpu, false)
+}
+
+#[cfg(any(test, feature = "validation"))]
+fn maintain_headless_preview_lookahead(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+    stage_missing: bool,
+) -> anyhow::Result<bool> {
     const FIRST_LOOKAHEAD_OFFSET: usize = 2;
-    const LAST_LOOKAHEAD_OFFSET: usize = 4;
+    const LAST_LOOKAHEAD_OFFSET: usize = 6;
     let mut expected = Vec::with_capacity(LAST_LOOKAHEAD_OFFSET);
     if let Some(request) = state.preview_successor_execution_request(Instant::now()) {
         expected.push(request.snapshot().transport().playback_intent());
@@ -516,6 +638,49 @@ pub(crate) fn stage_headless_preview_lookahead(
     );
     gpu.retain_staged_successor_intents(&expected);
 
+    // The media preroll owner already found the next distinct physical source
+    // inside its bounded horizon. Materialize that exact frame far enough
+    // ahead to build contract-specific OCIO shader/LUT/pipeline objects before
+    // AudioDevice owns time. No frame texture, native surface, submission, or
+    // presentation ticket survives this preparation.
+    let cold_activation =
+        preview.video_preroll(state.preview_video_preroll_request(Instant::now()));
+    let mut cold_activation_prepared =
+        cold_activation.is_none_or(|readiness| readiness.bounded_cold_activation_frame.is_none());
+    if stage_missing
+        && let Some(activation_frame) = cold_activation
+            .filter(|readiness| readiness.bounded_cold_activation_ready)
+            .and_then(|readiness| readiness.bounded_cold_activation_frame)
+        && let Some(request) =
+            state.preview_cold_activation_execution_request(Instant::now(), activation_frame)
+    {
+        let admission_open =
+            request.snapshot().transport().allows_future_media_admission(Instant::now());
+        let cold_intent = request.snapshot().transport().playback_intent();
+        if gpu.has_prewarmed_cold_activation_inputs(cold_intent) {
+            cold_activation_prepared = true;
+        } else if admission_open {
+            match preview.gpu_preview_frame(request) {
+                PreviewGpuFrameState::Ready(frame) => {
+                    ensure!(
+                        frame.is_successor_preparation() && frame.presentation_ticket().is_none(),
+                        "Headless cold activation produced current presentation authority"
+                    );
+                    gpu.prewarm_cold_activation_inputs(&frame)
+                        .context("prewarm Headless cold-activation GPU inputs")?;
+                    drop(frame);
+                    cold_activation_prepared = true;
+                }
+                PreviewGpuFrameState::Prepared
+                | PreviewGpuFrameState::Current(_)
+                | PreviewGpuFrameState::Transparent(_) => {
+                    cold_activation_prepared = true;
+                }
+                PreviewGpuFrameState::Loading | PreviewGpuFrameState::Unavailable(_) => {}
+            }
+        }
+    }
+
     for offset in FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET {
         let Some(request) = state.preview_lookahead_execution_request(Instant::now(), offset)
         else {
@@ -525,7 +690,18 @@ pub(crate) fn stage_headless_preview_lookahead(
         if gpu.has_staged_successor_for_intent(intent) {
             continue;
         }
-        match preview.gpu_preview_frame(request) {
+        if !stage_missing {
+            break;
+        }
+        let candidate = preview.gpu_preview_frame(request);
+        if headless_lookahead_candidate_is_semantically_prepared(&candidate) {
+            // Reusable output identity can prove several future coordinates
+            // without allocating a distinct staged frame. Keep scanning those
+            // zero-work coordinates; stopping here would revisit the first
+            // alias forever and could never close the bounded startup horizon.
+            continue;
+        }
+        match candidate {
             PreviewGpuFrameState::Ready(frame) => {
                 ensure!(
                     frame.is_successor_preparation()
@@ -536,18 +712,29 @@ pub(crate) fn stage_headless_preview_lookahead(
                 gpu.stage_successor(frame)
                     .context("prewarm staged Headless lookahead uploads")?;
             }
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Unavailable(_) => {}
             PreviewGpuFrameState::Prepared
             | PreviewGpuFrameState::Current(_)
-            | PreviewGpuFrameState::Transparent(_)
-            | PreviewGpuFrameState::Loading
-            | PreviewGpuFrameState::Unavailable(_) => {}
+            | PreviewGpuFrameState::Transparent(_) => {
+                unreachable!("semantically prepared Headless lookahead was handled before staging")
+            }
         }
         // One speculative evaluation per coordinator turn. Filling every
         // missing coordinate at once competes with current Playback decode;
         // repeated turns converge on the complete horizon without a burst.
         break;
     }
-    Ok(())
+    Ok(cold_activation_prepared)
+}
+
+#[cfg(any(test, feature = "validation"))]
+fn headless_lookahead_candidate_is_semantically_prepared(candidate: &PreviewGpuFrameState) -> bool {
+    matches!(
+        candidate,
+        PreviewGpuFrameState::Prepared
+            | PreviewGpuFrameState::Current(_)
+            | PreviewGpuFrameState::Transparent(_)
+    )
 }
 
 fn drive_headless_gpu_submission(
@@ -1152,7 +1339,56 @@ mod tests {
     use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
 
     #[test]
-    fn headless_turn_applies_complete_resource_policy_before_candidate_arbitration() {
+    fn semantically_prepared_lookahead_closes_without_adapter_staging() {
+        assert!(headless_lookahead_candidate_is_semantically_prepared(
+            &PreviewGpuFrameState::Prepared
+        ));
+        assert!(!headless_lookahead_candidate_is_semantically_prepared(
+            &PreviewGpuFrameState::Loading
+        ));
+    }
+
+    #[test]
+    fn only_an_exact_candidate_key_inherits_prior_physical_visibility() {
+        let visible_at = Instant::now() - Duration::from_millis(5);
+        let visible = Some((9_u8, visible_at));
+
+        assert_eq!(
+            exact_visible_output_at(&9, visible.as_ref()),
+            Some(visible_at),
+            "an identical resolved output needs no replacement publication"
+        );
+        assert_eq!(
+            exact_visible_output_at(&10, visible.as_ref()),
+            None,
+            "a different semantic output must still cross terminal preflight"
+        );
+        assert_eq!(exact_visible_output_at(&9, None), None);
+    }
+
+    #[test]
+    fn queue_ordered_prepared_current_uses_its_boundary_publication_time() {
+        let visible_at = Instant::now() - Duration::from_millis(10);
+        let prepared_at = visible_at + Duration::from_millis(5);
+
+        assert_eq!(
+            current_candidate_prior_publication_at(true, Some(visible_at), Some(prepared_at)),
+            Some(visible_at)
+        );
+        assert_eq!(
+            current_candidate_prior_publication_at(false, Some(visible_at), Some(prepared_at)),
+            Some(prepared_at),
+            "a distinct prepared resource was already queue-published before its pointer-only promotion"
+        );
+        assert_eq!(
+            current_candidate_prior_publication_at(false, Some(visible_at), None),
+            None,
+            "a replacement without prepared publication evidence still requires terminal preflight"
+        );
+    }
+
+    #[test]
+    fn headless_turn_projects_the_complete_resource_policy() {
         let state = AppState::new();
         let preview = HeadlessPreviewRuntime::new();
         let before = preview.diagnostics().resource_decision_applications;

@@ -131,9 +131,10 @@ pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
     orphaned_completion_count: u64,
 }
 
-/// Submitted cleanup-owner horizon, aligned with bounded CPU frame staging.
-pub(crate) const VIEWER_GPU_SUBMISSION_CAPACITY: usize =
-    super::preview_execution::PREVIEW_GPU_CPU_STAGING_CAPACITY;
+/// Submitted cleanup-owner horizon. This stays independent of the larger
+/// ticketless CPU staging horizon: only queue-published submissions awaiting
+/// callback retirement occupy these slots.
+pub(crate) const VIEWER_GPU_SUBMISSION_CAPACITY: usize = 4;
 
 /// Bounded additional wait after quarantine for the exact completion callback
 /// before its bounded slot is force-released.

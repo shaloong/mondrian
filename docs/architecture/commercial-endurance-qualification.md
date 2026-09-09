@@ -1,9 +1,91 @@
 # Commercial Endurance Qualification
 
+Machine-plan `verifier_tools.bmx` binds raw2bmx/mxf2raw executable hashes,
+version-output hashes and a complete optional DLL inventory. AS-11 pre-start
+admission requires this inventory, retains one Media `PreparedBmxRuntime`, and
+runs both real version probes before opening the phase's physical owners.
+Missing bindings, missing DLL inventory or absent files produce `NotRun`;
+changed hashes, failed probes or cleanup failures remain errors with evidence.
+The runtime is admitted for the entire original phase plus shutdown horizon;
+individual probes and exports can only shorten their own command deadline.
+After the independent verifier and App Export queue consume every request and
+child, phase terminal evidence records `bmx_runtime` with its eight raw closure
+fields. Existing schema-2 terminals without BMX remain readable as `None`;
+approved BMX phases require actual namespace ownership and complete closure.
+Platform owner replay checks all eight BMX fields and their types. A completed
+phase requires owned namespace authority, released commands and file leases, no expired deadline,
+and no validation, ACL restoration, removal or outstanding-owner errors. Failed
+phase reports retain well-formed unsuccessful receipts without claiming cleanup.
+Factory rejection, panic and other pre-start exits retain a pending owner for
+explicit run-owner close, with bounded raw pre-start failures/cleanup in the
+failed-run report. Canonical ANC Export-selection checks also run for every
+bound phase preset during source-inventory admission before any physical session.
+
+Declared ANC programs retain one parsed source lease shared by physical and
+Export owners. Each started phase publishes the same optional
+`ancillary_program_sha256`, `ancillary_export_artifacts`, and `wire_journals`
+at the producer raw/report, canonical phase-owner root, manifest producer, and
+normalized phase report. Export entries come from joined final-artifact rescan
+workers; wire entries come from consuming native owners after synchronizing and
+hashing their actual journal handles. Inventories are phase-scoped, unique and
+bounded to 256 artifacts and 64 journals. The producer requires a one-to-one
+ordered match against its actual verified Export events, and replay binds the
+entire inventory to the phase owner. Undeclared ANC preserves the legacy shape;
+partial or unknown flattened fields cannot deserialize as absent evidence.
+
+Exact recovery primes actual Audio output and current/successor GPU work under one original deadline. Initial playback, seek, cache pressure and resumed Headless recreation first prove their original epoch/frame/quality on the physical GPU. During Audio startup the already-running clock may advance monotonically within that epoch and quality; the coordinator must then obtain a separate exact physical Ready proof for the resolved frame. `HeadlessAvPictureCompletion` binds both coordinates to the Engine's accepted handoff and the physical stream's matching generation, sample anchor and active callback evidence. It preserves raw phase and latency observations without reinterpreting the Engine's phase algorithm. Synthetic, rejected, stale-stream and late readiness cannot complete recovery. The owner retains the last 32 completions for diagnostic publication even when subsequent work fails. The paused old-generation proof remains video-only. Settling native scheduling retains only the last verified picture keys in the owning session. Re-entry restores them only against the exact epoch/frame/quality, Preview key and still-current physical GPU output; stale or revoked evidence cannot authorize Ready. The original multi-frame transition rejection remains unchanged. Native PQ diagnostics use the supported TIFF16 delivery path and retain UInt16 precision; normalized float JSON is not native Float32 evidence or authored 203-nit qualification.
+
+When that first physical Audio observation resolves to a later frame, the
+coordinator reissues exactly one demand for the Audio-owned epoch/frame/quality
+against the remaining original recovery deadline. This replaces the inherited
+startup presentation deadline, which may already be exhausted after inactive
+callback fill, without renewing the recovery window or accepting a late frame.
+
+Audio completion refreshes the actual device observation after GPU execution,
+before accepting its resolved picture. A callback may advance while rendering;
+an earlier accepted handoff is not authority to freeze the Engine position.
+Only the post-pump exact binding can complete startup; chasing a device the GPU
+cannot keep up with remains bounded by the same original deadline. Replacement
+Headless sessions also prepare their paused picture before Play, with separate
+raw preparation evidence and no renewal of the recovery horizon.
+
+Phase owner reports use schema 2 and include the consuming closure of the
+capacity-one asynchronous artifact verifier. Realtime polling only takes a
+finished result; snapshot copies, native probes/full decoding, hashing and
+verifier evidence publication run on the phase-owned worker. Its original
+phase horizon and artifact deadline are never renewed. Rust qualification and
+independent PowerShell replay both require complete worker inventory and native
+cleanup for a successful phase; missing or legacy verifier evidence is rejected.
+
+The App-only test profile omits optimization and full debug information to keep
+the expanded harness within a 16 GiB Windows host's commit limit. Domain crates
+retain their optimization, and performance acceptance uses separate production
+dev/release executables rather than treating unit-test timings as qualification.
+
+The production repeated-export backend schedules the complete terminal job
+snapshot on the phase's capacity-one worker at its first terminal observation.
+Polling remains pending until publication and native thread join finish, before
+verification or history reclamation. The create-only filename includes the job ID, so a
+cancel/retry sharing an output path cannot replace prior evidence. This closes
+the gap in a separate sampler that can miss a Running-to-Completed transition.
+Completed, Cancelled and Failed all use this path. Metadata and full verification
+share the same first-observation artifact deadline. The nested terminal-publication
+receipt retains the latest original snapshot within its 2 MiB bound, and metadata
+workers never replace the separate native-verifier closure. Independent verification
+also publishes its complete success/failure native evidence beside the artifact.
+
 Commercial endurance is a qualification Module, not a longer benchmark. It
 proves that one exact release candidate can continuously play, feed physical
 reference output, export, recover, and return all owned work to quiescence
 without unbounded resource growth.
+
+Validation entrypoints establish the same admission state as the product: the
+native color capture keeps a display-referred Program output while selecting
+linear or display targets per Export; real-media smoke explicitly stops and seeks
+to exact frame zero after authoring. The independent performance-owner protocol
+injects its cache configuration before worker construction, including actual
+required-cache startup failure, so an ordinary build cannot silently substitute
+the user's default cache or drop a replacement cache owner outside the receipt.
 
 ## Ownership
 
@@ -27,8 +109,10 @@ The implementation is split at existing authority boundaries:
   derives terminal software/Export closure from typed owner receipts and the
   final Reference Output accounting snapshot. It does not execute workloads or
   reinterpret gates. Reference Output now has the consuming Module/Session
-  receipt boundary; a real DeckLink/AJA provider implementation and physical
-  HITL evidence remain required before that receipt can qualify hardware.
+  receipt boundary and concrete Windows DeckLink/AJA native providers, including
+  independent raw ANC capture. Their native no-device validation does not
+  establish physical HITL qualification. Hardware and other-OS execution remain
+  NotRun until measured on the corresponding rig.
 - `mondrian-app::app::endurance_campaign` owns exact serial phase admission,
   monotonic cadence, native process-tree sampling, final-sample order, and
   shutdown-before-terminal capture. It consumes an `EnduranceCampaignRuntime`;
@@ -197,11 +281,14 @@ shutdown path before semantic events, the final sample, or a later serial phase
 can proceed.
 
 Cross-domain capture is an explicitly bounded envelope, not a fictitious
-global linearization point. The supervisor stamps the envelope immediately
-before invoking the native memory probe, then collects each domain's internally
-consistent projection before the completion stamp. The snapshot path does not
-schedule, pump, or poll phase work; individual owner projections may still
-refresh bounded diagnostic caches. Export's endurance projection is linearized
+global linearization point. At each cadence the supervisor stamps the envelope,
+copies each domain's internally consistent owner projection, and dispatches the
+native process-tree probe to one phase-scoped evidence worker. While that probe
+enumerates processes, the supervisor keeps the realtime product session pumping
+in bounded quanta. The worker's monotonic completion time closes the envelope.
+The snapshot call itself does not schedule, pump, poll, or settle phase work;
+individual owner projections may still refresh bounded diagnostic caches.
+Export's endurance projection is linearized
 by the sole Queue mutex: lifecycle flags, cumulative counters, job gauges, and
 activity count are copied while the same lock is held. Job/activity mutations
 advance both activity and revision before releasing that lock;
@@ -221,6 +308,11 @@ Timeline render-cache is also retained as typed nested evidence: production
 Preview requires a successfully started cache worker and its exact terminal
 receipt. A configured cache start failure is not equivalent to a cache that was
 never required, and cannot disappear into Preview's aggregate worker counts.
+Before any media-worker join, Preview permanently disconnects the old completed-
+result Receiver and drops its queued results, then clears foreground residency.
+Consequently a decode that races shutdown must drop its native frame on the
+worker before clearing the decoder Session; it cannot publish a D3D12-backed
+surface into an owner that is simultaneously waiting for that worker to exit.
 
 Audio closure is similarly owner-derived: `AudioPlayback` joins its PCM render
 worker and asks the concrete output Adapter to join every device-lifecycle
@@ -353,7 +445,8 @@ owner, and GPU retirement in that order.
 The validation-only `PersistentTimelinePlaybackPhase` is the high-level
 realtime phase owner over that sealed session. Startup requires an admitted
 Playback/Reference or Concurrent/Recovery workload, a fresh stopped frame-zero
-transport, one active exact 60/1 Sequence, and enough authored extent for every
+transport, one active Sequence at the prepared workload's exact program rate
+(60/1 or the separately approved 60000/1001 row), and enough authored extent for every
 required presentation plus one terminal guard frame. It freezes Sequence ID,
 Sequence Revision, and Project Author Generation before starting ordinary App
 Playback. Each accepted interval pumps the actual App Audio output before the
@@ -364,7 +457,22 @@ skipped/non-unit progress, picture unavailability, clock fallback, external
 transport or author drift, overflow, and owner failure permanently fault the
 phase. A cadence observation first finishes the current realtime residency;
 resume revalidates the same binding and coordinate before native scheduling is
-entered again. Startup failure deliberately leaves `AppState` and the execution
+entered again. The one pre-measurement owner-preparation boundary additionally
+pauses the transport after its exact A/V proof and before the initial owner
+snapshot. Measurement resume restarts that same transport and sealed
+Preview/GPU/Audio owner group, closes one exact Ready picture, and proves that
+`AudioDevice` has reclaimed Clock Master before the coordinator's first
+measured interval. This gate prevents both unmeasured snapshot latency and a
+temporary Synthetic-clock restart from entering cadence evidence.
+Cache-pressure recovery uses the same retained-owner suspension: it
+freezes transport before the destructive trim and re-enters Priming afterward,
+so the current picture, exact immediate successor, and bounded cold-activation
+media residency are rebuilt before `AudioDevice` regains measured clock
+authority. Farther cold-activation GPU prewarm uses the remaining immutable
+Priming work horizon; it is an optimization and cannot hold clock admission
+after those owner facts are ready.
+Periodic in-phase samples remain non-pausing. Startup failure
+deliberately leaves `AppState` and the execution
 owner group with the caller so their consuming terminal contract can still run.
 This is production Timeline picture/audio-path evidence only: canonical
 Reference Output is independently driven by the persistent canonical pump
@@ -429,13 +537,23 @@ receipts can close a phase.
 
 The default App performance suite reuses this ownership rule instead of
 granting test teardown a weaker meaning. Each smoke runs its measured work
-inside a panic boundary, closes all admission, synchronously reclaims Preview
-workers/decoder-native residency, retires the GPU generation, and consumes the
-App against one caller-owned absolute deadline. Preview must precede GPU
-retirement after the shared stop signal: an admitted decoder worker can still
-own the renderer-qualified device root or a native surface until its join is
-proved. Its
-schema-1 JSON projection preserves all typed terminal leaves, including the
+inside a panic boundary, closes all admission, executes a GPU-to-decoder
+dependency barrier, synchronously reclaims Preview workers/decoder-native
+residency, retires the GPU generation, and consumes the App against one
+caller-owned absolute deadline. After the shared stop signal, the Headless GPU
+Adapter first releases ticketless staging and physical publication owners,
+drives every submitted owner to callback or bounded quarantine retirement, and
+reclaims renderer native-import source residency while its device generation
+remains alive. The serialized barrier receipt must show zero submitted owners
+and zero native sources before Preview destroys its FFmpeg hardware sessions.
+Preview then precedes final GPU retirement because an admitted decoder worker
+can still own the renderer-qualified device root until its join is proved. If
+Preview does not return, the paired shutdown owner retains the complete GPU
+generation for the remainder of the failed validation process and emits a
+non-qualifying receipt; it never unloads the device underneath a detached
+hardware-decoder worker. Its
+schema-2 JSON projection preserves the dependency-barrier receipt and all typed
+terminal leaves, including the
 Preview Runtime's nested Timeline render-cache receipt and the App's Project,
 Reference, Export terminal snapshot, Audio, Audio Source, and auxiliary-worker
 facts. Project timing compatibility remains three case rows carrying one
@@ -550,6 +668,23 @@ frozen Sequence export, independent full-content verification, and forbidden
 cancellation; Concurrent Recovery fixes all realtime/Export policies plus the
 ordered seek, surface/device reopen, Export cancel/retry, and cache-pressure
 cycle and exact cycle/cancellation counts.
+
+Realtime frame opportunities keep the phase's strict interval timeout. The
+cache-pressure recovery step intentionally evicts optional media residency, so
+its exact current-picture rebuild uses a separate five-second cold-open budget,
+capped by the unchanged campaign absolute deadline. This permits one real
+decoder or still-image session reconstruction without weakening continuous
+playback cadence acceptance or allowing recovery to extend the campaign. After
+the trim and Nominal-policy restore, the Playback owner reissues that same
+epoch/frame/quality as a fresh demand sequence against the identical recovery
+deadline. The old ticket loses authority, Audio Device Clock remains master,
+and the Headless completion wait consumes the remaining portion of that one
+deadline. No ordinary interval or automatic quality transition receives this
+deadline authority. Cache-pressure receipt schema 4 binds the optional Store's
+CPU bytes, entry count, and decoder/GPU resource units independently. At least
+one dimension must be nonzero before the trim and all three must be zero after
+it, so zero-copy native surfaces with no retained CPU pixels remain real,
+replayable trim evidence.
 
 Each phase declares exact minimum duration, warmup, cadence, maximum sample and
 per-domain Playback/Reference/Export/recovery progress gaps, native memory
@@ -780,9 +915,11 @@ only for the Export interval and drop it before consuming the complete
 `AppState`; otherwise its extra Queue `Arc` is residual ownership, not clean
 shutdown evidence.
 
-The concrete runtime leaves every realtime phase settled across the
-supervisor's `snapshot` call and resumes only when the next `pump_until`
-begins. Surface reopen takes the sole App owner only after settlement and
+The concrete runtime exposes read-only, internally atomic diagnostics while the
+realtime phase remains active. Sampling therefore cannot pause physical Audio,
+Timeline transport, Preview/GPU completion, or Reference Output. The surrounding
+sample interval is the honest cross-owner envelope. Surface reopen takes the sole
+App owner only after an explicit settlement and
 restores the returned owner before inspecting operation success, so a failed
 Window operation still has consuming shutdown authority. The validation Window
 does not advance the settled Timeline transport. Instead, it temporarily owns
@@ -1082,3 +1219,380 @@ The bounded protocol target compiles the real evidence/cache/observer Modules;
 it does not replace Runtime factory, Golden/Headless/performance integration or
 physical GPU tests. Window initial/reopen ownership, whole-operation Golden
 closure and durable success-receipt history remain separate unfinished work.
+
+
+## Complete Window owner semantic replay
+
+Window success replay decodes Runtime, Host and native return leaves into
+owning types, requires the normal four-worker Runtime handoff/signal/join,
+and recomputes Host Preview, callback, cache, Waveform/source, Thumbnail and
+device-catalog closure. GPU generation binding remains mandatory. Typed
+canonical re-encoding rejects extra nested fields, missing nullable inventory,
+wrong primitive types and contradictory enum payloads after every digest is
+recomputed. Hashes remain byte integrity, not external authenticity.
+
+Failure receipts decode each exact variant into owner types. Dirty receipts
+remain persistable diagnostics; `verify_owned_authority_released` recomputes
+the same predicate as sealing and returns false for dirty closure. Successful
+batch and campaign producer validation transitively consume these checks.
+Native evidence continues to prove Rust authority return only.
+
+Independent PowerShell replay uses `window-owner-closure.psm1`, with explicit
+owner schemas, widths and semantic predicates, sharing existing callback and
+Audio Source predicates with performance replay. The checked-in
+`window-owner-closure.json` contains only owner facts extracted from an earlier
+local capture for deterministic replay tests. Replaying that fixture is not a
+new execution or qualification of the historical binary.
+
+### Ordered Window generation evidence
+
+Window-run schema 3 and closed-run schema 2 retain a bounded typed generation
+history. Replacement appends the old identity before candidate construction,
+then the installed candidate identity, the raw consumed old owner receipt, and
+the final active owner receipt. Partial candidate errors and panics use the same
+catch/consuming-close boundary as initial Window startup. Dirty retirement is
+recorded before qualification and cannot disappear behind a clean final GPU.
+Replaying a successful run checks exact order, both distinct generation pairs,
+all raw retirement facts, and equality with the final outer GPU receipt. A failed
+candidate can prove partial inventory closure without proving recovery.
+Overflow and unfinished attempts remain diagnostic failures, never clean passes.
+
+The Viewer GPU wake now uses the same bounded callback-ownership Module as
+Preview Work Watch. Native delivery failures are sticky generation failures;
+callback invocation, capture retirement, destructor panic and deliberately
+retained opaque payloads remain distinct raw facts. Consuming GPU closure closes
+callback admission, waits for the actual progress-thread join and callback
+retirement against one unchanged absolute deadline, and retains both receipts.
+A worker's exit-channel message is only a hint: final thread-local/capture Drop
+may still be running. Surface old-generation shutdown schema 4, Window final
+GPU receipts, Headless/Endurance and performance receipts require the exact join,
+complete callback inventory and zero native-delivery/registration failures.
+Independent PowerShell replay applies the same callback shape and clean predicate.
+
+Golden Editorial now retains the shared Headless realtime session throughout
+its presentation operation. Normal return, an operation error and caught unwind
+all consume Preview before GPU, and the successful stage report or typed failure
+retains both raw receipts. Complete Golden CLI execution keeps its App outside
+the stage error/unwind scope, consumes it before publishing a pass, and embeds
+the canonical complete App/Export shutdown receipt in schema-2 reports. Project
+startup errors consume the actual App before propagation; failed closure keeps
+runtime directories intact. These ownership gates do not turn a developer run
+into physical HDR, broadcast-device or 72-hour qualification.
+
+### Exact-runtime run closure (run/report schema 4)
+
+`mondrian-platform-core::QualifiedRuntimeCapsuleClosureEvidence` is the shared
+platform-neutral raw contract. Media derives namespace-seal, admitted/settled/
+remaining/abandoned child inventory, original-deadline, removal and nullable
+cleanup-error facts. The exact nullable field is mandatory in serialized input.
+A `WithFfmpeg` run-owner receipt retains independent Surface and capsule owners;
+repeated nesting is rejected and this never promotes physical native termination.
+
+The prepared phase factory consumes its capsule after all phase owners and the
+Surface driver, before manifest publication. Preparation and Surface failures
+retain the capsule raw receipt separately from the original failure. Preflight
+self-test schema 2 explicitly closes the capsule and serializes its closure.
+Rust and the independent PowerShell verifier require capsule closure for any
+started phase, replay every leaf predicate, and require an actual EventLoop
+inside the composite closure for started Concurrent Recovery. Legacy run/report
+schema 3 cannot establish this new inventory.
+
+### Concrete physical machine factory
+
+`PhysicalEnduranceMachineFactory` assembles all three phases through the same
+immutable Project/Source/Export composition as continuous Export. Discovery
+retains the exact physical Reference adapter that passed preflight and moves
+that adapter into App ownership. Audio preflight reuses the production CPAL
+negotiation for exact device, rate, and layout. Reference preflight reads actual
+mode/generation/version and external lock status without opening an output
+Session. The executable uses the real Window driver and derives capability
+inventory from its owner. Missing provider, fixture, exact audio mode, reference
+lock, or pre-loader authority is admission-time NotRun. An available SDK or
+a compiled DLL alone supplies no physical completion or wire-readback evidence.
+
+### Golden and Performance operation ownership
+
+Golden CLI construction keeps the App outside fallible bootstrap and binding;
+complete and focused workflows consume that App before publishing their report.
+The focused Editorial scope tests use the same closure protocol. Editorial and
+retime Viewer work keep the shared realtime Session intact through each whole
+operation, then consume Preview and GPU under one deadline. Successful reports
+carry canonical App and raw Viewer receipts; typed operation/startup failures
+retain the original owners' complete shutdown evidence. Runtime directories are
+retained when closure cannot prove that all users have stopped.
+
+`performance_owner_closure` is the single deep Module for performance factory
+admission, panic isolation, shared-deadline closure, and complete projection.
+Performance startup failures retain typed App, Headless partial construction and
+Preview receipts in addition to the independently replayable JSON projection.
+The validation-only `performance_owner_protocol` example runs a bounded real
+App/Preview matrix (success, operation error, operation panic and missing required
+cache), allowing ownership changes to be tested without linking the full App
+performance suite. Window GPU evidence additionally requires an accepted native
+wake registration; a callback that was never invoked remains a valid receipt.
+Headless partial construction can legitimately contain no wake registration.
+
+The validation composition root accepts an externally bound optional preloader
+artifact in machine-plan verifier_tools and admits loader capability only after
+its authenticated native handshake. The endurance executable also implements the
+same demux/probe hidden protocols so all native media children can use the exact
+pre-loader-owned application image. The independent verifier reconciles the outer
+launcher receipt after the completed child manifest is published; schema 4 does
+not claim that a child can attest its own post-exit launcher cleanup.
+
+### Complete durable phase closure history
+
+The schema-4 run manifest and qualification report retain an ordered
+`phase_owner_history` entry for every started phase; admission-time NotRun has
+no created-owner entry. Each entry binds the run, phase and started-owner
+ordinal to canonical raw terminal JSON and its SHA-256. The product runtime
+publishes the entry as a create-only, fsynced `phase-owner-NN.json` through the
+existing capture publication seam immediately after consuming the actual
+phase. Beginning preparation for another phase never clears this history.
+The raw terminal preserves App's existing canonical closure (including each
+Export, Audio, Reference and source-cache leaf), plus the exact Preview, GPU,
+Waveform and partial-construction receipts for the owners actually created.
+No report reconstructs closure from counters or a successful aggregate flag.
+
+The product campaign catches operation panics with phase ownership retained;
+phase close preparation and repeated-Export verification run inside a borrowed
+panic boundary before consuming those owners. Ordinary error, cancellation,
+verifier panic and final-publication failure therefore retain the same raw
+owner inventory. `run-failure.json` durably preserves the complete prior phase
+history, current terminal, and the run-level Surface/FFmpeg closure. A
+create-only publication collision keeps the existing file unchanged and
+returns a typed failure carrying both the original error and exact unpublishable
+report bytes.
+
+Platform replay verifies bounded ordered history, immutable run/phase/status
+bindings, canonical report hashes and App/Export leaf hash linkage. Independent
+`phase-owner-closure.psm1` additionally replays the complete App, Preview, GPU
+and Waveform closure using the shared owner validators and compares every
+published phase file with the final manifest history. The standalone adversarial
+script covers all three phase shapes, including rehashed inner App/Export
+mutations and generation, callback, worker, identity and type contradictions.
+The checked-in App/realtime JSON fixtures are synthetic protocol fixtures,
+not physical qualification evidence.
+
+The schema-4 exact-runtime closure includes a bounded typed
+`child_cleanup_failures` array. Each failure retains PID, observed native exit,
+original kill/wait errors, the original deadline outcome, and independent
+stdin/stdout/stderr worker errors. Missing nullable leaves are invalid. A nonempty
+array prevents qualification independently of namespace cleanup and child-count
+balances; cleanup_error is not used as a serialized evidence container.
+
+### COL-045 ordinary product capture process
+
+The `cross_application_capture` validation example imports the fixed 120 EXR
+stimuli through App media import, authors one exact 24000/1001 Sequence through
+ordinary drop/trim transactions, and presents frames 0/17/119 through the shared
+Golden Headless Preview/GPU session. Ordinary Export jobs publish Float32 OpenEXR,
+RGBA8 PNG and opaque Float32 TIFF respectively. The TIFF decoder only reads native
+sample values into the JSON comparison payload; the harness owns no color transform.
+The create-new, flushed report binds input and executable hashes, complete settings,
+native manifests/artifact digests, individual job snapshots, and consuming App,
+Export, Preview/GPU shutdown evidence even on error/unwind. The PQ capture explicitly
+retains the current product settings and does not claim the stimulus's 203-nit
+reference-white qualification, which has no ordinary authored parameter today.
+A captured artifact alone does not qualify the independent same-run comparison.
+
+Campaign PSE admission checks the explicit approved provider runtime closure before
+the first phase, including when prerequisite preparation precedes FFmpeg process
+installation. Missing closure is RuntimeClosureMissing NotRun. Shared final-file
+QC now passes one exact Instant through picture rescan and regulatory analysis.
+
+### Short local real-media smoke
+
+`cargo run -p mondrian-app --features validation --example local_media_smoke --
+"E:/Video Projects/Mondrian Test" "<new-output-directory>" 30` runs three local
+software stages. Thirty seconds per stage is the default practical minimum;
+15–60 seconds is accepted for focused investigation. Fixture import, initial
+warming, recovery, independent full-decode verification and consuming shutdown
+add time beyond the three observation periods. The run has a 15-minute stop
+deadline, 6 GiB product-process-tree private-memory stop threshold, fixed bounded
+histories and at most eight verified exports per export stage.
+
+The harness uses real 24/25/60 fps 4K HEVC 10-bit clips, HEVC alpha, a PNG overlay,
+and WAV source audio through ordinary media import and Timeline drop/trim. The
+Sequence explicitly uses 60/1 and 640×360 output. Each stage creates fresh App,
+Preview/GPU and Waveform owners after the preceding group has consumed shutdown.
+The shared persistent Playback owner provides real Audio Device clock intervals,
+seek and cache-pressure receipts; the repeated Export owner provides actual
+cancellation/distinct retry, publication and independent decoding. No physical
+Reference Output, Window surface, HDR display or 72-hour qualification is implied.
+Missing or oversized fixture files produce admission-time `NotRun` before an App
+owner is created. Every started stage writes complete raw shutdown and job/event
+history on completion, failure or unwind; failed cleanup retains its runtime files.
+The authored Timeline repeats genuine two-second source contributions to a
+checked, fixed maximum of 512 segments. Its exact extent covers the full phase,
+the profile's maximum Export completion grace, recovery seek displacement, and
+a ten-second terminal guard, preventing slow independent verification from
+silently converting the transport to `Ended`.
+The third smoke stage also performs an in-place Headless device replacement:
+its persistent Playback owner pauses Audio (which first synchronizes the physical
+clock), binds the resulting exact coordinate and proves that old frame Ready,
+consumes old Preview/GPU against one deadline, installs a fresh shared session,
+and verifies the unchanged Sequence/frame Ready under the resumed Audio Device
+clock. Both old raw shutdown and any partial new-start inventory are preserved.
+This software receipt remains distinct from the physical Window surface receipt.
+The repeated Export backend now writes create-new, flushed
+`<artifact>.independent-verification.json` sidecars at its actual verifier call,
+including request identity and full success/failure native evidence. A failed or
+expired verification cannot return before attempting that durable record, and the
+smoke binds all such verification attempts to the run's original deadline.
+
+Smoke memory sampling runs on a dedicated fixed-cadence worker. The realtime
+coordinator only drains completed native results and pairs each with a read-only
+owner snapshot, so Windows process enumeration cannot steal an Audio callback
+interval. Headless startup fills its bounded distant media horizon and prepares
+the exact immediate-successor GPU picture before the Audio Device becomes Clock
+Master. It opportunistically prewarms the distant cold-activation GPU contract
+only while the original Priming work horizon remains open. During measured playback, the coordinator
+prunes and retains that horizon but executes only the exact immediate-successor
+preparation synchronously; a missing far-future 4K frame cannot delay an Audio
+clock observation. Per-stage maximum timings are retained in coordinator
+evidence so a non-unit advance identifies the blocking stage without weakening
+the exact one-frame gate. Successor evaluation itself owns only its exact
+ticketless frame; future-window scheduling remains with the visible current or
+priming turn and cannot recursively execute in that realtime interval. Export
+stages keep admitting work until both the minimum observation duration and at
+least two independently verified artifacts are satisfied, with cancel/retry fully
+resolved. This completion grace is at most 90 additional seconds and cannot extend
+the original run deadline. The phase consumes its independent verifier worker
+before App queue shutdown and retains that worker's complete shutdown receipt.
+
+The ordinary cross-application capture similarly freezes one 900-second deadline
+before admission. Import, project persistence, Viewer startup/presentation,
+per-case Export polling, bounded 64 KiB file hashing and all consuming closures
+share that deadline. A completion observed after its deadline remains failure;
+its existing job and owner evidence is still retained. Expired admission is
+tested without constructing an App or Viewer, and elapsed observation time alone
+cannot satisfy the smoke's two-export and completed-recovery requirements.
+
+Repeated Export owns at most one independent-verification thread. Admission freezes
+min(verification policy deadline, original phase deadline) before the worker starts;
+all snapshot/probe/full-decode/hash and durable evidence I/O execute on that worker.
+Realtime poll only observes whether its handle finished, consumes a finished handle,
+and publishes the resulting sealed event using the observation timestamp. It never
+waits for a running verifier and cannot admit a second artifact beside it. A recovery
+request during completed-artifact verification waits as phase state while Timeline
+and physical output keep pumping, then targets the next distinct reversible attempt.
+
+FrozenRepeatedExportPhase::shutdown_until consumes this worker owner before App/Export
+shutdown, sharing cancellation and the original deadline. Raw receipts retain started,
+joined, remaining and abandoned counts; last-worker identity, actual child cleanup,
+independent verification failure, evidence durability and panic diagnostics. Joining
+or observing a result after its frozen deadline cannot produce successful closure.
+An unjoined thread keeps its own native leases and is explicitly recorded abandoned;
+phase evidence cannot claim that a cancellation request terminated it. The production
+phase report and short native smoke both preserve this consuming receipt.
+
+
+## Shared campaign ANC source and phase evidence (2026-09-06)
+
+A schema-2 machine plan may bind one optional top-level `ancillary_program`
+`{path, sha256}`. The bounded 8 MiB file is read, hashed, parsed and held under
+one deny-write/delete source lease. An absent field preserves the no-attachment
+plan. A declared missing file yields pre-start `NotRun`; malformed bytes, wrong
+hash, unsupported carriage or an inexact origin/rate/range fail closed. There is
+one `FrozenAncillaryProgram` interpretation. Each fresh Reference and repeated
+Export plan must retain the exact same prepared Arc as the machine authority.
+
+The physical pump maps an absolute Timeline frame to selection-relative ANC
+using the exact output rate. It preserves canonical packet words and appends
+the real owner correlation packet. Outside the attachment range the inventory
+is explicitly empty, never wrapped or looped. Sparse packet inventories are
+preflighted without materializing millions of empty frames. Repeated export and
+cancel/retry clone the same frozen attachment into the existing Export snapshot.
+The supported shared delivery row is AS-11 X9 720p60000/1001; original 60/1
+workloads remain separate. The new profile uses checked rational floor for
+24-hour completed frames, exactly 5,178,821 at 60000/1001.
+
+Every successful independent Export decode is followed by the Broadcast MXF
+ST436 parser over the same immutable artifact identity. It checks the decoded
+artifact SHA before comparing every canonical ANC frame, and retains the
+original deadline/cancellation throughout. The consuming verifier owner
+publishes the actual create-only sidecar path and byte hash after joining its
+worker. The prepared program stores bounded, phase-scoped Export and closed
+native wire inventories. Their root fields are `ancillary_program_sha256`,
+`ancillary_export_artifacts` and `wire_journals`, omitted as a unit for plans
+without ANC. Wire entries originate only from consuming native shutdown with
+no outstanding owner resources; neither directory scans nor completion echoes
+can create them. Independent validation binds each sidecar to its Export event
+and each journal to its phase and the same source hash. Unit/parser tests are
+software evidence and never physical SDI, HDR, PSE or 72-hour qualification.
+
+### Stopped-picture preparation before the timed transport
+
+Persistent Timeline phase startup first completes ordinary stopped Preview with
+its existing paired Headless session. Cold decode, shader preparation and upload
+are bounded by the earlier of the original phase deadline and the existing
+completion timeout. This creates no second realtime driver and changes no
+Playback Priming deadline. Only an exact, physically retained GPU output with
+consumed presentation authority and no outstanding submission closes setup.
+If a prior physical output consumed the stable picture before a replacement
+Preview/GPU generation starts, this same coordinator invokes the Playback
+Engine's idempotent Pause command to renew one exact, untimed `PersistentStill`
+demand. Epoch, quality revision, and frame must remain unchanged; the replacement
+then follows the ordinary decode, GPU, and physical publication path.
+The short local producer records its original epoch/frame/quality and elapsed
+microseconds separately as `stopped_picture_preparation`; setup is never an
+accepted realtime interval or an Audio Ready proof. Failure retains the original
+session for the same consuming shutdown path. Timed Playback must then satisfy
+its own fresh demand and real Audio Device handoff.
+
+Speculative successor, lookahead, and cold-activation failures terminate only
+that candidate. They preserve the already-published current Viewer output and
+its semantic registration while Audio priming completes; a current-candidate
+terminal failure still clears both through the ordinary Viewer lifecycle.
+Once the immutable Priming work horizon closes, the coordinator stops retrying
+a missing distant GPU prewarm. Exact successor readiness and the media-window
+owner's bounded cold-activation residency remain the startup gate, so an
+expired ticketless optimization cannot strand a ready physical picture on the
+Synthetic Clock.
+
+Each production phase now owns two distinct time intervals. Machine-plan
+`timeouts.startup_ms` is a separate 120,000 ms default (validated in the same
+1..maximum timeout range as the other bounds), not a recovery allowance. Before
+factory or native admission, the runtime freezes this original startup deadline
+and the maximum capsule horizon: startup deadline plus the required measurement
+duration plus shutdown. Cold Preview/GPU preparation, Reference opening, frozen
+Export configuration and the final exact Audio/picture reconciliation finish
+before that startup deadline. They never renew it or contribute accepted
+intervals to the measured phase.
+
+Only then does one consuming measurement activation freeze the shared run-clock
+origin for capture, playback/reference observations, Export events and recovery
+scheduling. Export preparation has admitted no job or verifier; activation
+assigns its original measured-phase verification horizon and admits its first
+job. The settled ready-owner snapshot is sample zero, without entering a
+zero-budget realtime residency. The supervisor pumps an entire 24 hours after
+this boundary. Fixture admission must still leave the complete measured frame
+extent after natural Audio startup advancement; exhausted footage is rejected,
+never represented as a successful shorter run.
+
+The machine-plan timeout object explicitly supports:
+`{"startup_ms":120000,"interval_ms":5000,"recovery_ms":60000,"surface_reopen_ms":30000,"shutdown_ms":60000}`.
+Generated test plans include `startup_ms`; older plans deserialize the independent
+default. The complete five-field `measurement_timing` value is bound unchanged
+across the consuming phase owner, producer raw/report, manifest producer and
+normalized qualification report. Started qualification requires it, including
+strictly serial startup after the preceding phase's consuming closure. Startup
+failure instead preserves partial `phase_startup` raw evidence in the failure
+artifact and never fabricates a measurement origin. Synthetic nine-second
+startup / full-day counter tests exercise scheduling contracts only.
+
+Startup AV reconciliation may follow the same epoch through Engine-owned Recovering state and monotonically advancing quality revisions after proving the original exact physical picture. Every resolved quality still needs its own exact GPU binding; completion requires Playing and the accepted physical Audio stream. Reverse direction, quality regression, epoch replacement, original deadline expiry and terminal candidate rejection remain failures. This rule does not alter ordinary measured interval transition gates.
+
+The explicitly ignored native_repeated_export_cancel_retry_retains_independent_artifacts_and_closure test isolates the same FrozenRepeatedExportPhase with real imported media when realtime admission fails. It retains read-only fixture handles, producer/project hashes, owner-derived recovery events, all terminal jobs, independent artifact verification and consuming verifier/App closure under one 900-second deadline. It must complete at least two verified artifacts and the actual cancellation/retry operation. This is independent Export software evidence, never concurrent Playback or physical campaign qualification.
+
+The validation-only `local_media_proxy_smoke` entrypoint is a separate bounded
+control for a machine that cannot sustain the original 4K decode path. It imports
+the three opaque HEVC sources, PNG and WAV through ordinary product actions,
+places proxy artifacts under the create-only evidence root, and waits for the
+product proxy owner to become idle with three successful or already-fresh
+artifacts before constructing Headless owners. Its 1,200-second process bound
+and 360-second Export completion grace are recorded explicitly and do not alter
+the original 900/90-second stress profile. Alpha HEVC is excluded from this
+control and `original_native_media_qualified` remains false. Successful control
+evidence proves the three-phase software composition and recovery paths only.

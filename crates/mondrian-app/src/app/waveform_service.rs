@@ -66,7 +66,7 @@ const WAVEFORM_WORKER_TERMINAL_PANICKED_OWNER_ABANDONED: u8 = 3;
 const WAVEFORM_WORKER_TERMINAL_FAILED: u8 = 4;
 
 /// Consuming-style closure evidence for the product waveform service.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioWaveformShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,

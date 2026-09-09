@@ -39,7 +39,7 @@ pub struct AudioOutputDeviceCatalogAdapter {
 }
 
 /// Bounded cumulative raw inventory for all device-discovery attempts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioDeviceCatalogShutdownEvidence {
     /// Receipt schema.
     pub schema_version: u32,
@@ -68,7 +68,7 @@ pub struct AudioDeviceCatalogShutdownEvidence {
 }
 
 /// Exact Host-startup state of one freshly prepared catalog Adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioDeviceCatalogStartupState {
     /// The inert Adapter exists and native discovery has not been attempted.

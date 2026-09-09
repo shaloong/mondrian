@@ -82,6 +82,11 @@ pub(super) struct DirectoryCleanup {
 }
 
 impl DirectoryCleanup {
+    /// Leave a directory intact when its execution owners did not close.
+    pub(super) fn retain(&mut self) {
+        self.path = None;
+    }
+
     pub(super) fn track(&mut self, path: Option<PathBuf>) {
         self.path = path;
     }
@@ -289,9 +294,23 @@ pub(super) fn new_run_directory(
 }
 
 pub(super) fn wait_for_media_imports(state: &mut AppState) -> anyhow::Result<()> {
-    let deadline = Instant::now() + IMPORT_TIMEOUT;
+    wait_for_media_imports_until(state, Instant::now() + IMPORT_TIMEOUT)
+}
+
+pub(super) fn wait_for_media_imports_until(
+    state: &mut AppState,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    ensure!(
+        Instant::now() < deadline,
+        "media import deadline elapsed before waiting"
+    );
     while state.pending_media_import_batches() > 0 {
         state.poll_media_imports();
+        ensure!(
+            Instant::now() < deadline,
+            "media import completed after its original deadline"
+        );
         if state.pending_media_import_batches() == 0 {
             break;
         }
@@ -309,14 +328,29 @@ pub(super) fn wait_for_export_job(
     job_id: JobId,
     timeout: Duration,
 ) -> anyhow::Result<ExportJobSnapshot> {
-    let deadline = Instant::now() + timeout;
+    wait_for_export_job_until(state, job_id, Instant::now() + timeout)
+}
+
+pub(super) fn wait_for_export_job_until(
+    state: &mut AppState,
+    job_id: JobId,
+    deadline: Instant,
+) -> anyhow::Result<ExportJobSnapshot> {
     loop {
+        ensure!(
+            Instant::now() < deadline,
+            "export deadline elapsed before polling job {job_id}"
+        );
         state.poll_export_queue();
         let snapshot = state
             .export_jobs_snapshot()
             .into_iter()
             .find(|snapshot| snapshot.id == job_id)
             .with_context(|| format!("export job disappeared: {job_id}"))?;
+        ensure!(
+            Instant::now() < deadline,
+            "export job {job_id} completed after its original deadline"
+        );
         if snapshot.status.is_terminal() {
             return Ok(snapshot);
         }
@@ -350,6 +384,8 @@ pub(super) fn execute_export_job(
         output_path: output_path.clone(),
         output_policy: ExportOutputPolicy::CreateNew,
         broadcast_qc: None,
+        regulatory_pse: None,
+        frozen_ancillary: None,
     }))?;
     let created = state
         .export_jobs_snapshot()

@@ -160,7 +160,10 @@ fn video_asset_with_physical_stream_and_interpretation(
         pixel_format_proven,
         bit_depth,
         has_alpha,
-        Default::default(),
+        mondrian_core::PictureStreamMetadata {
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::Progressive),
+            ..Default::default()
+        },
     )
 }
 
@@ -229,6 +232,51 @@ fn video_asset_with_picture(
 }
 
 #[test]
+fn static_decode_slot_follows_frozen_asset_kind_not_path_extension() {
+    let root = unique_root("mondrian-static-source-kind");
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let path = root.join("video-disguised-as-image.png");
+    std::fs::write(&path, b"source identity fixture").expect("fixture source");
+    let mut asset =
+        video_asset_with_sampling_evidence(path, Some(ColorSpace::Rec709), true, 8, true);
+    let config = proxy_config(root.join("proxy"));
+    let context = color_context();
+    for kind in [AssetKind::Video, AssetKind::StillImage] {
+        asset.kind = kind.clone();
+        let PreviewMediaSourceOutcome::Ready(resolved) =
+            resolve_preview_media_source(PreviewMediaSourceRequest {
+                asset: &asset,
+                color_space_override: None,
+                alpha_interpretation: AlphaInterpretation::Straight,
+                picture_overrides: Default::default(),
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                input_color: &context,
+                prefer_proxy: false,
+                request_missing_proxy_generation: false,
+                proxy_config: &config,
+                proxy_color: None,
+                hardware_admission: gpu_admission(),
+                cpu_working_required: false,
+                representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+            })
+        else {
+            panic!("admitted source must resolve");
+        };
+        assert_eq!(
+            resolved.key.decode.source().is_still_image(),
+            kind == AssetKind::StillImage
+        );
+        if kind == AssetKind::StillImage {
+            assert_eq!(
+                resolved.key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::NativeCpu
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
     let root = unique_root("mondrian-preview-interlaced-source");
     let source = root.join("source.mov");
@@ -290,7 +338,7 @@ fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
     );
     assert_eq!(
         resolved.key.decode.source().path(),
-        source.canonicalize().expect("source")
+        mondrian_assets::canonical_asset_file_path(&source).expect("source")
     );
     assert_eq!(
         resolved.key.decode.representation(),
@@ -724,6 +772,16 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         mondrian_media::PreviewDecodeRepresentation::NativeSurface
     );
     assert_eq!(
+        resolved
+            .key
+            .preparation_intent
+            .color_transform()
+            .expect("color-managed native source")
+            .backend,
+        mondrian_renderer::RenderColorTransformBackend::OcioGpuShaderPlan,
+        "native-surface decode must carry the renderer GPU input transform"
+    );
+    assert_eq!(
         resolved.key.native_surface_hint(),
         Some(PreviewNativeSurfaceHint::P010)
     );
@@ -753,6 +811,16 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         cpu_resolved.key.decode.representation(),
         mondrian_media::PreviewDecodeRepresentation::NativeCpu,
         "CPU-working requests retain the sampled extent instead of native-surface geometry"
+    );
+    assert_eq!(
+        cpu_resolved
+            .key
+            .preparation_intent
+            .color_transform()
+            .expect("color-managed CPU source")
+            .backend,
+        mondrian_renderer::RenderColorTransformBackend::CpuOcioRgba8Boundary,
+        "CPU-addressable decode must retain the CPU input transform"
     );
     assert_ne!(
         resolved.key, cpu_resolved.key,
@@ -875,7 +943,10 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
     let PreviewMediaSourceOutcome::Unavailable(unavailable) = outcome else {
         panic!("missing sampling must be unavailable")
     };
-    assert!(unavailable.reason.to_string().contains("Interpret Asset"));
+    assert!(unavailable
+        .reason
+        .to_string()
+        .contains("overrides cannot repair unsupported decoder sampling"));
     assert!(
         crate::app::proxy_generation::resolve_asset_proxy_color_contract(&asset, &context).is_err()
     );

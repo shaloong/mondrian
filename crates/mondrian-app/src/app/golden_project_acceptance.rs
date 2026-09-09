@@ -7,12 +7,16 @@
 mod audio_authoring_evidence;
 mod color_media_roundtrip;
 mod composed_workflow;
+#[cfg(feature = "validation")]
+mod cross_application_capture;
 mod editorial_transport;
 mod fixture;
 mod foundation_audio;
 mod generated_delivery;
 mod harness;
 mod headless_preview;
+#[cfg(feature = "validation")]
+mod local_media_smoke;
 #[cfg(test)]
 mod long_work_area_delivery;
 mod media_execution;
@@ -39,6 +43,38 @@ use mondrian_timeline::sequence::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+/// Run three bounded local real-media software stages without commercial qualification.
+#[cfg(feature = "validation")]
+pub fn run_local_media_smoke(
+    root: PathBuf,
+    output: PathBuf,
+    phase_seconds: u64,
+) -> anyhow::Result<PathBuf> {
+    local_media_smoke::run(root, output, phase_seconds)
+}
+
+/// Run real-media repeated Export and cancel/retry validation independently.
+#[cfg(feature = "validation")]
+pub fn run_local_media_export_smoke(root: PathBuf, output: PathBuf) -> anyhow::Result<PathBuf> {
+    local_media_smoke::run_export_native(root, output)
+}
+
+/// Run the bounded three-phase workflow after product proxy generation settles.
+#[cfg(feature = "validation")]
+pub fn run_local_media_proxy_smoke(
+    root: PathBuf,
+    output: PathBuf,
+    phase_seconds: u64,
+) -> anyhow::Result<PathBuf> {
+    local_media_smoke::run_proxy_control(root, output, phase_seconds)
+}
+
+/// Capture the fixed COL-045 stimulus through ordinary product authoring and export.
+#[cfg(feature = "validation")]
+pub fn run_cross_application_capture(input: PathBuf, output: PathBuf) -> anyhow::Result<PathBuf> {
+    cross_application_capture::run(input, output)
+}
 
 /// Execute one complete single-Project Golden run in the dedicated validation
 /// process and return the durable typed report path.

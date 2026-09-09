@@ -45,7 +45,8 @@ impl AppState {
             self.playback_preview_resolution_scale(),
             self.last_timeline_seek_source,
             demand,
-        );
+        )
+        .with_priming_work_deadline(self.playback_priming_work_deadline_at(sampled_at));
         PreviewExecutionSnapshot::new(authoring, transport, &self.viewer_display_management)
     }
 
@@ -75,6 +76,20 @@ impl AppState {
             self.preview_execution_snapshot(sampled_at),
             self,
             offset,
+        )
+    }
+
+    /// Capture ticketless CPU/GPU preparation for an exact farther playback
+    /// coordinate returned by the cold-activation planner.
+    pub(crate) fn preview_cold_activation_execution_request(
+        &self,
+        sampled_at: Instant,
+        frame: i64,
+    ) -> Option<PreviewFrameExecutionRequest<'_>> {
+        PreviewFrameExecutionRequest::lookahead_frame(
+            self.preview_execution_snapshot(sampled_at),
+            self,
+            frame,
         )
     }
 

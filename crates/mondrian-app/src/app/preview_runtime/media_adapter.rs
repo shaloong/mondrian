@@ -36,16 +36,28 @@ pub(super) const fn media_wait_for_admission(
         | MediaPreviewRequestAdmission::BlockedAggregateCapacity
         | MediaPreviewRequestAdmission::InvalidMediaIdentity
         | MediaPreviewRequestAdmission::InvalidScheduling
+        | MediaPreviewRequestAdmission::ExpiredPrerollDeadline
         | MediaPreviewRequestAdmission::WorkerUnavailable => None,
     }
 }
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    #[cfg(test)]
     pub(super) fn media_frame_for_plan(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,
         proxy_demands: &dyn PreviewProxyDemandSink,
         request: PreviewTimelineMediaRequest,
+    ) -> PreviewTimelineMediaFrame {
+        self.media_frame_for_plan_observing_key(snapshot, proxy_demands, request, |_| {})
+    }
+
+    pub(super) fn media_frame_for_plan_observing_key(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
+        request: PreviewTimelineMediaRequest,
+        mut observe_key: impl FnMut(&MediaPreviewKey),
     ) -> PreviewTimelineMediaFrame {
         let transport = snapshot.transport();
         let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
@@ -64,6 +76,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Ok(key) => key,
             Err(reason) => return PreviewTimelineMediaFrame::Unavailable { reason },
         };
+        observe_key(&key);
         let generation = self.execution.borrow().generation();
         let demand_identity = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
             .then(|| transport.demand().map(PreviewFrameDemandSnapshot::identity))
@@ -78,7 +91,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             },
             mondrian_playback::MediaWorkDemandId::for_playback,
         );
-        match self.protected_cached_media_frame(&key, current_demand_id) {
+        let intent = if transport.is_speculative_preparation() {
+            MediaPreviewRequestIntent::Prefetch
+        } else {
+            MediaPreviewRequestIntent::Current(current_demand_id)
+        };
+        match self.cached_media_frame_for_intent(&key, intent) {
             Ok(Some(frame)) => return PreviewTimelineMediaFrame::Ready(frame),
             Ok(None) => {}
             Err(mondrian_playback::MediaFrameProtectionError::CurrentWorkingSetCapacity) => {
@@ -96,13 +114,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
         adaptive_hints.playback_direction = transport.playback_direction();
         let deadline = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-            .then(|| transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline))
+            .then(|| {
+                if transport.is_speculative_preparation() {
+                    transport.priming_work_deadline()
+                } else {
+                    transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline)
+                }
+            })
             .flatten();
-        let intent = if transport.is_successor_preparation() {
-            MediaPreviewRequestIntent::Prefetch
-        } else {
-            MediaPreviewRequestIntent::Current(current_demand_id)
-        };
         let admission = if request.cpu_working_required || self.viewer_cpu_fallback_active.get() {
             self.request_cpu_working_media_preview(
                 key.clone(),
@@ -135,7 +154,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         match admission {
             MediaPreviewRequestAdmission::AlreadyResident => {
-                match self.protected_cached_media_frame(&key, current_demand_id) {
+                match self.cached_media_frame_for_intent(&key, intent) {
                     Ok(Some(frame)) => PreviewTimelineMediaFrame::Ready(frame),
                     Err(
                         mondrian_playback::MediaFrameProtectionError::CurrentWorkingSetCapacity,
@@ -185,6 +204,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ),
                 }
             }
+            MediaPreviewRequestAdmission::ExpiredPrerollDeadline => {
+                PreviewTimelineMediaFrame::Unavailable {
+                    reason: PreviewUnavailability::failed(
+                        PreviewOutputStage::MediaDecode,
+                        "playback preroll deadline expired before media producer admission",
+                    ),
+                }
+            }
             MediaPreviewRequestAdmission::WorkerUnavailable => {
                 PreviewTimelineMediaFrame::Unavailable {
                     reason: PreviewUnavailability::failed(
@@ -208,12 +235,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
-    fn protected_cached_media_frame(
+    pub(super) fn cached_media_frame_for_intent(
         &self,
         key: &MediaPreviewKey,
-        demand_id: mondrian_playback::MediaWorkDemandId,
+        intent: MediaPreviewRequestIntent,
     ) -> Result<Option<MediaPreviewFrame>, mondrian_playback::MediaFrameProtectionError> {
-        let frame = self.frame_store.borrow_mut().protected_media_frame(key, demand_id);
+        // Ticketless successor and lookahead preparation retain the physical
+        // payload they actually consume, but cannot acquire Current's protected
+        // working-set grant or preempt nearer speculative work under that role.
+        let frame = match intent {
+            MediaPreviewRequestIntent::Current(demand_id) => {
+                self.frame_store.borrow_mut().protected_media_frame(key, demand_id)
+            }
+            MediaPreviewRequestIntent::Prefetch => {
+                Ok(self.frame_store.borrow_mut().media_frame(key))
+            }
+        };
         match &frame {
             Ok(Some(_)) | Err(_) => bump(&self.metrics.media_cache_hits),
             Ok(None) => bump(&self.metrics.media_cache_misses),

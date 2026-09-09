@@ -290,6 +290,20 @@ pub(super) fn resolve_media_path_for_preference(
     asset: &AssetRecord,
     prefer_proxy: bool,
 ) -> anyhow::Result<ResolvedPathEvidence> {
+    resolve_media_path_for_preference_with_picture_overrides(
+        state,
+        asset,
+        prefer_proxy,
+        Default::default(),
+    )
+}
+
+pub(super) fn resolve_media_path_for_preference_with_picture_overrides(
+    state: &AppState,
+    asset: &AssetRecord,
+    prefer_proxy: bool,
+    picture_overrides: mondrian_core::PictureInterpretationOverrides,
+) -> anyhow::Result<ResolvedPathEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let input_color = sequence
         .settings
@@ -301,7 +315,7 @@ pub(super) fn resolve_media_path_for_preference(
         asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
-        picture_overrides: Default::default(),
+        picture_overrides,
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &input_color,
         prefer_proxy,
@@ -1130,22 +1144,24 @@ pub(super) fn execute_proxy_relink_stage(
 fn execute_proxy_relink_slice(
     root: &Path,
     paths: &GoldenRunPaths,
-) -> anyhow::Result<GoldenProxyRelinkReport> {
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenProxyRelinkReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
     let project_settings = mondrian_core::ProjectSettings {
         cache_dir: Some(paths.directory.join("cache")),
         ..mondrian_core::ProjectSettings::default()
     };
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Proxy + Relink",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         project_settings,
     )?;
-    super::foundation_audio::execute_foundation_stage(root, &contract, &mut workflow)?;
-    execute_proxy_relink_stage(root, &contract, &mut workflow, &paths.directory)
+    workflow.run_with(|workflow| {
+        super::foundation_audio::execute_foundation_stage(root, &contract, workflow)?;
+        execute_proxy_relink_stage(root, &contract, workflow, &paths.directory)
+    })
 }
 
 #[test]

@@ -11,7 +11,9 @@ default-run = "mondrian"
 validation = [
     "mondrian-export/validation",
     "mondrian-media/validation",
+    "dep:mondrian-validation-launcher",
     "mondrian-renderer/validation",
+    "dep:tiff",
 ]
 
 # Product app UI editor shell.
@@ -61,6 +63,14 @@ path = "src/bin/ui_pipeline_test.rs"
 name = "viewer_gpu_output_budget"
 path = "src/bin/viewer_gpu_output_budget.rs"
 
+# Production-linked owner protocol without integration-test companion binaries.
+[[example]]
+name = "performance_owner_protocol"
+path = "examples/performance_owner_protocol.rs"
+required-features = ["validation"]
+test = true
+bench = false
+
 # Actual-source protocol tests without integration-test companion binaries.
 [[example]]
 name = "preview_visual_protocol"
@@ -86,7 +96,37 @@ test = true
 harness = true
 bench = false
 
+[[example]]
+name = "cross_application_capture"
+path = "examples/cross_application_capture.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_smoke"
+path = "examples/local_media_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_export_smoke"
+path = "examples/local_media_export_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_proxy_smoke"
+path = "examples/local_media_proxy_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
 [dependencies]
+tiff = { version = "0.11.3", optional = true }
+mondrian-validation-launcher = { workspace = true, optional = true }
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
 mondrian-broadcast = { workspace = true }

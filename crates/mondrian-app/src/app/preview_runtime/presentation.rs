@@ -13,8 +13,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         request: PreviewFrameExecutionRequest<'_>,
     ) -> PreviewPresentationState<O> {
-        if self.media_existing_work_retry_pending.replace(false) {
-            bump(&self.media_existing_work_retry_acknowledgements);
+        if self.media_retry_pending.replace(false) {
+            bump(&self.media_retry_acknowledgements);
         }
         let snapshot = request.snapshot();
         let proxy_demands = request.proxy_demands();
@@ -382,7 +382,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
         if matches!(&preview_state, PreviewPresentationState::Loading) {
-            self.publish_existing_work_retry_if_actionable();
+            self.publish_media_retry_if_actionable();
         }
         self.observe_preview_state(preview_state)
     }

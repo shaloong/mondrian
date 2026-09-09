@@ -44,7 +44,7 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
     let directory = new_run_directory(&root, "MONDRIAN_GOLDEN_RETIME_RUN_ROOT", "golden-retime")?;
     let mut cleanup = DirectoryCleanup::default();
     cleanup.track(Some(directory.clone()));
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         directory.join("retime-hero.mdp"),
         "Golden Retime Hero",
         sequence_settings_from_contract(&contract.timeline)?,
@@ -54,39 +54,41 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
             ..ProjectSettings::default()
         },
     )?;
-    let hero_sequence_id = workflow.hero_sequence_id();
+    workflow
+        .run_with_cleanup(Some(cleanup), |workflow| {
+            let hero_sequence_id = workflow.hero_sequence_id();
 
-    let media_path = directory.join("metadata-only-retime-source.mov");
-    std::fs::write(&media_path, [0_u8])?;
-    let media_path =
-        std::fs::canonicalize(media_path).context("canonicalize Golden Retime media fixture")?;
-    let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
-    let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
-        media_path.clone(),
-        fingerprint,
-        MediaInfo {
-            duration: Duration::from_secs(10),
-            file_size: 1,
-            container: "mov".to_owned(),
-            video_streams: vec![VideoStreamInfo {
-                index: 0,
-                codec: VideoCodec::H264,
-                duration: Some(Duration::from_secs(10)),
-                codec_profile: VideoCodecProfile::H264High,
-                width: 1920,
-                height: 1080,
-                picture: Default::default(),
-                frame_rate: Rational::FPS_25,
-                frame_rate_proven: true,
-                pixel_format: PixelFormat::Yuv420p,
-                pixel_format_proven: true,
-                color_range: DecodedVideoRange::Limited,
-                color_interpretation: DetectedColorInterpretation {
-                    candidate_color_space: Some(ColorSpace::Rec709),
-                    confidence: VideoColorInterpretationConfidence::High,
-                    source: VideoColorSpaceSource::Metadata,
-                    method: VideoColorDetectionMethod::MetadataHint,
-                    evidence: vec![
+            let media_path = directory.join("metadata-only-retime-source.mov");
+            std::fs::write(&media_path, [0_u8])?;
+            let media_path = std::fs::canonicalize(media_path)
+                .context("canonicalize Golden Retime media fixture")?;
+            let fingerprint = mondrian_media::MediaFileFingerprint::capture(&media_path);
+            let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+                media_path.clone(),
+                fingerprint,
+                MediaInfo {
+                    duration: Duration::from_secs(10),
+                    file_size: 1,
+                    container: "mov".to_owned(),
+                    video_streams: vec![VideoStreamInfo {
+                        index: 0,
+                        codec: VideoCodec::H264,
+                        duration: Some(Duration::from_secs(10)),
+                        codec_profile: VideoCodecProfile::H264High,
+                        width: 1920,
+                        height: 1080,
+                        picture: Default::default(),
+                        frame_rate: Rational::FPS_25,
+                        frame_rate_proven: true,
+                        pixel_format: PixelFormat::Yuv420p,
+                        pixel_format_proven: true,
+                        color_range: DecodedVideoRange::Limited,
+                        color_interpretation: DetectedColorInterpretation {
+                            candidate_color_space: Some(ColorSpace::Rec709),
+                            confidence: VideoColorInterpretationConfidence::High,
+                            source: VideoColorSpaceSource::Metadata,
+                            method: VideoColorDetectionMethod::MetadataHint,
+                            evidence: vec![
                         mondrian_media::VideoColorInterpretationEvidence::MetadataHint {
                             scope: mondrian_media::VideoColorMetadataHintScope::Stream,
                             key: "source_color_space".to_owned(),
@@ -98,245 +100,249 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
                                 ),
                         },
                     ],
-                    warnings: Vec::new(),
-                    user_overridable: true,
+                            warnings: Vec::new(),
+                            user_overridable: true,
+                        },
+                        color_metadata: None,
+                        color_metadata_hints: Vec::new(),
+                        hdr_metadata: Vec::new(),
+                        camera_raw: None,
+                        bit_depth: 8,
+                        has_alpha: false,
+                        avg_bitrate: 8_000_000,
+                        total_frames: Some(250),
+                    }],
+                    audio_streams: vec![AudioStreamInfo {
+                        index: 1,
+                        stream_id: Some(1),
+                        language: None,
+                        title: None,
+                        is_default: true,
+                        codec: AudioCodec::Pcm { bit_depth: 24 },
+                        duration: Some(Duration::from_secs(10)),
+                        sample_rate: 48_000,
+                        channels: 2,
+                        channel_layout: ChannelLayout::Stereo,
+                        bit_depth: 24,
+                        avg_bitrate: 2_304_000,
+                    }],
+                    has_video: true,
+                    has_audio: true,
                 },
-                color_metadata: None,
-                color_metadata_hints: Vec::new(),
-                hdr_metadata: Vec::new(),
-                camera_raw: None,
-                bit_depth: 8,
-                has_alpha: false,
-                avg_bitrate: 8_000_000,
-                total_frames: Some(250),
-            }],
-            audio_streams: vec![AudioStreamInfo {
-                index: 1,
-                stream_id: Some(1),
-                language: None,
-                title: None,
-                is_default: true,
-                codec: AudioCodec::Pcm { bit_depth: 24 },
-                duration: Some(Duration::from_secs(10)),
-                sample_rate: 48_000,
-                channels: 2,
-                channel_layout: ChannelLayout::Stereo,
-                bit_depth: 24,
-                avg_bitrate: 2_304_000,
-            }],
-            has_video: true,
-            has_audio: true,
-        },
-    )?;
-    let asset_id = workflow
-        .app()
-        .asset_library()
-        .context("Golden Retime Asset Library is absent")?
-        .commit_media_probe(candidate, None)?;
+            )?;
+            let asset_id = workflow
+                .app()
+                .asset_library()
+                .context("Golden Retime Asset Library is absent")?
+                .commit_media_probe(candidate, None)?;
 
-    let sequence = workflow
-        .app()
-        .active_sequence()
-        .context("Golden Retime Hero Sequence is absent")?;
-    let video_track_id = sequence.video_tracks[0].id;
-    let audio_track_id = sequence.audio_tracks[0].id;
-    let time_base = sequence.time_base();
-    let frame_rate = sequence.settings.frame_rate;
-    let (inserted, _) =
-        author_transition(workflow.app_mut(), "insert-linked-retime-source", |state| {
-            Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
+            let sequence = workflow
+                .app()
+                .active_sequence()
+                .context("Golden Retime Hero Sequence is absent")?;
+            let video_track_id = sequence.video_tracks[0].id;
+            let audio_track_id = sequence.audio_tracks[0].id;
+            let time_base = sequence.time_base();
+            let frame_rate = sequence.settings.frame_rate;
+            let (inserted, _) =
+                author_transition(workflow.app_mut(), "insert-linked-retime-source", |state| {
+                    Ok(state.insert_asset_from_ui(TimelineInsertAssetPayload {
+                        asset_id,
+                        at: TimelineTime::ZERO,
+                        source_in: TimelineTime::ZERO,
+                        duration: TimelineTime::from_frame_position(FramePosition::new(
+                            48, time_base,
+                        ))?,
+                        video_target_track_id: Some(video_track_id),
+                        audio_target_track_id: Some(audio_track_id),
+                        ripple_track_ids: vec![video_track_id, audio_track_id],
+                        automation_policy: InsertAutomationPolicy::FollowEditorialContent,
+                        transition_policy: InsertTransitionPolicy::RejectAffected,
+                        timeline_state_policy: InsertTimelineStatePolicy::PreserveSequenceTime,
+                    })?)
+                })?;
+            ensure!(
+                inserted.inserted_clip_ids.len() == 2,
+                "Golden Retime Insert did not create one linked picture/audio pair"
+            );
+            let (video_clip_id, audio_clip_id) = linked_clip_ids(
+                workflow.app().active_sequence().context("Hero is absent")?,
                 asset_id,
-                at: TimelineTime::ZERO,
-                source_in: TimelineTime::ZERO,
-                duration: TimelineTime::from_frame_position(FramePosition::new(48, time_base))?,
-                video_target_track_id: Some(video_track_id),
-                audio_target_track_id: Some(audio_track_id),
-                ripple_track_ids: vec![video_track_id, audio_track_id],
-                automation_policy: InsertAutomationPolicy::FollowEditorialContent,
-                transition_policy: InsertTransitionPolicy::RejectAffected,
-                timeline_state_policy: InsertTimelineStatePolicy::PreserveSequenceTime,
-            })?)
-        })?;
-    ensure!(
-        inserted.inserted_clip_ids.len() == 2,
-        "Golden Retime Insert did not create one linked picture/audio pair"
-    );
-    let (video_clip_id, audio_clip_id) = linked_clip_ids(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        asset_id,
-    )?;
+            )?;
 
-    dispatch_author_transition(
-        workflow.app_mut(),
-        "set-linked-forward-rate",
-        crate::app::ui_actions::clip_set_rate_action(
-            crate::app::product_action::ClipSetRatePayload {
-                clip_id: video_clip_id,
-                rate: TimeScale::new(3, 2)?,
-                include_linked: true,
-            },
-        ),
-    )?;
-    assert_clip_scale(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        video_clip_id,
-        TimeScale::new(3, 2)?,
-    )?;
-    assert_clip_scale(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        audio_clip_id,
-        TimeScale::new(3, 2)?,
-    )?;
-    let sample_frame = 12;
-    let expected_forward_source = SourceSampleTarget::covering(frame_time(18, time_base)?);
-    assert_visual_source_sample(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        sample_frame,
-        expected_forward_source,
-    )?;
-    assert_prepared_audio_source_time(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        audio_clip_id,
-        frame_time(sample_frame, time_base)?,
-        expected_forward_source,
-        TimeScale::new(3, 2)?,
-    )?;
+            dispatch_author_transition(
+                workflow.app_mut(),
+                "set-linked-forward-rate",
+                crate::app::ui_actions::clip_set_rate_action(
+                    crate::app::product_action::ClipSetRatePayload {
+                        clip_id: video_clip_id,
+                        rate: TimeScale::new(3, 2)?,
+                        include_linked: true,
+                    },
+                ),
+            )?;
+            assert_clip_scale(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                video_clip_id,
+                TimeScale::new(3, 2)?,
+            )?;
+            assert_clip_scale(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                audio_clip_id,
+                TimeScale::new(3, 2)?,
+            )?;
+            let sample_frame = 12;
+            let expected_forward_source = SourceSampleTarget::covering(frame_time(18, time_base)?);
+            assert_visual_source_sample(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                sample_frame,
+                expected_forward_source,
+            )?;
+            assert_prepared_audio_source_time(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                audio_clip_id,
+                frame_time(sample_frame, time_base)?,
+                expected_forward_source,
+                TimeScale::new(3, 2)?,
+            )?;
 
-    dispatch_author_transition(
-        workflow.app_mut(),
-        "set-linked-reverse-rate",
-        crate::app::ui_actions::clip_set_rate_action(
-            crate::app::product_action::ClipSetRatePayload {
-                clip_id: video_clip_id,
-                rate: TimeScale::new(-3, 2)?,
-                include_linked: true,
-            },
-        ),
-    )?;
-    assert_clip_scale(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        video_clip_id,
-        TimeScale::new(-3, 2)?,
-    )?;
-    assert_clip_scale(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        audio_clip_id,
-        TimeScale::new(-3, 2)?,
-    )?;
-    let expected_reverse_source =
-        SourceSampleTarget::strict_predecessor(frame_time(54, time_base)?);
-    ensure!(
-        expected_reverse_source.to_frame_position(frame_rate)?.frame == 53,
-        "reverse sample did not select the frame before its exclusive boundary"
-    );
-    assert_visual_source_sample(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        sample_frame,
-        expected_reverse_source,
-    )?;
-    assert_prepared_audio_source_time(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        audio_clip_id,
-        frame_time(sample_frame, time_base)?,
-        expected_reverse_source,
-        TimeScale::new(-3, 2)?,
-    )?;
+            dispatch_author_transition(
+                workflow.app_mut(),
+                "set-linked-reverse-rate",
+                crate::app::ui_actions::clip_set_rate_action(
+                    crate::app::product_action::ClipSetRatePayload {
+                        clip_id: video_clip_id,
+                        rate: TimeScale::new(-3, 2)?,
+                        include_linked: true,
+                    },
+                ),
+            )?;
+            assert_clip_scale(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                video_clip_id,
+                TimeScale::new(-3, 2)?,
+            )?;
+            assert_clip_scale(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                audio_clip_id,
+                TimeScale::new(-3, 2)?,
+            )?;
+            let expected_reverse_source =
+                SourceSampleTarget::strict_predecessor(frame_time(54, time_base)?);
+            ensure!(
+                expected_reverse_source.to_frame_position(frame_rate)?.frame == 53,
+                "reverse sample did not select the frame before its exclusive boundary"
+            );
+            assert_visual_source_sample(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                sample_frame,
+                expected_reverse_source,
+            )?;
+            assert_prepared_audio_source_time(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                audio_clip_id,
+                frame_time(sample_frame, time_base)?,
+                expected_reverse_source,
+                TimeScale::new(-3, 2)?,
+            )?;
 
-    dispatch_author_transition(
-        workflow.app_mut(),
-        "freeze-linked-picture-only",
-        crate::app::ui_actions::clip_hold_frame_action(
-            crate::app::product_action::ClipHoldFramePayload {
-                clip_id: video_clip_id,
-                sequence_time: FramePosition::new(sample_frame, time_base),
-            },
-        ),
-    )?;
-    let held_sequence = workflow.app().active_sequence().context("Hero is absent")?;
-    assert_clip_scale(held_sequence, video_clip_id, TimeScale::new(0, 1)?)?;
-    assert_clip_scale(held_sequence, audio_clip_id, TimeScale::new(-3, 2)?)?;
-    assert_visual_source_sample(held_sequence, sample_frame, expected_reverse_source)?;
-    assert_visual_source_sample(held_sequence, 36, expected_reverse_source)?;
-    assert_prepared_audio_source_time(
-        held_sequence,
-        audio_clip_id,
-        frame_time(36, time_base)?,
-        SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
-        TimeScale::new(-3, 2)?,
-    )?;
+            dispatch_author_transition(
+                workflow.app_mut(),
+                "freeze-linked-picture-only",
+                crate::app::ui_actions::clip_hold_frame_action(
+                    crate::app::product_action::ClipHoldFramePayload {
+                        clip_id: video_clip_id,
+                        sequence_time: FramePosition::new(sample_frame, time_base),
+                    },
+                ),
+            )?;
+            let held_sequence = workflow.app().active_sequence().context("Hero is absent")?;
+            assert_clip_scale(held_sequence, video_clip_id, TimeScale::new(0, 1)?)?;
+            assert_clip_scale(held_sequence, audio_clip_id, TimeScale::new(-3, 2)?)?;
+            assert_visual_source_sample(held_sequence, sample_frame, expected_reverse_source)?;
+            assert_visual_source_sample(held_sequence, 36, expected_reverse_source)?;
+            assert_prepared_audio_source_time(
+                held_sequence,
+                audio_clip_id,
+                frame_time(36, time_base)?,
+                SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
+                TimeScale::new(-3, 2)?,
+            )?;
 
-    author_transition(workflow.app_mut(), "undo-picture-hold", |state| {
-        ensure!(state.undo_timeline()?, "picture hold had no Undo entry");
-        Ok(())
-    })?;
-    assert_clip_scale(
-        workflow.app().active_sequence().context("Hero is absent")?,
-        video_clip_id,
-        TimeScale::new(-3, 2)?,
-    )?;
-    author_transition(workflow.app_mut(), "undo-linked-reverse-rate", |state| {
-        ensure!(
-            state.undo_timeline()?,
-            "linked reverse rate had no Undo entry"
-        );
-        Ok(())
-    })?;
-    let forward_sequence = workflow.app().active_sequence().context("Hero is absent")?;
-    assert_clip_scale(forward_sequence, video_clip_id, TimeScale::new(3, 2)?)?;
-    assert_clip_scale(forward_sequence, audio_clip_id, TimeScale::new(3, 2)?)?;
+            author_transition(workflow.app_mut(), "undo-picture-hold", |state| {
+                ensure!(state.undo_timeline()?, "picture hold had no Undo entry");
+                Ok(())
+            })?;
+            assert_clip_scale(
+                workflow.app().active_sequence().context("Hero is absent")?,
+                video_clip_id,
+                TimeScale::new(-3, 2)?,
+            )?;
+            author_transition(workflow.app_mut(), "undo-linked-reverse-rate", |state| {
+                ensure!(
+                    state.undo_timeline()?,
+                    "linked reverse rate had no Undo entry"
+                );
+                Ok(())
+            })?;
+            let forward_sequence = workflow.app().active_sequence().context("Hero is absent")?;
+            assert_clip_scale(forward_sequence, video_clip_id, TimeScale::new(3, 2)?)?;
+            assert_clip_scale(forward_sequence, audio_clip_id, TimeScale::new(3, 2)?)?;
 
-    author_transition(workflow.app_mut(), "undo-linked-forward-rate", |state| {
-        ensure!(
-            state.undo_timeline()?,
-            "linked forward rate had no Undo entry"
-        );
-        Ok(())
-    })?;
-    let original_sequence = workflow.app().active_sequence().context("Hero is absent")?;
-    assert_clip_scale(original_sequence, video_clip_id, TimeScale::ONE)?;
-    assert_clip_scale(original_sequence, audio_clip_id, TimeScale::ONE)?;
+            author_transition(workflow.app_mut(), "undo-linked-forward-rate", |state| {
+                ensure!(
+                    state.undo_timeline()?,
+                    "linked forward rate had no Undo entry"
+                );
+                Ok(())
+            })?;
+            let original_sequence = workflow.app().active_sequence().context("Hero is absent")?;
+            assert_clip_scale(original_sequence, video_clip_id, TimeScale::ONE)?;
+            assert_clip_scale(original_sequence, audio_clip_id, TimeScale::ONE)?;
 
-    author_transition(workflow.app_mut(), "redo-linked-forward-rate", |state| {
-        ensure!(
-            state.redo_timeline()?,
-            "linked forward rate had no Redo entry"
-        );
-        Ok(())
-    })?;
-    author_transition(workflow.app_mut(), "redo-linked-reverse-rate", |state| {
-        ensure!(
-            state.redo_timeline()?,
-            "linked reverse rate had no Redo entry"
-        );
-        Ok(())
-    })?;
-    author_transition(workflow.app_mut(), "redo-picture-hold", |state| {
-        ensure!(state.redo_timeline()?, "picture hold had no Redo entry");
-        Ok(())
-    })?;
-    let durable = workflow.durable_save_reopen()?;
-    ensure!(
-        durable.session_identity_changed && durable.project_identity_preserved,
-        "Golden Retime durable reopen did not cross a fresh Session boundary"
-    );
-    ensure!(
-        workflow.hero_sequence_id() == hero_sequence_id
-            && workflow.app().active_sequence_id() == Some(hero_sequence_id),
-        "Golden Retime durable reopen changed the Hero Sequence"
-    );
+            author_transition(workflow.app_mut(), "redo-linked-forward-rate", |state| {
+                ensure!(
+                    state.redo_timeline()?,
+                    "linked forward rate had no Redo entry"
+                );
+                Ok(())
+            })?;
+            author_transition(workflow.app_mut(), "redo-linked-reverse-rate", |state| {
+                ensure!(
+                    state.redo_timeline()?,
+                    "linked reverse rate had no Redo entry"
+                );
+                Ok(())
+            })?;
+            author_transition(workflow.app_mut(), "redo-picture-hold", |state| {
+                ensure!(state.redo_timeline()?, "picture hold had no Redo entry");
+                Ok(())
+            })?;
+            let durable = workflow.durable_save_reopen()?;
+            ensure!(
+                durable.session_identity_changed && durable.project_identity_preserved,
+                "Golden Retime durable reopen did not cross a fresh Session boundary"
+            );
+            ensure!(
+                workflow.hero_sequence_id() == hero_sequence_id
+                    && workflow.app().active_sequence_id() == Some(hero_sequence_id),
+                "Golden Retime durable reopen changed the Hero Sequence"
+            );
 
-    let reopened = workflow.app().active_sequence().context("reopened Hero is absent")?;
-    assert_clip_scale(reopened, video_clip_id, TimeScale::new(0, 1)?)?;
-    assert_clip_scale(reopened, audio_clip_id, TimeScale::new(-3, 2)?)?;
-    assert_visual_source_sample(reopened, 36, expected_reverse_source)?;
-    assert_prepared_audio_source_time(
-        reopened,
-        audio_clip_id,
-        frame_time(36, time_base)?,
-        SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
-        TimeScale::new(-3, 2)?,
-    )?;
-    Ok(())
+            let reopened = workflow.app().active_sequence().context("reopened Hero is absent")?;
+            assert_clip_scale(reopened, video_clip_id, TimeScale::new(0, 1)?)?;
+            assert_clip_scale(reopened, audio_clip_id, TimeScale::new(-3, 2)?)?;
+            assert_visual_source_sample(reopened, 36, expected_reverse_source)?;
+            assert_prepared_audio_source_time(
+                reopened,
+                audio_clip_id,
+                frame_time(36, time_base)?,
+                SourceSampleTarget::strict_predecessor(frame_time(18, time_base)?),
+                TimeScale::new(-3, 2)?,
+            )?;
+            Ok(())
+        })
+        .map(|_| ())
 }
 
 fn linked_clip_ids(

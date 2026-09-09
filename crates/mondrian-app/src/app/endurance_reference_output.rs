@@ -53,6 +53,8 @@ pub struct PersistentReferenceOutputPump {
     state: ReferencePumpState,
     scheduled_frames: u64,
     fault: Option<String>,
+    wire_correlation: Option<mondrian_broadcast::AncillaryWireCorrelation>,
+    ancillary_program: Option<Arc<super::endurance_ancillary::PreparedEnduranceAncillaryProgram>>,
 }
 
 /// Opaque proof that the exact physical Session opened, reported external
@@ -164,9 +166,46 @@ impl PersistentReferenceOutputPump {
             state: ReferencePumpState::Prepared,
             scheduled_frames: 0,
             fault: None,
+            wire_correlation: None,
+            ancillary_program: None,
         })
     }
 
+    /// Bind the explicit validation-only canonical ANC owner before hardware opens.
+    pub fn set_wire_correlation(
+        &mut self,
+        correlation: Option<mondrian_broadcast::AncillaryWireCorrelation>,
+    ) -> Result<(), PersistentReferenceOutputError> {
+        self.require_state(ReferencePumpState::Prepared)?;
+        if self.request.ancillary_policy.requires_readback() && correlation.is_none() {
+            return Err(PersistentReferenceOutputError::InvalidPlan(
+                "physical ANC readback requires its canonical correlation owner".to_owned(),
+            ));
+        }
+        self.wire_correlation = correlation;
+        Ok(())
+    }
+
+    /// Retain the same prepared program before opening physical hardware.
+    pub fn set_ancillary_program(
+        &mut self,
+        program: Option<Arc<super::endurance_ancillary::PreparedEnduranceAncillaryProgram>>,
+    ) -> Result<(), PersistentReferenceOutputError> {
+        self.require_state(ReferencePumpState::Prepared)?;
+        if let Some(program) = &program {
+            program
+                .validate_rate(self.request.signal.frame_rate)
+                .map_err(PersistentReferenceOutputError::InvalidPlan)?;
+            if !self.request.ancillary_policy.requires_readback() || self.wire_correlation.is_none()
+            {
+                return Err(PersistentReferenceOutputError::InvalidPlan(
+                    "campaign ANC requires independent physical wire readback".to_owned(),
+                ));
+            }
+        }
+        self.ancillary_program = program;
+        Ok(())
+    }
     /// Open the exact provider mode, schedule complete preroll, then start playback.
     pub fn open_preroll_and_start(
         &mut self,
@@ -271,12 +310,25 @@ impl PersistentReferenceOutputPump {
                 self.latch_fault(format!("render Reference Audio Program: {error}"))
             })?;
         self.audio_entered = true;
+        let program_frame = match &self.ancillary_program {
+            Some(owner) => owner
+                .frame_at(frame_index, self.request.signal.frame_rate)
+                .map_err(|error| self.latch_fault(error))?,
+            None => mondrian_reference_output::AncillaryFrame::empty(frame_index),
+        };
+        let ancillary = match &self.wire_correlation {
+            Some(owner) => owner
+                .frame(frame_index, program_frame.packets().to_vec())
+                .map_err(|error| self.latch_fault(format!("canonical ANC marker: {error}")))?,
+            None => program_frame,
+        };
         let bundle = self
             .program
-            .execute_cpu(
+            .execute_cpu_with_ancillary(
                 &picture.working_frame,
                 frame_index,
                 &audio.samples,
+                ancillary,
                 &mut self.color_session,
             )
             .map_err(|error| self.latch_fault(format!("lower Reference A/V bundle: {error}")))?;

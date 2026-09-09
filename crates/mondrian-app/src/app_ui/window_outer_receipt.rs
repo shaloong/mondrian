@@ -14,9 +14,11 @@ use crate::app_ui::window::{
     AppUiActiveWindowGpuShutdownEvidence, AppUiPreActiveWindowShutdownEvidence,
 };
 
-const WINDOW_OUTER_RECEIPT_SCHEMA_VERSION: u32 = 2;
+use super::window_generation_history::WindowGenerationHistory;
+
+const WINDOW_OUTER_RECEIPT_SCHEMA_VERSION: u32 = 3;
 const MAXIMUM_WINDOW_OUTER_RECEIPT_JSON_BYTES: usize = 128 * 1024;
-const WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES: usize = 128 * 1024;
 const MAXIMUM_WINDOW_CLOSED_RECEIPT_JSON_BYTES: usize = 2 * 1024 * 1024;
 const ACTIVE_EXIT_OUTCOME: &str = "active_exited";
@@ -60,21 +62,26 @@ pub(super) enum AppUiWindowOuterShutdownEvidence {
 #[derive(Debug, Clone)]
 pub struct AppUiWindowClosedEvidence {
     evidence: AppUiWindowOuterShutdownEvidence,
+    generation_history: WindowGenerationHistory,
 }
 
 impl AppUiWindowClosedEvidence {
-    pub(super) fn new(evidence: AppUiWindowOuterShutdownEvidence) -> Self {
-        Self { evidence }
+    pub(super) fn new(
+        evidence: AppUiWindowOuterShutdownEvidence,
+        generation_history: WindowGenerationHistory,
+    ) -> Self {
+        Self { evidence, generation_history }
     }
 
     /// Whether every Window-owned authority represented by this outcome returned.
     pub fn all_owned_authority_released(&self) -> bool {
         self.evidence.all_owned_authority_released()
+            && self.generation_history.all_created_resources_released()
     }
 
     /// Seal the exact mutually-exclusive Window closure evidence for persistence.
     pub fn seal_receipt(&self) -> Result<AppUiWindowClosedReceipt, AppUiWindowClosedReceiptError> {
-        AppUiWindowClosedReceipt::seal(&self.evidence)
+        AppUiWindowClosedReceipt::seal(&self.evidence, &self.generation_history)
     }
 }
 
@@ -105,10 +112,12 @@ pub struct AppUiWindowClosedReceipt {
 impl AppUiWindowClosedReceipt {
     fn seal(
         evidence: &AppUiWindowOuterShutdownEvidence,
+        generation_history: &WindowGenerationHistory,
     ) -> Result<Self, AppUiWindowClosedReceiptError> {
         let projection = CanonicalWindowClosedReceipt {
             schema_version: WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION,
             shutdown: CanonicalWindowClosedEvidence::from_evidence(evidence)?,
+            generation_history: generation_history.clone(),
         };
         let outcome = projection.validate()?;
         let canonical_json = serde_json::to_string(&projection)
@@ -121,7 +130,8 @@ impl AppUiWindowClosedReceipt {
             outcome,
             canonical_json,
             sha256,
-            all_owned_authority_released: evidence.all_owned_authority_released(),
+            all_owned_authority_released: evidence.all_owned_authority_released()
+                && generation_history.all_created_resources_released(),
         })
     }
 
@@ -145,11 +155,8 @@ impl AppUiWindowClosedReceipt {
         &self.sha256
     }
 
-    /// Revalidate canonical shape and embedded byte integrity.
-    ///
-    /// Runtime, Host, and GPU semantic replay remains the responsibility of
-    /// their owning Modules; this method does not promote integrity to physical
-    /// qualification.
+    /// Revalidate canonical shape and every embedded owner receipt's typed shape.
+    /// Dirty owner evidence remains valid diagnostic evidence.
     pub fn verify_integrity(
         canonical_json: &str,
         sha256: &str,
@@ -169,6 +176,19 @@ impl AppUiWindowClosedReceipt {
             return Err(AppUiWindowClosedReceiptError::NonCanonicalEvidence);
         }
         Ok(outcome)
+    }
+
+    /// Replay the owning Modules' closure predicates, including dirty failures.
+    /// This proves Rust owner closure only, never physical native termination.
+    pub fn verify_owned_authority_released(
+        canonical_json: &str,
+        sha256: &str,
+    ) -> Result<bool, AppUiWindowClosedReceiptError> {
+        Self::verify_integrity(canonical_json, sha256)?;
+        let projection: CanonicalWindowClosedReceipt = serde_json::from_str(canonical_json)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        Ok(projection.shutdown.decode()?.all_owned_authority_released()
+            && projection.generation_history.all_created_resources_released())
     }
 
     /// Physical native termination remains unqualified without OS evidence.
@@ -205,11 +225,14 @@ pub enum AppUiWindowClosedReceiptError {
 struct CanonicalWindowClosedReceipt {
     schema_version: u32,
     shutdown: CanonicalWindowClosedEvidence,
+    generation_history: WindowGenerationHistory,
 }
 
 impl CanonicalWindowClosedReceipt {
     fn validate(&self) -> Result<AppUiWindowClosedOutcome, AppUiWindowClosedReceiptError> {
-        if self.schema_version != WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION {
+        if self.schema_version != WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION
+            || !self.generation_history.has_valid_shape()
+        {
             return Err(AppUiWindowClosedReceiptError::InvalidEvidence);
         }
         self.shutdown.validate()
@@ -322,7 +345,47 @@ impl CanonicalWindowClosedEvidence {
         if let Some(native) = active_native {
             native.validate_active_native_return()?;
         }
+        self.decode()?;
         Ok(outcome)
+    }
+
+    fn decode(&self) -> Result<AppUiWindowOuterShutdownEvidence, AppUiWindowClosedReceiptError> {
+        Ok(match self {
+            Self::RuntimeStartupFailed { runtime } => {
+                AppUiWindowOuterShutdownEvidence::RuntimeStartupFailed {
+                    runtime: runtime.decode()?,
+                }
+            }
+            Self::HostStartupFailed { runtime, host } => {
+                AppUiWindowOuterShutdownEvidence::HostStartupFailed {
+                    runtime: runtime.decode()?,
+                    host: host.decode()?,
+                }
+            }
+            Self::PreActiveFailed { runtime, host, native } => {
+                AppUiWindowOuterShutdownEvidence::PreActiveFailed {
+                    runtime: runtime.decode()?,
+                    host: host.decode()?,
+                    native: native.decode()?,
+                }
+            }
+            Self::ActiveExited { runtime, host, gpu, native } => {
+                AppUiWindowOuterShutdownEvidence::ActiveExited {
+                    runtime: runtime.decode()?,
+                    host: host.decode()?,
+                    gpu: gpu.decode()?,
+                    native: native.decode()?,
+                }
+            }
+            Self::ActivePublicationFailed { runtime, host, gpu, native } => {
+                AppUiWindowOuterShutdownEvidence::ActivePublicationFailed {
+                    runtime: runtime.decode()?,
+                    host: host.decode()?,
+                    gpu: gpu.decode()?,
+                    native: native.decode()?,
+                }
+            }
+        })
     }
 }
 
@@ -334,6 +397,18 @@ struct CanonicalWindowClosedLeaf {
 }
 
 impl CanonicalWindowClosedLeaf {
+    fn decode<T: serde::de::DeserializeOwned + Serialize>(
+        &self,
+    ) -> Result<T, AppUiWindowClosedReceiptError> {
+        let typed: T = serde_json::from_str(&self.json)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        // Typed re-encoding rejects unknown nested fields AND missing Option
+        // fields; serde's default Option decoding alone cannot prove inventory.
+        if canonical_closed_leaf_json(&typed)? != self.json {
+            return Err(AppUiWindowClosedReceiptError::NonCanonicalEvidence);
+        }
+        Ok(typed)
+    }
     fn seal(value: &impl Serialize) -> Result<Self, AppUiWindowClosedReceiptError> {
         let json = canonical_closed_leaf_json(value)?;
         if json.len() > MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES {
@@ -391,7 +466,7 @@ fn canonical_closed_leaf_json(
 }
 
 /// Evidence that can only be minted after the Window function returns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct AppUiWindowNativeReturnEvidence {
     event_loop_borrow_returned: bool,
     window_owner_scope_exited: bool,
@@ -413,6 +488,13 @@ impl AppUiWindowNativeReturnEvidence {
 }
 
 impl AppUiWindowOuterShutdownEvidence {
+    pub(super) fn final_gpu(&self) -> Option<&AppUiActiveWindowGpuShutdownEvidence> {
+        match self {
+            Self::ActiveExited { gpu, .. } | Self::ActivePublicationFailed { gpu, .. } => Some(gpu),
+            _ => None,
+        }
+    }
+
     pub(super) fn runtime_startup_failed(runtime: AppUiBackgroundRuntimeShutdownEvidence) -> Self {
         Self::RuntimeStartupFailed { runtime }
     }
@@ -464,7 +546,7 @@ impl AppUiWindowOuterShutdownEvidence {
             }
             Self::ActiveExited { runtime, host, gpu, native }
             | Self::ActivePublicationFailed { runtime, host, gpu, native } => {
-                runtime.all_created_resources_released()
+                runtime.qualifies_normal_runtime()
                     && host.all_resources_released()
                     && gpu.qualifies_normal_runtime()
                     && native.qualifies_rust_authority_release()
@@ -503,6 +585,7 @@ impl AppUiWindowRunReceipt {
     pub(super) fn seal_active(
         recovery: EnduranceRecoveryOperationReceipt,
         shutdown: AppUiWindowOuterShutdownEvidence,
+        generation_history: WindowGenerationHistory,
     ) -> Result<Self, AppUiWindowRunReceiptError> {
         if !shutdown.all_owned_authority_released() {
             return Err(AppUiWindowRunReceiptError::IncompleteOwnedAuthority);
@@ -527,6 +610,7 @@ impl AppUiWindowRunReceipt {
             gpu_shutdown_json: gpu_json,
             native_return_sha256: lower_sha256(native_json.as_bytes()),
             native_return_json: native_json,
+            generation_history,
         };
         projection.validate()?;
         let canonical_json = serde_json::to_string(&projection)
@@ -563,7 +647,8 @@ impl AppUiWindowRunReceipt {
         &self.sha256
     }
 
-    /// Revalidate schema and byte integrity without trusting the enclosing report.
+    /// Revalidate canonical typed owner evidence and normal-runtime closure.
+    /// Recomputing hashes cannot promote dirty or incomplete owner evidence.
     pub fn verify_integrity(
         canonical_json: &str,
         sha256: &str,
@@ -642,6 +727,7 @@ struct CanonicalActiveWindowRunEvidence {
     gpu_shutdown_sha256: String,
     native_return_json: String,
     native_return_sha256: String,
+    generation_history: WindowGenerationHistory,
 }
 
 impl CanonicalActiveWindowRunEvidence {
@@ -674,14 +760,27 @@ impl CanonicalActiveWindowRunEvidence {
             }
         }
         let gpu: AppUiActiveWindowGpuShutdownEvidence =
-            serde_json::from_str(&self.gpu_shutdown_json)
-                .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
-        let Some((_, surface_generation_after, _, device_generation_after)) =
+            decode_active_leaf(&self.gpu_shutdown_json)?;
+        let runtime: AppUiBackgroundRuntimeShutdownEvidence =
+            decode_active_leaf(&self.runtime_shutdown_json)?;
+        let host: AppUiServiceShutdownEvidence = decode_active_leaf(&self.host_shutdown_json)?;
+        let native: AppUiWindowNativeReturnEvidence = decode_active_leaf(&self.native_return_json)?;
+        if !runtime.qualifies_normal_runtime()
+            || !host.all_resources_released()
+            || !native.qualifies_rust_authority_release()
+        {
+            return Err(AppUiWindowRunReceiptError::IncompleteOwnedAuthority);
+        }
+        let Some(generations @ (_, surface_generation_after, _, device_generation_after)) =
             recovery.surface_device_generations()
         else {
             return Err(AppUiWindowRunReceiptError::InvalidEvidence);
         };
-        if !gpu.qualifies_normal_runtime()
+        if !recovery
+            .surface_device_shutdown_json()
+            .is_some_and(|json| self.generation_history.matches_old_retirement(json))
+            || !self.generation_history.qualifies_recovery(generations, &gpu)
+            || !gpu.qualifies_normal_runtime()
             || gpu.generation_identity()
                 != Some((surface_generation_after, device_generation_after))
         {
@@ -689,6 +788,17 @@ impl CanonicalActiveWindowRunEvidence {
         }
         Ok(())
     }
+}
+
+fn decode_active_leaf<T: serde::de::DeserializeOwned + Serialize>(
+    json: &str,
+) -> Result<T, AppUiWindowRunReceiptError> {
+    let typed: T = serde_json::from_str(json)
+        .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+    if canonical_leaf_json(&typed)? != json {
+        return Err(AppUiWindowRunReceiptError::NonCanonicalEvidence);
+    }
+    Ok(typed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,13 +854,28 @@ fn lower_sha256(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+fn test_owner_leaf(name: &str) -> String {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/validation/fixtures/window-owner-closure.json"
+    ))
+    .expect("owner replay fixture");
+    serde_json::to_string(&fixture[name]).expect("canonical owner leaf")
+}
+
+#[cfg(test)]
 fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64) -> String {
+    let host: serde_json::Value =
+        serde_json::from_str(&test_owner_leaf("host_shutdown")).expect("host fixture");
     serde_json::to_string(&serde_json::json!({
         "surface_generation": surface_generation,
         "device_generation": device_generation,
         "publication_cleanup": { "Ok": null },
         "retirement": {
             "retired": {
+                "worker_shutdown": "terminated",
+                "wake_callbacks": host["preview"]["work_callbacks"],
+                "native_wake_failures": 0,
+                "wake_registration_rejections": 0,
                 "worker_started": true,
                 "worker_terminated": true,
                 "worker_panicked": false,
@@ -770,6 +895,32 @@ fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64)
 }
 
 #[cfg(test)]
+fn test_generation_history(
+    recovery: &EnduranceRecoveryOperationReceipt,
+) -> WindowGenerationHistory {
+    let (before_surface, after_surface, before_device, after_device) =
+        recovery.surface_device_generations().expect("recovery generations");
+    let mut old: serde_json::Value =
+        serde_json::from_str(recovery.surface_device_shutdown_json().expect("old receipt"))
+            .expect("old raw");
+    let object = old.as_object_mut().expect("old object");
+    object.remove("schema_version");
+    object.remove("surface_generation");
+    object.remove("device_generation");
+    let old = serde_json::json!({"surface_generation": before_surface, "device_generation": before_device,
+        "publication_cleanup": {"Ok": null}, "retirement": {"retired": old}});
+    super::window_generation_history::test_history(
+        before_surface,
+        after_surface,
+        before_device,
+        after_device,
+        serde_json::from_value(old).expect("old GPU"),
+        serde_json::from_str(&test_clean_gpu_shutdown_json(after_surface, after_device))
+            .expect("final GPU"),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn test_integrity_receipt_for_recovery(
     recovery: &EnduranceRecoveryOperationReceipt,
 ) -> (String, String) {
@@ -777,8 +928,8 @@ pub(crate) fn test_integrity_receipt_for_recovery(
         let value: serde_json::Value = serde_json::from_str(json).expect("test leaf should parse");
         serde_json::to_string(&value).expect("test leaf should normalize")
     };
-    let runtime = normalize(r#"{"supervisor":"terminated"}"#);
-    let host = normalize(r#"{"services":"returned"}"#);
+    let runtime = test_owner_leaf("runtime_shutdown");
+    let host = test_owner_leaf("host_shutdown");
     let (_, surface_generation_after, _, device_generation_after) = recovery
         .surface_device_generations()
         .expect("Window-run fixture requires Surface/device recovery");
@@ -799,6 +950,7 @@ pub(crate) fn test_integrity_receipt_for_recovery(
         gpu_shutdown_json: gpu,
         native_return_sha256: lower_sha256(native.as_bytes()),
         native_return_json: native,
+        generation_history: test_generation_history(recovery),
     };
     let json = serde_json::to_string(&projection).expect("test projection should serialize");
     let sha256 = lower_sha256(json.as_bytes());
@@ -822,10 +974,10 @@ mod tests {
             4,
         )
         .expect("fixture recovery receipt");
-        let runtime = r#"{"supervisor":"terminated"}"#.to_owned();
-        let host = r#"{"preview":{"worker":"returned"}}"#.to_owned();
+        let runtime = test_owner_leaf("runtime_shutdown");
+        let host = test_owner_leaf("host_shutdown");
         let gpu = test_clean_gpu_shutdown_json(2, 4);
-        let native = r#"{"physical_native_termination":"unverified"}"#.to_owned();
+        let native = test_owner_leaf("native_return");
         CanonicalActiveWindowRunEvidence {
             schema_version: WINDOW_OUTER_RECEIPT_SCHEMA_VERSION,
             outcome: ACTIVE_EXIT_OUTCOME.to_owned(),
@@ -839,6 +991,7 @@ mod tests {
             gpu_shutdown_json: gpu,
             native_return_sha256: lower_sha256(native.as_bytes()),
             native_return_json: native,
+            generation_history: test_generation_history(&recovery),
         }
     }
 
@@ -856,6 +1009,7 @@ mod tests {
         CanonicalWindowClosedReceipt {
             schema_version: WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION,
             shutdown,
+            generation_history: WindowGenerationHistory::default(),
         }
     }
 
@@ -869,10 +1023,14 @@ mod tests {
 
     #[test]
     fn closed_receipt_preserves_all_mutually_exclusive_outcomes() {
-        let runtime = || closed_leaf(r#"{"supervisor":"terminated"}"#);
-        let host = || closed_leaf(r#"{"preview":"returned"}"#);
-        let gpu = || closed_leaf(r#"{"retirement":"returned"}"#);
-        let pre_active = || closed_leaf(r#"{"last_stage":"surface_created"}"#);
+        let runtime = || closed_leaf(&test_owner_leaf("runtime_shutdown"));
+        let host = || closed_leaf(&test_owner_leaf("host_shutdown"));
+        let gpu = || closed_leaf(&test_clean_gpu_shutdown_json(2, 4));
+        let pre_active = || {
+            closed_leaf(
+                r#"{"last_stage":"surface_created","rust_native_authority_released_on_event_loop_thread":true,"viewer_gpu":"not_started"}"#,
+            )
+        };
         let active_native = || {
             closed_leaf(
                 r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#,
@@ -888,7 +1046,9 @@ mod tests {
             (
                 closed_projection(CanonicalWindowClosedEvidence::HostStartupFailed {
                     runtime: runtime(),
-                    host: host(),
+                    host: closed_leaf(
+                        r#"{"schema_version":1,"stage":"app_owned","failure_kind":"host","opaque_panic_payload_abandoned":false,"app_configuration_restored":true,"theme_restored":true,"thumbnail":null,"waveform":"not_created","preview":"not_created","catalog":null}"#,
+                    ),
                 }),
                 AppUiWindowClosedOutcome::HostStartupFailed,
             ),
@@ -999,6 +1159,271 @@ mod tests {
         assert_eq!(
             AppUiWindowRunReceipt::verify_integrity(&json, &hash),
             Err(AppUiWindowRunReceiptError::EmbeddedHashMismatch)
+        );
+    }
+
+    fn verify_rehashed(
+        projection: &CanonicalActiveWindowRunEvidence,
+    ) -> Result<(), AppUiWindowRunReceiptError> {
+        let json = serde_json::to_string(projection).expect("serialize rehashed projection");
+        AppUiWindowRunReceipt::verify_integrity(&json, &lower_sha256(json.as_bytes()))
+    }
+
+    #[test]
+    fn generation_history_rejects_reordering_omission_dirty_retirement_and_rehashed_rebinding() {
+        let clean = fixture_projection();
+        assert!(verify_rehashed(&clean).is_ok());
+        let original = serde_json::to_value(&clean.generation_history).expect("history JSON");
+        for attack in 0..8 {
+            let mut value = original.clone();
+            match attack {
+                0 => {
+                    value["events"].as_array_mut().expect("events").swap(1, 2);
+                }
+                1 => {
+                    value["events"].as_array_mut().expect("events").remove(2);
+                }
+                2 => {
+                    value["events"][2]["shutdown"]["retirement"]["retired"]["worker_terminated"] =
+                        false.into()
+                }
+                3 => value["events"][2]["shutdown"]["surface_generation"] = 99.into(),
+                4 => value["events"][1]["device_generation"] = 3.into(),
+                5 => value["overflowed"] = true.into(),
+                6 => {
+                    value["events"][3]["shutdown"]["retirement"]["retired"]
+                        ["native_wake_failures"] = 1.into()
+                }
+                _ => value["schema_version"] = 0.into(),
+            }
+            let mut projection = clean.clone();
+            projection.generation_history = serde_json::from_value(value).expect("typed mutation");
+            assert!(
+                verify_rehashed(&projection).is_err(),
+                "accepted history attack {attack}"
+            );
+        }
+    }
+
+    fn replace_leaf(
+        projection: &mut CanonicalActiveWindowRunEvidence,
+        name: &str,
+        value: &serde_json::Value,
+    ) {
+        let json = serde_json::to_string(value).expect("serialize mutated owner");
+        let sha256 = lower_sha256(json.as_bytes());
+        match name {
+            "runtime_shutdown" => {
+                projection.runtime_shutdown_json = json;
+                projection.runtime_shutdown_sha256 = sha256;
+            }
+            "host_shutdown" => {
+                projection.host_shutdown_json = json;
+                projection.host_shutdown_sha256 = sha256;
+            }
+            "native_return" => {
+                projection.native_return_json = json;
+                projection.native_return_sha256 = sha256;
+            }
+            _ => panic!("unknown test owner"),
+        }
+    }
+
+    #[test]
+    fn rehashed_dirty_owners_cannot_qualify_success() {
+        use serde_json::json;
+        for (owner, pointer, replacement) in [
+            (
+                "runtime_shutdown",
+                "/runtime_handoff_completed",
+                json!(false),
+            ),
+            ("runtime_shutdown", "/configured_worker_threads", json!(0)),
+            (
+                "runtime_shutdown",
+                "/shutdown_signal_delivered",
+                json!(false),
+            ),
+            ("runtime_shutdown", "/supervisor", json!("not_started")),
+            (
+                "runtime_shutdown",
+                "/supervisor",
+                json!("timed_out_detached"),
+            ),
+            (
+                "runtime_shutdown",
+                "/supervisor",
+                json!("panicked_payload_abandoned"),
+            ),
+            ("native_return", "/event_loop_borrow_returned", json!(false)),
+            ("native_return", "/window_owner_scope_exited", json!(false)),
+            (
+                "native_return",
+                "/physical_native_termination",
+                json!("qualified"),
+            ),
+            ("host_shutdown", "/preview/worker_panics", json!(1)),
+            ("host_shutdown", "/preview/workers_terminated", json!(0)),
+            ("host_shutdown", "/preview/worker_timeouts", json!(1)),
+            ("host_shutdown", "/preview/unverified_async_reaps", json!(1)),
+            (
+                "host_shutdown",
+                "/preview/visual_dependency_worker",
+                json!("not_started"),
+            ),
+            (
+                "host_shutdown",
+                "/preview/work_callbacks/registrations_retained",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/preview/work_callbacks/shutdown_rejection",
+                json!("concurrent_shutdown"),
+            ),
+            (
+                "host_shutdown",
+                "/preview/timeline_render_cache/aggregate_outcome",
+                json!("not_started"),
+            ),
+            (
+                "host_shutdown",
+                "/preview/timeline_render_cache/worker/worker_started",
+                json!(false),
+            ),
+            (
+                "host_shutdown",
+                "/preview/timeline_render_cache/worker/detached",
+                json!(true),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/waveform/worker_owner_abandonments",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/waveform/external_source_cache_references",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/waveform/source_cache/decoder_sessions_remaining",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/waveform/source_cache/decoder_startup/producers_remaining",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/thumbnails/Ok/active_requests_remaining",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/thumbnails/Ok/worker",
+                json!("timed_out_detached"),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/catalog/results_missing",
+                json!(1),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/catalog/workers_joined",
+                json!(0),
+            ),
+            (
+                "host_shutdown",
+                "/auxiliary/catalog/startup_attempts",
+                json!(u64::MAX),
+            ),
+        ] {
+            let mut projection = fixture_projection();
+            let mut value: serde_json::Value =
+                serde_json::from_str(&test_owner_leaf(owner)).expect("owner");
+            *value.pointer_mut(pointer).expect("exact owner field") = replacement;
+            replace_leaf(&mut projection, owner, &value);
+            assert!(
+                verify_rehashed(&projection).is_err(),
+                "accepted {owner}{pointer}"
+            );
+        }
+    }
+
+    fn object_paths(value: &serde_json::Value, prefix: &str, paths: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            paths.push(prefix.to_owned());
+            for (name, value) in object {
+                object_paths(value, &format!("{prefix}/{name}"), paths);
+            }
+        }
+    }
+
+    #[test]
+    fn every_owner_field_is_required_and_every_object_has_exact_shape() {
+        for owner in ["runtime_shutdown", "host_shutdown", "native_return"] {
+            let original: serde_json::Value =
+                serde_json::from_str(&test_owner_leaf(owner)).expect("owner");
+            let mut paths = Vec::new();
+            object_paths(&original, "", &mut paths);
+            for path in paths {
+                let object = original.pointer(&path).expect("object").as_object().expect("object");
+                for key in object.keys() {
+                    for mutation in 0..3 {
+                        let mut value = original.clone();
+                        let target = value
+                            .pointer_mut(&path)
+                            .expect("object")
+                            .as_object_mut()
+                            .expect("object");
+                        match mutation {
+                            0 => {
+                                target.remove(key);
+                            }
+                            1 => {
+                                target.insert(key.clone(), serde_json::json!([]));
+                            }
+                            _ => {
+                                target.insert(
+                                    "unexpected_owner".to_owned(),
+                                    serde_json::json!(false),
+                                );
+                            }
+                        }
+                        let mut projection = fixture_projection();
+                        replace_leaf(&mut projection, owner, &value);
+                        assert!(
+                            verify_rehashed(&projection).is_err(),
+                            "accepted {owner}{path}/{key}, mutation {mutation}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dirty_failure_receipt_replays_without_becoming_clean() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&test_owner_leaf("runtime_shutdown")).expect("runtime");
+        value["supervisor"] = serde_json::json!("timed_out_detached");
+        let runtime = closed_leaf(&serde_json::to_string(&value).expect("runtime"));
+        let projection = closed_projection(CanonicalWindowClosedEvidence::ActiveExited {
+            runtime,
+            host: closed_leaf(&test_owner_leaf("host_shutdown")),
+            gpu: closed_leaf(&test_clean_gpu_shutdown_json(2, 4)),
+            native: closed_leaf(&test_owner_leaf("native_return")),
+        });
+        let json = serde_json::to_string(&projection).expect("failure receipt");
+        let hash = lower_sha256(json.as_bytes());
+        assert!(AppUiWindowClosedReceipt::verify_integrity(&json, &hash).is_ok());
+        assert_eq!(
+            AppUiWindowClosedReceipt::verify_owned_authority_released(&json, &hash),
+            Ok(false)
         );
     }
 

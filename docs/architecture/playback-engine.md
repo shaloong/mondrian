@@ -1,5 +1,31 @@
 # Playback Engine
 
+After an Adapter proves exact physical GPU completion and finalizes Presented/NoDemand, `release_completed_gpu_evaluation(output_key, playback_intent)` may retire that CPU evaluation's reuse owner. The bounded evaluation set records the final monitor/scopes key together with epoch, frame and quality; equal pixels at a different transport intent cannot retire a successor. Pending evaluations, native decoder owners and Frame Store entries are untouched. In-flight candidate clones retain their independent leases. This lets ordinary cache pressure reclaim old CPU inputs after completed GPU output has become authoritative, without increasing the optional cache budget or granting speculative work Current capacity.
+
+Both immediate successor and farther lookahead requests are speculative media work. The shared media Adapter projects both ticketless purposes to Prefetch, never Current, including cache hits: they retain their physical payload lease without acquiring Current working-set protection. Optional capacity refusal therefore cannot reclaim an earlier Prefetch under a falsely promoted Current role. Physical immediate-successor GPU ownership remains a separate exact-intent contract.
+
+Priming also proves the next distinct physical source inside the bounded cold-open horizon before it releases the clock anchor. The shared preroll seam may overlap that future decode with GPU presentation only after the complete current-frame media closure is physically resident; a partial multi-input closure retains absolute admission priority. Distinct-source discovery uses the renderer's canonical inclusive range closure and a monotonic prefix binary search for the first Asset outside the current media set. The App then lowers and validates the exact returned frame before admission. The visible current owner admits the activation against the original preroll deadline and reports its residency as a separate Playback observation; the deadline is never renewed. Once Playing begins, current turns only replenish the same bounded window, while speculative successor and farther-lookahead turns cannot recursively scan it.
+
+Cold-activation GPU-object preparation has its own ticketless execution purpose. Its resolved evaluation lives only for that prewarm call and does not enter the ordinary four-entry evaluation LRU; dropping the frame releases its transient media protection after renderer backend objects are ready. This keeps the far activation coordinate outside the ordinary realtime evaluation set while the bounded staging owners protect the near horizon. The cold frame still uses the same Timeline resolver, exact media keys, GPU input preparation, deadlines, and cancellation policy.
+
+The configured media-resident Priming prefix is at most six future frames, covering the complete 250ms temporal window at the canonical 24fps qualification rate. Physical frame planning reduces that near prefix when the current frame plus a complete multi-layer cold-source activation would exceed the Standard eight-surface grant; no ninth speculative surface is admitted and no partial frame closure is counted preservable. Exact Current work reuses its already-resident prefix entry, and rolling eviction releases past coordinates before admitting farther work. Playing keeps the rate-derived 250ms temporal window, with at most two queued or in-flight prefetch decodes.
+
+Priming may overlap the farther cold-source batch with current decode only after
+every dependency of the exact current picture already has Broker reservation or
+Frame Store residency. The cold batch receives its atomic physical leases next;
+ordinary immediate and rolling repair remain closed until current residency is
+complete. This opens independent decoder sessions in parallel without allowing
+speculation to precede, partially own, or evict the visible current closure.
+
+Current picture materialization admits all exact media requests from the renderer's already validated visual closure before returning a Pending dependency. Requests are deduplicated by complete source sample, input color, picture interpretation, extent, and CPU-working requirement; Ready results retain their protection leases for the bounded evaluation. The executor consumes this batch without re-querying author state or granting presentation readiness to an incomplete frame. This keeps a static overlay from postponing the first admission of a video's other Current inputs.
+
+The evaluation coordinator observes the complete `MediaPreviewKey` chosen by the media Adapter for every request in that admitted closure and stores those keys on both retained producer waits and Ready evaluations. Completion, cancellation, and settled-owner recovery invalidate only entries that name the exact key. A prefetch for another source sample of the same Asset therefore cannot discard an already staged current or successor evaluation. The key includes frozen source identity, sample target, representation, source color, picture geometry, alpha interpretation, and renderer preparation intent, so proxy or hardware-path changes also stay isolated.
+
+Media work leases expose their immutable physical admission class to completion
+adapters. This is evidence of the grant actually owned by an execution, not a
+new scheduling authority. Optional cache retirement can therefore be separated
+from failure of a Current working-set grant without changing either capacity.
+
 ## Purpose
 
 The Playback Engine owns realtime transport semantics. It converts commands,
@@ -44,6 +70,12 @@ retains independent transport authority.
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | physical decoded-media allocation ledger, optional decoded/final-raster residency, exact-current demand protection, current/stale Viewer pin, count/byte/native-resource grants, failure memory | request priority, pending/in-flight scheduling, deadline policy, proxy selection, media/color interpretation, Widget payloads |
 | Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, exact-current-demand video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
+
+The pump outcome also carries the one exact terminal candidate accepted during
+that turn. Headless execution retains this receipt through candidate/GPU
+reconciliation. An output that completes after Playback accepted `Late`,
+`Blocked`, `Canceled`, or `Failed` cannot overwrite the terminal opportunity as
+`Ready`; the receipt remains bound to its epoch, quality revision, and frame. Acceptance is retained separately from public `PlaybackSnapshot` mutation: consuming a recovery demand can leave transport state, coordinate, and quality unchanged while still exhausting that exact terminal authority.
 | Preview Execution Coordinator | complete generation binding, pending state, executed presentation quality, candidate identity, exact registered output | timeline interpretation, codec payloads, GPU resources, Widget state |
 | Preview Output Unavailability | `NoContent`/`Blocked`/`Failed` disposition, owning production stage, stable code, bounded aggregate evidence | scheduler policy, renderer error details, localized UI wording |
 | Presentation Adapter | output registration, Viewer handoff, exact presentation-ticket completion, presentation evidence | timeline advancement, GPU color/composite interpretation, scheduler state |
@@ -324,10 +356,17 @@ activation time plus the stale-callback and one-buffer tolerance is rejected as
 `Unavailable`; it cannot jump timeline position and the Engine remains on the
 Synthetic Clock Master until plausible device evidence returns.
 Once Audio Device Master is active, its media anchor is immutable for that
-consumption interval. A changed anchor or decreasing consumed-sample position
-hands off continuously to Synthetic Master before the new observation can move
-the timeline. A reprime must therefore pass the normal phase-aligned handoff
-gate instead of reusing callback consumption accumulated against an old anchor.
+consumption interval. The raw host callback counter is an exact monotonic fact;
+a changed anchor or decreasing raw counter hands off continuously to Synthetic
+Master before the new observation can move the timeline. The delay-corrected
+device position is a point estimate inside the recorded uncertainty interval.
+Across a callback boundary that point may move slightly backward when the
+counter and the host playback-delay estimate advance together. Adjacent
+overlapping uncertainty intervals retain the last proven device position;
+non-overlapping regressions or an advance faster than elapsed time plus both
+endpoint uncertainties still hand off fail-closed. A reprime must therefore
+pass the normal phase-aligned handoff gate instead of reusing callback
+consumption accumulated against an old anchor.
 
 ### Master selection
 
@@ -396,6 +435,15 @@ first account for the final running interval without relying on a later UI
 tick. Audio-device observations remain authoritative after handoff, while the
 same projection keeps the Synthetic Clock Master continuous during device
 absence, preroll, and recovery.
+
+Physical audio queue service and audio-clock observation are two explicit App
+Adapter stages. Ordinary product pumping performs both in order. The Headless
+AV coordinator may poll and refill the same concrete Audio Playback owner while
+an exact current picture is still resolving, but it holds the resulting clock
+snapshot until that picture has physical Ready evidence. Device lifecycle
+events are still applied immediately. This prevents callback starvation without
+allowing audio queue maintenance to advance transport past an unresolved video
+opportunity.
 
 ### Time representation
 
@@ -476,8 +524,10 @@ deep realtime lifecycle Module described below; waveform analysis, thumbnail
 execution, and proxy generation each independently own bounded admission,
 domain scheduling, cancellation, retention, and terminal evidence; Export must
 retain its offline resource policy as it adopts the same language. Sharing this
-Interface never authorizes background Export to contend with realtime frame or
-audio work.
+Interface never authorizes automatic background work to contend with realtime
+frame or audio work. The App resource coordinator may independently grant one
+explicit user Export its reduced realtime resource policy; that queue remains
+behind its own safe-boundary gate and Critical pressure closes the grant.
 
 `FrameWorkBroker<K, D, P>` is the Playback Module's codec- and UI-independent
 request-lifecycle Interface. `K` is an opaque Adapter key, `D` an opaque
@@ -522,12 +572,24 @@ Adapter must still poll `execution_cancellation` cooperatively and resolve its
 execution lease before any result handling.
 
 Stalled-presentation expiration is restricted to `FrameWorkClass::Playback`.
+For a deadline-bearing Playback-current binding, the Broker expires pending
+publication authority at the exact absolute monotonic deadline lowered during
+admission. Re-observation may lower the same owner deadline with a smaller
+remaining budget but cannot renew it. The generic 250 ms stall age applies only
+as a fail-safe to malformed Playback-current work admitted without a deadline;
+it never extends a valid Frame Demand opportunity.
 Interactive work has latest-wins generation cancellation but no presentation
 deadline; applying the playback stall age to a stable scrub can prevent a slow
 source-open or GOP seek from ever completing. Still work is likewise excluded.
 The App Adapter also suppresses this shorter expiry while the Engine is in
 `Priming`; bounded preroll owns its own deadline and must get one opportunity to
 establish the cold software-decoded first frame.
+Expiring a Playback-current binding also invalidates every retained Timeline
+wait or ready evaluation that names that exact physical media key. The expired
+Broker binding has no publication owner, so retaining its dependency level
+would suppress replacement admission and leave the next demand permanently
+Loading. An in-flight `FinishForLocality` attempt may still complete cache-only,
+but it cannot keep the expired evaluation authoritative.
 
 Submission distinguishes `DroppedObsoleteGeneration` from
 `DroppedBackpressure`. The former has no admitted owner and therefore cannot be
@@ -547,6 +609,13 @@ evaluation from charging the same current demand twice and prevents metadata
 promotion from silently dropping a queued physical lease. If a newly acquired
 payload loses a later ordinary submit race, move/drop semantics release or
 replace that exact lease.
+
+Sustained-pressure suppression is applied only after that payload-free exact-key
+binding attempt. A speculative decode for the demanded key is promoted to
+Current and receives the immutable demand identity/deadline even while other
+realtime work exists. Pressure may defer acquisition of a new payload behind a
+different observable realtime owner; it cannot strand Current behind its own
+Prefetch lease or return a deferred state with no completion/retry owner.
 
 The Broker, not an opaque Adapter payload timestamp, owns queue-wait authority.
 Every dequeued `FrameWorkExecution` carries the elapsed time since its latest
@@ -685,36 +754,51 @@ Still/NonPlayback/Any. This prevents one request stream from cold-opening a
 decoder/device session on each idle worker and prevents deterministic still
 decode from occupying the realtime playback lane. Parallelism remains
 available through lanes whose declared acceptance spans the class rather than
-through implicit cross-lane stealing. One bounded failover is explicit: when a
+through implicit cross-lane stealing. A shared NonPlayback lane may borrow the
+oldest unbound Playback Prefetch only while the dedicated Playback lane is
+executing a Current request. Once the App has selected a worker to open an exact
+physical source, the request carries that worker affinity through queued
+Prefetch-to-Current rebinding. `Any` remains the single-worker fallback. This
+lets cold-source preparation overlap current decode while ensuring that the
+worker-local FFmpeg Session opened by that preparation owns every later
+continuation for the same source. Affinity is scheduling metadata rather than a
+second request authority; pending bindings, leases, deadlines, and completion
+remain Broker-owned. One bounded current-work failover is explicit: when a
 live Playback-lane execution already has authoritative cancellation evidence,
 an idle NonPlayback lane may dequeue one `Current + Playback` replacement.
 That authorized replacement outranks ordinary Interactive and Still current
 backlog so sustained non-playback demand cannot starve playback recovery. It may
-never take Playback Prefetch, never admits a second live cross-lane replacement,
+never substitutes a Prefetch for that current recovery, never admits a second live cross-lane replacement,
 and does not release the old execution's resource lease. The generic Broker
 does not assign codec threads; the App media Adapter must cap a cross-lane
 replacement at the NonPlayback worker's CPU share so recovery cannot overlap
-two full-machine software decoders. The current App deliberately instantiates
-only Playback plus shared NonPlayback workers (or one Any worker on a constrained
-CPU); dedicated Interactive and Still lanes remain capabilities of the generic
-Broker, not additional production decoder pools.
+two full-machine software decoders. The current App instantiates Playback plus
+shared NonPlayback workers, and on a sufficient CPU budget a third Still
+worker. Static Timeline sources carry Still-worker affinity while retaining
+Playback work class and deadline semantics, so slow image probing cannot occupy
+either moving-source Session owner. One Any worker remains the constrained-CPU
+fallback; the generic Interactive lane is not a separate production pool.
 
 Worker-lane affinity is necessary but does not by itself bound native decoder
 residency across a transport transition. The App Preview Runtime therefore owns
 two mutually exclusive physical residency families: `PlaybackCursor` belongs
 to Playback; `ScrubCursor` and `RandomAccessStillFrame` belong to Interactive.
-When the family changes, the Runtime removes only Frame Store entries carrying
-nonzero decoder resource units, publishes a worker-lifecycle revision, and
-waits for the opposite worker family to destroy its own codec context before
-admitting new-family decode. CPU media frames and independently usable final
+Every worker-local context contains separate bounded sets for those families;
+lane and Session family are independent because NonPlayback may own an
+explicitly affined cold Playback source. When the family changes, the Runtime
+removes only Frame Store entries carrying nonzero decoder resource units,
+publishes a worker-lifecycle revision, and waits for every worker to retire the
+obsolete Session set before admitting new-family decode. CPU media frames and independently usable final
 Viewer outputs remain resident. The Broker owns only the revision and
 lost-wakeup-safe Condvar interruption; it does not decide which workers retire
 or interpret media access modes. A stale acknowledgement is revision-scoped and
-cannot satisfy a later transition. The worker cannot acknowledge even the
-current revision until completion, Frame Store, and renderer clones have
-released every native-output lease from its context. This bounds production to
-one active native decoder family while preserving thread-affine FFmpeg
-destruction and bounded transition latency.
+cannot satisfy a later transition. If a published native output still pins the
+obsolete family, the worker records a family-scoped pending retirement and
+acknowledges the directive so the separate active Session set can proceed. It
+performs the deferred destruction on its next lifecycle observation after the
+last family output releases. Final teardown verifies both sets and all external
+leases are gone. This preserves thread-affine FFmpeg destruction and bounded
+transition latency without conflating the two families.
 
 Admission across the pending-binding window and worker queue is transactional.
 The Broker first computes one eviction that can satisfy every active capacity
@@ -822,6 +906,19 @@ is running after a terminal non-presentable delivery, Preview may retain an
 already published exact output but must return Loading for any unregistered
 no-ticket retry until the Engine issues another demand.
 
+There is one bounded alias case that does not perform a visibility commit. A
+complete current-plan evaluation may prove that its exact `PreviewOutputKey`
+already names the continuously retained semantic output and the Adapter must
+separately prove that the same physical output lease is still current. The
+candidate is then marked `already_visible`; Headless may synchronize its fresh
+ticket after the deadline without inventing a late publication. The App
+classifies visibility no later than the ticket deadline, conservatively
+producing `Degraded` when proof arrived after it, while the terminal delivery
+keeps the real current monotonic observation time. This exception cannot be
+used by a new buffer, a stale ticket, a key-only match without the physical
+lease, or a candidate that has not completed canonical Timeline evaluation.
+Fresh candidates still run deadline preflight before recording GPU commands.
+
 A bounded Headless observation must close the exact sampled demand, not merely
 wait for `Ready`. If preflight or completion consumes that demand as `Late`,
 the gate records a non-ready terminal sample and applies its unchanged quality
@@ -870,18 +967,28 @@ reuse its candidate transition and publication primitives. The Module is
 compiled for `validation` as well as tests, including the same successor,
 physical-output, work-watch, and retry seams.
 
+Audio Device admission consumes three independent owner facts: Playback proves
+the complete preservable near-media prefix, the Viewer Adapter proves the exact
+immediate physical successor, and the renderer prewarms the discovered cold
+activation's GPU input contract. Farther ticketless GPU staging remains bounded
+to one new preparation per coordinator turn and is opportunistic; an asynchronous
+Timeline evaluation at offsets two through six cannot hold the clock after those
+three required facts are satisfied.
+
 COL-047 endurance execution wraps this coordinator with one validation-only
 `PersistentTimelinePlaybackPhase`; it does not add another playback loop. The
 owner freezes the active Sequence ID/revision, Project Author Generation, and
-the frame-zero coordinate at startup, admits only an exact 60/1 non-looping
-fixture with one guard frame beyond the required presentation count, and pumps
+the frame-zero coordinate at startup, admits a non-looping fixture at the
+prepared workload's exact program rate (60/1 or separately approved 60000/1001),
+with one guard frame beyond the required presentation count, and pumps
 the App-owned physical Audio output. One accepted interval must prove the
 departed exact picture ready, remain under Audio Device Clock, and advance
 exactly one frame in the same Playback Epoch. Natural end, author/transport
 drift, clock fallback, skipped progress, picture unavailability, and execution
-failure latch permanently. Owner snapshots occur only after the phase has
-finished the current native-scheduling residency; resume verifies the unchanged
-binding and coordinate before constructing another residency. This proves the
+failure latch permanently. Owner snapshots read each domain's internally atomic
+diagnostics while the native-scheduling residency remains active; the caller's
+observation interval is the cross-domain envelope. Settlement remains an explicit
+operation for seek, device/surface reopen, and consuming shutdown. This proves the
 production Timeline A/V transport but is intentionally not Reference Output
 clean-feed evidence: that downstream branch must originate from the canonical
 full-raster working Program Output and public Audio Program, never Viewer
@@ -922,10 +1029,24 @@ rotation. Only an exact current-coordinate request promotes semantic and
 physical ownership. Late cleanup is artifact/submission-scoped and cannot erase
 or revive a newer prepared result.
 
-The immediate-successor GPU slot is complemented by a four-entry,
-Adapter-owned CPU-complete staging horizon. Three entries cover coordinates
-`current+2` through `current+4` (or the reverse-direction equivalents); the
-fourth permits an immediate successor blocked on GPU admission without
+For Headless realtime playback, an exact semantic and physical prepared match
+is promoted immediately after the Clock advances across its frame boundary.
+That deadline-bound promotion precedes the general Preview result pump and GPU
+callback retirement. Native-memory observation and the next immutable resource
+decision run after candidate arbitration on every successful turn, so resource
+maintenance cannot consume the presentation budget of an already-rendered
+successor.
+
+If the exact Preview delivery consumes a pending demand between a candidate
+attempt and its physical-current observation, Headless upgrades the original
+sampled binding in place. The resulting receipt therefore retains the demand
+identity that owned the pre-clock opportunity even though the live transport
+snapshot correctly reports no pending demand after acceptance.
+
+The immediate-successor GPU slot is complemented by a six-entry,
+Adapter-owned CPU-complete staging horizon. Five entries cover coordinates
+`current+2` through `current+6` (or the reverse-direction equivalents); the
+sixth permits an immediate successor blocked on GPU admission without
 evicting that horizon. These entries own neither a GPU submission nor a
 physical/semantic publication. When a clock displacement lands directly on a
 staged coordinate, the Adapter may attach the freshly captured current
@@ -937,7 +1058,15 @@ transition; it re-enters the ordinary current-demand execution path.
 Adapters fill at most the nearest missing staged coordinate per coordinator
 turn. Repeated turns converge on the horizon; one turn may not burst three
 speculative evaluations into the media/visual scheduler and compete with the
-current Playback demand.
+current Playback demand. Qualification keeps its independent four-frame
+maximum recovery displacement; the larger ownership horizon cannot relax that
+acceptance rule.
+
+Once AudioDevice owns time, the pre-clock interval path only retains existing
+lookahead owners. After an exact boundary presentation completes, the
+coordinator may add one nearest missing staged coordinate. This rolling
+replenishment replaces the entry consumed as the new immediate successor
+without allowing distant staging to precede the current frame's publication.
 
 `app::viewer_gpu_publication::ViewerGpuPublicationSlots` is the sole physical
 ownership Module for this contract. It retains one current and one prepared
@@ -1333,10 +1462,18 @@ Presenting the priming-current output consumes its Frame Demand but does not end
 topping up future media even when a Viewer-only generation rotation made that
 output stale; output freshness decides presentation, not media admission. Only
 ordinary Playing/Recovering without demand uses the terminal no-demand path.
-The preroll observation seam itself maintains that bounded forward queue before
-reporting residency. Startup therefore cannot wait for a later Viewer-candidate
-turn to admit decoder work after current-frame presentation has already consumed
-most of the priming deadline.
+Before the Priming current demand is consumed, both shared preroll observation
+and steady prefetch inspect existing future residency without admitting new
+future work. This gives the first exact multi-input picture priority before
+optional sources open decoder sessions or displace its already-decoded inputs.
+Once current presentation consumes the demand, the preroll observation seam
+maintains the bounded forward queue without waiting for another Viewer turn.
+The execution snapshot carries a separate read-only Priming work deadline from
+the same active Engine demand, bound to its epoch, quality and target. Consuming
+presentation authority does not erase that horizon or renew it: expired
+projections remain expired, and missing/expired horizons reject new Priming
+work. Ordinary Playing prediction remains unchanged. Media residency alone
+still cannot establish current or successor presentation readiness.
 
 The realtime callback may only read/write preallocated lock-free or proven
 bounded structures and atomics. It must not allocate, log, decode, access the
@@ -1678,13 +1815,96 @@ no-deadline-renewal rule. The post-pump transport tick uses a newly sampled
 monotonic instant and still runs after a pump error, because a fail-closed audio
 event may already have handed authority continuously to Synthetic Clock.
 
+During initial play and active seek recovery, the full video cold-start horizon
+remains the gate for physical Audio activation and Audio Device Clock handoff.
+The coordinator nevertheless keeps the inactive Audio generation filling while
+that video gate is closed. Those preroll polls cannot publish a device-clock
+observation or consume PCM, but they prevent independent video preparation from
+leaving the Audio generation with no admitted work once the video gate opens.
+The Headless coordinator publishes video-preroll readiness after each bounded
+lookahead maintenance turn. The staging turn that makes the last media or cold
+activation input ready can therefore release `Priming` immediately; it cannot
+leave the Engine holding the earlier incomplete observation until the original
+recovery deadline. Reobservation carries the unchanged active Priming demand
+identity even after its terminal Ready delivery has consumed presentation
+authority.
+When a distinct-source activation exists, Preview reserves and retains its
+exact media dependency closure before pinning the near media prefix. The Frame
+Store charges the actual entry, byte, and decoder-resource units, including
+multi-layer activations. Priming's rolling scheduler services the immediate
+frame and that activation but leaves remaining near admission to the preroll
+owner. This prevents a saturated surface ring from alternately evicting the
+completed cold frame and the last near frame; the reported preservable prefix
+reflects the capacity left after the cold owner is fixed. Playing retains its
+ordinary time-derived rolling window. Within that running window, the exact
+immediate source continuation enters the Playback worker before any retained
+cold-source top-up. The cold activation keeps the next bounded reservation,
+but cannot block a millisecond-scale reuse decode behind a source-open path at
+the current presentation boundary. A retained cold-activation owner survives
+crossing into the ordinary rolling window; only reaching its exact Timeline
+coordinate, leaving the bounded horizon, or rotating the semantic execution
+identity releases it. The target therefore cannot slide forward one frame per
+clock tick and reopen the same physical source ahead of current-source work.
+The future-media owner also retains a bounded exact-source-to-worker map. The
+initial source defaults to Playback, each new cold activation uses the opposite
+worker from an already-owned persistent source or the next alternating lane,
+and all missing requests in that activation inherit the chosen owner. The map
+uses the immutable physical decode-source contract, not an authored clip or
+Asset alias, and expires with semantic-window identity or bounded LRU eviction.
+An in-family frame/cache trim releases the cold-activation payload owner but
+preserves this map and the immutable lowering plan; decoded-frame residency is
+not Session ownership. While Priming, observing a retained activation memo
+without its payload immediately reacquires the exact Broker/Frame Store closure
+before the near-prefix planner can spend the bounded speculative slots. Full
+project/lifecycle invalidation still clears both.
+The shared `video_preroll` entry synchronizes the sampled transport family and
+Playback Epoch before it admits or retains any of these payloads. Preroll may be
+the first Preview call after play or recovery, so deferring that lifecycle edge
+to a later GPU candidate would immediately retire the owner preroll just built.
+Cache-pressure recovery seals Critical and restored Nominal decisions in order.
+Its later exact-picture observation accepts a newer decision revision because
+stopping and resuming Playback changes real execution demand; it still requires
+Nominal/None policy, monotonic Preview application, and unchanged cumulative
+GPU, fatal, and Export failure counters.
+This makes the surface retained at an edit and the decoder Session needed after
+the edit part of one lifecycle.
+
+A controlled resource-recovery operation may explicitly reissue only the exact
+current timed demand when that operation invalidated the representation needed
+to satisfy it. The Engine preserves epoch, target, current quality revision,
+transport state, and Clock Master, retires every old ticket through a fresh
+demand sequence, and uses the operation's already-bounded absolute deadline. If
+the preceding terminal presentation selected a new adaptive quality, this seam
+may issue that current revision only when the old exact demand is the recorded
+terminal owner. Stopped, paused, ended, blocked, mismatched-current, and
+non-future requests fail atomically. Ordinary clock handoff and automatic
+quality recovery continue to retain the earliest current-frame deadline.
+
+The Headless realtime coordinator uses that same explicit seam once when a
+current decode or presentation candidate crosses its terminal deadline before
+the Audio Device clock can advance. The retry keeps the exact epoch and frame,
+issues a fresh demand sequence, and is bounded by the smaller of the outer
+interval deadline and one late-presentation-grace interval. A second terminal
+rejection fails the interval. This lets an isolated decoder jitter complete
+through the declared recovery path while preventing deadline renewal loops or
+multi-frame clock stalls.
+
+Realtime candidate, successor, and lookahead loops expose bounded aggregate
+stage timings and terminal diagnostics. They do not emit one log record per
+poll: synchronous stderr/file collectors can otherwise become part of the
+presentation critical path and fabricate the clock displacement that the
+qualification is intended to measure.
+
 Long-run acceptance telemetry obeys the same realtime boundary. Native
 product-process-tree memory samples are captured by a dedicated evidence
-worker on a fixed monotonic cadence and accumulated only after the measured
-playback window closes. Transport advancement, audio pumping, Preview result
-draining, and Viewer submission therefore never execute Tool Help enumeration
-or per-process memory queries inline. A separate post-stress sample may run
-synchronously only after realtime playback and GPU ownership have settled.
+worker on a fixed monotonic cadence. Completed results are drained without
+blocking and paired with read-only owner snapshots while transport continues.
+Transport advancement, audio pumping, Preview result draining, Viewer submission,
+and Reference Output therefore never execute Tool Help enumeration or per-process
+memory queries inline. The general campaign coordinator uses the same rule and
+pumps the active runtime in bounded quanta while its phase-scoped native probe is
+in flight. A terminal probe may block only after realtime playback and GPU
+ownership have been consumed.
 
 The worker/session retirement boundary owns codec, DPB, hardware-frames context,
 and native surface-pool destruction; it does not own the physical decoder
@@ -1786,7 +2006,12 @@ and failure state lives in the playback-owned Module. Decoded media with absent
 or incomplete source revision evidence is never admitted. Entry count, host
 bytes, and decoder-resource units remain independent budgets; the prefetch
 window consumes those budgets but does not define or inflate them. The Store
-never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
+offers an atomic speculative batch reservation for one complete frame
+dependency closure. It evicts releasable Store-only LRU ownership first, then
+publishes one independently owned lease per request only when the complete
+entry/byte/decoder-unit aggregate fits. A multi-layer native cold activation
+therefore cannot retain one surface while waiting indefinitely for another.
+The Store never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
 identity, stable presentation-resource naming, and the CPU raster output
 contract. The Window presentation Adapter alone maps that value to
 `ViewerFrameImage`, reusing the same `Arc<[u8]>`; a headless Adapter can consume
@@ -1883,6 +2108,26 @@ Adaptive-scale rotation prunes old-size queued keys so the bounded window can
 admit Half/Quarter work; the worker-local decoder Session remains reusable and
 rebinds only its output materialization geometry. Headless otherwise claims no
 UI publication.
+
+A terminal delivery that changes the adaptive scale does not publish a second
+demand for the coordinate that just completed. Its presentation deadline is
+already spent, and a presentable Ready/Degraded picture remains the physical
+current output. The new quality revision applies when the Clock Master advances
+to the next coordinate, which then receives one freshly computed demand. A
+clock-superseded coordinate still publishes its new current demand immediately;
+there was no terminal presentation to retain.
+Subframe clock observations between the terminal delivery and that boundary
+also preserve the consumed demand identity. They cannot reinterpret the new
+quality revision as authority to rerender the already-presented coordinate.
+
+The realtime coordinator retains the exact completed demand as the interval's
+physical presentation fact before consulting the newly selected Preview
+generation. A scale transition can make the just-presented output stale for
+future reuse, but it cannot erase the Ready/Degraded presentation that already
+closed the sampled coordinate. Cache or device recovery may close its bounded
+exact-picture opportunity while Playback remains `Recovering`; later clock
+coordinates, rather than repeated presentations of the same picture, supply the
+healthy-delivery window used to return to `Playing`.
 Device-scoped Renderer native decode admission is consumed by both Adapters and
 remains separate from media
 decode capability probes.
@@ -1904,6 +2149,9 @@ decode capability probes.
    indefinitely for a stale terminal result would deadlock recovery. A timely
    first result clears pressure accumulated while the new spatial work was
    materializing.
+   Explicit resource reconstruction may reissue the same current picture only
+   under its caller-owned bounded recovery deadline; it cannot alter transport
+   identity, coordinate, current quality, or Clock Master.
 9. Blocked color/capability paths cannot be relabeled as ordinary buffering.
 10. Preview and export retain identical timeline/effect/color interpretation;
     only realtime scheduling, resolution, and presentation may differ.
@@ -1955,3 +2203,76 @@ decode capability probes.
   return; fewer resource-policy applications than planned observations fails
   closed even when all frames were otherwise presented;
 - Golden/Stress Project runs use real media and structured evidence.
+
+### Preview queue admission owner and receiver construction
+
+The Preview Runtime retains the single admission-closing media job sender from
+unpublished construction through consuming shutdown. Starting a native worker or
+building a deterministic workerless test adapter obtains only a receiver from
+`MediaPreviewScheduler::job_receiver`; this operation does not manufacture a
+second sender whose Drop could close the shared broker. Dropping the real sender
+still closes admission and wakes receivers. A regression exercises receiver
+acquisition and disposal while the original sender remains usable, followed by
+actual sender retirement and rejected subsequent work. Production worker-health
+and packaged-worker admission checks remain mandatory.
+
+Headless A/V terminal observation uses the same candidate-retry predicate as
+ordinary realtime intervals: a satisfied current binding is not reevaluated
+merely because Audio is still joining. Distant lookahead starts only after the
+immediate successor has retained a prepared closure. Initial A/V startup fills
+the bounded CPU-complete horizon before AudioDevice begins consuming the
+timeline; this keeps the first cold YUV upload outside the first presentation
+interval. Once AudioDevice owns time, a frame boundary promotes the prepared
+picture and replenishes only the exact immediate successor. It retains and
+prunes the existing distant horizon without synchronously evaluating a missing
+far-future frame: measured 4K layer preparation can exceed one picture period,
+so that work has no authority to delay the next device-clock observation. The
+cold horizon still supplies headroom while steady immediate-successor residency
+converges. Priming retains the existing bounded
+media-prefix admission. After a Ready publication, the Headless coordinator releases only the exact completed CPU
+evaluation reuse entry, and only once the physical output matches, no submission
+remains in flight, and the GPU generation is healthy. Queue publication alone
+never performs that release. Neither deadlines nor residency limits change.
+
+An immediate-successor or farther-lookahead candidate owns only its exact
+ticketless frame. It does not recursively schedule the ordinary future-media
+window after Timeline evaluation. The visible current/priming execution turn is
+the sole recurring prefetch owner, so future source discovery and source
+revalidation cannot run on the realtime coordinator while it is preparing a
+successor. Exact speculative media needed by that successor still enters the
+bounded Prefetch lane through Timeline evaluation.
+
+Promoting a physically prepared successor is still a visible current execution
+turn. Before it returns the promoted output, it replenishes the same bounded
+future-media queue and performs the bounded canonical activation query. The
+query is logarithmic in the two-second range and does not lower every
+intervening frame on the AudioDevice coordinator. Playing with
+an already exact current output does the same. Lookahead and successor requests
+cannot promote the immediate-successor slot, so ticketless work cannot acquire
+this recurring authority.
+
+A consuming GPU completion that reports a terminal Frame Delivery returns that
+terminal status from the same candidate call. Completion-owner draining cannot
+recursively execute another candidate first: once Late, Blocked, Canceled, or
+Failed consumes the demand, a late exact physical artifact is retained only as
+stale evidence and cannot be reclassified as Ready.
+
+At a device-clock boundary, the Headless adapter samples the complete semantic
+key and cloneable artifact identity of the physical output that is already
+visible. If a CPU-staged current candidate later resolves to that exact key and
+the same physical lease is still current, the Preview coordinator revalidates
+the retained output under the new generation and consumes the demand with the
+sampled visibility time. No replacement GPU submission is created. A different
+plan key, execution nonce, physical artifact, seek epoch, quality revision, or
+frame intent continues through terminal preflight and ordinary publication.
+When accepting that frame advances the adaptive quality revision, the satisfied
+binding remains current for the same epoch and frame until the clock advances,
+provided no replacement demand exists and the revision only moves forward.
+This keeps the accepted physical picture visible during Recovering without
+issuing or inventing a second same-frame delivery.
+An exact prepared successor also carries its queue-ordered availability across
+the device-clock boundary. The Headless adapter passes that boundary timestamp
+into the pointer-only semantic and physical slot promotion, validates the exact
+prepared key and artifact, and then completes the demand against that prior
+publication time. A replacement without prepared publication proof still runs
+terminal preflight at the actual submission or promotion attempt.

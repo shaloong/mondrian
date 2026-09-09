@@ -139,6 +139,9 @@ pub struct PreviewDecodeWorkerExecutionDiagnostics {
     pub playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
     /// Progress for the shared Interactive/Still worker when two workers are available.
     pub non_playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
+    /// Progress for the static-image/Still worker when three workers are available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still: Option<mondrian_media::PreviewDecodeExecutionProgress>,
 }
 
 /// Cloneable read authority for the bounded Preview workers' media progress.
@@ -168,6 +171,7 @@ impl PreviewDecodeWorkerExecutionWatch {
                 MediaPreviewWorkerLane::Any => snapshot.any = progress,
                 MediaPreviewWorkerLane::Playback => snapshot.playback = progress,
                 MediaPreviewWorkerLane::NonPlayback => snapshot.non_playback = progress,
+                MediaPreviewWorkerLane::Still => snapshot.still = progress,
             }
         }
         snapshot
@@ -198,6 +202,10 @@ pub struct PreviewFutureMediaWindowDiagnostics {
     /// One planning turn observes each unique physical path at most once. A
     /// later turn must observe the path again.
     pub source_fingerprint_observations: u64,
+    /// Timeline frame whose distinct physical-source dependency closure is retained.
+    pub retained_cold_activation_frame: Option<i64>,
+    /// Media frames physically retained for the bounded cold activation closure.
+    pub retained_cold_activation_media_frames: usize,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -300,12 +308,14 @@ pub struct PreviewDiagnostics {
     pub preview_execution_generation: u64,
     /// Exact current-candidate bindings waiting on reused Broker work.
     pub media_existing_work_waiters: usize,
-    /// Existing-work retry authority retained until candidate evaluation acknowledges it.
-    pub media_existing_work_retry_pending: bool,
-    /// Current media requests that registered exact existing-work waiters.
-    pub media_existing_work_waiter_registrations: u64,
-    /// Retained existing-work retries acknowledged by real candidate evaluation.
-    pub media_existing_work_retry_acknowledgements: u64,
+    /// Current-candidate keys waiting for realtime execution pressure to settle.
+    pub media_execution_pressure_waiters: usize,
+    /// Media retry authority retained until candidate evaluation acknowledges it.
+    pub media_retry_pending: bool,
+    /// Current media requests that registered an owner-bound retry waiter.
+    pub media_retry_waiter_registrations: u64,
+    /// Retained media retries acknowledged by real candidate evaluation.
+    pub media_retry_acknowledgements: u64,
     /// Last exhaustive reason the GPU candidate returned Loading.
     pub last_gpu_loading_reason: Option<&'static str>,
     /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.

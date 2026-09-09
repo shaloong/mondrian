@@ -893,17 +893,17 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
 fn execute_recovery_nesting_slice(
     root: &Path,
     paths: &GoldenRunPaths,
-) -> anyhow::Result<GoldenRecoveryNestingReport> {
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenRecoveryNestingReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Recovery + Nesting",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    execute_recovery_nesting_stage(&contract, &mut workflow)
+    workflow.run_with(|workflow| execute_recovery_nesting_stage(&contract, workflow))
 }
 
 #[test]

@@ -16,7 +16,8 @@ use mondrian_effects::{
     EffectExecutionSessionConfig, EffectGraphExecutionBudget, LutPreparationCacheConfig,
 };
 use mondrian_export::{
-    ExportExecutionResourcePolicy, EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
+    ExportExecutionResourcePolicy, ExportQueueDiagnostics,
+    EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
 };
 use mondrian_media::{HwDeviceContextPoolPolicy, PreviewSeekIndexCachePolicy};
 use mondrian_platform::{
@@ -1279,15 +1280,7 @@ impl AppState {
                     .last()
                     .map_or(0, |terminal| terminal.operation_id),
             },
-            export: ExecutionDomainDemand {
-                queued: export.pending,
-                running: export.running + export.cancelling,
-                user_initiated: export.pending + export.running + export.cancelling,
-                terminal_generation: export
-                    .completions
-                    .saturating_add(export.failures)
-                    .saturating_add(export.cancellations),
-            },
+            export: export_execution_domain_demand(&export),
         };
         let fresh_demand_observations = if external_demand_is_fresh {
             ExecutionResourceSlotDomains::all()
@@ -1399,6 +1392,27 @@ impl AppState {
     }
 }
 
+fn export_execution_domain_demand(export: &ExportQueueDiagnostics) -> ExecutionDomainDemand {
+    let active = export.running.saturating_add(export.cancelling);
+    // A queue attempt blocked at its cooperative execution gate has already
+    // returned the heavy execution slot, but it remains runnable work. Keeping
+    // it in `running` makes the slot allocator wait for the attempt to finish
+    // before reopening dispatch, while the attempt itself waits for reopened
+    // dispatch: Critical -> Nominal pressure would deadlock permanently. Move
+    // only the bounded yielded population back to queued demand so a fresh
+    // observation can re-admit the same immutable attempt.
+    let yielded = export.running_yielded.min(active);
+    ExecutionDomainDemand {
+        queued: export.pending.saturating_add(yielded),
+        running: active.saturating_sub(yielded),
+        user_initiated: export.pending.saturating_add(active),
+        terminal_generation: export
+            .completions
+            .saturating_add(export.failures)
+            .saturating_add(export.cancellations),
+    }
+}
+
 fn publish_decision(state: &mut ExecutionResourceCoordinationState) {
     let revision = state.decision.revision.saturating_add(1);
     state.decision = Arc::new(derive_decision(
@@ -1440,11 +1454,17 @@ fn heavy_slot_capacity(
     pressure: ExecutionResourcePressure,
     demand: ExecutionResourceDemandSnapshot,
 ) -> usize {
-    if demand.preview_realtime
-        || demand.audio_realtime
-        || pressure == ExecutionResourcePressure::Critical
-    {
+    if pressure == ExecutionResourcePressure::Critical {
         return 0;
+    }
+    if demand.preview_realtime || demand.audio_realtime {
+        // Concurrent Recovery has one explicitly admitted offline Export owner.
+        // Keep every automatic/background domain closed, but allow the bounded
+        // allocator to hand one slot to that concrete user Export demand.
+        return usize::from(
+            demand.export.user_initiated > 0
+                && (demand.export.queued > 0 || demand.export.running > 0),
+        );
     }
     if pressure == ExecutionResourcePressure::Elevated {
         return 1;
@@ -1779,7 +1799,7 @@ fn derive_decision(
         },
         export: ExportExecutionDecision {
             dispatch_enabled: export_dispatch,
-            resource_policy: export_resource_policy(profile.class, cache_divisor),
+            resource_policy: export_resource_policy(profile.class, cache_divisor, realtime),
         },
         ui: UiExecutionDecision {
             vector_icon_cache_entries: (vector_icon_entries / cache_divisor).max(1),
@@ -1952,6 +1972,7 @@ fn export_gpu_visual_active_grant(
 fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
+    realtime: bool,
 ) -> ExportExecutionResourcePolicy {
     let (
         visual_program_entries,
@@ -2061,6 +2082,10 @@ fn export_resource_policy(
         MachineResourceClass::Professional => 512 * MIB,
     };
     ExportExecutionResourcePolicy {
+        // Realtime Preview/Audio owns GPU priority. An admitted explicit
+        // Export remains live, but equivalent CPU-capable visual work must not
+        // continuously submit a second GPU queue beside the realtime Session.
+        opportunistic_gpu_acceleration: !realtime,
         // Reachable-closure and per-frame working limits are correctness
         // admission grants, not optional residency. Pressure may delay the
         // next attempt and trim caches, but cannot make the same valid Export
@@ -2477,7 +2502,7 @@ mod tests {
     }
 
     #[test]
-    fn realtime_demand_always_admits_preview_and_audio_and_pauses_background_dispatch() {
+    fn realtime_demand_admits_one_explicit_export_and_pauses_other_background_dispatch() {
         let coordinator =
             ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
         let decision = coordinator.update_demand(ExecutionResourceDemandSnapshot {
@@ -2495,9 +2520,48 @@ mod tests {
         assert!(!decision.proxy.automatic_dispatch_enabled);
         assert!(!decision.media_import.dispatch_enabled);
         assert!(!decision.media_asset_mutation.dispatch_enabled);
-        assert!(!decision.export.dispatch_enabled);
+        assert!(decision.export.dispatch_enabled);
+        assert!(
+            !decision.export.resource_policy.opportunistic_gpu_acceleration,
+            "realtime owners keep GPU priority while an equivalent CPU Export route remains live"
+        );
         assert_eq!(decision.audio.idle_warmup_windows, 0);
         assert!(!decision.audio.idle_warmup_dispatch_enabled);
+    }
+
+    #[test]
+    fn realtime_without_explicit_export_has_no_heavy_dispatch_and_critical_closes_export() {
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        assert!(
+            coordinator.decision().export.resource_policy.opportunistic_gpu_acceleration,
+            "offline Export retains GPU acceleration"
+        );
+        let realtime = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(!realtime.export.dispatch_enabled);
+
+        let export = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: ExecutionDomainDemand {
+                queued: 1,
+                user_initiated: 1,
+                ..ExecutionDomainDemand::default()
+            },
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(export.export.dispatch_enabled);
+
+        let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
+        assert!(!critical.export.dispatch_enabled);
+        assert!(critical
+            .heavy_slots
+            .domains_to_close()
+            .contains(ExecutionResourceSlotDomain::Export));
     }
 
     #[test]
@@ -2939,6 +3003,61 @@ mod tests {
             mondrian_renderer::PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES
         );
         assert!(fresh.revision > critical.revision);
+    }
+
+    #[test]
+    fn yielded_export_is_queued_for_fresh_slot_reacquisition_after_critical_pressure() {
+        let active_queue =
+            ExportQueueDiagnostics { running: 1, ..ExportQueueDiagnostics::default() };
+        let active = export_execution_domain_demand(&active_queue);
+        assert_eq!(
+            (active.queued, active.running, active.user_initiated),
+            (0, 1, 1)
+        );
+
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: active,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
+        assert!(critical
+            .heavy_slots
+            .domains_to_close()
+            .contains(ExecutionResourceSlotDomain::Export));
+        assert!(coordinator
+            .acknowledge_heavy_slot_close(&critical, ExecutionResourceSlotDomain::Export));
+        assert!(
+            !coordinator
+                .observe_pressure(ExecutionResourcePressure::Nominal)
+                .export
+                .dispatch_enabled
+        );
+
+        let yielded_queue = ExportQueueDiagnostics {
+            dispatch_enabled: false,
+            running_yield_requested: true,
+            running: 1,
+            running_yielded: 1,
+            ..ExportQueueDiagnostics::default()
+        };
+        let yielded = export_execution_domain_demand(&yielded_queue);
+        assert_eq!(
+            (yielded.queued, yielded.running, yielded.user_initiated),
+            (1, 0, 1),
+            "a cooperative yield returns its running slot without losing runnable work"
+        );
+        let resumed = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: yielded,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(resumed.export.dispatch_enabled);
+        assert!(resumed.heavy_slots.allocation().admits(ExecutionResourceSlotDomain::Export));
     }
 
     #[test]

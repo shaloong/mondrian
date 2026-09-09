@@ -16,7 +16,6 @@ use thiserror::Error;
 const WORKLOAD_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_WORKLOAD_BYTES: u64 = 16 * 1024;
 const MICROS_PER_HOUR: u64 = 3_600_000_000;
-const EXACT_PROGRAM_FRAMES_PER_SECOND: u64 = 60;
 
 const PLAYBACK_REFERENCE_WORKLOAD_ID: &str = "mondrian-col047/playback-reference/v1";
 const CONTINUOUS_EXPORT_WORKLOAD_ID: &str = "mondrian-col047/continuous-export/v1";
@@ -29,6 +28,8 @@ const CONCURRENT_RECOVERY_WORKLOAD_ID: &str = "mondrian-col047/concurrent-recove
 /// product owners after this admission boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EndurancePreStartCapability {
+    /// Loader-before-execution native object authority was attested for this process.
+    PreloaderMappedImageIdentityPrepared,
     /// Timeline picture/audio fixture bindings were declared and are reachable for later build.
     TimelinePlaybackFixtureDeclared,
     /// Sequence/source Export fixture bindings were declared for later exact build validation.
@@ -41,6 +42,12 @@ pub enum EndurancePreStartCapability {
     ExternalReferenceSignalPreflight,
     /// Pinned independent verifier identity and execution contract were prepared.
     IndependentExportVerifierPrepared,
+    /// Externally approved PSE provider and fixed QC profile are held before phase owners start.
+    RegulatoryPseProviderPrepared,
+    /// Exact BMX executable, version and complete runtime owners were admitted.
+    ApprovedBmxRuntimePrepared,
+    /// Declared canonical ANC source is validated and retained before phase creation.
+    FrozenAncillaryProgramPrepared,
     /// Product seek recovery contract and target inventory were prepared.
     SeekRecoveryPrepared,
     /// Process-local Surface event-loop recovery owner was prepared.
@@ -69,6 +76,28 @@ pub struct EnduranceNotRunAdmission {
 }
 
 impl EnduranceNotRunAdmission {
+    pub(crate) fn missing_bmx(phase_id: String, workload_id: String) -> Self {
+        Self::new(
+            phase_id,
+            workload_id,
+            vec![EndurancePreStartCapability::ApprovedBmxRuntimePrepared],
+        )
+    }
+    pub(crate) fn missing_ancillary(phase_id: String, workload_id: String) -> Self {
+        Self::new(
+            phase_id,
+            workload_id,
+            vec![EndurancePreStartCapability::FrozenAncillaryProgramPrepared],
+        )
+    }
+    pub(crate) fn missing_regulatory_pse(phase_id: String, workload_id: String) -> Self {
+        Self::new(
+            phase_id,
+            workload_id,
+            vec![EndurancePreStartCapability::RegulatoryPseProviderPrepared],
+        )
+    }
+
     fn new(
         phase_id: String,
         workload_id: String,
@@ -101,6 +130,12 @@ pub struct EndurancePreStartCapabilityInventory {
 }
 
 impl EndurancePreStartCapabilityInventory {
+    pub(crate) fn admit(&mut self, capability: EndurancePreStartCapability) {
+        self.capabilities.insert(capability);
+    }
+    pub(crate) fn revoke(&mut self, capability: EndurancePreStartCapability) {
+        self.capabilities.remove(&capability);
+    }
     /// Construct an inventory from independently observed product capabilities.
     pub fn new(capabilities: impl IntoIterator<Item = EndurancePreStartCapability>) -> Self {
         Self { capabilities: capabilities.into_iter().collect() }
@@ -154,6 +189,7 @@ pub struct PreparedEnduranceWorkload {
     kind: EndurancePhaseKind,
     required_capabilities: Vec<EndurancePreStartCapability>,
     recovery_cycle_count: u32,
+    program_frame_rate: Option<mondrian_core::Rational>,
 }
 
 impl PreparedEnduranceWorkload {
@@ -176,12 +212,14 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
+                        EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
                         EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
                         EndurancePreStartCapability::AudioOutputDevicePrepared,
                         EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
                         EndurancePreStartCapability::ExternalReferenceSignalPreflight,
                     ],
                     recovery_cycle_count: 0,
+                    program_frame_rate: Some(contract.program_frame_rate.rate()),
                 })
             }
             EndurancePhaseKind::ContinuousExport => {
@@ -192,10 +230,12 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
+                        EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
                         EndurancePreStartCapability::FrozenExportFixtureDeclared,
                         EndurancePreStartCapability::IndependentExportVerifierPrepared,
                     ],
                     recovery_cycle_count: 0,
+                    program_frame_rate: None,
                 })
             }
             EndurancePhaseKind::ConcurrentRecovery => {
@@ -206,6 +246,7 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
+                        EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
                         EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
                         EndurancePreStartCapability::FrozenExportFixtureDeclared,
                         EndurancePreStartCapability::AudioOutputDevicePrepared,
@@ -218,11 +259,16 @@ impl PreparedEnduranceWorkload {
                         EndurancePreStartCapability::CachePressurePrepared,
                     ],
                     recovery_cycle_count: contract.recovery_cycle_count,
+                    program_frame_rate: Some(contract.program_frame_rate.rate()),
                 })
             }
         }
     }
 
+    /// Exact physical program rate declared by this hash-bound workload.
+    pub const fn program_frame_rate(&self) -> Option<mondrian_core::Rational> {
+        self.program_frame_rate
+    }
     /// Stable workload identity sealed by the checked-in contract.
     pub fn workload_id(&self) -> &str {
         &self.workload_id
@@ -323,7 +369,11 @@ impl PlaybackReferenceWorkload {
             &self.export_policy,
             &self.recovery_policy,
         );
-        validate_program_frame_counters(self.wall_clock_hours, requirement)?;
+        validate_program_frame_counters(
+            self.wall_clock_hours,
+            self.program_frame_rate.rate(),
+            requirement,
+        )?;
         if !requirement.counters.require_hardware_reference_output
             || !requirement.counters.require_external_reference_lock
             || requirement.counters.minimum_verified_exports != 0
@@ -427,7 +477,11 @@ impl ConcurrentRecoveryWorkload {
             &self.export_policy,
             &self.artifact_validation,
         );
-        validate_program_frame_counters(self.wall_clock_hours, requirement)?;
+        validate_program_frame_counters(
+            self.wall_clock_hours,
+            self.program_frame_rate.rate(),
+            requirement,
+        )?;
         let exact_cycle = [
             WorkloadRecoveryStep::Seek,
             WorkloadRecoveryStep::SurfaceDeviceReopen,
@@ -454,10 +508,20 @@ impl ConcurrentRecoveryWorkload {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 enum ProgramFrameRate {
     #[serde(rename = "60/1")]
     Sixty,
+    #[serde(rename = "60000/1001")]
+    SixtyThousandOver1001,
+}
+impl ProgramFrameRate {
+    fn rate(self) -> mondrian_core::Rational {
+        match self {
+            Self::Sixty => mondrian_core::Rational::new(60, 1),
+            Self::SixtyThousandOver1001 => mondrian_core::Rational::new(60000, 1001),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,11 +643,13 @@ fn validate_identity_and_duration(
 
 fn validate_program_frame_counters(
     wall_clock_hours: u32,
+    rate: mondrian_core::Rational,
     requirement: &EndurancePhaseRequirement,
 ) -> Result<(), EnduranceWorkloadError> {
     let expected_frames = u64::from(wall_clock_hours)
         .checked_mul(3_600)
-        .and_then(|seconds| seconds.checked_mul(EXACT_PROGRAM_FRAMES_PER_SECOND))
+        .and_then(|seconds| seconds.checked_mul(u64::try_from(rate.num).ok()?))
+        .and_then(|numerator| numerator.checked_div(u64::try_from(rate.den).ok()?))
         .ok_or(EnduranceWorkloadError::RequirementMismatch(
             "program frame count overflow",
         ))?;
@@ -592,7 +658,7 @@ fn validate_program_frame_counters(
         || requirement.counters.minimum_reference_hardware_timestamps != expected_frames
     {
         return Err(EnduranceWorkloadError::RequirementMismatch(
-            "60 fps program counter policy",
+            "exact rational program counter policy",
         ));
     }
     Ok(())
@@ -648,6 +714,41 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_5994_workloads_preserve_exact_rational_counter_policy() {
+        let profile: EnduranceQualificationProfile = serde_json::from_slice(
+            &fs::read(
+                root().join("tests/validation/commercial-endurance-qualification-as11-5994.json"),
+            )
+            .expect("profile bytes"),
+        )
+        .expect("profile");
+        for mut requirement in profile.phases {
+            let stem = match requirement.kind {
+                EndurancePhaseKind::PlaybackReference => "playback-reference",
+                EndurancePhaseKind::ContinuousExport => "continuous-export",
+                EndurancePhaseKind::ConcurrentRecovery => "concurrent-recovery",
+            };
+            let path = root().join(format!(
+                "tests/validation/endurance-workloads/{stem}-as11-5994-v1.json"
+            ));
+            let workload =
+                PreparedEnduranceWorkload::load(&requirement, &path).expect("5994 workload");
+            if requirement.kind != EndurancePhaseKind::ContinuousExport {
+                assert_eq!(
+                    workload.program_frame_rate(),
+                    Some(mondrian_core::Rational::new(60000, 1001))
+                );
+                assert_eq!(
+                    requirement.counters.minimum_reference_completed_frames,
+                    5_178_821
+                );
+                requirement.counters.minimum_reference_completed_frames += 1;
+                assert!(PreparedEnduranceWorkload::load(&requirement, &path).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn missing_capabilities_form_an_exact_not_run_receipt_before_start() {
         let requirement = profile()
             .phases
@@ -658,6 +759,7 @@ mod tests {
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed recovery workload");
         let inventory = EndurancePreStartCapabilityInventory::new([
+            EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
             EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
             EndurancePreStartCapability::FrozenExportFixtureDeclared,
         ]);
@@ -693,6 +795,7 @@ mod tests {
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed Export workload");
         let inventory = EndurancePreStartCapabilityInventory::new([
+            EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
             EndurancePreStartCapability::FrozenExportFixtureDeclared,
             EndurancePreStartCapability::IndependentExportVerifierPrepared,
         ]);

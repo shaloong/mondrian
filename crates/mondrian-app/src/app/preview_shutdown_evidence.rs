@@ -7,7 +7,7 @@ use super::preview_work_notification::PreviewWorkCallbackEvidence;
 use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
 /// Construction state of one native owner, independent of Runtime readiness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewStartupOwnerState {
     /// No native construction was attempted.
@@ -41,7 +41,7 @@ impl PreviewStartupOwnerState {
 }
 
 /// Exact per-owner inventory before an unpublished Runtime failed construction.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PreviewStartupInventory {
     /// Required cache worker or explicitly disabled test cache.
     pub cache: PreviewStartupOwnerState,
@@ -72,7 +72,7 @@ impl PreviewStartupInventory {
 }
 
 /// Exact outcomes recorded by the sole Runtime consuming shutdown algorithm.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PreviewStartupWorkerShutdown {
     /// Only installed media workers, preserving their construction order.
     pub media: Vec<PreviewOwnedWorkerShutdown>,
@@ -85,7 +85,7 @@ pub struct PreviewStartupWorkerShutdown {
 }
 
 /// Owner-free closure of a partial Preview, never normal-runtime qualification.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PreviewStartupShutdownEvidence {
     /// Partial-construction evidence schema.
     pub schema_version: u32,
@@ -189,7 +189,7 @@ impl PreviewStartupShutdownEvidence {
 }
 
 /// Synchronous terminal evidence for every worker owned by Preview Runtime.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PreviewRuntimeShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,

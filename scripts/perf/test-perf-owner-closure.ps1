@@ -101,6 +101,10 @@ foreach ($shape in @('missing', 'null', 'case', 'extra', 'old_schema')) {
 $gpuFixture = Copy-JsonValue $rows[0]
 $gpuFixture.owner_closure.gpu_owner_required = $true
 $gpuFixture.owner_closure.gpu = [pscustomobject]@{
+    worker_shutdown = 'terminated'
+    wake_callbacks = (Get-Content -LiteralPath (Join-Path $repositoryRoot "tests/validation/fixtures/window-owner-closure.json") -Raw | ConvertFrom-Json).host_shutdown.preview.work_callbacks
+    native_wake_failures = 0
+    wake_registration_rejections = 0
     worker_started = $true
     worker_terminated = $true
     worker_panicked = $false

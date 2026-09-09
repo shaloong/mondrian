@@ -45,6 +45,12 @@ impl PreviewWorkPoll {
 pub(crate) struct PreviewVideoPreroll {
     pub(crate) ready_media_frames: usize,
     pub(crate) preservable_media_frames: usize,
+    /// Whether the next distinct physical source within the bounded cold-open
+    /// horizon is already resident, or no such activation exists.
+    pub(crate) bounded_cold_activation_ready: bool,
+    /// Exact next distinct-source activation discovered inside that horizon.
+    /// This is preparation authority only; it carries no presentation ticket.
+    pub(crate) bounded_cold_activation_frame: Option<i64>,
 }
 
 /// Minimal authoritative transport identity consumed by Preview execution.
@@ -115,6 +121,11 @@ pub(crate) struct PlaybackPreviewPumpOutcome {
     pub(crate) transport_change: bool,
     pub(crate) candidate_retry_required: bool,
     pub(crate) needs_follow_up_poll: bool,
+    /// The one terminal candidate whose exact sampled demand authority was
+    /// consumed during this pump. Headless coordinators retain this receipt so
+    /// a later physical completion cannot overwrite an accepted Late/Blocked
+    /// result for the same presentation opportunity.
+    pub(crate) accepted_delivery: Option<FrameDeliveryCandidate>,
 }
 
 /// Apply one ordered production preview-execution cycle to Playback state.
@@ -133,22 +144,23 @@ pub(crate) fn pump_playback_preview(
     let transport_intent = state.preview_transport_intent();
     let poll = adapter.poll_playback_work(pending_demand, transport_intent);
     let observed_at = std::time::Instant::now();
-    let delivery_changed =
-        poll.frame_delivery_candidates
-            .iter()
-            .copied()
-            .fold(false, |changed, candidate| {
-                // Completion draining and realtime-stall expiry are independent
-                // bounded sources. They may both report a terminal fact for the
-                // identity sampled at the start of this turn. The first accepted
-                // fact consumes that authority; later facts are expected losing
-                // races, not rejected Playback observations.
-                if state.pending_playback_frame_demand_identity() == Some(candidate.identity()) {
-                    state.observe_frame_delivery_candidate(candidate, observed_at) || changed
-                } else {
-                    changed
-                }
-            });
+    let mut delivery_changed = false;
+    let mut accepted_delivery = None;
+    for candidate in poll.frame_delivery_candidates.iter().copied() {
+        // Completion draining and realtime-stall expiry are independent
+        // bounded sources. They may both report a terminal fact for the
+        // identity sampled at the start of this turn. The first accepted fact
+        // consumes that authority; later facts are expected losing races, not
+        // rejected Playback observations.
+        if state.pending_playback_frame_demand_identity() == Some(candidate.identity()) {
+            let receipt =
+                state.observe_frame_delivery_candidate_with_receipt(candidate, observed_at);
+            delivery_changed |= receipt.transport_changed();
+            if receipt.accepted() {
+                accepted_delivery = Some(candidate);
+            }
+        }
+    }
     let preroll_changed = observe_playback_video_preroll(state, adapter);
 
     PlaybackPreviewPumpOutcome {
@@ -156,6 +168,7 @@ pub(crate) fn pump_playback_preview(
         transport_change: poll.transport_change || delivery_changed || preroll_changed,
         candidate_retry_required: poll.candidate_retry_required,
         needs_follow_up_poll: poll.needs_follow_up_poll,
+        accepted_delivery,
     }
 }
 
@@ -191,6 +204,7 @@ pub(crate) fn observe_playback_video_preroll_with_presentation_readiness(
             demand,
             readiness.ready_media_frames,
             readiness.preservable_media_frames,
+            readiness.bounded_cold_activation_ready,
             presentation_successor_ready,
             observed_at,
         )
@@ -218,7 +232,7 @@ mod tests {
 
     struct FakePreviewAdapter {
         poll: RefCell<Option<PreviewWorkPoll>>,
-        preroll: Option<PreviewVideoPreroll>,
+        preroll: Cell<Option<PreviewVideoPreroll>>,
         transport_intent: Cell<Option<PreviewTransportIntent>>,
         preroll_transport_intent: Cell<Option<PreviewTransportIntent>>,
         preroll_demand: Cell<Option<FrameDemandIdentity>>,
@@ -240,7 +254,7 @@ mod tests {
         ) -> Option<PreviewVideoPreroll> {
             self.preroll_transport_intent.set(Some(request.snapshot().transport().intent()));
             self.preroll_demand.set(request.demand());
-            self.preroll
+            self.preroll.get()
         }
     }
 
@@ -255,7 +269,7 @@ mod tests {
                 needs_follow_up_poll: true,
                 frame_delivery_candidates: Vec::new(),
             })),
-            preroll: None,
+            preroll: Cell::new(None),
             transport_intent: Cell::new(None),
             preroll_transport_intent: Cell::new(None),
             preroll_demand: Cell::new(None),
@@ -268,6 +282,7 @@ mod tests {
                 transport_change: false,
                 candidate_retry_required: false,
                 needs_follow_up_poll: true,
+                accepted_delivery: None,
             }
         );
         assert!(adapter.transport_intent.get().is_some_and(|intent| !intent.playing()));
@@ -287,10 +302,12 @@ mod tests {
                 )],
                 ..PreviewWorkPoll::default()
             })),
-            preroll: Some(PreviewVideoPreroll {
+            preroll: Cell::new(Some(PreviewVideoPreroll {
                 ready_media_frames: 8,
                 preservable_media_frames: 8,
-            }),
+                bounded_cold_activation_ready: true,
+                bounded_cold_activation_frame: None,
+            })),
             transport_intent: Cell::new(None),
             preroll_transport_intent: Cell::new(None),
             preroll_demand: Cell::new(None),
@@ -299,6 +316,10 @@ mod tests {
         let outcome = pump_playback_preview(&mut state, &adapter);
 
         assert!(outcome.transport_change);
+        assert_eq!(
+            outcome.accepted_delivery.map(FrameDeliveryCandidate::kind),
+            Some(FrameDeliveryKind::Blocked)
+        );
         assert!(!state.is_playing());
         assert_eq!(
             adapter.transport_intent.get(),
@@ -323,10 +344,12 @@ mod tests {
         );
         let adapter = FakePreviewAdapter {
             poll: RefCell::new(None),
-            preroll: Some(PreviewVideoPreroll {
+            preroll: Cell::new(Some(PreviewVideoPreroll {
                 ready_media_frames: 0,
                 preservable_media_frames: 0,
-            }),
+                bounded_cold_activation_ready: true,
+                bounded_cold_activation_frame: None,
+            })),
             transport_intent: Cell::new(None),
             preroll_transport_intent: Cell::new(None),
             preroll_demand: Cell::new(None),
@@ -346,6 +369,95 @@ mod tests {
     }
 
     #[test]
+    fn priming_reobserves_the_same_demand_after_the_horizon_becomes_ready() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(4);
+        let identity =
+            state.pending_playback_frame_demand_identity().expect("active priming demand");
+        assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        assert_eq!(state.pending_playback_frame_demand_identity(), None);
+        assert_eq!(
+            state.playback_engine.frame_demand().map(|demand| demand.identity()),
+            Some(identity)
+        );
+
+        let adapter = FakePreviewAdapter {
+            poll: RefCell::new(None),
+            preroll: Cell::new(Some(PreviewVideoPreroll {
+                ready_media_frames: 0,
+                preservable_media_frames: 2,
+                bounded_cold_activation_ready: false,
+                bounded_cold_activation_frame: Some(6),
+            })),
+            transport_intent: Cell::new(None),
+            preroll_transport_intent: Cell::new(None),
+            preroll_demand: Cell::new(None),
+        };
+
+        assert!(!observe_playback_video_preroll_with_presentation_readiness(
+            &mut state, &adapter, true
+        ));
+        assert_eq!(adapter.preroll_demand.get(), Some(identity));
+        adapter.preroll.set(Some(PreviewVideoPreroll {
+            ready_media_frames: 2,
+            preservable_media_frames: 2,
+            bounded_cold_activation_ready: true,
+            bounded_cold_activation_frame: Some(6),
+        }));
+
+        assert!(observe_playback_video_preroll_with_presentation_readiness(
+            &mut state, &adapter, true
+        ));
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(mondrian_playback::ClockMaster::Synthetic)
+        );
+    }
+
+    #[test]
+    fn pump_retains_accepted_delivery_when_recovery_snapshot_does_not_change() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(4);
+        let first_identity =
+            state.pending_playback_frame_demand_identity().expect("first active demand");
+        assert!(state.observe_frame_delivery_candidate(
+            FrameDeliveryCandidate::for_demand(first_identity, FrameDeliveryKind::Late),
+            std::time::Instant::now(),
+        ));
+        let second_identity = state
+            .reissue_current_frame_demand_for_recovery_until(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .expect("bounded recovery demand");
+        let before = state.playback_engine.snapshot();
+        let adapter = FakePreviewAdapter {
+            poll: RefCell::new(Some(PreviewWorkPoll {
+                frame_delivery_candidates: vec![FrameDeliveryCandidate::for_demand(
+                    second_identity,
+                    FrameDeliveryKind::Late,
+                )],
+                ..PreviewWorkPoll::default()
+            })),
+            preroll: Cell::new(None),
+            transport_intent: Cell::new(None),
+            preroll_transport_intent: Cell::new(None),
+            preroll_demand: Cell::new(None),
+        };
+
+        let outcome = pump_playback_preview(&mut state, &adapter);
+
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert!(!outcome.transport_change);
+        assert_eq!(
+            outcome.accepted_delivery,
+            Some(FrameDeliveryCandidate::for_demand(
+                second_identity,
+                FrameDeliveryKind::Late,
+            ))
+        );
+        assert!(state.pending_playback_frame_demand_identity().is_none());
+    }
+    #[test]
     fn pump_silently_retires_losing_terminal_facts_for_consumed_demand() {
         let mut state = AppState::new();
         state.set_playback_frame_running(4);
@@ -358,15 +470,19 @@ mod tests {
                 ],
                 ..PreviewWorkPoll::default()
             })),
-            preroll: None,
+            preroll: Cell::new(None),
             transport_intent: Cell::new(None),
             preroll_transport_intent: Cell::new(None),
             preroll_demand: Cell::new(None),
         };
 
-        pump_playback_preview(&mut state, &adapter);
+        let outcome = pump_playback_preview(&mut state, &adapter);
         let evidence = state.playback_evidence_report();
 
+        assert_eq!(
+            outcome.accepted_delivery.map(FrameDeliveryCandidate::kind),
+            Some(FrameDeliveryKind::Late)
+        );
         assert_eq!(evidence.deliveries.late, 1);
         assert_eq!(evidence.deliveries.rejected, 0);
     }
@@ -403,7 +519,7 @@ mod tests {
                 ],
                 ..PreviewWorkPoll::default()
             })),
-            preroll: None,
+            preroll: Cell::new(None),
             transport_intent: Cell::new(None),
             preroll_transport_intent: Cell::new(None),
             preroll_demand: Cell::new(None),

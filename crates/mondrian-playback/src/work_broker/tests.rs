@@ -38,6 +38,7 @@ fn request(key: u64, generation: u64, class: FrameWorkClass) -> FrameWorkRequest
         generation,
         priority: FrameWorkPriority::Current,
         work_class: class,
+        worker_affinity: None,
         resource_scope: FrameWorkResourceScope::Shared,
         demand_identity: None,
         deadline: None,
@@ -247,6 +248,41 @@ fn current_still_work_preserves_decoder_lane_affinity() {
 }
 
 #[test]
+fn explicit_worker_affinity_survives_prefetch_to_current_rebinding() {
+    let broker = FrameWorkBroker::new(2, 2);
+    let generation = broker.begin_generation();
+    let mut cold_source = request(1, generation, FrameWorkClass::Playback);
+    cold_source.priority = FrameWorkPriority::Prefetch;
+    cold_source.worker_affinity = Some(FrameWorkerLane::NonPlayback);
+    assert!(matches!(
+        broker.submit(cold_source),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    assert_eq!(
+        broker.bind_existing(binding_request(1, generation, FrameWorkClass::Playback)),
+        FrameWorkBindingSubmission::UpdatedQueued {
+            priority_promoted: true,
+            work_class_changed: false,
+            generation_changed: false,
+        }
+    );
+    assert!(matches!(
+        broker.receive_timeout(FrameWorkerLane::Playback, Duration::ZERO),
+        FrameWorkReceiveWait::TimedOut
+    ));
+    let execution = match broker.receive(FrameWorkerLane::NonPlayback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected receive: {other:?}"),
+    };
+    assert_eq!(execution.priority, FrameWorkPriority::Current);
+    assert_eq!(
+        broker.resolve_execution(execution.id, true).completion,
+        FrameRequestCompletion::Current
+    );
+}
+
+#[test]
 fn exact_binding_rerequest_reuses_in_flight_without_a_fallback() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -277,6 +313,7 @@ fn bind_existing_updates_queued_metadata_without_replacing_or_dropping_payload()
         generation,
         priority: FrameWorkPriority::Prefetch,
         work_class: FrameWorkClass::Playback,
+        worker_affinity: None,
         resource_scope: FrameWorkResourceScope::Shared,
         demand_identity: Some(demand_identity(1)),
         deadline: None,
@@ -937,6 +974,62 @@ fn injected_clock_makes_realtime_expiration_exact() {
     assert_eq!(expired[0].key, 1);
     assert_eq!(expired[0].removed_queued_work, 1);
     assert_eq!(expired[0].retained_in_flight_work, 0);
+}
+
+#[test]
+fn playback_current_deadline_overrides_the_generic_stall_watchdog() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(100));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    let mut current = request(1, generation, FrameWorkClass::Playback);
+    current.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(20),
+    ));
+    broker.submit(current);
+
+    clock.set(Duration::from_millis(119));
+    assert!(
+        broker.expire_playback_current_older_than(Duration::from_millis(250)).is_empty(),
+        "a concrete presentation deadline must not expire early"
+    );
+    clock.set(Duration::from_millis(120));
+    let expired = broker.expire_playback_current_older_than(Duration::from_millis(250));
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].key, 1);
+}
+
+#[test]
+fn same_binding_reobservation_cannot_renew_a_playback_current_deadline() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(100));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    let mut original = request(1, generation, FrameWorkClass::Playback);
+    original.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(20),
+    ));
+    broker.submit(original);
+
+    clock.set(Duration::from_millis(110));
+    let mut observed_again = binding_request(1, generation, FrameWorkClass::Playback);
+    observed_again.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(10),
+    ));
+    assert!(matches!(
+        broker.bind_existing(observed_again),
+        FrameWorkBindingSubmission::UpdatedQueued { .. }
+    ));
+
+    clock.set(Duration::from_millis(119));
+    assert!(broker.expire_playback_current_older_than(Duration::from_secs(1)).is_empty());
+    clock.set(Duration::from_millis(120));
+    assert_eq!(
+        broker.expire_playback_current_older_than(Duration::from_secs(1)).len(),
+        1,
+        "re-observation must preserve the owner's original absolute deadline"
+    );
 }
 
 #[test]
@@ -1913,7 +2006,7 @@ fn authorized_playback_failover_precedes_sustained_non_playback_current_work() {
 }
 
 #[test]
-fn non_playback_failover_never_takes_playback_prefetch() {
+fn non_playback_lane_uses_idle_capacity_for_playback_prefetch() {
     let clock = ManualRuntimeClock::at(Duration::ZERO);
     let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
     let generation = broker.begin_generation();
@@ -1929,11 +2022,73 @@ fn non_playback_failover_never_takes_playback_prefetch() {
     broker.submit(prefetch);
 
     clock.set(Duration::from_micros(5_001));
+    let preload = match broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO) {
+        FrameWorkReceiveWait::Work(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("idle shared lane must accept playback Prefetch: {other:?}"),
+    };
+    assert_eq!(preload.key, 2);
+    assert_eq!(preload.priority, FrameWorkPriority::Prefetch);
+    assert_eq!(preload.work_class, FrameWorkClass::Playback);
+    assert_eq!(broker.diagnostics().in_flight_non_playback_lane, 1);
+}
+
+#[test]
+fn non_playback_lane_does_not_steal_prefetch_from_an_idle_playback_lane() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    for key in 1..=3 {
+        let mut prefetch = request(key, generation, FrameWorkClass::Playback);
+        prefetch.priority = FrameWorkPriority::Prefetch;
+        assert!(matches!(
+            broker.submit(prefetch),
+            FrameWorkSubmission::Queued { .. }
+        ));
+    }
+
     assert!(matches!(
         broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO),
         FrameWorkReceiveWait::TimedOut
     ));
-    assert_eq!(broker.diagnostics().queued_prefetch, 1);
+
+    let playback = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("playback lane must receive the nearest successor: {other:?}"),
+    };
+    assert_eq!(playback.key, 1);
+
+    let remaining = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("sequential prefetch must remain with the playback lane: {other:?}"),
+    };
+    assert_eq!(remaining.key, 2);
+}
+
+#[test]
+fn non_playback_current_work_precedes_playback_prefetch() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+    prefetch.priority = FrameWorkPriority::Prefetch;
+    broker.submit(prefetch);
+    broker.submit(request(2, generation, FrameWorkClass::Still));
+
+    let current = match broker.receive(FrameWorkerLane::NonPlayback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("shared current work must outrank a playback preload: {other:?}"),
+    };
+    assert_eq!(current.key, 2);
+    assert_eq!(current.priority, FrameWorkPriority::Current);
+
+    assert!(matches!(
+        broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO),
+        FrameWorkReceiveWait::TimedOut
+    ));
+    let preload = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("playback preload must remain with its dedicated lane: {other:?}"),
+    };
+    assert_eq!(preload.key, 1);
+    assert_eq!(preload.priority, FrameWorkPriority::Prefetch);
 }
 
 #[test]

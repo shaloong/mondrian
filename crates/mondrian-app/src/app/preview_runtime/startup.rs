@@ -78,6 +78,24 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         )
     }
 
+    /// Construct the ordinary worker inventory with one caller-owned cache policy.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn try_new_with_cache_config_for_validation(
+        config: Result<mondrian_render_cache::TimelineRenderCacheConfig, String>,
+    ) -> Result<Self, PreviewStartupFailure<O>> {
+        let budget = preview_decode_cpu_budget();
+        let workers = media_preview_worker_count().min(budget.preview_worker_count);
+        let mut runtime = Self::prepare_unpublished(budget, MediaPreviewScheduler::default());
+        *runtime.timeline_render_cache.get_mut() =
+            crate::app::preview_render_cache::PreviewTimelineRenderCache::prepare_with_config_for_test(config);
+        Self::try_start_prepared(
+            runtime,
+            workers,
+            PreviewWorkerIsolation::RequiredPackaged,
+            |_| {},
+        )
+    }
+
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn try_start_with_checkpoint_for_host(
         checkpoint: impl FnMut(PreviewStartupCheckpoint),
@@ -199,15 +217,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
             media_aggregate_capacity_waiting: Cell::new(false),
             media_existing_work_waiters: RefCell::new(HashMap::new()),
-            media_existing_work_retry_pending: Cell::new(false),
-            media_existing_work_waiter_registrations: Cell::new(0),
-            media_existing_work_retry_acknowledgements: Cell::new(0),
+            media_execution_pressure_waiters: RefCell::new(HashMap::new()),
+            media_retry_pending: Cell::new(false),
+            media_retry_waiter_registrations: Cell::new(0),
+            media_retry_acknowledgements: Cell::new(0),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             execution: RefCell::new(PreviewExecutionCoordinator::default()),
             transport_playing: Cell::new(false),
             transport_epoch: Cell::new(None),
             playback_pressure: Cell::new(PlaybackPressureState::default()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "validation"))]
             last_video_preroll_observation: Cell::new(None),
             applied_resource_decision: Cell::new(None),
             applied_resource_trim: Cell::new(
@@ -283,7 +302,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         checkpoint(PreviewStartupCheckpoint::Cache);
         let scheduler = self.scheduler.clone();
-        let (_, job_rx) = scheduler.job_queue();
+        let job_rx = scheduler.job_receiver();
         let (result_tx, result_rx) =
             mpsc::sync_channel::<MediaPreviewResult>(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
         *self.results.get_mut() = result_rx;
@@ -367,7 +386,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_decode_context_bootstrap = worker_decode_context_bootstrap
                 .with_worker_resources(decode_worker_resources.clone())
                 .with_decoder_thread_limit(match worker_lane {
-                    MediaPreviewWorkerLane::NonPlayback => {
+                    MediaPreviewWorkerLane::NonPlayback | MediaPreviewWorkerLane::Still => {
                         decode_cpu_budget.decoder_threads_per_worker
                     }
                     MediaPreviewWorkerLane::Any | MediaPreviewWorkerLane::Playback => {

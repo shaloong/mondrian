@@ -113,19 +113,18 @@ use crate::app::ui_actions::{
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    export_enqueue_action, timeline_clear_in_out_points_action, timeline_drop_asset_action,
-    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
-    timeline_move_clip_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_set_in_out_point_action,
-    timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
-    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
-    track_add_action, track_move_action, track_set_author_control_action,
-    track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
-    video_transition_select_action, video_transition_set_range_action,
-    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
-    visual_effect_select_action, visual_effect_set_enabled_action,
+    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
+    timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
+    track_set_author_control_action, track_set_edit_policy_action,
+    video_transition_create_cross_dissolve_action, video_transition_select_action,
+    video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
+    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
+    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
     visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
@@ -2296,6 +2295,12 @@ pub struct ExportPanelModel {
     pub dynamic_hdr: ExportDynamicHdrModel,
     pub range: TimelineExportRange,
     pub output_path: String,
+    /// Explicit immutable ANC selection; clones retain the owner cheaply.
+    pub ancillary: Option<crate::app::exporting::ImportedAncillaryProgram>,
+    /// Shared Export selection/profile preflight failure for the attachment.
+    pub ancillary_error: Option<String>,
+    /// Explicit provider/QC selection frozen independently from UI rendering.
+    pub regulatory_pse: Option<crate::app::exporting::ImportedRegulatoryPseConfiguration>,
     pub delivery_error: Option<String>,
     pub status: Option<(String, bool)>,
     pub jobs: Vec<ExportJobModel>,
@@ -2520,6 +2525,22 @@ impl ExportPanelModel {
                 .err()
                 .map(|error| error.to_string())
             });
+        let ancillary = state.export_draft.ancillary.clone();
+        let ancillary_error = ancillary.as_ref().and_then(|item| {
+            selected_sequence_snapshot.map_or_else(
+                || Some("选择序列后才能绑定 ANC 帧范围".to_owned()),
+                |sequence| {
+                    mondrian_export::queue::check_ancillary_export_selection(
+                        &item.program,
+                        &preset,
+                        sequence,
+                        state.export_draft.range,
+                        state.project_color_environment(),
+                    )
+                    .err()
+                },
+            )
+        });
 
         let jobs = state.export_jobs_snapshot();
         let queue_count = jobs.len();
@@ -2551,6 +2572,9 @@ impl ExportPanelModel {
             dynamic_hdr,
             range: state.export_draft.range,
             output_path: state.export_draft.output_path.clone(),
+            ancillary,
+            ancillary_error,
+            regulatory_pse: state.export_draft.regulatory_pse.clone(),
             delivery_error,
             status: state.status_hint.clone(),
             jobs,
@@ -2567,6 +2591,7 @@ impl ExportPanelModel {
             && self.selected_sequence_id.is_some()
             && !self.output_path.trim().is_empty()
             && self.delivery_error.is_none()
+            && self.ancillary_error.is_none()
     }
 
     fn can_choose_output(&self) -> bool {
@@ -2584,6 +2609,8 @@ impl ExportPanelModel {
             "没有可用导出预设".to_owned()
         } else if let Some(error) = &self.delivery_error {
             format!("交付设置不兼容：{error}")
+        } else if let Some(error) = &self.ancillary_error {
+            format!("ANC 预检失败：{error}")
         } else if let Some((message, true)) = &self.status {
             format!("错误：{message}")
         } else if self.output_path.trim().is_empty() {
@@ -2595,10 +2622,12 @@ impl ExportPanelModel {
         }
     }
 
-    fn enqueue_request(&self) -> Option<TimelineExportRequest> {
+    /// Materialize this snapshot for non-interactive callers. The product button
+    /// uses EnqueueDraft so large ANC payloads are frozen only at dispatch.
+    pub fn enqueue_request(&self) -> Option<TimelineExportRequest> {
         let preset = self.selected_preset()?.clone();
         let sequence_id = self.selected_sequence_id?;
-        if self.delivery_error.is_some() {
+        if self.delivery_error.is_some() || self.ancillary_error.is_some() {
             return None;
         }
         let output_path = self.output_path.trim();
@@ -2611,7 +2640,9 @@ impl ExportPanelModel {
             range: self.range,
             output_path: output_path.into(),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
-            broadcast_qc: None,
+            broadcast_qc: self.regulatory_pse.as_ref().map(|selected| selected.qc_profile.clone()),
+            regulatory_pse: self.regulatory_pse.as_ref().map(|selected| selected.provider.clone()),
+            frozen_ancillary: self.ancillary.as_ref().map(|item| item.program.as_ref().clone()),
         })
     }
 
@@ -5549,11 +5580,91 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         FlexChild::fixed(Box::new(output_browse)),
     ])
     .with_gap(8.0);
-    let enqueue_action = model.enqueue_request().map(export_enqueue_action);
+    let enqueue_action = crate::app::ui_actions::export_enqueue_draft_action();
     let enqueue_button = AppIcon::Export
         .text_button_or_label("Add to queue")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
+    let ancillary_import = AppIcon::Folder
+        .text_button_or_label("导入 ANC / 字幕…")
+        .on_click(crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action());
+    let ancillary_clear = AppIcon::Trash
+        .text_button_or_label("移除")
+        .enabled(model.ancillary.is_some())
+        .on_click(export_edit_draft_action(ExportDraftEdit::ClearAncillary));
+    let ancillary_row = FlexContainer::row(vec![
+        FlexChild::fixed(Box::new(ancillary_import)),
+        FlexChild::fixed(Box::new(ancillary_clear)),
+    ])
+    .with_gap(current_theme().spacing.sm);
+    let ancillary_source = model
+        .ancillary
+        .as_ref()
+        .map(|item| item.path.display().to_string())
+        .unwrap_or_else(|| "未选择 ANC / 广播字幕".to_owned());
+    let ancillary_range = model
+        .ancillary
+        .as_ref()
+        .map(|item| {
+            format!(
+                "0…{} · {} 帧 · 起点 {}",
+                item.program.frame_count() - 1,
+                item.program.frame_count(),
+                item.program.source_start()
+            )
+        })
+        .unwrap_or_else(|| "—".to_owned());
+    let ancillary_cadence = model
+        .ancillary
+        .as_ref()
+        .map(|item| {
+            format!(
+                "{}/{} fps · {} 个包",
+                item.program.output_frame_rate().num,
+                item.program.output_frame_rate().den,
+                item.packet_count
+            )
+        })
+        .unwrap_or_else(|| "—".to_owned());
+    let ancillary_readiness = model.ancillary_error.clone().unwrap_or_else(|| {
+        if let Some(source)=model.ancillary.as_ref().and_then(|item|item.program.caption_source()) {
+            let format=match source.source_format {
+                mondrian_broadcast::CaptionSourceFormat::ScenaristSccV1=>"SCC V1.0 · 608 Field 1",
+                mondrian_broadcast::CaptionSourceFormat::RawCdpSt334_2_2015=>"原始 CDP · ST334-2:2015",
+            };
+            format!("{format} · 导入器 v{} · 608 通道位图 {:04b} · 708 服务 {:?}。传输校验通过；成品复读后发布，未授予字幕显示或 SDI 硬件资格",source.importer_version,source.cea608_channels,source.cea708_services)
+        } else if model.ancillary.is_some() {"ST436 结构与导出范围已验证；成品复读通过后发布，未授予 SDI 硬件资格".to_owned()}
+        else {"AS-11：ANC JSON、SCC V1.0（29.97→59.94 / Field 1）、原始 CDP；≤8 MiB / 100000 字幕帧，VANC 第 20 行。按序列起始时码与导出范围对齐".to_owned()}
+    });
+    let pse_import = AppIcon::Folder
+        .text_button_or_label("导入 PSE 配置…")
+        .on_click(crate::app::ui_actions::app_shell_import_export_pse_dialog_action());
+    let pse_clear = AppIcon::Trash
+        .text_button_or_label("移除")
+        .enabled(model.regulatory_pse.is_some())
+        .on_click(export_edit_draft_action(
+            ExportDraftEdit::ClearRegulatoryPse,
+        ));
+    let pse_row = FlexContainer::row(vec![
+        FlexChild::fixed(Box::new(pse_import)),
+        FlexChild::fixed(Box::new(pse_clear)),
+    ])
+    .with_gap(current_theme().spacing.sm);
+    let pse_identity = model
+        .regulatory_pse
+        .as_ref()
+        .map(|item| {
+            format!(
+                "{} / {}",
+                item.provider.approval.provider_id, item.provider.approval.provider_version
+            )
+        })
+        .unwrap_or_else(|| "未选择独立监管分析器".to_owned());
+    let pse_status = if model.regulatory_pse.is_some() {
+        "配置已冻结；入队核验分析器身份，成品复扫后判定监管结果"
+    } else {
+        "导入 provider 与广播 QC profile 的 JSON 配置"
+    };
     let clear_terminal_button = AppIcon::Trash
         .text_button_or_label("Clear finished")
         .enabled(model.can_clear_terminal_history)
@@ -5916,6 +6027,50 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_section(signal_section)
         .with_section(encoding_section)
         .with_section(audio_section)
+        .with_section(
+            PropertySection::new("广播 ANC")
+                .with_row(PropertyRow::new("选择", Box::new(ancillary_row)))
+                .with_row(
+                    PropertyRow::new(
+                        "来源",
+                        Box::new(Label::new(ancillary_source).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(
+                    PropertyRow::new(
+                        "帧范围",
+                        Box::new(Label::new(ancillary_range).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(PropertyRow::new(
+                    "帧率 / 包数",
+                    Box::new(Label::new(ancillary_cadence).muted()),
+                ))
+                .with_row(
+                    PropertyRow::new(
+                        "资格",
+                        Box::new(Label::new(ancillary_readiness).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 5.0),
+                ),
+        )
+        .with_section(
+            PropertySection::new("监管 PSE")
+                .with_row(PropertyRow::new("选择", Box::new(pse_row)))
+                .with_row(
+                    PropertyRow::new(
+                        "分析器",
+                        Box::new(Label::new(pse_identity).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(
+                    PropertyRow::new("状态", Box::new(Label::new(pse_status).muted().wrapped()))
+                        .with_height(current_theme().spacing.interact_height * 3.0),
+                ),
+        )
         .with_section(
             PropertySection::new("Dynamic HDR 交付")
                 .with_row(PropertyRow::new("意图", Box::new(dynamic_hdr_dropdown)))

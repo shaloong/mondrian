@@ -683,6 +683,32 @@ mod tests {
     }
 
     #[test]
+    fn rehashed_completed_window_with_dirty_runtime_cannot_qualify_batch() {
+        let mut window = window_leaf(1, "surface.c1");
+        let mut value: serde_json::Value = serde_json::from_str(&window.json).expect("window");
+        let mut runtime: serde_json::Value =
+            serde_json::from_str(value["runtime_shutdown_json"].as_str().expect("runtime JSON"))
+                .expect("runtime");
+        runtime["supervisor"] = serde_json::json!("not_started");
+        let runtime_json = serde_json::to_string(&runtime).expect("runtime");
+        value["runtime_shutdown_sha256"] = batch_lower_sha256(runtime_json.as_bytes()).into();
+        value["runtime_shutdown_json"] = runtime_json.into();
+        window.json = serde_json::to_string(&value).expect("window");
+        window.sha256 = batch_lower_sha256(window.json.as_bytes());
+        let projection = CanonicalSurfaceReopenBatchReceipt {
+            schema_version: SURFACE_REOPEN_BATCH_RECEIPT_SCHEMA_VERSION,
+            submitted_request_count: 1,
+            completed_window_receipts: vec![window],
+            app_shutdown: app_leaf(),
+            cleanup_diagnostic: None,
+            outcome: CanonicalSurfaceReopenBatchOutcome::Success {
+                event_loop_shutdown: event_loop_leaf(),
+            },
+        };
+        assert!(verify_projection(&projection).is_err());
+    }
+
+    #[test]
     fn request_failure_seals_before_event_loop_and_replays_nonqualifying() {
         let error = run_app_ui_surface_device_reopen_validation_batch(AppState::new(), Vec::new())
             .expect_err("empty batch must fail");

@@ -19,7 +19,7 @@ use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
     PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeKey, PreviewDecodeOutcome,
     PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
-    PreviewHardwareDecodeRequest,
+    PreviewDecodeSessionFamily, PreviewHardwareDecodeRequest,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
@@ -374,21 +374,22 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     // acknowledged immediately so the family barrier cannot stall decode
     // admission behind one renderer/lease lifetime; the codec context is then
     // retired lazily once the last native lease drops.
-    let mut pending_native_retire = false;
+    let mut pending_native_retire = PendingMediaPreviewSessionRetirements::default();
     loop {
-        if pending_native_retire && decode_context.native_outputs_released() {
-            decode_context.clear();
-            pending_native_retire = false;
-        }
+        pending_native_retire.clear_released(&mut decode_context);
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
-            if directive.retire_context() {
-                if decode_context.native_outputs_released() {
-                    decode_context.clear();
-                    pending_native_retire = false;
+            if directive.retire_context()
+                && let Some(retired_family) = directive.retired_family()
+            {
+                pending_native_retire
+                    .remove(opposite_preview_decode_session_family(retired_family));
+                if decode_context.family_native_outputs_released(retired_family) {
+                    decode_context.clear_family(retired_family);
+                    pending_native_retire.remove(retired_family);
                     residency.acknowledge_retirement(lane, directive.revision());
                 } else {
                     residency.acknowledge_retirement(lane, directive.revision());
-                    pending_native_retire = true;
+                    pending_native_retire.insert(retired_family);
                 }
             }
             residency_revision = directive.revision();
@@ -399,10 +400,10 @@ fn media_preview_worker_with_decoder<DecodeJob>(
         {
             MediaPreviewJobQueueWait::Work(outcome) => outcome,
             MediaPreviewJobQueueWait::Lifecycle => continue,
-            MediaPreviewJobQueueWait::Idle => {
-                decode_context.clear();
-                continue;
-            }
+            // The active residency family is an explicit Runtime lifecycle
+            // owner. An arbitrary quiet interval cannot retire a cold-source
+            // Playback Session before its retained Timeline activation.
+            MediaPreviewJobQueueWait::Idle => continue,
             MediaPreviewJobQueueWait::Closed => break,
         };
         let job = match outcome {
@@ -671,8 +672,12 @@ impl MediaPreviewWorkerDecodeContext {
         self.recovery_revision
     }
 
-    fn native_outputs_released(&self) -> bool {
-        self.context.native_outputs_released()
+    fn family_native_outputs_released(&self, family: PreviewDecodeSessionFamily) -> bool {
+        self.context.family_native_outputs_released(family)
+    }
+
+    fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
+        self.context.clear_family(family);
     }
 
     fn clear(&mut self) {
@@ -689,6 +694,52 @@ impl MediaPreviewWorkerDecodeContext {
         self.context = self.bootstrap.clone_for_sequential_recovery().build();
         self.recovery_revision = self.recovery_revision.saturating_add(1);
         clear_panicked
+    }
+}
+
+const fn opposite_preview_decode_session_family(
+    family: PreviewDecodeSessionFamily,
+) -> PreviewDecodeSessionFamily {
+    match family {
+        PreviewDecodeSessionFamily::Playback => PreviewDecodeSessionFamily::Interactive,
+        PreviewDecodeSessionFamily::Interactive => PreviewDecodeSessionFamily::Playback,
+    }
+}
+
+#[derive(Default)]
+struct PendingMediaPreviewSessionRetirements {
+    playback: bool,
+    interactive: bool,
+}
+
+impl PendingMediaPreviewSessionRetirements {
+    fn insert(&mut self, family: PreviewDecodeSessionFamily) {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback = true,
+            PreviewDecodeSessionFamily::Interactive => self.interactive = true,
+        }
+    }
+
+    fn remove(&mut self, family: PreviewDecodeSessionFamily) {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback = false,
+            PreviewDecodeSessionFamily::Interactive => self.interactive = false,
+        }
+    }
+
+    fn clear_released(&mut self, context: &mut MediaPreviewWorkerDecodeContext) {
+        if self.playback
+            && context.family_native_outputs_released(PreviewDecodeSessionFamily::Playback)
+        {
+            context.clear_family(PreviewDecodeSessionFamily::Playback);
+            self.playback = false;
+        }
+        if self.interactive
+            && context.family_native_outputs_released(PreviewDecodeSessionFamily::Interactive)
+        {
+            context.clear_family(PreviewDecodeSessionFamily::Interactive);
+            self.interactive = false;
+        }
     }
 }
 

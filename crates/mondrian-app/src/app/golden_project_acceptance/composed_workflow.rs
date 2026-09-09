@@ -25,6 +25,20 @@ struct ComposedRun {
 }
 
 impl ComposedRun {
+    #[cfg(test)]
+    fn run_with<T>(
+        mut self,
+        operation: impl FnOnce(&mut Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<super::workflow::GoldenOwnedOperation<T>> {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&mut self)))
+                .unwrap_or_else(|payload| {
+                    Err(crate::app::headless_execution_startup::startup_panic_diagnostic(payload))
+                });
+        let Self { workflow, _cleanup, .. } = self;
+        workflow.finish_with_cleanup(result, Some(_cleanup))
+    }
+
     fn create(
         root: &Path,
         name: &str,
@@ -45,13 +59,24 @@ impl ComposedRun {
             cache_dir: Some(directory.join("cache")),
             ..ProjectSettings::default()
         };
-        let workflow = GoldenProductWorkflowDriver::create(
+        let workflow = match GoldenProductWorkflowDriver::create(
             directory.join("windows-alpha-golden-composed.mdp"),
             name,
             settings,
             ProjectColorEnvironment::default(),
             project_settings,
-        )?;
+        ) {
+            Ok(workflow) => workflow,
+            Err(primary) => {
+                if primary
+                    .downcast_ref::<super::workflow::GoldenWorkflowStartupClosedFailure>()
+                    .is_none_or(|failure| !failure.app.all_resources_released())
+                {
+                    cleanup.retain();
+                }
+                return Err(primary);
+            }
+        };
         Ok((contract, Self { workflow, _cleanup: cleanup, directory }))
     }
 }
@@ -97,6 +122,8 @@ struct GoldenCompleteRunReport {
     execution_plan: GoldenAcceptancePlan,
     stages: Vec<GoldenExecutedStage>,
     final_project: GoldenFinalProjectEvidence,
+    app_shutdown_json: Option<String>,
+    app_shutdown_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +135,16 @@ struct GoldenCompleteFailureReport {
     complete_golden_project: bool,
     run_id: String,
     error: String,
+    app_shutdown_json: Option<String>,
+    app_shutdown_sha256: Option<String>,
+    viewer_shutdown: Option<super::headless_preview::GoldenViewerShutdownEvidence>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{primary}; complete Golden App closure qualified={qualified}", qualified = .app.all_resources_released())]
+struct GoldenCompleteClosedFailure {
+    primary: anyhow::Error,
+    app: crate::app::endurance_shutdown::AppEnduranceShutdownEvidence,
 }
 
 fn run_identity(directory: &Path) -> anyhow::Result<String> {
@@ -356,104 +393,115 @@ fn resolve_hero_sequence_id(
 #[ignore = "composed Golden stages require canonical PCM/AAC/H.264/HLG/Alpha fixtures, FFmpeg proxy/export encoders, and a Windows Basic Title font"]
 fn golden_all_stages_share_one_hero_sequence() -> anyhow::Result<()> {
     let root = repository_root();
-    let (contract, mut run) =
-        ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
-    let project_id = run.workflow.project_id();
-    let project_path = run.workflow.project_path().to_path_buf();
+    let (contract, run) = ComposedRun::create(&root, "Windows Alpha Golden Hero Authoring", false)?;
+    run.run_with(|run| {
+        let project_id = run.workflow.project_id();
+        let project_path = run.workflow.project_path().to_path_buf();
 
-    let output_directory = run.directory.clone();
-    let stages = execute_hero_stages(&root, &contract, &mut run.workflow, &output_directory)?;
-    ensure!(
-        stages.sequence_id == run.workflow.hero_sequence_id()
-            && run.workflow.app().sequences().len() == 1,
-        "focused Hero authoring gate did not retain exactly one Hero Sequence"
-    );
-    let foundation_before_proxy = stages.foundation.capture_audio_anchor(run.workflow.app())?;
-    let editorial_before_proxy = stages.editorial.capture_authoring_anchor(run.workflow.app())?;
-    let proxy = proxy_relink::execute_proxy_relink_stage(
-        &root,
-        &contract,
-        &mut run.workflow,
-        &output_directory,
-    )?;
-    ensure!(
-        proxy.primary_sequence_id() == stages.sequence_id
-            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
-            && run.workflow.app().sequences().len() == 1,
-        "focused Proxy/Relink did not reuse the one Hero Sequence"
-    );
-    ensure!(
-        foundation_before_proxy == stages.foundation.capture_audio_anchor(run.workflow.app())?,
-        "focused Proxy/Relink changed Foundation authoring"
-    );
-    ensure!(
-        editorial_before_proxy == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
-        "focused Proxy/Relink changed Editorial authoring"
-    );
-    stages.visual.verify_retained_authoring(run.workflow.app())?;
-    stages.delivery.verify_retained_authoring(run.workflow.app())?;
-    proxy.verify_retained_authoring(run.workflow.app())?;
-    let foundation_before_recovery = stages.foundation.capture_audio_anchor(run.workflow.app())?;
-    let editorial_before_recovery =
-        stages.editorial.capture_authoring_anchor(run.workflow.app())?;
-    let recovery = recovery_nesting::execute_recovery_nesting_stage(&contract, &mut run.workflow)?;
-    ensure!(
-        recovery.primary_sequence_id() == stages.sequence_id
-            && recovery.nested_sequence_id() != stages.sequence_id
-            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
-            && run.workflow.app().sequences().len() == 2,
-        "focused Recovery/Nesting did not keep Hero primary with one nested child"
-    );
-    ensure!(
-        foundation_before_recovery == stages.foundation.capture_audio_anchor(run.workflow.app())?,
-        "focused Recovery/Nesting changed Foundation authoring"
-    );
-    ensure!(
-        editorial_before_recovery
-            == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
-        "focused Recovery/Nesting changed Editorial authoring"
-    );
-    stages.visual.verify_retained_authoring(run.workflow.app())?;
-    stages.delivery.verify_retained_authoring(run.workflow.app())?;
-    proxy.verify_retained_authoring(run.workflow.app())?;
-    let foundation_before_color = stages.foundation.capture_audio_anchor(run.workflow.app())?;
-    let editorial_before_color = stages.editorial.capture_authoring_anchor(run.workflow.app())?;
-    let recovery_before_color = recovery.capture_authoring_anchor(run.workflow.app())?;
-    let color = color_media_roundtrip::execute_color_media_stage(
-        &root,
-        &contract,
-        &mut run.workflow,
-        &output_directory,
-    )?;
-    ensure!(
-        color.primary_sequence_id() == stages.sequence_id
-            && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
-            && run.workflow.app().sequences().len() == 2,
-        "focused Color Media did not reuse Hero while retaining one nested child"
-    );
-    ensure!(
-        foundation_before_color == stages.foundation.capture_audio_anchor(run.workflow.app())?,
-        "focused Color Media changed Foundation authoring"
-    );
-    ensure!(
-        editorial_before_color == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
-        "focused Color Media changed Editorial authoring"
-    );
-    ensure!(
-        recovery_before_color == recovery.capture_authoring_anchor(run.workflow.app())?,
-        "focused Color Media changed Recovery/Nesting authoring"
-    );
-    stages.visual.verify_retained_authoring(run.workflow.app())?;
-    stages.delivery.verify_retained_authoring(run.workflow.app())?;
-    proxy.verify_retained_authoring(run.workflow.app())?;
-    color.verify_retained_authoring(run.workflow.app())?;
-    ensure!(
-        run.workflow.project_id() == project_id
-            && run.workflow.project_path() == project_path
-            && run.workflow.app().project_id() == Some(project_id),
-        "composed Hero stages changed the Golden Project binding"
-    );
-    Ok(())
+        let output_directory = run.directory.clone();
+        let stages = execute_hero_stages(&root, &contract, &mut run.workflow, &output_directory)?;
+        ensure!(
+            stages.sequence_id == run.workflow.hero_sequence_id()
+                && run.workflow.app().sequences().len() == 1,
+            "focused Hero authoring gate did not retain exactly one Hero Sequence"
+        );
+        let foundation_before_proxy = stages.foundation.capture_audio_anchor(run.workflow.app())?;
+        let editorial_before_proxy =
+            stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+        let proxy = proxy_relink::execute_proxy_relink_stage(
+            &root,
+            &contract,
+            &mut run.workflow,
+            &output_directory,
+        )?;
+        ensure!(
+            proxy.primary_sequence_id() == stages.sequence_id
+                && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+                && run.workflow.app().sequences().len() == 1,
+            "focused Proxy/Relink did not reuse the one Hero Sequence"
+        );
+        ensure!(
+            foundation_before_proxy
+                == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+            "focused Proxy/Relink changed Foundation authoring"
+        );
+        ensure!(
+            editorial_before_proxy
+                == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+            "focused Proxy/Relink changed Editorial authoring"
+        );
+        stages.visual.verify_retained_authoring(run.workflow.app())?;
+        stages.delivery.verify_retained_authoring(run.workflow.app())?;
+        proxy.verify_retained_authoring(run.workflow.app())?;
+        let foundation_before_recovery =
+            stages.foundation.capture_audio_anchor(run.workflow.app())?;
+        let editorial_before_recovery =
+            stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+        let recovery =
+            recovery_nesting::execute_recovery_nesting_stage(&contract, &mut run.workflow)?;
+        ensure!(
+            recovery.primary_sequence_id() == stages.sequence_id
+                && recovery.nested_sequence_id() != stages.sequence_id
+                && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+                && run.workflow.app().sequences().len() == 2,
+            "focused Recovery/Nesting did not keep Hero primary with one nested child"
+        );
+        ensure!(
+            foundation_before_recovery
+                == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+            "focused Recovery/Nesting changed Foundation authoring"
+        );
+        ensure!(
+            editorial_before_recovery
+                == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+            "focused Recovery/Nesting changed Editorial authoring"
+        );
+        stages.visual.verify_retained_authoring(run.workflow.app())?;
+        stages.delivery.verify_retained_authoring(run.workflow.app())?;
+        proxy.verify_retained_authoring(run.workflow.app())?;
+        let foundation_before_color = stages.foundation.capture_audio_anchor(run.workflow.app())?;
+        let editorial_before_color =
+            stages.editorial.capture_authoring_anchor(run.workflow.app())?;
+        let recovery_before_color = recovery.capture_authoring_anchor(run.workflow.app())?;
+        let color = color_media_roundtrip::execute_color_media_stage(
+            &root,
+            &contract,
+            &mut run.workflow,
+            &output_directory,
+        )?;
+        ensure!(
+            color.primary_sequence_id() == stages.sequence_id
+                && run.workflow.app().active_sequence_id() == Some(stages.sequence_id)
+                && run.workflow.app().sequences().len() == 2,
+            "focused Color Media did not reuse Hero while retaining one nested child"
+        );
+        ensure!(
+            foundation_before_color
+                == stages.foundation.capture_audio_anchor(run.workflow.app())?,
+            "focused Color Media changed Foundation authoring"
+        );
+        ensure!(
+            editorial_before_color
+                == stages.editorial.capture_authoring_anchor(run.workflow.app())?,
+            "focused Color Media changed Editorial authoring"
+        );
+        ensure!(
+            recovery_before_color == recovery.capture_authoring_anchor(run.workflow.app())?,
+            "focused Color Media changed Recovery/Nesting authoring"
+        );
+        stages.visual.verify_retained_authoring(run.workflow.app())?;
+        stages.delivery.verify_retained_authoring(run.workflow.app())?;
+        proxy.verify_retained_authoring(run.workflow.app())?;
+        color.verify_retained_authoring(run.workflow.app())?;
+        ensure!(
+            run.workflow.project_id() == project_id
+                && run.workflow.project_path() == project_path
+                && run.workflow.app().project_id() == Some(project_id),
+            "composed Hero stages changed the Golden Project binding"
+        );
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 fn execute_complete_golden_project(
@@ -833,7 +881,9 @@ fn execute_complete_golden_project(
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     Ok(GoldenCompleteRunReport {
-        schema_version: 1,
+        schema_version: 2,
+        app_shutdown_json: None,
+        app_shutdown_sha256: None,
         profile: "windows-alpha-complete-golden-project",
         contract_id: contract.id.clone(),
         status: "pass",
@@ -871,27 +921,65 @@ pub(super) fn run_complete_golden_project(output: Option<PathBuf>) -> anyhow::Re
     let (contract, mut run) =
         ComposedRun::create(&root, "Windows Alpha Complete Golden Project", true)?;
     let output = output.unwrap_or_else(|| run.directory.join("golden-complete-run-report.json"));
-    match execute_complete_golden_project(&root, &contract, &mut run) {
-        Ok(report) => {
-            write_report(&output, &report)?;
+    let operation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_complete_golden_project(&root, &contract, &mut run)
+    }))
+    .unwrap_or_else(|payload| {
+        Err(crate::app::headless_execution_startup::startup_panic_diagnostic(payload))
+    });
+    let run_id = run_identity(&run.directory);
+    let ComposedRun { workflow, mut _cleanup, directory: _ } = run;
+    let app = workflow.shutdown_until(Instant::now() + Duration::from_secs(30));
+    if !app.all_resources_released() {
+        _cleanup.retain();
+    }
+    let sealed = crate::app::endurance_shutdown::AppEnduranceShutdownReceipt::seal(&app);
+    let shutdown_json = sealed.as_ref().ok().map(|receipt| receipt.canonical_json().to_owned());
+    let shutdown_sha256 = sealed.as_ref().ok().map(|receipt| receipt.sha256().to_owned());
+    let operation = operation.and_then(|report| {
+        ensure!(
+            app.all_resources_released(),
+            "Golden App ownership did not close"
+        );
+        sealed
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("seal Golden App closure: {error}"))?;
+        Ok(report)
+    });
+    match operation {
+        Ok(mut report) => {
+            report.app_shutdown_json = shutdown_json;
+            report.app_shutdown_sha256 = shutdown_sha256;
+            write_report(&output, &report)
+                .map_err(|primary| GoldenCompleteClosedFailure { primary, app })?;
             Ok(output)
         }
-        Err(error) => {
+        Err(primary) => {
+            let viewer_shutdown = primary
+                .downcast_ref::<super::headless_preview::GoldenViewerClosedFailure>()
+                .map(|failure| failure.shutdown.clone());
             let failure = GoldenCompleteFailureReport {
-                schema_version: 1,
+                schema_version: 2,
                 profile: "windows-alpha-complete-golden-project",
                 contract_id: contract.id.clone(),
                 status: "fail",
                 complete_golden_project: false,
-                run_id: run_identity(&run.directory)?,
-                error: format!("{error:#}"),
+                run_id: run_id.unwrap_or_else(|error| format!("unavailable: {error}")),
+                error: format!("{primary:#}"),
+                app_shutdown_json: shutdown_json,
+                app_shutdown_sha256: shutdown_sha256,
+                viewer_shutdown,
             };
-            write_report(&output, &failure)?;
-            Err(error)
+            let primary = match write_report(&output, &failure) {
+                Ok(()) => primary,
+                Err(publication) => primary.context(format!(
+                    "Golden failure receipt publication also failed: {publication:#}"
+                )),
+            };
+            Err(GoldenCompleteClosedFailure { primary, app }.into())
         }
     }
 }
-
 #[test]
 fn complete_coordinator_accepts_only_partial_unique_slice_reports() -> anyhow::Result<()> {
     let contract = load_golden_contract(&repository_root())?;
@@ -957,12 +1045,16 @@ fn complete_coordinator_requires_one_primary_hero_sequence_identity() -> anyhow:
 #[ignore = "complete Golden execution runs through the dedicated mondrian-golden process entrypoint"]
 fn golden_current_stages_share_one_project() -> anyhow::Result<()> {
     let root = repository_root();
-    let (contract, mut run) =
+    let (contract, run) =
         ComposedRun::create(&root, "Windows Alpha Golden Existing Stages", false)?;
-    let report = execute_complete_golden_project(&root, &contract, &mut run)?;
-    ensure!(
-        report.complete_golden_project && report.stages.len() == contract.execution_slices.len(),
-        "complete composed Golden report did not close every declared stage"
-    );
-    Ok(())
+    run.run_with(|run| {
+        let report = execute_complete_golden_project(&root, &contract, run)?;
+        ensure!(
+            report.complete_golden_project
+                && report.stages.len() == contract.execution_slices.len(),
+            "complete composed Golden report did not close every declared stage"
+        );
+        Ok(())
+    })
+    .map(|_| ())
 }

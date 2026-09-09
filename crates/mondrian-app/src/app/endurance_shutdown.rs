@@ -117,7 +117,7 @@ impl EnduranceWorkerShutdownEvidence {
 
 /// One background execution domain's owner-derived endurance gauges.
 #[cfg(any(test, feature = "validation"))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct AppBackgroundDomainSnapshot {
     pub(crate) queue_depth: u64,
     pub(crate) owned_resource_units: u64,
@@ -191,7 +191,7 @@ impl AppBackgroundDomainSnapshot {
 
 /// Fixed-shape runtime snapshot for every App-owned auxiliary execution domain.
 #[cfg(any(test, feature = "validation"))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct AppBackgroundEnduranceSnapshot {
     pub(crate) audio_idle_warmup: AppBackgroundDomainSnapshot,
     pub(crate) media_import: AppBackgroundDomainSnapshot,
@@ -311,6 +311,18 @@ pub struct AppEnduranceShutdownEvidence {
     pub visual_tracking: EnduranceWorkerShutdownEvidence,
     /// Lazy Proxy generation worker-pool evidence.
     pub proxy_generation: EnduranceWorkerShutdownEvidence,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl Serialize for AppEnduranceShutdownEvidence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let receipt = AppEnduranceShutdownReceipt::seal(self).map_err(serde::ser::Error::custom)?;
+        let mut output = serializer.serialize_struct("AppEnduranceShutdownEvidence", 2)?;
+        output.serialize_field("canonical_json", receipt.canonical_json())?;
+        output.serialize_field("sha256", receipt.sha256())?;
+        output.end()
+    }
 }
 
 #[cfg(any(test, feature = "validation"))]
@@ -1147,6 +1159,19 @@ fn checked_usize_to_u64(value: usize, field: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_in_canonical_app_fixture_replays_every_original_leaf() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/validation/fixtures/app-shutdown-closure.json"
+        ))
+        .expect("canonical App fixture");
+        assert!(AppEnduranceShutdownReceipt::verify_integrity(
+            fixture["canonical_json"].as_str().expect("canonical bytes"),
+            fixture["sha256"].as_str().expect("canonical digest"),
+        )
+        .expect("typed replay of all raw App/Export leaves"));
+    }
 
     fn fresh_app_shutdown_evidence() -> AppEnduranceShutdownEvidence {
         AppState::new().shutdown_for_endurance(

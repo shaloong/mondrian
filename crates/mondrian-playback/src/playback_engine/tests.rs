@@ -659,6 +659,31 @@ fn decreasing_callback_position_falls_back_to_synthetic() {
 }
 
 #[test]
+fn latency_estimate_jitter_at_callback_boundary_keeps_audio_clock_authority() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+
+    let mut before_boundary = audio_observation(&engine, 1_100, ts(20));
+    before_boundary.estimated_latency_frames = 100;
+    before_boundary.uncertainty_frames = 512;
+    let acquired = engine.observe_audio_device_clock(before_boundary).unwrap();
+    assert_eq!(acquired.clock_master, Some(ClockMaster::AudioDevice));
+
+    // The exact callback counter advanced by one 512-frame block. The host's
+    // refreshed latency estimate grew by 514 frames, so the derived point
+    // estimate moved back by two frames while both uncertainty intervals still
+    // overlap. This is ordinary callback-boundary sampling, not device loss.
+    let mut after_boundary = audio_observation(&engine, 1_612, ts(30));
+    after_boundary.estimated_latency_frames = 614;
+    after_boundary.uncertainty_frames = 512;
+    let retained = engine.observe_audio_device_clock(after_boundary).unwrap();
+
+    assert_eq!(retained.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(retained.position.frame, acquired.position.frame);
+}
+
+#[test]
 fn changed_media_anchor_cannot_reuse_active_callback_consumption() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
@@ -798,6 +823,7 @@ fn video_preroll(
         demand: engine.frame_demand().expect("active frame demand").identity(),
         ready_media_frames,
         preservable_media_frames,
+        bounded_cold_activation_ready: true,
         presentation_successor_ready: true,
     }
 }
@@ -925,6 +951,24 @@ fn presented_current_frame_waits_for_physical_presentation_successor() {
 }
 
 #[test]
+fn presented_current_frame_waits_for_bounded_cold_source_activation() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    let mut observation = video_preroll(&engine, 8, 8);
+    observation.bounded_cold_activation_ready = false;
+
+    assert!(!engine.observe_video_preroll(observation, ts(17)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Priming);
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    observation.bounded_cold_activation_ready = true;
+    assert!(engine.observe_video_preroll(observation, ts(1510)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
 fn presented_current_without_a_preroll_observation_retains_deadline_fallback() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
@@ -1003,6 +1047,7 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: first_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                bounded_cold_activation_ready: true,
                 presentation_successor_ready: true,
             },
             ts(2)
@@ -1019,6 +1064,7 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: wrong_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                bounded_cold_activation_ready: true,
                 presentation_successor_ready: true,
             },
             ts(2)
@@ -1703,7 +1749,7 @@ fn audio_clock_handoff_accounts_for_point_and_growing_uncertainty() {
 }
 
 #[test]
-fn quality_revision_and_recovery_cannot_extend_current_frame_deadline() {
+fn quality_revision_transitions_defer_new_demand_until_the_next_frame() {
     let policy = PlaybackPolicy {
         pressure_window: 1,
         pressure_threshold: 1,
@@ -1725,22 +1771,153 @@ fn quality_revision_and_recovery_cannot_extend_current_frame_deadline() {
         .expect("pressure delivery")
         .accepted());
 
-    let recovery = engine.pending_frame_demand().expect("recovery demand");
     assert_eq!(engine.snapshot().state, TransportState::Recovering);
-    assert_eq!(recovery.target, full_quality.target);
-    assert_eq!(recovery.deadline, full_quality.deadline);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "the terminally completed coordinate must not receive another demand against its spent deadline"
+    );
+
+    let subframe = engine.tick(ts(11)).unwrap();
+    assert_eq!(subframe.position, full_quality.target);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "a subframe clock observation must not reissue the completed coordinate for its new quality revision"
+    );
+
+    engine.tick(ts(40)).unwrap();
+    let recovery = engine.pending_frame_demand().expect("next-frame recovery demand");
+    assert_eq!(recovery.target.frame, full_quality.target.frame + 1);
+    assert_eq!(recovery.deadline, Some(ts(60)));
     assert!(engine
         .observe_frame_delivery(
             FrameDeliveryCandidate::for_demand(recovery.identity(), FrameDeliveryKind::Ready)
-                .complete_at(ts(10))
+                .complete_at(ts(40))
         )
         .expect("healthy recovery delivery")
         .accepted());
 
-    let restored = engine.pending_frame_demand().expect("restored demand");
     assert_eq!(engine.snapshot().state, TransportState::Playing);
-    assert_eq!(restored.target, full_quality.target);
-    assert_eq!(restored.deadline, full_quality.deadline);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "quality restoration also applies at the next clock boundary"
+    );
+    engine.tick(ts(80)).unwrap();
+    let restored = engine.pending_frame_demand().expect("restored next-frame demand");
+    assert_eq!(restored.target.frame, recovery.target.frame + 1);
+    assert_eq!(restored.preview_scale, PreviewResolutionScale::Full);
+    assert_eq!(restored.deadline, Some(ts(100)));
+}
+
+#[test]
+fn bounded_recovery_can_reissue_the_current_quality_after_a_terminal_scale_change() {
+    let policy = PlaybackPolicy {
+        pressure_window: 1,
+        pressure_threshold: 1,
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let original = engine.pending_frame_demand().expect("original demand");
+
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Degraded,)
+                .complete_at(ts(10)),
+        )
+        .expect("terminal degraded delivery")
+        .accepted());
+    let transitioned = engine.snapshot();
+    assert_eq!(transitioned.state, TransportState::Recovering);
+    assert!(transitioned.quality_revision > original.quality_revision);
+    assert!(engine.pending_frame_demand().is_none());
+
+    let recovery = engine
+        .reissue_current_frame_demand_for_recovery(ts(11), ts(5_011))
+        .expect("bounded current-quality recovery demand");
+    assert_eq!(recovery.epoch, original.epoch);
+    assert_eq!(recovery.target, original.target);
+    assert_eq!(recovery.quality_revision, transitioned.quality_revision);
+    assert_eq!(recovery.preview_scale, transitioned.preview_scale);
+    assert_eq!(recovery.deadline, Some(ts(5_011)));
+    assert_ne!(recovery.sequence, original.sequence);
+}
+
+#[test]
+fn bounded_recovery_reissues_only_the_exact_current_running_demand() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let original = engine.pending_frame_demand().expect("original demand");
+    let before = engine.snapshot();
+
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Late)
+                .complete_at(ts(21))
+        )
+        .unwrap()
+        .accepted());
+    assert!(engine.pending_frame_demand().is_none());
+
+    let recovery = engine
+        .reissue_current_frame_demand_for_recovery(ts(21), ts(5_021))
+        .expect("bounded recovery demand");
+    let after = engine.snapshot();
+    assert_eq!(recovery.kind, FrameDemandKind::TimedPlayback);
+    assert_eq!(recovery.epoch, original.epoch);
+    assert_eq!(recovery.quality_revision, original.quality_revision);
+    assert_eq!(recovery.target, original.target);
+    assert_eq!(recovery.deadline, Some(ts(5_021)));
+    assert_ne!(recovery.sequence, original.sequence);
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.position, before.position);
+    assert_eq!(after.quality_revision, before.quality_revision);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.clock_master, before.clock_master);
+
+    assert!(
+        !engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Ready)
+                    .complete_at(ts(22))
+            )
+            .unwrap()
+            .accepted(),
+        "the superseded recovery ticket must lose authority"
+    );
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(recovery.identity(), FrameDeliveryKind::Ready)
+                .complete_at(ts(5_020))
+        )
+        .unwrap()
+        .accepted());
+}
+
+#[test]
+fn bounded_recovery_rejects_non_running_or_non_future_authority_atomically() {
+    let mut stopped = engine();
+    let before = stopped.snapshot();
+    assert_eq!(
+        stopped.reissue_current_frame_demand_for_recovery(ts(1), ts(10)),
+        Err(PlaybackError::InvalidRecoveryFrameDemand)
+    );
+    assert_eq!(stopped.snapshot(), before);
+    assert_eq!(stopped.monotonic_high_water(), ts(0));
+
+    let mut running = engine();
+    running.play(100, ts(0)).unwrap();
+    running.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let demand = running.pending_frame_demand().expect("running demand");
+    let before = running.snapshot();
+    assert_eq!(
+        running.reissue_current_frame_demand_for_recovery(ts(5), ts(5)),
+        Err(PlaybackError::InvalidRecoveryFrameDemand)
+    );
+    assert_eq!(running.snapshot(), before);
+    assert_eq!(running.pending_frame_demand(), Some(demand));
+    assert_eq!(running.monotonic_high_water(), ts(0));
 }
 
 #[test]

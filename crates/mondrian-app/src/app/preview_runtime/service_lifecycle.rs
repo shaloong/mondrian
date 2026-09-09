@@ -116,6 +116,28 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         true
     }
 
+    /// Release CPU evaluation reuse after the Adapter proves physical current completion.
+    /// The caller must have finalized Presented/NoDemand for this exact GPU output.
+    /// Registration alone does not authorize release. In-flight candidate clones,
+    /// unrelated evaluations, native owners and Frame Store entries remain intact.
+    pub(crate) fn release_completed_gpu_evaluation(
+        &self,
+        output_key: &PreviewOutputKey,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        if !self
+            .execution
+            .borrow()
+            .exact_current_output()
+            .is_some_and(|(current, _)| current == output_key)
+        {
+            return false;
+        }
+        self.evaluation_working_set
+            .borrow_mut()
+            .release_completed_gpu_evaluation(output_key, intent)
+    }
+
     /// Release all idle decoded media at an explicit validation/lifecycle seam.
     #[cfg(test)]
     pub(crate) fn try_release_settled_transport_all_media_residency(&self) -> bool {
@@ -166,7 +188,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();
-        self.media_existing_work_retry_pending.set(false);
+        self.media_execution_pressure_waiters.borrow_mut().clear();
+        self.media_retry_pending.set(false);
         let pending_requests = self.scheduler.diagnostics().pending_requests as u64;
         let (generation, queued_jobs) = self.scheduler.cancel_all();
         if let Some(task) = &self.visual_execution {
@@ -312,6 +335,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.jobs.close();
         self.visual_dependencies.begin_shutdown();
         let already_shutdown = self.shutdown.request();
+        // Disconnect the completion sink before waiting for media workers.
+        // A decode can finish after the foreground stores were cleared and
+        // publish a native AVFrame into this channel. Keeping the Receiver in
+        // `self` while joining that worker creates a lifetime cycle: codec
+        // teardown waits for the queued surface, while the Receiver is not
+        // dropped until after the join. Replacing it makes every raced publish
+        // fail on the worker and drop its payload before decoder-session clear.
+        let (_replacement_sender, replacement_receiver) = mpsc::sync_channel(1);
+        drop(self.results.replace(replacement_receiver));
         self.future_media_window.borrow_mut().clear();
         self.retire_obsolete_transport_work();
         self.clear_all_preview_residency();
@@ -343,6 +375,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Preview Runtime. Evaluation entries are dropped first because their
     /// frame handles are clones of Store payloads.
     pub(super) fn clear_decoder_resource_preview_residency(&self) {
+        // The future-window cold-activation owner may hold the final external
+        // clone of a native surface. Retire it before asking the Store and
+        // decoder Session to prove that native residency is gone. Lowered
+        // plans and source-to-worker Session ownership remain valid across an
+        // in-family trim and therefore stay resident.
+        self.future_media_window.borrow_mut().release_decoded_residency();
         self.evaluation_working_set.borrow_mut().clear_decoder_resource_entries();
         self.frame_store.borrow_mut().clear_decoder_resource_media_frames();
     }
@@ -350,12 +388,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Atomically retire every decoded-media owner while preserving final
     /// Viewer outputs and failure memory.
     pub(super) fn clear_media_preview_residency(&self) {
+        self.future_media_window.borrow_mut().release_decoded_residency();
         self.evaluation_working_set.borrow_mut().clear();
         self.frame_store.borrow_mut().clear_media_frames();
     }
 
     /// Retire all Preview residency at an Authoring Session boundary.
     pub(super) fn clear_all_preview_residency(&self) {
+        self.future_media_window.borrow_mut().clear();
         self.evaluation_working_set.borrow_mut().clear();
         self.frame_store.borrow_mut().clear_all();
     }

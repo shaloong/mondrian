@@ -184,6 +184,15 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
             .map(ViewerGpuPhysicalPublication::artifact)
     }
 
+    /// Prepared artifact only when it has the exact semantic output identity.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn prepared_artifact_for_key(&self, output_key: &K) -> Option<&O> {
+        self.prepared
+            .as_ref()
+            .filter(|prepared| prepared.output_key() == output_key)
+            .map(ViewerGpuPhysicalPublication::artifact)
+    }
+
     /// Promote only the exact prepared identity into the visible slot.
     ///
     /// A matching prepared owner takes precedence even when current has the
@@ -336,6 +345,25 @@ mod tests {
         assert_eq!(
             slots.current_artifact_for_key(&"same".to_owned()),
             Some(&"prepared")
+        );
+    }
+
+    #[test]
+    fn prepared_lookup_requires_the_exact_key_and_never_aliases_current() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut slots = ViewerGpuPublicationSlots::default();
+        publish(&mut slots, false, 1, "current", "visible", &drops);
+        publish(&mut slots, true, 2, "next", "prepared", &drops);
+
+        assert_eq!(
+            slots.prepared_artifact_for_key(&"next".to_owned()),
+            Some(&"prepared")
+        );
+        assert!(slots.prepared_artifact_for_key(&"current".to_owned()).is_none());
+        assert!(slots.prepared_artifact_for_key(&"other".to_owned()).is_none());
+        assert_eq!(
+            slots.current_artifact_for_key(&"current".to_owned()),
+            Some(&"visible")
         );
     }
 

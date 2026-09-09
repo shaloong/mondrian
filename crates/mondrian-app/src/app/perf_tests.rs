@@ -1,3 +1,5 @@
+use super::performance_owner_closure::*;
+
 #[cfg(feature = "validation")]
 use super::audio_playback_acceptance::{
     evaluate_professional_audio_playback, AudioPlaybackMediaProbeReport,
@@ -26,8 +28,7 @@ use super::*;
 mod authoring_perf;
 #[path = "perf_decode_progress.rs"]
 mod perf_decode_progress;
-#[path = "perf_process_memory.rs"]
-mod perf_process_memory;
+use super::perf_process_memory;
 use crate::app::headless_preview_presentation::{
     prepare_headless_preview_successor, stage_headless_preview_lookahead, HeadlessPreviewRuntime,
 };
@@ -37,9 +38,7 @@ use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
     HeadlessViewerGpuOutput,
 };
-use crate::app::preview_execution::{
-    PreviewDecodeExecutionSummary, PREVIEW_GPU_CPU_STAGING_CAPACITY,
-};
+use crate::app::preview_execution::PreviewDecodeExecutionSummary;
 use crate::app::preview_runtime::{
     build_preview_color_health_report, build_preview_decode_performance_report,
     build_preview_decode_performance_report_with_required_access_modes,
@@ -49,17 +48,17 @@ use crate::app::preview_runtime::{
     PreviewDecodePerformancePolicy, PreviewDecodePerformanceReport,
     PreviewDecodePerformanceSeverity, PreviewDecodePerformanceVerdict,
     PreviewDecodeWorkClassProfiles, PreviewDecodeWorkLatencyBuckets,
-    PreviewDecodeWorkLatencyProfile, PreviewDiagnostics, PreviewOwnedWorkerShutdown,
-    PreviewProductionRuntime, PreviewRenderPerformanceReport, PreviewRenderPerformanceSeverity,
-    PreviewRenderPerformanceVerdict, PreviewRuntimeShutdownEvidence,
-    PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US, PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
-    PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+    PreviewDecodeWorkLatencyProfile, PreviewDiagnostics, PreviewProductionRuntime,
+    PreviewRenderPerformanceReport, PreviewRenderPerformanceSeverity,
+    PreviewRenderPerformanceVerdict, PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION, PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app::viewer_gpu_output_health::{
     build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputHealthReport,
     ViewerGpuOutputHealthVerdict,
 };
+
 use crate::app_ui::panels::ViewerPreviewSource;
 use crate::app_ui::preview::WindowPreviewAdapter;
 use crate::app_ui::shell::AppUiAppRoot;
@@ -104,6 +103,7 @@ use mondrian_ui_theme::ThemePreset;
 const PROFESSIONAL_NATIVE_VIDEO_GPU_IMPORTS_PER_CANDIDATE_BUDGET: usize = 4;
 const PROFESSIONAL_NATIVE_VIDEO_GPU_CANDIDATE_OVERHEAD: usize = 128;
 const PROFESSIONAL_NATIVE_VIDEO_GPU_OBSERVATION_CAPACITY_LIMIT: usize = 1_000_000;
+const QUALIFIED_MAX_FRAME_DISPLACEMENT: u64 = 4;
 
 fn commit_perf_media_probe(
     library: &AssetLibrary,
@@ -137,163 +137,6 @@ struct ProjectPerfCaseEvidence<'a> {
     #[serde(flatten)]
     case: &'a PerfCaseReport,
     owner_closure: &'a PerfOwnerClosureReport,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfWorkerClosureReport {
-    domain: &'static str,
-    requested_workers: u32,
-    startup_attempted: bool,
-    started_workers: u32,
-    terminated_workers: u32,
-    panicked_workers: u32,
-    timed_out_workers: u32,
-    detached_workers: u32,
-    unexpected_worker_exits: u32,
-    queued_work_remaining: u64,
-    running_work_remaining: u64,
-    owned_resources_remaining: u64,
-    cumulative_failures: u64,
-    lifecycle_closed: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfProjectClosureReport {
-    session_was_open: bool,
-    pending_close_was_active: bool,
-    authoring_session_released: bool,
-    pending_close_released: bool,
-    runtime_lease_released: bool,
-    retired_library_generations_remaining: u32,
-    lifecycle_failure: Option<String>,
-    all_resources_released: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-struct PerfAudioOutputClosureReport {
-    schema_version: u32,
-    workers_started: u32,
-    workers_terminated: u32,
-    worker_start_failures: u32,
-    worker_spawner_panics: u32,
-    worker_panics: u32,
-    current_thread_detachments: u32,
-    worker_owner_abandonments: u32,
-    worker_terminal_evidence_missing: u32,
-    all_workers_terminated: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-struct PerfAudioClosureReport {
-    schema_version: u32,
-    render_workers_started: u32,
-    render_workers_terminated: u32,
-    render_worker_panics: u32,
-    render_worker_owner_abandonments: u32,
-    render_worker_terminal_evidence_missing: u32,
-    render_current_thread_detachments: u32,
-    render_retirement_workers_started: u32,
-    render_retirement_workers_terminated: u32,
-    render_retirement_worker_panics: u32,
-    render_retirement_worker_owner_abandonments: u32,
-    render_retirement_worker_terminal_evidence_missing: u32,
-    render_retirement_current_thread_detachments: u32,
-    output: PerfAudioOutputClosureReport,
-    foreign_owner_panics: u32,
-    foreign_owner_abandonments: u32,
-    shutdown_coordinators_started: u32,
-    shutdown_coordinators_terminated: u32,
-    shutdown_coordinator_start_failures: u32,
-    shutdown_coordinator_panics: u32,
-    shutdown_coordinator_timeouts: u32,
-    shutdown_coordinator_detachments: u32,
-    shutdown_coordinator_spawner_panics: u32,
-    shutdown_coordinator_owner_abandonments: u32,
-    shutdown_resource_facts_complete_at_deadline: bool,
-    shutdown_owner_lifetime_unresolved_at_deadline: bool,
-    all_workers_terminated: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfAudioSourceClosureReport {
-    strong_references_before_consumption: u32,
-    strong_references_remaining: u32,
-    cache: Option<mondrian_media::AudioSourceCacheShutdownEvidence>,
-    all_resources_released: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfAppClosureReport {
-    app_owner_consumed: bool,
-    project: PerfProjectClosureReport,
-    reference_output: mondrian_reference_output::ReferenceOutputModuleShutdownReceipt,
-    reference_output_resources_released: bool,
-    export: mondrian_export::ExportQueueShutdownEvidence,
-    export_terminal_snapshot: mondrian_export::ExportEnduranceSnapshot,
-    export_resources_released: bool,
-    audio: PerfAudioClosureReport,
-    audio_source_cache: PerfAudioSourceClosureReport,
-    workers: Vec<PerfWorkerClosureReport>,
-    all_resources_released: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-struct PerfRenderCacheWorkerClosureReport {
-    worker_started: bool,
-    worker_terminated: bool,
-    worker_panicked: bool,
-    current_thread_skipped: bool,
-    timed_out: bool,
-    detached: bool,
-    all_workers_terminated: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfPreviewClosureReport {
-    work_callbacks: Option<super::preview_runtime::PreviewWorkCallbackEvidence>,
-    visual_dependency_worker: Option<&'static str>,
-    owner_slot: usize,
-    schema_version: u32,
-    workers_started: u32,
-    workers_terminated: u32,
-    worker_panics: u32,
-    worker_panic_payloads_abandoned: u32,
-    current_thread_detachments: u32,
-    unverified_async_reaps: u32,
-    worker_timeouts: u32,
-    worker_deadline_detachments: u32,
-    render_cache_schema_version: u32,
-    render_cache_required: bool,
-    render_cache_start_failed: bool,
-    render_cache_worker: Option<PerfRenderCacheWorkerClosureReport>,
-    render_cache_aggregate_outcome: &'static str,
-    all_resources_released: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfGpuClosureReport {
-    renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
-    worker_started: bool,
-    worker_terminated: bool,
-    worker_panicked: bool,
-    timed_out: bool,
-    retirement_requested: bool,
-    retirement_handoff_accepted: bool,
-    retirement_completed: bool,
-    generation_terminal_kind: Option<&'static str>,
-    all_resources_released: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PerfOwnerClosureReport {
-    schema_version: u32,
-    shared_deadline_budget_ms: u64,
-    preview_owner_count: usize,
-    gpu_owner_required: bool,
-    previews: Vec<PerfPreviewClosureReport>,
-    gpu: Option<PerfGpuClosureReport>,
-    app: PerfAppClosureReport,
-    all_resources_released: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1824,7 +1667,7 @@ fn playback_resize_gate_requires_geometry_change_and_bounded_presentation_contin
         33,
         Some(17),
         Some(17),
-        (PREVIEW_GPU_CPU_STAGING_CAPACITY + 1) as u64,
+        QUALIFIED_MAX_FRAME_DISPLACEMENT + 1,
         0,
         4,
         true,
@@ -2097,8 +1940,7 @@ fn evaluate_pause_seek_resume(
     if first_epoch.is_none() || first_epoch != last_epoch {
         failures.push("resume_epoch_changed");
     }
-    if maximum_frame_advance == 0 || maximum_frame_advance > PREVIEW_GPU_CPU_STAGING_CAPACITY as u64
-    {
+    if maximum_frame_advance == 0 || maximum_frame_advance > QUALIFIED_MAX_FRAME_DISPLACEMENT {
         failures.push("resume_frame_displacement_exceeded");
     }
     let allowed_stale_observations = requested_observations.div_ceil(12);
@@ -2151,8 +1993,7 @@ fn evaluate_playback_resize(
     if end_frame <= start_frame {
         failures.push("resize_no_forward_progress");
     }
-    if maximum_frame_advance == 0 || maximum_frame_advance > PREVIEW_GPU_CPU_STAGING_CAPACITY as u64
-    {
+    if maximum_frame_advance == 0 || maximum_frame_advance > QUALIFIED_MAX_FRAME_DISPLACEMENT {
         failures.push("resize_frame_displacement_exceeded");
     }
     if first_epoch.is_none() || first_epoch != last_epoch {
@@ -2531,572 +2372,6 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn perf_shutdown_budget_ms() -> u64 {
-    env_u64("MONDRIAN_PERF_SHUTDOWN_MS", 30_000).clamp(100, 120_000)
-}
-
-impl PerfWorkerClosureReport {
-    fn from_evidence(
-        domain: &'static str,
-        evidence: super::endurance_shutdown::EnduranceWorkerShutdownEvidence,
-    ) -> Self {
-        Self {
-            domain,
-            requested_workers: evidence.requested_workers,
-            startup_attempted: evidence.startup_attempted,
-            started_workers: evidence.started_workers,
-            terminated_workers: evidence.terminated_workers,
-            panicked_workers: evidence.panicked_workers,
-            timed_out_workers: evidence.timed_out_workers,
-            detached_workers: evidence.detached_workers,
-            unexpected_worker_exits: evidence.unexpected_worker_exits,
-            queued_work_remaining: evidence.queued_work_remaining,
-            running_work_remaining: evidence.running_work_remaining,
-            owned_resources_remaining: evidence.owned_resources_remaining,
-            cumulative_failures: evidence.cumulative_failures,
-            lifecycle_closed: evidence.lifecycle_closed(),
-        }
-    }
-}
-
-impl PerfAppClosureReport {
-    fn from_evidence(evidence: &super::endurance_shutdown::AppEnduranceShutdownEvidence) -> Self {
-        let workers = vec![
-            PerfWorkerClosureReport::from_evidence(
-                "execution_memory_observer",
-                evidence.execution_memory_observer,
-            ),
-            PerfWorkerClosureReport::from_evidence(
-                "project_persistence",
-                evidence.project_persistence,
-            ),
-            PerfWorkerClosureReport::from_evidence("audio_idle_warmup", evidence.audio_idle_warmup),
-            PerfWorkerClosureReport::from_evidence("media_import", evidence.media_import),
-            PerfWorkerClosureReport::from_evidence(
-                "media_asset_mutation",
-                evidence.media_asset_mutation,
-            ),
-            PerfWorkerClosureReport::from_evidence("visual_tracking", evidence.visual_tracking),
-            PerfWorkerClosureReport::from_evidence("proxy_generation", evidence.proxy_generation),
-        ];
-        let project = PerfProjectClosureReport {
-            session_was_open: evidence.project.session_was_open,
-            pending_close_was_active: evidence.project.pending_close_was_active,
-            authoring_session_released: evidence.project.authoring_session_released,
-            pending_close_released: evidence.project.pending_close_released,
-            runtime_lease_released: evidence.project.runtime_lease_released,
-            retired_library_generations_remaining: evidence
-                .project
-                .retired_library_generations_remaining,
-            lifecycle_failure: evidence.project.lifecycle_failure.clone(),
-            all_resources_released: evidence.project.all_resources_released(),
-        };
-        let audio_output = evidence.audio.output;
-        let audio = PerfAudioClosureReport {
-            schema_version: evidence.audio.schema_version,
-            render_workers_started: evidence.audio.render_workers_started,
-            render_workers_terminated: evidence.audio.render_workers_terminated,
-            render_worker_panics: evidence.audio.render_worker_panics,
-            render_worker_owner_abandonments: evidence.audio.render_worker_owner_abandonments,
-            render_worker_terminal_evidence_missing: evidence
-                .audio
-                .render_worker_terminal_evidence_missing,
-            render_current_thread_detachments: evidence.audio.render_current_thread_detachments,
-            render_retirement_workers_started: evidence.audio.render_retirement_workers_started,
-            render_retirement_workers_terminated: evidence
-                .audio
-                .render_retirement_workers_terminated,
-            render_retirement_worker_panics: evidence.audio.render_retirement_worker_panics,
-            render_retirement_worker_owner_abandonments: evidence
-                .audio
-                .render_retirement_worker_owner_abandonments,
-            render_retirement_worker_terminal_evidence_missing: evidence
-                .audio
-                .render_retirement_worker_terminal_evidence_missing,
-            render_retirement_current_thread_detachments: evidence
-                .audio
-                .render_retirement_current_thread_detachments,
-            output: PerfAudioOutputClosureReport {
-                schema_version: audio_output.schema_version,
-                workers_started: audio_output.workers_started,
-                workers_terminated: audio_output.workers_terminated,
-                worker_start_failures: audio_output.worker_start_failures,
-                worker_spawner_panics: audio_output.worker_spawner_panics,
-                worker_panics: audio_output.worker_panics,
-                current_thread_detachments: audio_output.current_thread_detachments,
-                worker_owner_abandonments: audio_output.worker_owner_abandonments,
-                worker_terminal_evidence_missing: audio_output.worker_terminal_evidence_missing,
-                all_workers_terminated: audio_output.all_workers_terminated(),
-            },
-            foreign_owner_panics: evidence.audio.foreign_owner_panics,
-            foreign_owner_abandonments: evidence.audio.foreign_owner_abandonments,
-            shutdown_coordinators_started: evidence.audio.shutdown_coordinators_started,
-            shutdown_coordinators_terminated: evidence.audio.shutdown_coordinators_terminated,
-            shutdown_coordinator_start_failures: evidence.audio.shutdown_coordinator_start_failures,
-            shutdown_coordinator_panics: evidence.audio.shutdown_coordinator_panics,
-            shutdown_coordinator_timeouts: evidence.audio.shutdown_coordinator_timeouts,
-            shutdown_coordinator_detachments: evidence.audio.shutdown_coordinator_detachments,
-            shutdown_coordinator_spawner_panics: evidence.audio.shutdown_coordinator_spawner_panics,
-            shutdown_coordinator_owner_abandonments: evidence
-                .audio
-                .shutdown_coordinator_owner_abandonments,
-            shutdown_resource_facts_complete_at_deadline: evidence
-                .audio
-                .shutdown_resource_facts_complete_at_deadline,
-            shutdown_owner_lifetime_unresolved_at_deadline: evidence
-                .audio
-                .shutdown_owner_lifetime_unresolved_at_deadline,
-            all_workers_terminated: evidence.audio.all_workers_terminated(),
-        };
-        let audio_source_cache = PerfAudioSourceClosureReport {
-            strong_references_before_consumption: evidence
-                .audio_source_cache
-                .strong_references_before_consumption,
-            strong_references_remaining: evidence.audio_source_cache.strong_references_remaining,
-            cache: evidence.audio_source_cache.cache,
-            all_resources_released: evidence.audio_source_cache.all_resources_released(),
-        };
-        Self {
-            app_owner_consumed: evidence.app_owner_consumed,
-            project,
-            reference_output: evidence.reference_output.clone(),
-            reference_output_resources_released: evidence.reference_output.all_resources_released(),
-            export: evidence.export,
-            export_terminal_snapshot: evidence.export_terminal_snapshot,
-            export_resources_released: evidence.export.all_resources_released(),
-            audio,
-            audio_source_cache,
-            workers,
-            all_resources_released: evidence.all_resources_released(),
-        }
-    }
-}
-
-fn preview_owned_worker_outcome_label(outcome: PreviewOwnedWorkerShutdown) -> &'static str {
-    match outcome {
-        PreviewOwnedWorkerShutdown::NotStarted => "not_started",
-        PreviewOwnedWorkerShutdown::Terminated => "terminated",
-        PreviewOwnedWorkerShutdown::Panicked => "panicked",
-        PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => "panicked_payload_abandoned",
-        PreviewOwnedWorkerShutdown::CurrentThreadSkipped => "current_thread_skipped",
-        PreviewOwnedWorkerShutdown::TimedOutDetached => "timed_out_detached",
-    }
-}
-
-impl PerfPreviewClosureReport {
-    fn from_evidence(owner_slot: usize, evidence: PreviewRuntimeShutdownEvidence) -> Self {
-        let render_cache = evidence.timeline_render_cache;
-        Self {
-            work_callbacks: evidence.work_callbacks,
-            visual_dependency_worker: evidence
-                .visual_dependency_worker
-                .map(preview_owned_worker_outcome_label),
-            owner_slot,
-            schema_version: evidence.schema_version,
-            workers_started: evidence.workers_started,
-            workers_terminated: evidence.workers_terminated,
-            worker_panics: evidence.worker_panics,
-            worker_panic_payloads_abandoned: evidence.worker_panic_payloads_abandoned,
-            current_thread_detachments: evidence.current_thread_detachments,
-            unverified_async_reaps: evidence.unverified_async_reaps,
-            worker_timeouts: evidence.worker_timeouts,
-            worker_deadline_detachments: evidence.worker_deadline_detachments,
-            render_cache_schema_version: render_cache.schema_version,
-            render_cache_required: render_cache.required,
-            render_cache_start_failed: render_cache.start_failed,
-            render_cache_worker: render_cache.worker.map(|worker| {
-                PerfRenderCacheWorkerClosureReport {
-                    worker_started: worker.worker_started,
-                    worker_terminated: worker.worker_terminated,
-                    worker_panicked: worker.worker_panicked,
-                    current_thread_skipped: worker.current_thread_skipped,
-                    timed_out: worker.timed_out,
-                    detached: worker.detached,
-                    all_workers_terminated: worker.all_workers_terminated(),
-                }
-            }),
-            render_cache_aggregate_outcome: preview_owned_worker_outcome_label(
-                render_cache.aggregate_outcome,
-            ),
-            all_resources_released: evidence.all_workers_terminated(),
-        }
-    }
-}
-
-impl PerfGpuClosureReport {
-    fn from_evidence(
-        evidence: super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
-    ) -> Self {
-        let generation_terminal_kind = evidence.generation_terminal_kind.map(|kind| match kind {
-            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceLost => {
-                "device_lost"
-            }
-            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => {
-                "device_destroyed"
-            }
-            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::ProgressFailure => {
-                "progress_failure"
-            }
-        });
-        let all_resources_released = evidence.qualifies_normal_runtime();
-        Self {
-            worker_started: evidence.worker_started,
-            worker_terminated: evidence.worker_terminated,
-            worker_panicked: evidence.worker_panicked,
-            timed_out: evidence.timed_out,
-            retirement_requested: evidence.retirement_requested,
-            retirement_handoff_accepted: evidence.retirement_handoff_accepted,
-            retirement_completed: evidence.retirement_completed,
-            renderer_retirement: evidence.renderer_retirement,
-            generation_terminal_kind,
-            all_resources_released,
-        }
-    }
-}
-
-impl PerfOwnerClosureReport {
-    fn from_evidence(
-        shared_deadline_budget_ms: u64,
-        gpu_owner_required: bool,
-        preview_evidence: Vec<PreviewRuntimeShutdownEvidence>,
-        gpu_evidence: Option<
-            super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
-        >,
-        app_evidence: super::endurance_shutdown::AppEnduranceShutdownEvidence,
-    ) -> Self {
-        let preview_owner_count = preview_evidence.len();
-        let previews = preview_evidence
-            .into_iter()
-            .enumerate()
-            .map(|(slot, evidence)| PerfPreviewClosureReport::from_evidence(slot, evidence))
-            .collect::<Vec<_>>();
-        let gpu = gpu_evidence.map(PerfGpuClosureReport::from_evidence);
-        let app = PerfAppClosureReport::from_evidence(&app_evidence);
-        let all_resources_released = previews.iter().all(|preview| preview.all_resources_released)
-            && if gpu_owner_required {
-                gpu.as_ref().is_some_and(|gpu| gpu.all_resources_released)
-            } else {
-                gpu.is_none()
-            }
-            && app.all_resources_released;
-        Self {
-            schema_version: 1,
-            shared_deadline_budget_ms,
-            preview_owner_count,
-            gpu_owner_required,
-            previews,
-            gpu,
-            app,
-            all_resources_released,
-        }
-    }
-
-    fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.schema_version == 1,
-            "unknown performance owner-closure schema"
-        );
-        anyhow::ensure!(
-            self.preview_owner_count == self.previews.len(),
-            "performance owner-closure Preview inventory changed"
-        );
-        anyhow::ensure!(
-            self.previews
-                .iter()
-                .enumerate()
-                .all(|(slot, preview)| preview.owner_slot == slot),
-            "performance owner-closure Preview slots changed"
-        );
-        anyhow::ensure!(
-            self.gpu_owner_required == self.gpu.is_some(),
-            "performance owner-closure GPU inventory changed"
-        );
-        anyhow::ensure!(
-            self.all_resources_released
-                && self.previews.iter().all(|preview| {
-                    preview.all_resources_released
-                        && preview.schema_version == 4
-                        && preview.work_callbacks.is_some_and(|callbacks| {
-                            callbacks.all_resources_released()
-                                && preview.workers_started
-                                    >= 2 + u32::from(callbacks.worker_started)
-                        })
-                        && preview.workers_started == preview.workers_terminated
-                        && preview.visual_dependency_worker == Some("terminated")
-                        && preview.render_cache_required
-                        && !preview.render_cache_start_failed
-                        && preview
-                            .render_cache_worker
-                            .is_some_and(|worker| worker.all_workers_terminated)
-                })
-                && self.gpu.as_ref().is_none_or(|gpu| gpu.all_resources_released)
-                && self.app.all_resources_released,
-            "performance owner-closure did not release every Preview/GPU/App resource: {self:?}"
-        );
-        Ok(())
-    }
-}
-
-fn install_perf_timeline_render_cache<O: Clone>(
-    preview: &PreviewProductionRuntime<O>,
-    root: &Path,
-) -> anyhow::Result<()> {
-    const DISK_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
-    const ARTIFACT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
-    const QUEUE_CAPACITY: usize = 4;
-    let config = mondrian_render_cache::TimelineRenderCacheConfig::new(
-        root.to_path_buf(),
-        DISK_BUDGET_BYTES,
-        ARTIFACT_BUDGET_BYTES,
-        QUEUE_CAPACITY,
-    )?;
-    preview.install_timeline_render_cache_for_test(config).with_context(|| {
-        format!(
-            "start isolated performance Timeline render cache {}",
-            root.display()
-        )
-    })
-}
-
-fn persistent_cache_request_verified(
-    before: TimelineRenderCacheDiagnostics,
-    after: TimelineRenderCacheDiagnostics,
-) -> bool {
-    after.lookup_submissions > before.lookup_submissions && after.hits > before.hits
-}
-
-fn shutdown_perf_owners<O: Clone>(
-    mut previews: Vec<PreviewProductionRuntime<O>>,
-    gpu: Option<HeadlessViewerGpuAdapter>,
-    mut app: AppState,
-    shared_deadline_budget_ms: u64,
-    gpu_owner_required: bool,
-) -> PerfOwnerClosureReport {
-    let deadline = Instant::now() + Duration::from_millis(shared_deadline_budget_ms);
-    for preview in &mut previews {
-        preview.begin_endurance_shutdown();
-    }
-    app.begin_endurance_shutdown();
-    let preview_evidence =
-        previews.into_iter().map(|preview| preview.shutdown_until(deadline)).collect();
-    // Preview workers and their decoder-native residency are producers of GPU
-    // work. Reclaim them before retiring the device generation so no producer
-    // can race the final native Device::poll/queue-completion proof.
-    let gpu_evidence = gpu.map(|gpu| gpu.shutdown_until(deadline));
-    let app_evidence = app.shutdown_for_endurance(deadline);
-    PerfOwnerClosureReport::from_evidence(
-        shared_deadline_budget_ms,
-        gpu_owner_required,
-        preview_evidence,
-        gpu_evidence,
-        app_evidence,
-    )
-}
-
-fn finish_perf_owner_run<T>(
-    operation: anyhow::Result<T>,
-    owner_closure: PerfOwnerClosureReport,
-) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
-    let closure_validation = owner_closure.validate();
-    let closure_json = serde_json::to_string(&owner_closure)
-        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
-    match (operation, closure_validation) {
-        (Ok(value), Ok(())) => Ok((value, owner_closure)),
-        (Err(operation_error), Ok(())) => Err(anyhow::anyhow!(
-            "performance operation failed: {operation_error:#}; owner_closure={closure_json}"
-        )),
-        (Ok(_), Err(closure_error)) => Err(closure_error),
-        (Err(operation_error), Err(closure_error)) => Err(anyhow::anyhow!(
-            "performance operation failed: {operation_error:#}; owner closure also failed: {closure_error:#}; owner_closure={closure_json}"
-        )),
-    }
-}
-
-fn create_perf_preview(app: AppState) -> anyhow::Result<(AppState, HeadlessPreviewRuntime)> {
-    create_perf_preview_with(app, HeadlessPreviewRuntime::try_new)
-}
-
-fn create_perf_preview_with(
-    app: AppState,
-    create: impl FnOnce() -> Result<
-        HeadlessPreviewRuntime,
-        super::preview_runtime::PreviewStartupFailure<
-            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
-        >,
-    >,
-) -> anyhow::Result<(AppState, HeadlessPreviewRuntime)> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(create)) {
-        Ok(Ok(preview)) => Ok((app, preview)),
-        Ok(Err(failure)) => Err(shutdown_perf_startup::<
-            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
-        >(
-            app,
-            Vec::new(),
-            super::headless_execution_startup::HeadlessExecutionStartFailure::partial_preview(
-                failure, None,
-            ),
-        )),
-        Err(payload) => Err(shutdown_perf_startup::<
-            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
-        >(
-            app,
-            Vec::new(),
-            super::headless_execution_startup::HeadlessExecutionStartFailure::preview_construction(
-                super::headless_execution_startup::startup_panic_diagnostic(payload),
-            ),
-        )),
-    }
-}
-
-fn run_with_perf_owners<O: Clone, T>(
-    mut app: AppState,
-    mut previews: Vec<PreviewProductionRuntime<O>>,
-    mut gpu: Option<HeadlessViewerGpuAdapter>,
-    operation: impl FnOnce(
-        &mut AppState,
-        &mut [PreviewProductionRuntime<O>],
-        Option<&mut HeadlessViewerGpuAdapter>,
-    ) -> anyhow::Result<T>,
-) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
-    let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        operation(&mut app, &mut previews, gpu.as_mut())
-    }))
-    .unwrap_or_else(|payload| {
-        Err(
-            super::execution_panic_diagnostic::execution_panic_diagnostic(
-                payload,
-                "performance operation",
-            ),
-        )
-    });
-    let budget_ms = perf_shutdown_budget_ms();
-    let gpu_owner_required = gpu.is_some();
-    let owner_closure = shutdown_perf_owners(previews, gpu, app, budget_ms, gpu_owner_required);
-    finish_perf_owner_run(operation_result, owner_closure)
-}
-
-fn run_with_perf_gpu_factory<O: Clone, T>(
-    app: AppState,
-    previews: Vec<PreviewProductionRuntime<O>>,
-    create_gpu: impl FnOnce() -> Result<
-        HeadlessViewerGpuAdapter,
-        super::headless_execution_startup::HeadlessExecutionStartFailure,
-    >,
-    operation: impl FnOnce(
-        &mut AppState,
-        &mut [PreviewProductionRuntime<O>],
-        Option<&mut HeadlessViewerGpuAdapter>,
-    ) -> anyhow::Result<T>,
-) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
-    let gpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_gpu))
-        .unwrap_or_else(|payload| {
-            Err(
-                super::headless_execution_startup::HeadlessExecutionStartFailure::before_progress(
-                    super::headless_execution_startup::startup_panic_diagnostic(payload),
-                ),
-            )
-        });
-    match gpu_result {
-        Ok(gpu) => run_with_perf_owners(app, previews, Some(gpu), operation),
-        Err(failure) => Err(shutdown_perf_startup(app, previews, failure)),
-    }
-}
-
-/// Failed startup has its own actual inventory, never a missing normal GPU receipt.
-fn shutdown_perf_startup<O: Clone>(
-    mut app: AppState,
-    mut previews: Vec<PreviewProductionRuntime<O>>,
-    mut failure: super::headless_execution_startup::HeadlessExecutionStartFailure,
-) -> anyhow::Error {
-    let budget_ms = perf_shutdown_budget_ms();
-    let deadline = Instant::now() + Duration::from_millis(budget_ms);
-    for preview in &mut previews {
-        preview.begin_endurance_shutdown();
-    }
-    failure.begin_shutdown();
-    app.begin_endurance_shutdown();
-    let mut previews = previews
-        .into_iter()
-        .map(|preview| preview.shutdown_until(deadline))
-        .collect::<Vec<_>>();
-    let (diagnostic, mut headless) = failure.shutdown_until(deadline);
-    let headless_closed = headless.all_created_resources_released();
-    previews.extend(headless.preview.take());
-    let all_previews_closed = previews.iter().all(|receipt| receipt.all_workers_terminated());
-    let previews = previews
-        .into_iter()
-        .enumerate()
-        .map(|(index, evidence)| PerfPreviewClosureReport::from_evidence(index, evidence))
-        .collect::<Vec<_>>();
-    let app = PerfAppClosureReport::from_evidence(&app.shutdown_for_endurance(deadline));
-    let all_resources_released =
-        all_previews_closed && headless_closed && app.all_resources_released;
-    diagnostic.context(format!(
-        "performance startup failed; startup_closure={}",
-        serde_json::json!({
-            "shared_deadline_budget_ms": budget_ms,
-            "previews": previews,
-            "preview_startup": headless.preview_startup,
-            "gpu": headless.gpu,
-            "opaque_panic_payload_abandoned": headless.opaque_panic_payload_abandoned,
-            "preview_construction_unverified": headless.preview_construction_unverified,
-            "app": app,
-            "all_resources_released": all_resources_released,
-        })
-    ))
-}
-
-fn run_with_realtime_perf_owners<T>(
-    mut app: AppState,
-    mut realtime: HeadlessRealtimePlaybackSession,
-    operation: impl FnOnce(&mut AppState, &mut HeadlessRealtimePlaybackSession) -> anyhow::Result<T>,
-) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
-    let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        operation(&mut app, &mut realtime)
-    }))
-    .unwrap_or_else(|payload| {
-        Err(
-            super::execution_panic_diagnostic::execution_panic_diagnostic(
-                payload,
-                "performance operation",
-            ),
-        )
-    });
-    let (preview, gpu) = realtime.into_shutdown_owners();
-    let budget_ms = perf_shutdown_budget_ms();
-    let owner_closure = shutdown_perf_owners(vec![preview], Some(gpu), app, budget_ms, true);
-    finish_perf_owner_run(operation_result, owner_closure)
-}
-
-fn run_with_realtime_perf_gpu_factory<T>(
-    app: AppState,
-    create_gpu: impl FnOnce() -> Result<
-        HeadlessViewerGpuAdapter,
-        super::headless_execution_startup::HeadlessExecutionStartFailure,
-    >,
-    operation: impl FnOnce(&mut AppState, &mut HeadlessRealtimePlaybackSession) -> anyhow::Result<T>,
-) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
-    let (app, preview) = create_perf_preview(app)?;
-    let gpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_gpu))
-        .unwrap_or_else(|payload| {
-            Err(
-                super::headless_execution_startup::HeadlessExecutionStartFailure::before_progress(
-                    super::headless_execution_startup::startup_panic_diagnostic(payload),
-                ),
-            )
-        });
-    let gpu = match gpu_result {
-        Ok(gpu) => gpu,
-        Err(failure) => return Err(shutdown_perf_startup(app, vec![preview], failure)),
-    };
-    match HeadlessRealtimePlaybackSession::with_shutdown_owners(preview, gpu) {
-        Ok(realtime) => run_with_realtime_perf_owners(app, realtime, operation),
-        Err(failure) => Err(shutdown_perf_startup::<
-            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
-        >(app, Vec::new(), failure)),
-    }
-}
-
 fn perf_output_path() -> Option<PathBuf> {
     std::env::var_os("MONDRIAN_PERF_OUTPUT").map(PathBuf::from)
 }
@@ -3313,6 +2588,10 @@ fn performance_gpu_initialization_error_closes_existing_owners_fail_closed() {
         |_, _, _| Ok(()),
     )
     .expect_err("GPU initialization failure must retain exact existing-owner evidence");
+    let raw = error.downcast_ref::<PerfStartupClosedFailure>().expect("typed startup receipt");
+    assert!(raw.app.all_resources_released());
+    assert!(raw.headless.all_created_resources_released());
+    assert_eq!(raw.previews.len(), 1);
     let detail = format!("{error:#}");
 
     assert!(detail.contains("intentional GPU initialization failure"));
@@ -8014,11 +7293,16 @@ fn interactive_decode_progress(
 fn isolated_demux_cancellation_terminations(
     workers: crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics,
 ) -> u64 {
-    [workers.any, workers.playback, workers.non_playback]
-        .into_iter()
-        .flatten()
-        .map(|progress| progress.isolated_demux.cancellation_terminations)
-        .fold(0, u64::saturating_add)
+    [
+        workers.any,
+        workers.playback,
+        workers.non_playback,
+        workers.still,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|progress| progress.isolated_demux.cancellation_terminations)
+    .fold(0, u64::saturating_add)
 }
 
 fn wait_for_preview_work_quiescence(
@@ -8092,15 +7376,20 @@ fn wait_for_preview_idle_residency_release(
 fn preview_decode_workers_idle_and_reaped(
     workers: crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics,
 ) -> bool {
-    [workers.any, workers.playback, workers.non_playback]
-        .into_iter()
-        .flatten()
-        .all(|progress| {
-            let demux = progress.isolated_demux;
-            progress.stage == PreviewDecodeExecutionStage::Idle
-                && demux.active_sessions == 0
-                && demux.reaped_sessions() == demux.session_launches
-        })
+    [
+        workers.any,
+        workers.playback,
+        workers.non_playback,
+        workers.still,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|progress| {
+        let demux = progress.isolated_demux;
+        progress.stage == PreviewDecodeExecutionStage::Idle
+            && demux.active_sessions == 0
+            && demux.reaped_sessions() == demux.session_launches
+    })
 }
 
 #[test]
@@ -8136,6 +7425,14 @@ fn preview_idle_release_requires_worker_idle_and_post_reap_accounting() {
     assert!(!preview_decode_workers_idle_and_reaped(
         crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics {
             playback: Some(unreaped),
+            ..workers
+        }
+    ));
+
+    assert!(!preview_decode_workers_idle_and_reaped(
+        crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics {
+            playback: Some(complete),
+            still: Some(unreaped),
             ..workers
         }
     ));
@@ -8745,8 +8042,9 @@ fn wait_for_headless_playback_preroll(
                 state,
                 gpu_adapter,
                 HeadlessGpuCompletionDeadline::at(deadline),
+                true,
             )?;
-            stage_headless_preview_lookahead(preview_service, state, gpu_adapter)?;
+            let _ = stage_headless_preview_lookahead(preview_service, state, gpu_adapter)?;
         }
         anyhow::ensure!(
             now < deadline,

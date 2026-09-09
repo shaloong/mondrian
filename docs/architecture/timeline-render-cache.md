@@ -128,3 +128,12 @@ unwind. Its owner-free native shutdown facts are serializable without replacing
 the consuming receipt with a projected success flag. Partial Preview closure
 binds these facts to exact startup inventory; normal Preview qualification still
 requires the existing required-cache closure predicate.
+
+
+### Preview closure inventory replay
+
+The cache worker shutdown receipt supports typed deserialization for independent
+owner replay. Preview requires a configured cache to carry an actually started,
+synchronously terminated worker and matching `Terminated` aggregate evidence.
+A disabled test cache is valid only with no worker, no startup failure and a
+`NotStarted` aggregate; a required cache cannot borrow that empty inventory.

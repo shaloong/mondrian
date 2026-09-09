@@ -139,6 +139,10 @@ pub const APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG: &str = "confirm_interpret_as
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to choose a timeline export output file.
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
+/// Native file selection for one canonical ANC export attachment.
+pub const APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG: &str = "import_export_ancillary_dialog";
+/// Native file selection for a regulatory PSE provider/QC configuration.
+pub const APP_SHELL_IMPORT_EXPORT_PSE_DIALOG: &str = "import_export_pse_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
 /// App-shell request to show app UI preferences.
@@ -1119,6 +1123,11 @@ pub fn export_enqueue_action(request: TimelineExportRequest) -> Action {
     ProductAction::Export(ExportProductAction::Enqueue(Box::new(request))).into_external_action()
 }
 
+/// Freeze the application-owned export draft once at user dispatch.
+pub fn export_enqueue_draft_action() -> Action {
+    ProductAction::Export(ExportProductAction::EnqueueDraft).into_external_action()
+}
+
 /// Build an action that updates one export draft field.
 pub fn export_edit_draft_action(edit: ExportDraftEdit) -> Action {
     ProductAction::Export(ExportProductAction::EditDraft(Box::new(edit))).into_external_action()
@@ -1360,6 +1369,16 @@ pub fn app_shell_save_project_as_dialog_action() -> Action {
 /// Build an app-shell request for choosing an export output file.
 pub fn app_shell_export_output_dialog_action(payload: ExportOutputDialogPayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_EXPORT_OUTPUT_DIALOG, payload)
+}
+
+/// Choose a canonical ANC JSON attachment through the native open-file dialog.
+pub fn app_shell_import_export_ancillary_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG)
+}
+
+/// Choose an explicit regulatory PSE provider/QC JSON configuration.
+pub fn app_shell_import_export_pse_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_IMPORT_EXPORT_PSE_DIALOG)
 }
 
 /// Build an app-shell request for showing product about information.

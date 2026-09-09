@@ -15,7 +15,9 @@ use crate::app::waveform_service::{
 };
 
 /// Last fully owned Host construction stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AppUiHostStartupStage {
     /// The exact caller App is held before any other work.
@@ -57,7 +59,7 @@ pub enum AppUiHostStartupStage {
 }
 
 /// Owner category that produced the primary Host startup failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppUiHostStartupFailureKind {
     /// Host composition or a named Host checkpoint unwound.
@@ -81,7 +83,7 @@ pub struct AppUiHostStartupDiagnostic {
 }
 
 /// Exact Waveform owner shape consumed after failed Host startup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppUiHostStartupWaveformShutdown {
     /// Host failed before Waveform construction.
@@ -93,7 +95,7 @@ pub enum AppUiHostStartupWaveformShutdown {
 }
 
 /// Exact Preview owner shape consumed after failed Host startup.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppUiHostStartupPreviewShutdown {
     /// Host failed before Preview construction.
@@ -105,7 +107,7 @@ pub enum AppUiHostStartupPreviewShutdown {
 }
 
 /// Exact catalog inventory and its consuming shutdown receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppUiHostStartupCatalogShutdown {
     /// Fresh Adapter state captured before cleanup.
     pub startup: AudioDeviceCatalogStartupState,
@@ -114,7 +116,7 @@ pub struct AppUiHostStartupCatalogShutdown {
 }
 
 /// Owner-derived closure facts for an unpublished Host.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppUiHostStartupShutdownEvidence {
     /// Receipt schema.
     pub schema_version: u32,

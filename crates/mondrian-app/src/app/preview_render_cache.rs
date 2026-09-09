@@ -35,7 +35,7 @@ pub(crate) struct PreviewTimelineRenderCache {
     start_failure: Option<String>,
     ready: Option<(TimelineRenderCacheIdentity, CpuColorFrame)>,
     negative: VecDeque<TimelineRenderCacheIdentity>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     startup_config: Option<Result<TimelineRenderCacheConfig, String>>,
 }
 
@@ -52,23 +52,26 @@ impl PreviewTimelineRenderCache {
             start_failure: None,
             ready: None,
             negative: VecDeque::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "validation"))]
             startup_config: None,
         }
     }
 
     /// Install a real service before logging or returning to Runtime construction.
     pub(crate) fn start_in_place(&mut self, work_notifier: PreviewWorkNotifier) {
-        #[cfg(test)]
-        if let Some(config) = self.startup_config.take() {
+        #[cfg(any(test, feature = "validation"))]
+        let config = self.startup_config.take();
+        #[cfg(not(any(test, feature = "validation")))]
+        let config = None;
+        #[cfg(not(test))]
+        let config = config.or_else(|| Some(default_config()));
+        if let Some(config) = config {
             self.start_with_config(config, work_notifier);
         }
-        #[cfg(not(test))]
-        self.start_with_config(default_config(), work_notifier);
     }
 
     /// Required native cache configuration for production-linked construction tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn prepare_with_config_for_test(
         config: Result<TimelineRenderCacheConfig, String>,
     ) -> Self {
@@ -287,7 +290,7 @@ impl PreviewTimelineRenderCache {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreviewTimelineRenderCacheShutdownEvidence {
     pub(crate) schema_version: u32,
     pub(crate) required: bool,
@@ -299,9 +302,14 @@ pub(crate) struct PreviewTimelineRenderCacheShutdownEvidence {
 impl PreviewTimelineRenderCacheShutdownEvidence {
     pub(crate) const fn all_resources_released(self) -> bool {
         self.schema_version == 1
-            && (!self.required
-                || (!self.start_failed
-                    && matches!(self.worker, Some(worker) if worker.all_workers_terminated())))
+            && !self.start_failed
+            && match (self.required, self.worker, self.aggregate_outcome) {
+                (true, Some(worker), PreviewOwnedWorkerShutdown::Terminated) => {
+                    worker.worker_started && worker.all_workers_terminated()
+                }
+                (false, None, PreviewOwnedWorkerShutdown::NotStarted) => true,
+                _ => false,
+            }
     }
 }
 

@@ -181,6 +181,7 @@ impl VisualExecutionAdmission {
             generation: self.generation,
             priority: self.priority,
             work_class: self.work_class,
+            worker_affinity: None,
             resource_scope: mondrian_playback::FrameWorkResourceScope::Shared,
             demand_identity: self.demand_identity,
             deadline: self.deadline,

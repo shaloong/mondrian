@@ -65,7 +65,7 @@ use super::preview_viewer_plan::{
 };
 
 /// Complete media-layer request emitted while materializing a prepared node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewTimelineMediaRequest {
     pub(crate) asset_id: AssetId,
     pub(crate) color_space_override: Option<ColorSpace>,
@@ -84,6 +84,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
 }
 
 /// Exhaustive Adapter response for one media layer needed by Timeline execution.
+#[derive(Clone)]
 pub(crate) enum PreviewTimelineMediaFrame {
     Ready(MediaPreviewFrame),
     Pending { wait: PreviewTimelineMediaWait },
@@ -476,9 +477,32 @@ where
             ),
         };
     }
+    // Admit the complete already-prepared media closure before an early
+    // Pending return can defer another Current input until the next turn.
+    // Retain Ready protection leases across this bounded batch, and give the
+    // executor those exact results instead of querying an input twice.
+    let demands = match collect_prepared_visual_media_demands(&closure) {
+        Ok(demands) => demands,
+        Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+    };
+    let mut admitted = HashMap::new();
+    for demand in demands {
+        admitted.entry(demand.clone()).or_insert_with(|| media_frame(demand));
+    }
+    let mut admitted_media = |demand: PreviewTimelineMediaRequest| {
+        admitted
+            .get(&demand)
+            .cloned()
+            .unwrap_or_else(|| PreviewTimelineMediaFrame::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "prepared media execution requested an input outside its admitted closure",
+                ),
+            })
+    };
     let mut adapter = PreviewTimelineExecutionAdapter {
         closure: &closure,
-        media_frame,
+        media_frame: &mut admitted_media,
         title_frame,
         scratch,
         facts: Vec::new(),

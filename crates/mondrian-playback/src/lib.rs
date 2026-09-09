@@ -473,6 +473,9 @@ pub struct VideoPrerollObservation {
     pub ready_media_frames: usize,
     /// Complete future media-bearing prefix that can be preserved concurrently.
     pub preservable_media_frames: usize,
+    /// Whether the next distinct physical source within the bounded cold-open
+    /// horizon is already resident, or no such activation exists.
+    pub bounded_cold_activation_ready: bool,
     /// Whether the exact immediate successor is physically prepared, or no
     /// successor exists for this transport coordinate.
     pub presentation_successor_ready: bool,
@@ -780,6 +783,11 @@ pub enum PlaybackError {
     /// Preview Adapter reported an inconsistent or unbounded lookahead window.
     #[error("video preroll must be a bounded ready prefix of the available media window")]
     InvalidVideoPrerollObservation,
+    /// A bounded recovery demand requires the exact current running picture and a future deadline.
+    #[error(
+        "bounded playback recovery requires the exact current running frame and a future deadline"
+    )]
+    InvalidRecoveryFrameDemand,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -792,6 +800,7 @@ struct ClockAnchor {
 struct AudioDeviceClockAnchor {
     stream_generation: u64,
     media_anchor: AudioSamplePosition,
+    last_consumed_frames: u64,
     last_effective_consumed_frames: u64,
     last_observed_at: MonotonicTimestamp,
     last_media_position_ns: i128,
@@ -1433,13 +1442,13 @@ impl PlaybackEngine {
             return Ok(self.snapshot());
         }
 
-        let effective_consumed = observation
+        let measured_effective_consumed = observation
             .consumed_frames
             .checked_sub(observation.estimated_latency_frames as u64)
             .ok_or(PlaybackError::InvalidAudioClockPosition)?;
         if self.audio_device_anchor.is_some_and(|anchor| {
             anchor.stream_generation == observation.stream_generation
-                && (effective_consumed < anchor.last_effective_consumed_frames
+                && (observation.consumed_frames < anchor.last_consumed_frames
                     || observation.media_anchor != anchor.media_anchor)
         }) {
             self.handoff_to_synthetic(observation.observed_at)?;
@@ -1449,7 +1458,7 @@ impl PlaybackEngine {
             .audio_device_anchor
             .filter(|anchor| anchor.stream_generation == observation.stream_generation)
         else {
-            let candidate_ns = audio_media_position_ns(observation, effective_consumed)?;
+            let candidate_ns = audio_media_position_ns(observation, measured_effective_consumed)?;
             let reference_ns = self.clock_phase_reference_ns(observation.observed_at)?;
             let phase_error_ns = candidate_ns
                 .checked_sub(reference_ns)
@@ -1479,7 +1488,8 @@ impl PlaybackEngine {
             self.audio_device_anchor = Some(AudioDeviceClockAnchor {
                 stream_generation: observation.stream_generation,
                 media_anchor: observation.media_anchor,
-                last_effective_consumed_frames: effective_consumed,
+                last_consumed_frames: observation.consumed_frames,
+                last_effective_consumed_frames: measured_effective_consumed,
                 last_observed_at: observation.observed_at,
                 last_media_position_ns: candidate_ns,
                 last_uncertainty_frames: observation.uncertainty_frames,
@@ -1490,6 +1500,32 @@ impl PlaybackEngine {
             return Ok(self.snapshot());
         };
 
+        // `consumed_frames` is an exact monotonic host callback counter. The
+        // effective device position subtracts a sampled playback-delay estimate
+        // and is therefore a point inside an uncertainty interval. Across a
+        // callback boundary the counter and delay estimate can both advance,
+        // making that point move slightly backwards even though the device did
+        // not. Preserve the last proven point while the adjacent uncertainty
+        // intervals overlap; a larger regression still takes the fail-closed
+        // Synthetic handoff above/below.
+        let adjacent_uncertainty_frames = u64::from(anchor.last_uncertainty_frames)
+            .checked_add(u64::from(observation.uncertainty_frames))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        let effective_consumed =
+            if measured_effective_consumed < anchor.last_effective_consumed_frames {
+                let regression = anchor
+                    .last_effective_consumed_frames
+                    .checked_sub(measured_effective_consumed)
+                    .ok_or(PlaybackError::InvalidAudioClockPosition)?;
+                if regression > adjacent_uncertainty_frames {
+                    self.handoff_to_synthetic(observation.observed_at)?;
+                    return Ok(self.snapshot());
+                }
+                anchor.last_effective_consumed_frames
+            } else {
+                measured_effective_consumed
+            };
+
         let observed_elapsed =
             observation.observed_at.checked_elapsed_since(anchor.last_observed_at)?;
         let consumed_delta = effective_consumed
@@ -1498,7 +1534,7 @@ impl PlaybackEngine {
         let allowed_elapsed_ns = observed_elapsed
             .as_nanos()
             .checked_add(sample_frames_ns_ceil(
-                u64::from(observation.uncertainty_frames.max(anchor.last_uncertainty_frames)),
+                adjacent_uncertainty_frames,
                 observation_rate,
             )?)
             .ok_or(PlaybackError::TransportArithmeticOverflow)?;
@@ -1513,6 +1549,7 @@ impl PlaybackEngine {
         self.audio_device_anchor = Some(AudioDeviceClockAnchor {
             stream_generation: anchor.stream_generation,
             media_anchor: anchor.media_anchor,
+            last_consumed_frames: observation.consumed_frames,
             last_effective_consumed_frames: effective_consumed,
             last_observed_at: observation.observed_at,
             last_media_position_ns: media_position_ns,
@@ -1649,7 +1686,6 @@ impl PlaybackEngine {
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
             self.quality_change_awaiting_delivery = true;
             self.quality_change_missed_demands = 0;
-            self.refresh_frame_demand(self.last_timestamp)?;
             self.consecutive_healthy = 0;
             if self.preview_scale == PreviewResolutionScale::Full {
                 self.state = TransportState::Playing;
@@ -1702,6 +1738,8 @@ impl PlaybackEngine {
             .video_preroll_observation
             .filter(|previous| previous.demand == observation.demand)
             .map_or(observation, |previous| VideoPrerollObservation {
+                bounded_cold_activation_ready: previous.bounded_cold_activation_ready
+                    || observation.bounded_cold_activation_ready,
                 presentation_successor_ready: previous.presentation_successor_ready
                     || observation.presentation_successor_ready,
                 ..observation
@@ -1770,6 +1808,58 @@ impl PlaybackEngine {
         } else {
             None
         }
+    }
+
+    /// Reissue the exact current timed picture for one explicitly bounded recovery.
+    ///
+    /// This seam is reserved for a recovery operation that temporarily made
+    /// the current representation unusable while transport retained play
+    /// intent. It preserves epoch, target, current quality revision, transport
+    /// state, and Clock Master, but publishes a fresh demand sequence whose
+    /// deadline is the recovery operation's already-bounded outer deadline. If
+    /// the terminal recovery observation itself selected a new quality, this
+    /// explicit seam may issue that current quality for the same coordinate;
+    /// ordinary quality changes still defer work until a clock boundary.
+    pub fn reissue_current_frame_demand_for_recovery(
+        &mut self,
+        now: MonotonicTimestamp,
+        recovery_deadline: MonotonicTimestamp,
+    ) -> Result<FrameDemand, PlaybackError> {
+        self.commit_candidate(move |candidate| {
+            candidate.reissue_current_frame_demand_for_recovery_in_place(now, recovery_deadline)
+        })
+    }
+
+    fn reissue_current_frame_demand_for_recovery_in_place(
+        &mut self,
+        now: MonotonicTimestamp,
+        recovery_deadline: MonotonicTimestamp,
+    ) -> Result<FrameDemand, PlaybackError> {
+        self.accept_timestamp(now)?;
+        let current_matches = self.active_demand.is_some_and(|demand| {
+            demand.kind == FrameDemandKind::TimedPlayback
+                && demand.epoch == self.epoch
+                && demand.quality_revision == self.quality_revision
+                && demand.target == self.position
+        });
+        let terminal_quality_transition_matches = self.active_demand.is_some_and(|demand| {
+            demand.kind == FrameDemandKind::TimedPlayback
+                && demand.epoch == self.epoch
+                && demand.quality_revision < self.quality_revision
+                && demand.target == self.position
+                && self.terminal_delivery
+                    == Some((demand.epoch, demand.quality_revision, demand.sequence))
+        });
+        if !matches!(
+            self.state,
+            TransportState::Playing | TransportState::Recovering
+        ) || !(current_matches || terminal_quality_transition_matches)
+            || recovery_deadline <= now
+        {
+            return Err(PlaybackError::InvalidRecoveryFrameDemand);
+        }
+        self.refresh_frame_demand_with_deadline(recovery_deadline)?;
+        self.active_demand.ok_or(PlaybackError::InvalidRecoveryFrameDemand)
     }
 
     /// Lower the authoritative phase at one exact monotonic instant to an
@@ -2072,6 +2162,7 @@ impl PlaybackEngine {
                     .minimum_video_preroll_frames
                     .min(observation.preservable_media_frames);
                 observation.ready_media_frames >= required
+                    && observation.bounded_cold_activation_ready
             })
         };
         let presentation_preroll_satisfied = self.policy.minimum_video_preroll_frames == 0
@@ -2096,6 +2187,7 @@ impl PlaybackEngine {
                     .minimum_video_preroll_frames
                     .min(observation.preservable_media_frames);
                 observation.ready_media_frames < required
+                    || !observation.bounded_cold_activation_ready
                     || !observation.presentation_successor_ready
             })
     }
@@ -2104,6 +2196,21 @@ impl PlaybackEngine {
         &mut self,
         now: MonotonicTimestamp,
     ) -> Result<(), PlaybackError> {
+        let completed_current_coordinate = self.active_demand.is_some_and(|demand| {
+            demand.epoch == self.epoch
+                && demand.target == self.position
+                && self.terminal_delivery
+                    == Some((demand.epoch, demand.quality_revision, demand.sequence))
+        });
+        if completed_current_coordinate {
+            // A terminal delivery can atomically select the next Preview scale.
+            // The already-presented coordinate has spent its presentation
+            // opportunity; subframe clock observations must not turn that
+            // policy revision into replacement current-frame authority. The
+            // next real clock boundary publishes the new scale for its newly
+            // current coordinate through the ordinary path below.
+            return Ok(());
+        }
         let current_matches = self.active_demand.is_some_and(|demand| {
             demand.epoch == self.epoch
                 && demand.quality_revision == self.quality_revision
@@ -2122,7 +2229,7 @@ impl PlaybackEngine {
                         TransportState::Playing | TransportState::Recovering
                     )
             });
-            let quality_changed = if missed_presentation {
+            if missed_presentation {
                 if self.quality_change_awaiting_delivery {
                     self.quality_change_missed_demands = self
                         .quality_change_missed_demands
@@ -2141,13 +2248,13 @@ impl PlaybackEngine {
                 }
                 self.push_pressure(true);
                 self.consecutive_healthy = 0;
-                self.apply_pressure_scale_down()?.1
-            } else {
-                false
-            };
-            if !quality_changed {
-                self.refresh_frame_demand(now)?;
+                self.apply_pressure_scale_down()?;
             }
+            // A clock boundary always needs one demand for the newly current
+            // coordinate. Quality transitions caused by the old coordinate's
+            // terminal result deliberately defer here instead of reissuing
+            // that already completed coordinate against its spent deadline.
+            self.refresh_frame_demand(now)?;
         }
         Ok(())
     }
@@ -2175,7 +2282,6 @@ impl PlaybackEngine {
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
             self.quality_change_awaiting_delivery = true;
             self.quality_change_missed_demands = 0;
-            self.refresh_frame_demand(self.last_timestamp)?;
         }
         self.recent_pressure.clear();
         Ok((true, quality_changed))

@@ -10,31 +10,14 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineTitleRequest,
 };
 
-/// Project one typed evaluation dependency from a media timeline pending
-/// dependency. Non-media waits keep their existing per-call behavior until
-/// typed generated-title/temporal variants land.
-fn media_dependency_from_pending(
-    dependency: PreviewTimelinePendingDependency,
-) -> Option<EvaluationDependency> {
-    match dependency {
-        PreviewTimelinePendingDependency::Media { asset_id, wait } => matches!(
-            wait,
-            crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer
-        )
-        .then_some(EvaluationDependency::MediaProducer(asset_id)),
-        PreviewTimelinePendingDependency::BasicTitle(_)
-        | PreviewTimelinePendingDependency::Temporal { .. } => None,
-    }
-}
-
 /// Reconstruct the media timeline dependency for consumers that keep
 /// branch-local pending handling.
 fn media_pending_dependency_from_wait(
     dependencies: &[EvaluationDependency],
 ) -> Option<PreviewTimelinePendingDependency> {
     dependencies.first().map(|dependency| match dependency {
-        EvaluationDependency::MediaProducer(asset_id) => PreviewTimelinePendingDependency::Media {
-            asset_id: *asset_id,
+        EvaluationDependency::MediaProducer(key) => PreviewTimelinePendingDependency::Media {
+            asset_id: key.asset_id,
             wait: crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer,
         },
     })
@@ -68,7 +51,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.request_timeline_render_cache_lookup(&evaluation);
             return FrameResolutionOutcome::Ready(evaluation);
         }
-        if let Some(dependencies) = self.evaluation_working_set.borrow().waiting_for(evaluation_key)
+        let request_priority = if snapshot.transport().is_speculative_preparation() {
+            MediaPreviewRequestPriority::Prefetch
+        } else {
+            MediaPreviewRequestPriority::Current
+        };
+        if let Some(dependencies) = self
+            .evaluation_working_set
+            .borrow_mut()
+            .waiting_for(evaluation_key, request_priority)
             && let Some(dependency) = media_pending_dependency_from_wait(&dependencies)
         {
             bump(&self.metrics.timeline_evaluation_wait_hits);
@@ -81,7 +72,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         bump(&self.metrics.timeline_evaluation_misses);
         self.bump_timeline_resolve_count();
-        let resolution = self.resolve_timeline(
+        let (resolution, dependencies) = self.resolve_timeline(
             snapshot,
             proxy_demands,
             sequence,
@@ -113,29 +104,45 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     color_context: plan.color_context,
                     resolved_quality,
                     reuse_policy,
-                    // Ready evaluations keep their dependencies empty until
-                    // per-dependency extraction lands; the working set is
-                    // still cleared on media arrival.
-                    dependencies: Arc::from([]),
+                    dependencies: dependencies.into(),
                     render_cache_identity: plan.render_cache_identity,
                 });
-                let clock = self.evaluation_working_set_clock.get();
-                self.evaluation_working_set.borrow_mut().insert(
-                    evaluation_key,
-                    Arc::clone(&evaluation),
-                    clock,
-                );
-                self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                // Far cold-source activation exists only to build native
+                // import/color backend objects. Inserting it into the
+                // four-entry ordinary LRU would evict the staged immediate
+                // successor just before its current-frame promotion.
+                if !snapshot.transport().is_cold_activation_preparation() {
+                    let clock = self.evaluation_working_set_clock.get();
+                    self.evaluation_working_set.borrow_mut().insert(
+                        evaluation_key,
+                        Arc::clone(&evaluation),
+                        clock,
+                    );
+                    self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                }
                 self.request_timeline_render_cache_lookup(&evaluation);
                 FrameResolutionOutcome::Ready(evaluation)
             }
             PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
             PreviewTimelineResolution::Pending { dependency } => {
-                if let Some(evaluation_dependency) = media_dependency_from_pending(dependency) {
-                    let dependencies = Arc::from([evaluation_dependency]);
-                    self.evaluation_working_set
-                        .borrow_mut()
-                        .insert_waiting(evaluation_key, dependencies);
+                let evaluation_dependency = match &dependency {
+                    PreviewTimelinePendingDependency::Media { wait, .. }
+                        if *wait
+                            == crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer =>
+                    {
+                        Some(dependencies)
+                    }
+                    PreviewTimelinePendingDependency::Media { .. }
+                    | PreviewTimelinePendingDependency::BasicTitle(_)
+                    | PreviewTimelinePendingDependency::Temporal { .. } => None,
+                };
+                if let Some(evaluation_dependencies) = evaluation_dependency {
+                    let dependencies = evaluation_dependencies.into();
+                    self.evaluation_working_set.borrow_mut().insert_waiting(
+                        evaluation_key,
+                        request_priority,
+                        dependencies,
+                    );
                 }
                 FrameResolutionOutcome::Pending(dependency)
             }
@@ -184,15 +191,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             color_context,
         )
+        .0
     }
 
-    /// Invalidate evaluations that depend on one media asset.
-    ///
-    /// Wait entries name their dependencies typed, so only the evaluations
-    /// waiting on this asset are removed; retained ready evaluations are
-    /// still cleared conservatively until dependency extraction lands.
-    pub(super) fn invalidate_evaluations_for_asset(&self, asset_id: AssetId) {
-        self.evaluation_working_set.borrow_mut().invalidate_for_asset(asset_id);
+    /// Invalidate only evaluations that consumed one exact physical media key.
+    pub(super) fn invalidate_evaluations_for_media_key(&self, key: &MediaPreviewKey) {
+        self.evaluation_working_set.borrow_mut().invalidate_for_media_key(key);
     }
 
     /// Resolve the timeline exactly once per miss.
@@ -211,10 +215,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         width: u32,
         height: u32,
         color_context: ProgramColorContext,
-    ) -> PreviewTimelineResolution {
+    ) -> (PreviewTimelineResolution, Vec<EvaluationDependency>) {
         self.synchronize_visual_program_authoring_session(snapshot);
+        let media_dependencies = RefCell::new(Vec::new());
         let mut media_frame = |request: PreviewTimelineMediaRequest| {
-            self.media_frame_for_plan(snapshot, proxy_demands, request)
+            self.media_frame_for_plan_observing_key(snapshot, proxy_demands, request, |key| {
+                let dependency = EvaluationDependency::MediaProducer(key.clone());
+                let mut dependencies = media_dependencies.borrow_mut();
+                if !dependencies.contains(&dependency) {
+                    dependencies.push(dependency);
+                }
+            })
         };
         let mut title_frame =
             |request: PreviewTimelineTitleRequest| self.title_frame_for_plan(request);
@@ -226,12 +237,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .authoring()
             .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity)
         else {
-            return PreviewTimelineResolution::Unavailable {
-                reason: PreviewUnavailability::no_content(
-                    PreviewOutputStage::Project,
-                    "Timeline resolution requires an Authoring Snapshot",
-                ),
-            };
+            return (
+                PreviewTimelineResolution::Unavailable {
+                    reason: PreviewUnavailability::no_content(
+                        PreviewOutputStage::Project,
+                        "Timeline resolution requires an Authoring Snapshot",
+                    ),
+                },
+                Vec::new(),
+            );
         };
         let (generation, cancellation) = {
             let execution = self.execution.borrow();
@@ -296,7 +310,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             PreviewTimelineResolution::Empty => {}
         }
-        resolution
+        (resolution, media_dependencies.into_inner())
     }
 
     fn record_timeline_execution_fact(&self, fact: &PreviewTimelineExecutionFact) {
@@ -319,31 +333,5 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod dependency_tests {
-    use super::*;
-    use crate::app::preview_timeline_execution::PreviewTimelineMediaWait;
-
-    #[test]
-    fn only_admitted_media_producers_become_retained_evaluation_waits() {
-        let asset_id = AssetId::new();
-        assert_eq!(
-            media_dependency_from_pending(PreviewTimelinePendingDependency::Media {
-                asset_id,
-                wait: PreviewTimelineMediaWait::Producer,
-            }),
-            Some(EvaluationDependency::MediaProducer(asset_id))
-        );
-        assert_eq!(
-            media_dependency_from_pending(PreviewTimelinePendingDependency::Media {
-                asset_id,
-                wait: PreviewTimelineMediaWait::RetryAdmission,
-            }),
-            None,
-            "transient admission pressure must re-enter scheduling on the next candidate pass"
-        );
     }
 }

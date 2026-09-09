@@ -215,6 +215,7 @@ mod tests {
                 any: None,
                 playback: Some(mondrian_media::PreviewDecodeExecutionProgress::default()),
                 non_playback: None,
+                still: None,
             },
         };
 

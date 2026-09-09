@@ -316,6 +316,7 @@ struct AppUiSurfaceDeviceReopenRequest {
 
 #[cfg(feature = "validation")]
 struct AppUiSurfaceDeviceReopenValidation {
+    generation_history: Rc<RefCell<super::window_generation_history::WindowGenerationHistory>>,
     state: AppUiSurfaceDeviceReopenValidationState,
     result: Arc<Mutex<Option<Result<EnduranceRecoveryOperationReceipt, String>>>>,
     deadline: Instant,
@@ -547,6 +548,10 @@ struct AppUiViewerGpuShutdownContract {
     schema_version: u32,
     surface_generation: u64,
     device_generation: u64,
+    worker_shutdown: crate::app::owned_worker_lifecycle::OwnedWorkerShutdown,
+    wake_callbacks: crate::app::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_wake_failures: u64,
+    wake_registration_rejections: u64,
     worker_started: bool,
     worker_terminated: bool,
     worker_panicked: bool,
@@ -647,15 +652,23 @@ fn seal_clean_viewer_gpu_shutdown(
     surface_generation: u64,
     device_generation: u64,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    if surface_generation == 0 || device_generation == 0 || !evidence.qualifies_normal_runtime() {
+    if surface_generation == 0
+        || device_generation == 0
+        || !evidence.qualifies_normal_runtime()
+        || evidence.wake_callbacks.registrations_accepted == 0
+    {
         return Err(
             format!("Viewer GPU device generation did not retire cleanly: {evidence:?}").into(),
         );
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
-        schema_version: 3,
+        schema_version: 4,
         surface_generation,
         device_generation,
+        worker_shutdown: evidence.worker_shutdown,
+        wake_callbacks: evidence.wake_callbacks,
+        native_wake_failures: evidence.native_wake_failures,
+        wake_registration_rejections: evidence.wake_registration_rejections,
         worker_started: evidence.worker_started,
         worker_terminated: evidence.worker_terminated,
         worker_panicked: evidence.worker_panicked,
@@ -2030,6 +2043,7 @@ impl AppUiActiveWindowGpuShutdownEvidence {
                 &self.retirement,
                 AppUiWindowGpuRetirementEvidence::Retired(evidence)
                     if evidence.qualifies_created_inventory(true)
+                        && evidence.wake_callbacks.registrations_accepted > 0
             )
     }
 
@@ -2038,6 +2052,7 @@ impl AppUiActiveWindowGpuShutdownEvidence {
             .then(|| format!("Window Viewer GPU generation did not close cleanly: {self:?}"))
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(super) const fn generation_identity(&self) -> Option<(u64, u64)> {
         match self.device_generation {
             Some(device_generation) if self.surface_generation != 0 && device_generation != 0 => {
@@ -2084,21 +2099,7 @@ fn request_app_ui_device(
     pollster::block_on(adapter.request_device(&descriptor))
 }
 
-#[cfg(feature = "validation")]
-fn close_failed_viewer_gpu_startup(
-    startup: crate::app::viewer_gpu_startup::ViewerGpuStartupOwner,
-    deadline: Instant,
-    primary: impl std::fmt::Display,
-) -> Box<dyn std::error::Error> {
-    let cleanup = startup.shutdown_until(deadline);
-    let cleanup_released = cleanup.is_some_and(|receipt| receipt.all_created_resources_released());
-    format!(
-        "{primary}; Viewer GPU startup cleanup_all_created_resources_released={cleanup_released}; cleanup={cleanup:?}"
-    )
-    .into()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum AppUiPreActiveWindowStartupStage {
     HostOwned,
@@ -2112,7 +2113,7 @@ pub(super) enum AppUiPreActiveWindowStartupStage {
     WindowActivated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum AppUiPreActiveViewerGpuShutdownEvidence {
     NotStarted,
@@ -2130,7 +2131,7 @@ impl AppUiPreActiveViewerGpuShutdownEvidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct AppUiPreActiveWindowShutdownEvidence {
     last_stage: AppUiPreActiveWindowStartupStage,
     rust_native_authority_released_on_event_loop_thread: bool,
@@ -2146,7 +2147,7 @@ impl AppUiPreActiveWindowShutdownEvidence {
 
 struct AppUiPreActiveWindowStartupFailure {
     primary: String,
-    shutdown: AppUiPreActiveWindowShutdownEvidence,
+    shutdown: Box<AppUiPreActiveWindowShutdownEvidence>,
 }
 
 struct AppUiInitialWindowCandidate {
@@ -2215,20 +2216,24 @@ fn prepare_initial_window_candidate(
             .map_err(|error| format!("could not create startup Device/Queue: {error}"))?;
         *last_stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
 
-        let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
-        let viewer_gpu_progress_wake = ViewerGpuDeviceProgressWake::new(move || {
-            let _ = viewer_gpu_completion_event_proxy
-                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
-        });
         *viewer_gpu_startup = Some(
             crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
                 &device,
                 &queue,
-                viewer_gpu_progress_wake,
+                ViewerGpuDeviceProgressWake::default(),
             )
             .map_err(|error| format!("could not start Viewer GPU progress: {error}"))?,
         );
         *last_stage = AppUiPreActiveWindowStartupStage::ViewerGpuProgressStarted;
+        let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
+        viewer_gpu_startup
+            .as_ref()
+            .ok_or("startup GPU owner missing")?
+            .install_native_waker(move || {
+                viewer_gpu_completion_event_proxy
+                    .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                    .is_ok()
+            });
 
         let preview_work_watch = host.preview_work_watch();
         let preview_work_event_pending = Arc::new(AtomicBool::new(false));
@@ -2335,7 +2340,7 @@ fn close_pre_active_native_construction(
     };
     AppUiPreActiveWindowStartupFailure {
         primary,
-        shutdown: AppUiPreActiveWindowShutdownEvidence {
+        shutdown: Box::new(AppUiPreActiveWindowShutdownEvidence {
             last_stage,
             // The construction closure has returned or unwound before this
             // evidence is built, so its Window/Surface/Adapter/Device owners
@@ -2343,7 +2348,7 @@ fn close_pre_active_native_construction(
             // that the OS compositor or native driver reported termination.
             rust_native_authority_released_on_event_loop_thread: true,
             viewer_gpu,
-        },
+        }),
     }
 }
 
@@ -2359,6 +2364,7 @@ fn reopen_window_surface_and_device(
     session: &mut AppUiWindowSession,
     event_proxy: &winit::event_loop::EventLoopProxy<AppUiUserEvent>,
     deadline: Instant,
+    history: &RefCell<super::window_generation_history::WindowGenerationHistory>,
 ) -> Result<AppUiSurfaceDeviceReopenTransition, Box<dyn std::error::Error>> {
     let surface_generation_before = session.surface_generation_id.get();
     let device_generation_before = session
@@ -2367,79 +2373,106 @@ fn reopen_window_surface_and_device(
         .ok_or("Window Viewer GPU device generation is missing")?
         .get();
 
-    // Prepare fresh platform/GPU admission before revoking the old window.
-    // The activated candidate becomes the outer Session owner before any old
-    // generation operation can fail, but remains Host-unpublished until the
-    // old owner has been consumed and proved retired.
-    let next_window = Arc::new(elwt.create_window(window_attributes_for_role(session.role))?);
-    let next_surface = instance.create_surface(next_window.clone())?;
-    let (next_device, next_queue) = request_app_ui_device(adapter)?;
-    let completion_proxy = event_proxy.clone();
-    let mut next_startup = crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
-        &next_device,
-        &next_queue,
-        ViewerGpuDeviceProgressWake::new(move || {
-            let _ = completion_proxy.send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
-        }),
-    )?;
-
-    let prepared = match AppUiPreparedWindowSession::prepare(
-        session.role,
-        next_window,
-        next_surface,
-        adapter,
-        &next_device,
-        &next_queue,
-        host,
-        Some(&mut next_startup),
-    ) {
-        Ok(prepared) => prepared,
-        Err(primary) => {
-            return Err(close_failed_viewer_gpu_startup(
-                next_startup,
-                deadline,
-                primary,
-            ));
+    use super::window_generation_history::WindowGenerationEvent;
+    history.borrow_mut().push(WindowGenerationEvent::Began {
+        surface_generation: surface_generation_before,
+        device_generation: device_generation_before,
+    });
+    // Keep the partial owner outside the caught construction scope, exactly as
+    // initial Window startup does. Errors and panics retain the same raw receipt.
+    let candidate = catch_pre_active_window_construction(deadline, |stage, startup_owner| {
+        let next_window = Arc::new(
+            elwt.create_window(window_attributes_for_role(session.role))
+                .map_err(|error| error.to_string())?,
+        );
+        *stage = AppUiPreActiveWindowStartupStage::WindowCreated;
+        let next_surface = instance
+            .create_surface(next_window.clone())
+            .map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::SurfaceCreated;
+        let (next_device, next_queue) =
+            request_app_ui_device(adapter).map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+        *startup_owner = Some(
+            crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
+                &next_device,
+                &next_queue,
+                ViewerGpuDeviceProgressWake::default(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        *stage = AppUiPreActiveWindowStartupStage::ViewerGpuProgressStarted;
+        let startup = startup_owner.as_mut().ok_or("candidate GPU startup owner missing")?;
+        let completion_proxy = event_proxy.clone();
+        startup.install_native_waker(move || {
+            completion_proxy
+                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                .is_ok()
+        });
+        let prepared = AppUiPreparedWindowSession::prepare(
+            session.role,
+            next_window,
+            next_surface,
+            adapter,
+            &next_device,
+            &next_queue,
+            host,
+            Some(startup),
+        )
+        .map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::WindowPrepared;
+        let after_surface = prepared.surface_generation_id().get();
+        let after_device = startup.generation_id().get();
+        if after_surface == surface_generation_before || after_device == device_generation_before {
+            return Err("Surface/device recovery reused a consumed generation identity".to_owned());
         }
-    };
-    let surface_generation_after = prepared.surface_generation_id().get();
-    let device_generation_after = next_startup.generation_id().get();
-    if surface_generation_after == surface_generation_before
-        || device_generation_after == device_generation_before
-    {
-        return Err(close_failed_viewer_gpu_startup(
-            next_startup,
-            deadline,
-            "Surface/device recovery reused a consumed generation identity",
-        ));
-    }
-
-    let activated = match prepared.activate(Some(&mut next_startup)) {
-        Ok(session) => session,
-        Err(primary) => {
-            return Err(close_failed_viewer_gpu_startup(
-                next_startup,
-                deadline,
-                primary,
-            ));
-        }
-    };
+        let activated = prepared.activate(Some(startup)).map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::WindowActivated;
+        Ok((
+            activated,
+            next_device,
+            next_queue,
+            after_surface,
+            after_device,
+        ))
+    });
+    let (activated, next_device, next_queue, surface_generation_after, device_generation_after) =
+        match candidate {
+            Ok(candidate) => candidate,
+            Err(failure) => {
+                history
+                    .borrow_mut()
+                    .push(WindowGenerationEvent::CandidateFailed { shutdown: *failure.shutdown });
+                return Err(failure.primary.into());
+            }
+        };
     let (mut retired_session, bounds) = activated.into_parts();
+    // After this swap the outer session owns the candidate even if retirement
+    // or publication fails. Always close the old owner before inspecting facts.
     let (shutdown_receipt_json, shutdown_receipt_sha256) = with_window_candidate_installed(
         session,
         &mut retired_session,
         |active_session, retired_session| {
-            clear_viewer_spatial_presentation(retired_session, host);
-            retired_session.window.set_visible(false);
-            let (retiring_progress, retirement) = retired_session
-                .take_viewer_gpu_generation_retirement()
-                .map_err(|error| -> Box<dyn std::error::Error> { error.to_string().into() })?;
-            let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
+            history.borrow_mut().push(WindowGenerationEvent::Activated {
+                surface_generation: surface_generation_after,
+                device_generation: device_generation_after,
+            });
+            let shutdown = catch_window_viewer_gpu_shutdown(retired_session, host, deadline);
+            history
+                .borrow_mut()
+                .push(WindowGenerationEvent::Retired { shutdown: shutdown.clone() });
+            if let Some(error) = shutdown.qualification_failure() {
+                return Err::<_, Box<dyn std::error::Error>>(error.into());
+            }
+            let AppUiWindowGpuRetirementEvidence::Retired(raw) = shutdown.retirement else {
+                return Err("old Window generation has no raw GPU retirement".into());
+            };
             let sealed = seal_clean_viewer_gpu_shutdown(
-                shutdown,
+                raw,
                 surface_generation_before,
                 device_generation_before,
             )?;
+            retired_session.window.set_visible(false);
             publish_active_window_session(host, active_session, bounds);
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
@@ -2513,6 +2546,7 @@ fn advance_surface_device_reopen_validation(
                 session,
                 event_proxy,
                 validation.deadline,
+                &validation.generation_history,
             )?;
             validation.state = AppUiSurfaceDeviceReopenValidationState::AwaitingReopenedPicture(
                 Box::new(AppUiSurfaceDeviceReopenAwaitingPicture {
@@ -3367,7 +3401,11 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
     let result = Arc::new(Mutex::new(None));
     let returned_state: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
     let recovery_pump_return = Rc::new(RefCell::new(None));
+    let generation_history = Rc::new(RefCell::new(
+        super::window_generation_history::WindowGenerationHistory::default(),
+    ));
     let validation = AppUiSurfaceDeviceReopenValidation {
+        generation_history: Rc::clone(&generation_history),
         state: AppUiSurfaceDeviceReopenValidationState::AwaitingOriginalPicture(
             AppUiSurfaceDeviceReopenRequest { cycle_index, operation_id },
         ),
@@ -3412,6 +3450,14 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
             )),
         ),
     };
+    if let Some(gpu) = shutdown.as_ref().and_then(AppUiWindowOuterShutdownEvidence::final_gpu) {
+        generation_history.borrow_mut().push(
+            super::window_generation_history::WindowGenerationEvent::Final {
+                shutdown: gpu.clone(),
+            },
+        );
+    }
+    let generation_history = generation_history.borrow().clone();
     let outer_failure = outer_failure.or_else(|| {
         shutdown.as_ref().and_then(|evidence| {
             (!evidence.all_owned_authority_released())
@@ -3431,13 +3477,14 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
         let evidence = shutdown
             .clone()
             .ok_or_else(|| "Window validation returned no complete outer evidence".to_owned())?;
-        AppUiWindowRunReceipt::seal_active(recovery, evidence)
+        AppUiWindowRunReceipt::seal_active(recovery, evidence, generation_history.clone())
             .map_err(|error| format!("could not seal Window run receipt: {error}"))
     });
     AppUiSurfaceDeviceReopenRun {
         app_state,
         result: operation_result,
-        shutdown: shutdown.map(AppUiWindowClosedEvidence::new),
+        shutdown: shutdown
+            .map(|evidence| AppUiWindowClosedEvidence::new(evidence, generation_history)),
         recovery_pump,
     }
 }
@@ -3590,11 +3637,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
     #[cfg(feature = "validation")]
     let validation_shutdown_deadline =
         surface_reopen_validation.as_ref().map(|validation| validation.deadline);
+    let product_startup_deadline =
+        || Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now);
+    #[cfg(feature = "validation")]
+    let host_startup_deadline =
+        validation_shutdown_deadline.unwrap_or_else(product_startup_deadline);
     #[cfg(not(feature = "validation"))]
-    let validation_shutdown_deadline: Option<Instant> = None;
-    let host_startup_deadline = validation_shutdown_deadline.unwrap_or_else(|| {
-        Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now)
-    });
+    let host_startup_deadline = product_startup_deadline();
     #[cfg(feature = "validation")]
     let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
         Ok(owner) => owner,
@@ -3678,7 +3727,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         Ok(candidate) => candidate,
         Err(failure) => {
             let native_cleanup_released = failure.shutdown.all_created_resources_released();
-            let native_cleanup = failure.shutdown;
+            let native_cleanup = *failure.shutdown;
             let primary = failure.primary;
             let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
             let ui_failure = (!ui_shutdown.all_resources_released())
@@ -4489,11 +4538,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
     });
     let event_loop_result =
         merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
-    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(|| {
+    let product_shutdown_deadline = || {
         Instant::now()
             .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
             .unwrap_or_else(Instant::now)
-    });
+    };
+    #[cfg(feature = "validation")]
+    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(product_shutdown_deadline);
+    #[cfg(not(feature = "validation"))]
+    let shutdown_deadline = product_shutdown_deadline();
     let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
@@ -8809,6 +8862,18 @@ mod tests {
             publication_cleanup: Ok(()),
             retirement: AppUiWindowGpuRetirementEvidence::Retired(
                 ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_shutdown:
+                        crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+                    wake_callbacks: serde_json::from_value(
+                        serde_json::from_str::<serde_json::Value>(include_str!(
+                            "../../../../tests/validation/fixtures/window-owner-closure.json"
+                        ))
+                        .expect("owner fixture")["host_shutdown"]["preview"]["work_callbacks"]
+                            .clone(),
+                    )
+                    .expect("callback fixture"),
+                    native_wake_failures: 0,
+                    wake_registration_rejections: 0,
                     worker_started: true,
                     worker_terminated: true,
                     worker_panicked: false,
@@ -8832,6 +8897,16 @@ mod tests {
         let clean = clean_final_window_gpu_shutdown();
         assert!(clean.qualifies_normal_runtime());
         assert!(clean.qualification_failure().is_none());
+
+        let mut unregistered = clean_final_window_gpu_shutdown();
+        if let AppUiWindowGpuRetirementEvidence::Retired(evidence) = &mut unregistered.retirement {
+            evidence.wake_callbacks =
+                crate::app::preview_work_notification::preview_work_notification_channel()
+                    .1
+                    .shutdown_until(Instant::now() + Duration::from_secs(1));
+            assert!(evidence.qualifies_created_inventory(true));
+        }
+        assert!(!unregistered.qualifies_normal_runtime());
 
         let mut dirty_publication = clean;
         dirty_publication.publication_cleanup = Err("publication panic".to_owned());

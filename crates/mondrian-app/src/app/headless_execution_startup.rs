@@ -40,7 +40,7 @@ impl HeadlessStartupGpuShutdownEvidence {
 }
 
 /// Owner-free closure of a failed Headless construction or decoder binding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HeadlessStartupShutdownEvidence {
     /// Preview construction unwound before returning a consuming owner.
     pub preview_construction_unverified: bool,

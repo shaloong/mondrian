@@ -7,7 +7,18 @@ use mondrian_app::app::endurance_campaign::{
 use mondrian_renderer::{ViewerCpuYuvUploadWorkerExit, ViewerGpuRetirementReceipt};
 
 fn normal_receipt() -> EnduranceGpuShutdownEvidence {
+    let owners: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/validation/fixtures/window-owner-closure.json"
+    ))
+    .expect("owner replay fixture");
     EnduranceGpuShutdownEvidence {
+        worker_shutdown: serde_json::from_str(r#""terminated""#).expect("worker outcome"),
+        wake_callbacks: serde_json::from_value(
+            owners["host_shutdown"]["preview"]["work_callbacks"].clone(),
+        )
+        .expect("callback receipt"),
+        native_wake_failures: 0,
+        wake_registration_rejections: 0,
         worker_started: true,
         worker_terminated: true,
         worker_panicked: false,
@@ -49,6 +60,14 @@ fn every_normal_shutdown_barrier_is_required() {
     let normal = normal_receipt();
     assert!(normal.qualifies_normal_runtime());
     for evidence in [
+        EnduranceGpuShutdownEvidence { native_wake_failures: 1, ..normal },
+        EnduranceGpuShutdownEvidence { wake_registration_rejections: 1, ..normal },
+        EnduranceGpuShutdownEvidence { wake_callbacks: Default::default(), ..normal },
+        EnduranceGpuShutdownEvidence {
+            worker_shutdown: serde_json::from_str(r#""timed_out_detached""#)
+                .expect("worker outcome"),
+            ..normal
+        },
         EnduranceGpuShutdownEvidence { worker_started: false, ..normal },
         EnduranceGpuShutdownEvidence { worker_terminated: false, ..normal },
         EnduranceGpuShutdownEvidence { worker_panicked: true, ..normal },

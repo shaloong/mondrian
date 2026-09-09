@@ -20,10 +20,12 @@ use std::hash::{Hash, Hasher};
 /// Maximum number of CPU-complete speculative Viewer frames retained without
 /// consuming GPU submission or presentation-output capacity.
 ///
-/// Three lookahead coordinates cover a bounded 50 ms scheduler displacement
-/// at 60 fps; the fourth slot lets the exact immediate successor wait for GPU
-/// admission without evicting that horizon.
-pub(crate) const PREVIEW_GPU_CPU_STAGING_CAPACITY: usize = 4;
+/// Five lookahead coordinates protect the complete six-frame Priming prefix
+/// beyond the separately submitted immediate successor. The sixth slot lets
+/// that exact immediate successor wait for GPU admission without evicting the
+/// horizon. This ownership capacity does not relax qualification's independent
+/// four-frame maximum recovery displacement.
+pub(crate) const PREVIEW_GPU_CPU_STAGING_CAPACITY: usize = 6;
 
 /// Strong process-local semantic identity used by Preview cache and
 /// presentation-registration keys.
@@ -1008,27 +1010,6 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         ));
         self.prepared_successor_generation = Some(self.generation);
         true
-    }
-
-    /// Exact prepared alias that is already represented by the visible slot.
-    #[cfg(any(test, feature = "validation"))]
-    pub(crate) fn already_visible_successor_key(
-        &self,
-        intent: PreviewPlaybackIntent,
-    ) -> Option<&K> {
-        if self.prepared_successor_generation != Some(self.generation) {
-            return None;
-        }
-        self.prepared_successor.as_ref().and_then(|(prepared_intent, prepared)| {
-            if *prepared_intent != intent {
-                return None;
-            }
-            match prepared {
-                PreparedPreviewOutput::Gpu { key, already_visible: true, .. } => Some(key),
-                PreparedPreviewOutput::Gpu { already_visible: false, .. }
-                | PreparedPreviewOutput::Transparent => None,
-            }
-        })
     }
 
     /// Whether the registered output was proven under the active generation.

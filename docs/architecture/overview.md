@@ -1,5 +1,7 @@
 # Architecture Overview
 
+Core encoded sampling contracts explicitly retain planar GBR/GBRA IEEE Float32 in both byte orders. Their proven depth is 32 bits, with Alpha present only for GBRA; unknown or contradictory probe facts remain inadmissible. These are source facts, not a claim of a hardware YUV surface.
+
 Mondrian is a native video editor organized around strict crate boundaries. The self-hosted winit/wgpu UI is the product path; old egui-era modules have been removed or are no longer architectural reference.
 
 ## Layers
@@ -129,7 +131,9 @@ foundation:
 - `mondrian-reference-output`: platform-neutral exact professional-output
   signal, v210/RGB12, embedded-s24, and atomic ancillary payload contracts,
   bounded scheduled
-  playout, lifecycle evidence, and delayed DeckLink/AJA vendor Adapter seams.
+  playout, lifecycle evidence, and concrete Windows DeckLink API 12.0/AJA SDK
+  18.1.0 native adapters with independent raw ANC capture. Native no-device
+  validation does not close physical hardware or other-OS qualification.
   It never owns Program Output color interpretation or Viewer/Export policy;
   see [Reference Output](reference-output.md).
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
@@ -311,3 +315,15 @@ candidate.
 - Realtime transport has exactly one Clock Master and is owned by the
   [Playback Engine](playback-engine.md); Viewer, decode, render, and audio
   adapters report observations rather than mutating transport.
+
+The validation-only Media runtime may depend on the platform-neutral
+`mondrian-platform-core` capsule-closure value contract. That foundation owns
+strict serde/replay predicates and no process, filesystem, FFmpeg or App owner.
+Media owns native capsule execution; App consumes and publishes its raw closure
+with the separate Surface/EventLoop receipt under endurance run/report schema 4.
+
+`mondrian-validation-launcher` is an FFmpeg-free validation entrypoint and shared
+Windows namespace policy. Its dependency direction stays below Media/App: plain
+bootstrap contracts and OS object ownership only; it has no authoring or media
+interpretation. Media and App enable it only for validation. See
+`native-validation-launcher.md` for the consuming outer process/Job owner.

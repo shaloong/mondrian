@@ -103,6 +103,28 @@ pub struct EnduranceMachineReferencePlan {
     pub open_request: EnduranceMachineReferenceOpenRequest,
     /// First absolute Sequence frame scheduled into the provider.
     pub first_frame_index: u64,
+    /// Independent physical AJA/DeckLink SDI receiver and validation receipt contract.
+    #[serde(default)]
+    pub wire_readback: Option<EnduranceMachineWireReadbackPlan>,
+}
+
+/// Explicit second-card physical ANC capture configuration. The phase owner
+/// generates the marker nonce; fixtures never synthesize readbacks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceMachineWireReadbackPlan {
+    /// Exact discovered receiver device, distinct from the output card.
+    pub device_id: ReferenceOutputDeviceId,
+    /// Receiver discovery generation.
+    pub device_generation: u64,
+    /// Progressive VANC line reserved for the canonical validation marker.
+    pub marker_line: u16,
+    /// Exact luma-word offset of the marker in that VANC line.
+    pub marker_horizontal_offset: u16,
+    /// Existing directory for complete output and independent capture words.
+    pub receipt_directory: PathBuf,
+    /// Bounded bytes per reopened physical session receipt journal.
+    pub maximum_receipt_bytes: u64,
 }
 
 /// Create-only publication authority for every repeated Export artifact.
@@ -170,6 +192,9 @@ pub struct EnduranceMachineExportPlan {
     pub artifact_prefix: String,
     /// Optional exact Broadcast QC profile.
     pub broadcast_qc: Option<EnduranceMachineFileBinding>,
+    /// Explicit externally approved PSE installation; missing approval is never synthesized.
+    #[serde(default)]
+    pub regulatory_pse: Option<mondrian_export::RegulatoryPseProviderConfig>,
     /// Explicit publication policy; commercial evidence is always create-only.
     pub output_policy: EnduranceMachineExportOutputPolicy,
     /// Largest artifact admitted for hashing and full decode.
@@ -194,6 +219,12 @@ pub struct EnduranceMachineToolPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnduranceMachineVerifierTools {
+    /// Exact approved BMX runtime for AS-11 repeated exports; absence is pre-start NotRun.
+    #[serde(default)]
+    pub bmx: Option<EnduranceMachineBmxTools>,
+    /// Optional approved FFmpeg-free native launcher; absent means no pre-loader capability.
+    #[serde(default)]
+    pub preloader: Option<EnduranceMachineFileBinding>,
     /// Pinned FFmpeg executable and capability identity.
     pub ffmpeg: EnduranceMachineToolPlan,
     /// Pinned FFprobe executable and capability identity.
@@ -203,10 +234,29 @@ pub struct EnduranceMachineVerifierTools {
     pub runtime_files: Vec<EnduranceMachineFileBinding>,
 }
 
+/// Approved executable identities and complete native DLL namespace for BMX.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceMachineBmxTools {
+    /// Exact raw essence wrapper image.
+    pub raw2bmx: EnduranceMachineFileBinding,
+    /// Exact independent MXF reader image.
+    pub mxf2raw: EnduranceMachineFileBinding,
+    /// Bounded raw2bmx `-v` stdout followed by stderr SHA-256.
+    pub raw2bmx_version_output_sha256: String,
+    /// Bounded mxf2raw `-v` stdout followed by stderr SHA-256.
+    pub mxf2raw_version_output_sha256: String,
+    /// Explicit complete approved DLL set; missing declaration is NotRun.
+    pub runtime_files: Option<Vec<EnduranceMachineFileBinding>>,
+}
+
 /// Non-renewing execution bounds frozen into the approved machine plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnduranceMachineTimeoutPlan {
+    /// One original bound for capability admission and all cold owner preparation.
+    #[serde(default = "default_startup_timeout_ms")]
+    pub startup_ms: u64,
     /// Maximum latency of one ordinary product pump interval.
     pub interval_ms: u64,
     /// Maximum latency of one complete four-step recovery cycle.
@@ -215,6 +265,10 @@ pub struct EnduranceMachineTimeoutPlan {
     pub surface_reopen_ms: u64,
     /// Single consuming shutdown deadline for one phase.
     pub shutdown_ms: u64,
+}
+
+const fn default_startup_timeout_ms() -> u64 {
+    120_000
 }
 
 /// Bounded machine-local plan whose exact bytes are a qualification trust anchor.
@@ -231,6 +285,9 @@ pub struct CommercialEnduranceMachinePlan {
     pub audio: EnduranceMachineAudioPlan,
     /// Exact physical Reference Output contract.
     pub reference_output: EnduranceMachineReferencePlan,
+    /// One exact canonical ANC program shared by physical output and every repeated export.
+    #[serde(default)]
+    pub ancillary_program: Option<EnduranceMachineFileBinding>,
     /// One phase-specific plan for Continuous Export and Concurrent Recovery.
     pub exports: Vec<EnduranceMachineExportPlan>,
     /// Ordered, distinct absolute frame targets for every recovery cycle.
@@ -247,6 +304,7 @@ pub struct PreparedCommercialEnduranceMachinePlan {
     plan: CommercialEnduranceMachinePlan,
     sha256: String,
     phase_requirements: Vec<mondrian_platform::EndurancePhaseRequirement>,
+    ancillary: super::endurance_ancillary::EnduranceAncillaryAdmission,
 }
 
 impl PreparedCommercialEnduranceMachinePlan {
@@ -297,11 +355,32 @@ impl PreparedCommercialEnduranceMachinePlan {
         let plan: CommercialEnduranceMachinePlan =
             serde_json::from_slice(&bytes).map_err(CommercialEnduranceMachinePlanError::Json)?;
         validate_plan(&plan, profile, recovery_cycle_count)?;
+        let ancillary = super::endurance_ancillary::EnduranceAncillaryAdmission::prepare(
+            plan.ancillary_program.as_ref(),
+        )
+        .map_err(CommercialEnduranceMachinePlanError::Read)?;
+        if let Some(program) = ancillary.program() {
+            program
+                .validate_rate(plan.reference_output.open_request.signal.frame_rate)
+                .map_err(CommercialEnduranceMachinePlanError::Read)?;
+        }
         Ok(Self {
+            ancillary,
             plan,
             sha256: format!("{:x}", Sha256::digest(bytes)),
             phase_requirements: profile.phases.clone(),
         })
+    }
+
+    /// Same parsed source and native lease for every phase consumer.
+    pub fn ancillary_program(
+        &self,
+    ) -> Option<&std::sync::Arc<super::endurance_ancillary::PreparedEnduranceAncillaryProgram>>
+    {
+        self.ancillary.program()
+    }
+    pub(crate) fn ancillary_program_missing(&self) -> bool {
+        self.ancillary.missing()
     }
 
     /// Validated strongly typed machine plan.
@@ -334,6 +413,14 @@ fn validate_plan(
         });
     }
     validate_identity(&plan.plan_id, "plan_id")?;
+    if let Some(binding) = &plan.ancillary_program {
+        validate_file_binding(binding, "ancillary_program")?;
+        if !plan.reference_output.open_request.ancillary_policy.requires_readback()
+            || plan.reference_output.wire_readback.is_none()
+        {
+            return Err(CommercialEnduranceMachinePlanError::InvalidReferenceContract);
+        }
+    }
     validate_file_binding(&plan.project.project, "project")?;
     validate_file_binding(
         &plan.project.external_source_inventory,
@@ -350,9 +437,52 @@ fn validate_plan(
     {
         return Err(CommercialEnduranceMachinePlanError::InvalidReferenceContract);
     }
+    if let Some(preloader) = &plan.verifier_tools.preloader {
+        validate_file_binding(preloader, "verifier_tools.preloader")?;
+    }
+    if let Some(wire) = &plan.reference_output.wire_readback {
+        validate_absolute_path(
+            &wire.receipt_directory,
+            "reference_output.wire_readback.receipt_directory",
+        )?;
+        if !matches!(
+            plan.reference_output.provider,
+            ReferenceOutputProvider::AjaNtv2 | ReferenceOutputProvider::DeckLink
+        ) || wire.device_id == plan.reference_output.device_id
+            || wire.device_generation == 0
+            || wire.marker_line == 0
+            || wire.marker_line > 2047
+            || u32::from(wire.marker_horizontal_offset) + 39
+                > plan.reference_output.open_request.signal.width
+            || wire.maximum_receipt_bytes < 4096
+            || wire.maximum_receipt_bytes > (1u64 << 40)
+        {
+            return Err(CommercialEnduranceMachinePlanError::InvalidReferenceContract);
+        }
+    }
     validate_tool(&plan.verifier_tools.ffmpeg, "ffmpeg")?;
     validate_tool(&plan.verifier_tools.ffprobe, "ffprobe")?;
     validate_verifier_runtime_files(&plan.verifier_tools)?;
+    if let Some(bmx) = &plan.verifier_tools.bmx {
+        validate_file_binding(&bmx.raw2bmx, "verifier_tools.bmx.raw2bmx")?;
+        validate_file_binding(&bmx.mxf2raw, "verifier_tools.bmx.mxf2raw")?;
+        validate_sha256(
+            &bmx.raw2bmx_version_output_sha256,
+            "verifier_tools.bmx.raw2bmx_version_output_sha256",
+        )?;
+        validate_sha256(
+            &bmx.mxf2raw_version_output_sha256,
+            "verifier_tools.bmx.mxf2raw_version_output_sha256",
+        )?;
+        if let Some(files) = &bmx.runtime_files {
+            if files.len() > 256 {
+                return Err(CommercialEnduranceMachinePlanError::InvalidVerifierRuntimeClosure);
+            }
+            for file in files {
+                validate_file_binding(file, "verifier_tools.bmx.runtime_files")?;
+            }
+        }
+    }
     validate_timeouts(plan.timeouts)?;
 
     let export_phase_ids = profile
@@ -473,6 +603,7 @@ fn validate_timeouts(
     timeouts: EnduranceMachineTimeoutPlan,
 ) -> Result<(), CommercialEnduranceMachinePlanError> {
     if [
+        timeouts.startup_ms,
         timeouts.interval_ms,
         timeouts.recovery_ms,
         timeouts.surface_reopen_ms,
@@ -619,18 +750,31 @@ pub(crate) fn write_test_machine_plan(
         })
         .map(|phase| EnduranceMachineExportPlan {
             phase_id: phase.phase_id.clone(),
-            preset: binding(&format!("{}-preset.json", phase.phase_id)),
+            preset: {
+                let path = fixture_root.join(format!("{}-preset.json", phase.phase_id));
+                let bytes =
+                    serde_json::to_vec(&mondrian_export::ExportPreset::h264_aac_sdr_1080p())
+                        .expect("test preset JSON");
+                std::fs::write(&path, &bytes).expect("write exact test preset");
+                EnduranceMachineFileBinding {
+                    path: mondrian_assets::canonical_native_path(&path)
+                        .expect("canonical test preset"),
+                    sha256: format!("{:x}", sha2::Sha256::digest(&bytes)),
+                }
+            },
             sequence_id,
             range: EnduranceMachineExportRange::EntireSequence,
             output_directory: fixture_root.join(format!("{}-output", phase.phase_id)),
             artifact_prefix: phase.phase_id.clone(),
             broadcast_qc: None,
+            regulatory_pse: None,
             output_policy: EnduranceMachineExportOutputPolicy::CreateNew,
             maximum_artifact_bytes: 1 << 30,
             decode_timeout_ms: 60_000,
         })
         .collect();
     let plan = CommercialEnduranceMachinePlan {
+        ancillary_program: None,
         schema_version: 2,
         plan_id: "test-machine-plan".to_owned(),
         project: EnduranceMachineProjectPlan {
@@ -645,6 +789,7 @@ pub(crate) fn write_test_machine_plan(
             channel_layout: AudioChannelLayout::Stereo,
         },
         reference_output: EnduranceMachineReferencePlan {
+            wire_readback: None,
             provider: ReferenceOutputProvider::DeckLink,
             device_id: ReferenceOutputDeviceId::new("decklink:test-device")
                 .expect("test Reference device"),
@@ -671,6 +816,8 @@ pub(crate) fn write_test_machine_plan(
         exports,
         recovery_seek_targets: (0..recovery_cycle_count).map(i64::from).collect(),
         verifier_tools: EnduranceMachineVerifierTools {
+            bmx: None,
+            preloader: None,
             ffmpeg: EnduranceMachineToolPlan {
                 executable: binding("ffmpeg.exe"),
                 version_output_sha256: "b".repeat(64),
@@ -684,6 +831,7 @@ pub(crate) fn write_test_machine_plan(
             runtime_files: vec![binding("avcodec.dll")],
         },
         timeouts: EnduranceMachineTimeoutPlan {
+            startup_ms: default_startup_timeout_ms(),
             interval_ms: 1_000,
             recovery_ms: 60_000,
             surface_reopen_ms: 30_000,
@@ -711,6 +859,65 @@ mod tests {
         .expect("parse profile")
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bmx_prerequisites_are_rejected_before_any_phase_native_owner() {
+        use crate::app::endurance_source_inventory::{
+            prepare_bmx_prerequisite, EnduranceBmxAdmission,
+        };
+        let temporary = tempfile::tempdir().expect("temporary plan");
+        let path = temporary.path().join("machine-plan.json");
+        let profile = profile();
+        write_test_machine_plan(&path, temporary.path(), &profile, 24);
+        let mut plan: CommercialEnduranceMachinePlan =
+            serde_json::from_slice(&fs::read(&path).expect("read plan")).expect("plan");
+        let phase_id = plan.exports[0].phase_id.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let cancel = mondrian_core::ExecutionCancellationToken::new();
+        let prepared = PreparedCommercialEnduranceMachinePlan::load(&path, &profile, 24)
+            .expect("ordinary plan");
+        let ordinary = prepare_bmx_prerequisite(&prepared, &phase_id, deadline, deadline, &cancel);
+        assert!(
+            matches!(ordinary, Ok(EnduranceBmxAdmission::NotRequired)),
+            "unexpected ordinary admission error: {:?}",
+            ordinary.err()
+        );
+        let bytes = serde_json::to_vec(&mondrian_export::ExportPreset::as11_x9_naba_hd_720p5994())
+            .expect("AS11 preset");
+        fs::write(&plan.exports[0].preset.path, &bytes).expect("replace test preset");
+        plan.exports[0].preset.sha256 = format!("{:x}", Sha256::digest(bytes));
+        let missing = EnduranceMachineFileBinding {
+            path: temporary.path().join("missing-bmx.exe"),
+            sha256: "a".repeat(64),
+        };
+        for bmx in [
+            None,
+            Some(EnduranceMachineBmxTools {
+                raw2bmx: missing.clone(),
+                mxf2raw: missing.clone(),
+                raw2bmx_version_output_sha256: "b".repeat(64),
+                mxf2raw_version_output_sha256: "c".repeat(64),
+                runtime_files: None,
+            }),
+            Some(EnduranceMachineBmxTools {
+                raw2bmx: missing.clone(),
+                mxf2raw: missing,
+                raw2bmx_version_output_sha256: "b".repeat(64),
+                mxf2raw_version_output_sha256: "c".repeat(64),
+                runtime_files: Some(Vec::new()),
+            }),
+        ] {
+            plan.verifier_tools.bmx = bmx;
+            fs::write(&path, serde_json::to_vec(&plan).expect("bound plan")).expect("write plan");
+            let prepared = PreparedCommercialEnduranceMachinePlan::load(&path, &profile, 24)
+                .expect("admitted plan shape");
+            assert!(matches!(
+                prepare_bmx_prerequisite(&prepared, &phase_id, deadline, deadline, &cancel),
+                Ok(EnduranceBmxAdmission::NotRun)
+            ));
+        }
+    }
+
     #[test]
     fn bounded_machine_plan_binds_exact_bytes_and_recovery_targets() {
         let temporary = tempfile::tempdir().expect("temporary machine plan");
@@ -728,6 +935,21 @@ mod tests {
                 actual: 24
             })
         ));
+    }
+
+    #[test]
+    fn startup_timeout_is_independent_defaulted_and_bounded() {
+        let json = serde_json::json!({"interval_ms":1000,"recovery_ms":7,"surface_reopen_ms":1000,"shutdown_ms":1000});
+        let mut timeouts: EnduranceMachineTimeoutPlan =
+            serde_json::from_value(json).expect("legacy plan uses startup default");
+        assert_eq!(timeouts.startup_ms, 120_000);
+        assert!(validate_timeouts(timeouts).is_ok());
+        for invalid in [0, MAXIMUM_TIMEOUT_MS + 1] {
+            timeouts.startup_ms = invalid;
+            assert!(validate_timeouts(timeouts).is_err());
+        }
+        timeouts.startup_ms = MAXIMUM_TIMEOUT_MS;
+        assert!(validate_timeouts(timeouts).is_ok());
     }
 
     #[test]

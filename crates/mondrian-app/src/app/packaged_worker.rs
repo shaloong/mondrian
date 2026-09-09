@@ -33,6 +33,9 @@ pub(crate) enum PackagedWorkerDiscoveryError {
 pub(crate) const MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) fn discover_preview_demux_worker() -> Result<PathBuf, PackagedWorkerDiscoveryError> {
+    if let Some(path) = mondrian_media::qualified_media_helper_path() {
+        return Ok(path);
+    }
     discover_required_packaged_app_worker("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", "Preview demux")
 }
 
@@ -41,6 +44,9 @@ pub(crate) fn discover_media_probe_worker() -> Option<PathBuf> {
 }
 
 fn discover_packaged_app_worker(override_environment: &str, purpose: &str) -> Option<PathBuf> {
+    if let Some(path) = mondrian_media::qualified_media_helper_path() {
+        return Some(path);
+    }
     if let Some(path) = std::env::var_os(override_environment) {
         let path = PathBuf::from(path);
         if path.is_file() {
@@ -72,6 +78,9 @@ fn discover_required_packaged_app_worker(
     override_environment: &str,
     purpose: &'static str,
 ) -> Result<PathBuf, PackagedWorkerDiscoveryError> {
+    if let Some(path) = mondrian_media::qualified_media_helper_path() {
+        return Ok(path);
+    }
     if let Some(path) = std::env::var_os(override_environment) {
         let path = PathBuf::from(path);
         return path

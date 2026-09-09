@@ -13,19 +13,19 @@ use mondrian_platform::{ProcessMemoryProbe, ProcessMemoryProbeResult, SystemPlat
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-pub(super) struct TimedProcessMemorySample {
-    pub(super) observed_at_us: u64,
-    pub(super) sample: ProcessMemoryProbeResult,
+pub(crate) struct TimedProcessMemorySample {
+    pub(crate) observed_at_us: u64,
+    pub(crate) sample: ProcessMemoryProbeResult,
 }
 
-pub(super) struct ProfessionalProcessMemorySampler {
+pub(crate) struct ProfessionalProcessMemorySampler {
     stop_sender: mpsc::Sender<()>,
     sample_receiver: mpsc::Receiver<TimedProcessMemorySample>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl ProfessionalProcessMemorySampler {
-    pub(super) fn start(observation_origin: Instant) -> anyhow::Result<Self> {
+    pub(crate) fn start(observation_origin: Instant) -> anyhow::Result<Self> {
         Self::start_with_probe(observation_origin, SAMPLE_INTERVAL, SystemPlatformService)
     }
 
@@ -81,6 +81,12 @@ impl ProfessionalProcessMemorySampler {
     pub(super) fn finish(mut self) -> anyhow::Result<Vec<TimedProcessMemorySample>> {
         self.stop_worker()?;
         Ok(self.sample_receiver.try_iter().collect())
+    }
+
+    /// Drain samples already completed by the native probe worker without
+    /// blocking the realtime coordinator.
+    pub(crate) fn drain_ready(&self) -> Vec<TimedProcessMemorySample> {
+        self.sample_receiver.try_iter().collect()
     }
 
     fn stop_worker(&mut self) -> anyhow::Result<()> {

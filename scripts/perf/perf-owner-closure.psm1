@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 # Explicit schema leaves, not PowerShell's coercive numeric conversions. Keep
 # this inventory shared by all required-field checks, including zero counters.
 $script:IntegerLeaves = @(
+    "native_wake_failures", "wake_registration_rejections",
     "registrations_accepted", "registrations_released", "registrations_abandoned",
     "registrations_retained", "invocations_in_flight", "retirements_active",
     "invocation_panics", "destructor_panics", "opaque_payloads_abandoned",
@@ -215,10 +216,17 @@ function Assert-CleanPreview {
 function Assert-CleanGpu {
     param($Gpu, [string]$Context)
     Assert-Fields $Gpu @(
+        "worker_shutdown", "wake_callbacks", "native_wake_failures", "wake_registration_rejections",
         "worker_started", "worker_terminated", "worker_panicked", "timed_out",
         "retirement_requested", "retirement_handoff_accepted", "retirement_completed",
         "generation_terminal_kind", "renderer_retirement", "all_resources_released"
     ) $Context
+    if ($Gpu.worker_shutdown -isnot [string] -or $Gpu.worker_shutdown -cne 'terminated') {
+        throw "$Context has no exact healthy progress-worker join"
+    }
+    Assert-CleanPreviewCallbacks $Gpu.wake_callbacks "$Context.wake_callbacks"
+    Assert-Zero $Gpu.native_wake_failures "$Context.native_wake_failures"
+    Assert-Zero $Gpu.wake_registration_rejections "$Context.wake_registration_rejections"
     foreach ($leaf in @(
         "worker_started", "worker_terminated", "retirement_requested",
         "retirement_handoff_accepted", "retirement_completed", "all_resources_released"
@@ -463,7 +471,12 @@ function Assert-CleanAudioSource {
     }
     Assert-Zero $Source.strong_references_remaining "$Context.strong_references_remaining"
     Assert-Bool $Source.all_resources_released $true "$Context.all_resources_released"
-    $cache = $Source.cache
+    Assert-CleanAudioSourceCache $Source.cache "$Context.cache"
+}
+
+# Raw owner receipt; shared by performance and independent Window replay.
+function Assert-CleanAudioSourceCache {
+    param($cache, [string]$Context)
     Assert-Fields $cache @(
         "schema_version", "decoder_startup", "in_flight_decodes_before", "pcm_entries_before", "pcm_bytes_before",
         "failure_entries_before", "external_pcm_buffer_references", "pcm_entries_remaining",
@@ -484,8 +497,8 @@ function Assert-CleanAudioSource {
         "shutdown_coordinator_spawner_panics", "shutdown_coordinator_owner_abandonments",
         "shutdown_resource_facts_complete_at_deadline",
         "shutdown_owner_lifetime_unresolved_at_deadline"
-    ) "$Context.cache"
-    Assert-CleanAudioStartup $cache.decoder_startup "$Context.cache.decoder_startup"
+    ) "$Context"
+    Assert-CleanAudioStartup $cache.decoder_startup "$Context.decoder_startup"
     if ([uint64]$cache.schema_version -ne 6 -or
         [uint64]$cache.decoder_shutdown_workers_started -ne 1 -or
         [uint64]$cache.child_processes_observed -ne [uint64]$cache.child_processes_terminated -or
@@ -493,7 +506,7 @@ function Assert-CleanAudioSource {
         [uint64]$cache.stderr_pump_threads_observed -ne [uint64]$cache.stderr_pump_threads_joined -or
         [uint64]$cache.decoder_shutdown_workers_started -ne [uint64]$cache.decoder_shutdown_workers_terminated -or
         [uint64]$cache.shutdown_coordinators_started -ne [uint64]$cache.shutdown_coordinators_terminated) {
-        throw "$Context.cache has an unknown schema or incomplete worker inventory"
+        throw "$Context has an unknown schema or incomplete worker inventory"
     }
     foreach ($leaf in @(
         "external_pcm_buffer_references", "pcm_entries_remaining", "pcm_bytes_remaining",
@@ -507,9 +520,9 @@ function Assert-CleanAudioSource {
         "shutdown_coordinator_start_failures", "shutdown_coordinator_panics",
         "shutdown_coordinator_timeouts", "shutdown_coordinator_detachments",
         "shutdown_coordinator_spawner_panics", "shutdown_coordinator_owner_abandonments"
-    )) { Assert-Zero $cache.$leaf "$Context.cache.$leaf" }
-    Assert-Bool $cache.shutdown_resource_facts_complete_at_deadline $true "$Context.cache.shutdown_resource_facts_complete_at_deadline"
-    Assert-Bool $cache.shutdown_owner_lifetime_unresolved_at_deadline $false "$Context.cache.shutdown_owner_lifetime_unresolved_at_deadline"
+    )) { Assert-Zero $cache.$leaf "$Context.$leaf" }
+    Assert-Bool $cache.shutdown_resource_facts_complete_at_deadline $true "$Context.shutdown_resource_facts_complete_at_deadline"
+    Assert-Bool $cache.shutdown_owner_lifetime_unresolved_at_deadline $false "$Context.shutdown_owner_lifetime_unresolved_at_deadline"
 }
 
 function Assert-CleanApp {
@@ -646,7 +659,74 @@ function Assert-MondrianPerfCases {
     if ($names.Count -ne $expected.Count) { throw "$Scenario is missing measured cases" }
 }
 
+function Assert-ExactReceiptFields($Value, [string[]]$Names, [string]$Context) {
+    if ($Value -isnot [pscustomobject]) { throw "$Context must be an object" }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { throw "$Context has missing or extra receipt fields" }
+    foreach ($name in $Names) { if ($actual -cnotcontains $name) { throw "$Context omits exact $name" } }
+}
+
+function Read-CanonicalOwnerLeaf($Leaf, [string]$Context, [string]$JsonField = 'json') {
+    Assert-ExactReceiptFields $Leaf @($JsonField, 'sha256') $Context
+    $json = $Leaf.$JsonField
+    if ($json -isnot [string] -or $json.Length -gt 2097152 -or $Leaf.sha256 -isnot [string]) { throw "$Context exceeds its bounded JSON shape" }
+    $digest = [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json)))
+    if ($digest -cne $Leaf.sha256) { throw "$Context raw receipt hash mismatch" }
+    return ($json | ConvertFrom-Json -Depth 80 -ErrorAction Stop)
+}
+
+function Assert-MondrianCanonicalAppClosure($Receipt) {
+    $app = Read-CanonicalOwnerLeaf $Receipt 'Phase App' 'canonical_json'
+    Assert-ExactReceiptFields $app @('schema_version','app_owner_consumed','project','reference_output','export','export_terminal_snapshot','audio','audio_source_cache','workers') 'Canonical App'
+    Assert-UnsignedInteger $app.schema_version 'Canonical App schema'
+    if ($app.schema_version -ne 1) { throw 'Unknown canonical App schema' }
+    Assert-Bool $app.app_owner_consumed $true 'App consumed'
+    Assert-ExactReceiptFields $app.project @('session_was_open','pending_close_was_active','authoring_session_released','pending_close_released','runtime_lease_released','retired_library_generations_remaining','lifecycle_failure') 'Canonical project'
+    foreach ($field in @('session_was_open','pending_close_was_active')) { Assert-BoolType $app.project.$field "App project $field" }
+    foreach ($field in @('authoring_session_released','pending_close_released','runtime_lease_released')) { Assert-Bool $app.project.$field $true "App project $field" }
+    Assert-Zero $app.project.retired_library_generations_remaining 'App retired libraries'
+    Assert-Null $app.project.lifecycle_failure 'App project close failure'
+    $projection = [pscustomobject]@{
+        reference_output = Read-CanonicalOwnerLeaf $app.reference_output 'Reference owner'
+        reference_output_resources_released = $true
+        export = Read-CanonicalOwnerLeaf $app.export 'Export owner'
+        export_terminal_snapshot = Read-CanonicalOwnerLeaf $app.export_terminal_snapshot 'Export terminal'
+        export_resources_released = $true
+    }
+    Assert-CleanReferenceOutput $projection 'Phase App'
+    Assert-CleanExport $projection 'Phase App'
+    $audio = Read-CanonicalOwnerLeaf $app.audio 'Audio owner'
+    $audio | Add-Member all_workers_terminated $true
+    $audio.output | Add-Member all_workers_terminated $true
+    Assert-CleanAudio $audio 'Phase Audio'
+    Assert-ExactReceiptFields $app.audio_source_cache @('strong_references_before_consumption','strong_references_remaining','cache') 'App source cache'
+    $source = [pscustomobject]@{
+        strong_references_before_consumption = $app.audio_source_cache.strong_references_before_consumption
+        strong_references_remaining = $app.audio_source_cache.strong_references_remaining
+        cache = Read-CanonicalOwnerLeaf $app.audio_source_cache.cache 'App raw source cache'
+        all_resources_released = $true
+    }
+    Assert-CleanAudioSource $source 'Phase App source'
+    $domains = @('execution_memory_observer','project_persistence','audio_idle_warmup','media_import','media_asset_mutation','visual_tracking','proxy_generation')
+    Assert-ExactReceiptFields $app.workers $domains 'App workers'
+    foreach ($domain in $domains) {
+        $worker = $app.workers.$domain
+        Assert-ExactReceiptFields $worker @('requested_workers','startup_attempted','started_workers','terminated_workers','panicked_workers','timed_out_workers','detached_workers','unexpected_worker_exits','queued_work_remaining','running_work_remaining','owned_resources_remaining','cumulative_failures') "App $domain"
+        $worker | Add-Member domain $domain
+        $worker | Add-Member lifecycle_closed $true
+        Assert-CleanWorker $worker "Phase App $domain"
+    }
+}
+
+function Assert-MondrianRawGpuClosure($Gpu) {
+    $copy = $Gpu | ConvertTo-Json -Depth 30 -Compress | ConvertFrom-Json
+    $copy | Add-Member all_resources_released $true
+    Assert-CleanGpu $copy 'Phase GPU'
+}
 Export-ModuleMember -Function @(
+    "Assert-MondrianCanonicalAppClosure", "Assert-MondrianRawGpuClosure", "Assert-ExactReceiptFields", "Read-CanonicalOwnerLeaf",
+    "Assert-CleanAudioSourceCache",
+    "Assert-CleanPreviewCallbacks",
     "Assert-MondrianPerfCases",
     "Assert-MondrianCleanOwnerClosure",
     "Assert-MondrianIdenticalOwnerClosures"

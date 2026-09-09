@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
@@ -48,6 +48,7 @@ use super::headless_realtime_playback::{
     HeadlessEnduranceShutdownProjection, HeadlessGpuExecutionDisposition,
     HeadlessGpuExecutionObserver, HeadlessPreviewSample, HeadlessRealtimePlaybackSession,
 };
+use super::headless_viewer_gpu::HeadlessPreviewGpuDependencyBarrierEvidence;
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
 pub use super::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationTerminalKind,
@@ -61,7 +62,7 @@ use super::waveform_service::{
 use super::AppState;
 
 /// Actual consuming receipts for a failed execution-group startup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EnduranceStartupOwnerClosure {
     /// Waveform construction unwound before returning a consuming owner.
     pub waveform_construction_unverified: bool,
@@ -146,7 +147,7 @@ impl EnduranceExecutionStartFailure {
 }
 
 /// Synchronous closure across Headless and every AppState execution owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EnduranceExecutionOwnerClosure {
     /// Complete Preview worker inventory.
     pub preview: PreviewRuntimeShutdownEvidence,
@@ -156,6 +157,8 @@ pub struct EnduranceExecutionOwnerClosure {
     pub waveform: AudioWaveformShutdownEvidence,
     /// Bounded GPU progress and generation-retirement evidence.
     pub gpu: EnduranceGpuShutdownEvidence,
+    /// Proof that GPU-side decoded-frame owners were released before Preview teardown.
+    pub gpu_preview_dependency_barrier: Option<HeadlessPreviewGpuDependencyBarrierEvidence>,
     /// Owner snapshot failure retained after consuming cleanup completed.
     pub owner_snapshot_failure: Option<String>,
     /// Terminal projection failure retained without discarding consuming receipts.
@@ -170,6 +173,10 @@ impl EnduranceExecutionOwnerClosure {
             && self.app.all_resources_released()
             && self.waveform.all_resources_released()
             && self.gpu.qualifies_normal_runtime()
+            && self
+                .gpu_preview_dependency_barrier
+                .as_ref()
+                .is_some_and(HeadlessPreviewGpuDependencyBarrierEvidence::is_complete)
     }
 
     /// Seal terminal gauges while retaining cumulative pre-shutdown failures.
@@ -198,10 +205,49 @@ fn retain_terminal_owner_projection(
     }
 }
 
+/// Exact retired and partially constructed inventory for a local Headless device replacement.
+#[cfg(feature = "validation")]
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct LocalHeadlessReopenOwners {
+    pub(crate) preview: Option<PreviewRuntimeShutdownEvidence>,
+    pub(crate) gpu: Option<EnduranceGpuShutdownEvidence>,
+    pub(crate) gpu_preview_dependency_barrier: Option<HeadlessPreviewGpuDependencyBarrierEvidence>,
+    pub(crate) failed_startup: Option<HeadlessStartupShutdownEvidence>,
+    pub(crate) construction_unverified: bool,
+    pub(crate) replacement_installed: bool,
+    pub(crate) failure: Option<String>,
+}
+/// Raw closure of the inventory actually remaining in a local smoke group.
+#[cfg(feature = "validation")]
+#[derive(Debug, serde::Serialize)]
+pub(crate) enum LocalSmokeOwnerShutdown {
+    Complete(Box<EnduranceExecutionOwnerClosure>),
+    /// Old and partial replacement Headless receipts are in the preceding reopen record.
+    AfterHeadlessRetirement {
+        app: Box<AppEnduranceShutdownEvidence>,
+        waveform: Box<AudioWaveformShutdownEvidence>,
+    },
+}
+
+#[cfg(feature = "validation")]
+impl LocalSmokeOwnerShutdown {
+    pub(crate) fn all_remaining_resources_released(&self) -> bool {
+        match self {
+            Self::Complete(raw) => raw.all_workers_terminated(),
+            Self::AfterHeadlessRetirement { app, waveform } => {
+                app.all_resources_released() && waveform.all_resources_released()
+            }
+        }
+    }
+}
 /// Validation owner group using the production Headless Preview/GPU and Audio paths.
 pub struct EnduranceExecutionOwners {
     realtime: Option<HeadlessRealtimePlaybackSession>,
     waveform: Arc<AudioWaveformService>,
+    stopped_preparation:
+        Option<super::headless_realtime_playback::HeadlessStoppedPicturePreparation>,
+    av_completions:
+        std::collections::VecDeque<super::headless_av_evidence::HeadlessAvPictureCompletion>,
 }
 
 #[derive(Default)]
@@ -232,6 +278,8 @@ pub(super) struct EnduranceRealtimeIntervalObservation {
     pub(super) after_epoch: u64,
     pub(super) after_frame: i64,
     pub(super) sample: HeadlessPreviewSample,
+    pub(super) coordinator_timing:
+        super::headless_realtime_playback::HeadlessRealtimeCoordinatorTiming,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +298,77 @@ pub(super) struct EnduranceCachePressureObservation {
 }
 
 impl EnduranceExecutionOwners {
+    /// Preserve the precise remaining inventory after a local replacement failed.
+    #[cfg(feature = "validation")]
+    pub(crate) fn shutdown_local_smoke_until(
+        self,
+        mut app: AppState,
+        deadline: Instant,
+    ) -> Result<LocalSmokeOwnerShutdown, EnduranceCampaignError> {
+        if self.realtime.is_some() {
+            return self
+                .shutdown_until(app, deadline)
+                .map(|raw| LocalSmokeOwnerShutdown::Complete(Box::new(raw)));
+        }
+        let Self { realtime: _, waveform, .. } = self;
+        waveform.begin_shutdown();
+        app.begin_endurance_shutdown();
+        let waveform = waveform.shutdown_until(deadline);
+        let app = app.shutdown_for_endurance(deadline);
+        Ok(LocalSmokeOwnerShutdown::AfterHeadlessRetirement {
+            app: Box::new(app),
+            waveform: Box::new(waveform),
+        })
+    }
+    /// Consume the actual old Preview/GPU pair before installing a new shared session.
+    /// The caller must settle Playback and pause its physical Audio transport first.
+    #[cfg(feature = "validation")]
+    pub(crate) fn reopen_local_headless_until(
+        &mut self,
+        deadline: Instant,
+    ) -> LocalHeadlessReopenOwners {
+        let mut raw = LocalHeadlessReopenOwners::default();
+        let Some(session) = self.realtime.take() else {
+            raw.failure = Some("local Headless reopen has no old session".to_owned());
+            return raw;
+        };
+        let mut shutdown_owners = session.into_shutdown_owners();
+        shutdown_owners.begin_shutdown();
+        let shutdown = shutdown_owners.shutdown_until(deadline);
+        let preview = shutdown.preview;
+        let gpu = shutdown.gpu;
+        let gpu_preview_dependency_barrier = shutdown.gpu_preview_dependency_barrier;
+        let clean = gpu_preview_dependency_barrier.is_complete()
+            && preview.all_workers_terminated()
+            && gpu.qualifies_normal_runtime();
+        raw.preview = Some(preview);
+        raw.gpu = Some(gpu);
+        raw.gpu_preview_dependency_barrier = Some(gpu_preview_dependency_barrier);
+        if !clean || Instant::now() >= deadline {
+            raw.failure = Some(
+                "old local Headless session did not close before the original deadline".to_owned(),
+            );
+            return raw;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            HeadlessRealtimePlaybackSession::new,
+        )) {
+            Ok(Ok(session)) => {
+                self.realtime = Some(session);
+                raw.replacement_installed = true;
+            }
+            Ok(Err(failure)) => {
+                let (diagnostic, evidence) = failure.shutdown_until(deadline);
+                raw.failure = Some(diagnostic.to_string());
+                raw.failed_startup = Some(evidence);
+            }
+            Err(payload) => {
+                raw.construction_unverified = true;
+                raw.failure = Some(startup_panic_diagnostic(payload).to_string());
+            }
+        }
+        raw
+    }
     /// Start real software execution owners without admitting a campaign phase.
     pub fn start(app: &AppState) -> Result<Self, EnduranceExecutionStartFailure> {
         Self::start_with_headless(app, HeadlessRealtimePlaybackSession::new)
@@ -301,20 +420,52 @@ impl EnduranceExecutionOwners {
             Err(payload) => Some(startup_panic_diagnostic(payload)),
         };
         if let Some(diagnostic) = diagnostic {
-            let (preview, gpu) = realtime.into_shutdown_owners();
+            let headless = realtime.into_shutdown_owners().into_binding_failure(diagnostic);
             return Err(EnduranceExecutionStartFailure {
                 // A factory that unwinds without returning any inventory stays
                 // unverified; owning Waveform failures retain their exact stage.
                 waveform_construction_unverified: waveform.is_none() && waveform_startup.is_none(),
-                headless: HeadlessExecutionStartFailure::binding(diagnostic, preview, gpu),
+                headless,
                 waveform,
                 waveform_startup,
             });
         }
         Ok(Self {
             realtime: Some(realtime),
+            stopped_preparation: None,
+            av_completions: std::collections::VecDeque::new(),
             waveform: waveform.expect("completed Waveform setup"),
         })
+    }
+
+    pub(super) fn prepare_stopped_picture(
+        &mut self,
+        app: &mut AppState,
+        deadline: Instant,
+    ) -> Result<
+        super::headless_realtime_playback::HeadlessStoppedPicturePreparation,
+        EnduranceCampaignError,
+    > {
+        let mut observer = EnduranceRealtimeObserver;
+        let evidence = self
+            .realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .prepare_stopped_picture(app, &mut observer, deadline)
+            .map_err(|error| EnduranceCampaignError::Runtime(format!("{error:#}")))?;
+        self.stopped_preparation.get_or_insert(evidence);
+        Ok(evidence)
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn stopped_preparation(
+        &self,
+    ) -> Option<super::headless_realtime_playback::HeadlessStoppedPicturePreparation> {
+        self.stopped_preparation
     }
 
     pub(super) fn begin_realtime_window(
@@ -341,22 +492,26 @@ impl EnduranceExecutionOwners {
         let before_epoch = app.playback_epoch().get();
         let before_frame = app.current_frame();
         let mut observer = EnduranceRealtimeObserver;
-        let sample = self
-            .realtime
-            .as_mut()
-            .ok_or_else(|| {
-                EnduranceCampaignError::Runtime(
-                    "Headless realtime execution session is missing".to_owned(),
-                )
-            })?
+        let realtime = self.realtime.as_mut().ok_or_else(|| {
+            EnduranceCampaignError::Runtime(
+                "Headless realtime execution session is missing".to_owned(),
+            )
+        })?;
+        let sample = realtime
             .run_production_av_interval(app, &mut observer, gpu_completion_timeout)
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        let coordinator_timing = realtime.realtime_timing().ok_or_else(|| {
+            EnduranceCampaignError::Runtime(
+                "Headless realtime timing owner disappeared after a completed interval".to_owned(),
+            )
+        })?;
         Ok(EnduranceRealtimeIntervalObservation {
             before_epoch,
             before_frame,
             after_epoch: app.playback_epoch().get(),
             after_frame: app.current_frame(),
             sample,
+            coordinator_timing,
         })
     }
 
@@ -375,6 +530,38 @@ impl EnduranceExecutionOwners {
             })?
             .complete_current_video_opportunity(app, &mut observer, gpu_completion_timeout)
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
+    }
+
+    /// Close one exact recovery picture only after the real Audio Device owns its clock.
+    pub(super) fn complete_current_av_picture(
+        &mut self,
+        app: &mut AppState,
+        timeout: Duration,
+    ) -> Result<super::headless_av_evidence::HeadlessAvPictureCompletion, EnduranceCampaignError>
+    {
+        let mut observer = EnduranceRealtimeObserver;
+        let completion = self
+            .realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .complete_current_av_opportunity(app, &mut observer, timeout)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        if self.av_completions.len() == 32 {
+            self.av_completions.pop_front();
+        }
+        self.av_completions.push_back(completion.clone());
+        Ok(completion)
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn av_completions(
+        &self,
+    ) -> &std::collections::VecDeque<super::headless_av_evidence::HeadlessAvPictureCompletion> {
+        &self.av_completions
     }
 
     pub(super) fn capture_cache_pressure_observation(
@@ -470,7 +657,10 @@ impl EnduranceExecutionOwners {
         Ok(())
     }
 
-    /// Capture owner-derived gauges and terminal counters at a settled boundary.
+    /// Capture internally atomic owner gauges without pausing active realtime work.
+    ///
+    /// The returned domains share the caller's bounded observation envelope;
+    /// they do not claim a cross-domain global linearization instant.
     pub fn capture_facts(
         &self,
         app: &AppState,
@@ -553,6 +743,10 @@ impl EnduranceExecutionOwners {
                 ..PreviewRuntimeShutdownEvidence::default()
             };
             let gpu = EnduranceGpuShutdownEvidence {
+                worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
+                wake_callbacks: Default::default(),
+                native_wake_failures: 0,
+                wake_registration_rejections: 0,
                 worker_started: false,
                 worker_terminated: false,
                 worker_panicked: false,
@@ -580,6 +774,7 @@ impl EnduranceExecutionOwners {
                 app,
                 waveform,
                 gpu,
+                gpu_preview_dependency_barrier: None,
                 owner_snapshot_failure: Some(
                     "Headless realtime execution session was missing during consuming shutdown"
                         .to_owned(),
@@ -588,23 +783,26 @@ impl EnduranceExecutionOwners {
                 terminal_owner_snapshot,
             });
         };
-        let (mut preview_owner, gpu_owner) = realtime.into_shutdown_owners();
+        let mut shutdown_owners = realtime.into_shutdown_owners();
         let (owner_snapshot, owner_snapshot_failure) =
-            match capture_headless_endurance_owner_snapshot(&preview_owner, &gpu_owner, &app) {
+            match capture_headless_endurance_owner_snapshot(
+                shutdown_owners.preview(),
+                shutdown_owners.gpu(),
+                &app,
+            ) {
                 Ok(snapshot) => (snapshot, None),
                 Err(error) => (
                     HeadlessEnduranceOwnerSnapshot::failed_capture(),
                     Some(error.to_string()),
                 ),
             };
-        preview_owner.begin_endurance_shutdown();
+        shutdown_owners.begin_shutdown();
         self.waveform.begin_shutdown();
         app.begin_endurance_shutdown();
-        let preview = preview_owner.shutdown_until(deadline);
-        // Decoder/Preview workers can still own native surfaces and enqueue
-        // completion-visible work after shutdown admission closes. Reclaim
-        // those producers before retiring the GPU device generation.
-        let gpu = gpu_owner.shutdown_until(deadline);
+        let shutdown = shutdown_owners.shutdown_until(deadline);
+        let preview = shutdown.preview;
+        let gpu = shutdown.gpu;
+        let gpu_preview_dependency_barrier = shutdown.gpu_preview_dependency_barrier;
         let waveform = self.waveform.shutdown_until(deadline);
         let app = app.shutdown_for_endurance(deadline);
         let (app_background, background_projection_failure) =
@@ -637,6 +835,7 @@ impl EnduranceExecutionOwners {
             app,
             waveform,
             gpu,
+            gpu_preview_dependency_barrier: Some(gpu_preview_dependency_barrier),
             owner_snapshot_failure,
             terminal_projection_failure,
             terminal_owner_snapshot,
@@ -693,7 +892,7 @@ fn cache_pressure_decision_sha256(
 }
 
 /// Process-monotonic campaign clock. UTC is never duration authority.
-pub trait EnduranceCampaignClock {
+pub trait EnduranceCampaignClock: Send + Sync {
     /// Microseconds elapsed since the campaign process established its origin.
     fn elapsed_us(&self) -> u64;
 }
@@ -724,7 +923,10 @@ impl EnduranceCampaignClock for SystemEnduranceCampaignClock {
 }
 
 /// One typed semantic event emitted by the actual product workload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) use mondrian_platform::EnduranceAncillaryExportArtifact;
+
+/// One typed semantic event emitted by the actual product workload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum EnduranceCampaignEvent {
     /// Independent re-open/content verification of a published Export artifact.
     ExportArtifactVerified(VerifiedExportArtifactEvent),
@@ -733,8 +935,10 @@ pub enum EnduranceCampaignEvent {
 }
 
 /// Sealed App projection of one independently verified Export artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VerifiedExportArtifactEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ancillary: Option<EnduranceAncillaryExportArtifact>,
     completed_at_us: u64,
     artifact_id: String,
     artifact_sha256: String,
@@ -743,7 +947,7 @@ pub struct VerifiedExportArtifactEvent {
 }
 
 /// Sealed projection of one owner-derived, independently replayable receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VerifiedRecoveryStepEvent {
     completed_at_us: u64,
     cycle_index: u32,
@@ -755,12 +959,22 @@ pub struct VerifiedRecoveryStepEvent {
 }
 
 impl EnduranceCampaignEvent {
+    pub(crate) fn with_ancillary_export_artifact(
+        mut self,
+        receipt: EnduranceAncillaryExportArtifact,
+    ) -> Self {
+        if let Self::ExportArtifactVerified(event) = &mut self {
+            event.ancillary = Some(receipt);
+        }
+        self
+    }
     /// Construct an Export event only from a completed independent verifier receipt.
     pub fn export_artifact_verified(
         completed_at_us: u64,
         receipt: &mondrian_export::IndependentExportArtifactReceipt,
     ) -> Self {
         Self::ExportArtifactVerified(VerifiedExportArtifactEvent {
+            ancillary: None,
             completed_at_us,
             artifact_id: receipt.report().artifact_id.clone(),
             artifact_sha256: receipt.report().artifact_sha256.clone(),
@@ -812,6 +1026,7 @@ impl EnduranceCampaignEvent {
         validation_report_sha256: impl Into<String>,
     ) -> Self {
         Self::ExportArtifactVerified(VerifiedExportArtifactEvent {
+            ancillary: None,
             completed_at_us,
             artifact_id: artifact_id.into(),
             artifact_sha256: artifact_sha256.into(),
@@ -896,7 +1111,7 @@ impl EnduranceRuntimeSnapshot {
 /// Reference Output contributes its final accounting snapshot separately. A
 /// consuming vendor thread/device shutdown receipt remains a qualification
 /// follow-on and is not implied by this projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct EnduranceRuntimeClosure {
     /// Completed or failed; `NotRun` is only legal at admission.
     pub status: EndurancePhaseTerminalStatus,
@@ -927,7 +1142,7 @@ impl EnduranceRuntimeClosure {
 }
 
 /// Raw receipts for the exact owner inventory consumed by a product phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum EnduranceTerminalOwners {
     /// Exact partial-start inventory; no successful-session snapshot is fabricated.
     Startup(Box<EnduranceStartupOwnerClosure>),
@@ -949,7 +1164,7 @@ impl EnduranceTerminalOwners {
 }
 
 /// Owner-free evidence from one consumed phase, independent of snapshot authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EndurancePhaseTerminalEvidence {
     /// Phase whose owners actually produced these receipts.
     pub phase_kind: EndurancePhaseKind,
@@ -957,12 +1172,26 @@ pub struct EndurancePhaseTerminalEvidence {
     pub closure: EnduranceRuntimeClosure,
     /// Complete raw receipts retained without live workers or device handles.
     pub owners: EnduranceTerminalOwners,
+    /// Capacity-one independent artifact verifier consumed before the App queue.
+    pub export_verifier: Option<super::endurance_export::FrozenExportVerifierShutdownReceipt>,
+    /// BMX namespace consumed only after the phase Export queue and every child closed.
+    pub bmx_runtime: Option<mondrian_media::ApprovedProviderRuntimeCleanupReceipt>,
     /// Every latched shutdown/projection failure, not only the aggregate status.
     pub failures: Vec<String>,
 }
 
 /// Product-owned execution surface consumed by the serial supervisor.
 pub trait EnduranceCampaignRuntime {
+    /// Immutable ANC inventory captured after this phase's actual owners closed.
+    fn phase_ancillary_evidence(
+        &self,
+    ) -> Option<mondrian_platform::EnduranceAncillaryPhaseEvidence> {
+        None
+    }
+    /// Immutable raw phase closure history already durably published by the owner.
+    fn phase_owner_history(&self) -> Vec<mondrian_platform::EndurancePhaseOwnerReceipt> {
+        Vec::new()
+    }
     /// Start the next phase's preparation before loading its workload or capture.
     ///
     /// Forget prior-phase error attachments without granting owner admission or
@@ -987,6 +1216,18 @@ pub trait EnduranceCampaignRuntime {
         workload: &PreparedEnduranceWorkload,
         phase_started_at_run_us: u64,
     ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError>;
+
+    /// Activate measured work once after every cold owner is ready. Implementors
+    /// must bind events, recoveries and new Export admission to this same origin.
+    fn begin_measurement(
+        &mut self,
+        _requirement: &EndurancePhaseRequirement,
+        _measurement_started_at_run_us: u64,
+    ) -> Result<mondrian_platform::EndurancePhaseMeasurementTiming, EnduranceCampaignError> {
+        Err(EnduranceCampaignError::Runtime(
+            "runtime has no measurement activation authority".to_owned(),
+        ))
+    }
 
     /// Pump real product work until the absolute campaign deadline is reached.
     fn pump_until(
@@ -1072,7 +1313,7 @@ where
             .ok_or_else(|| EnduranceCampaignError::MissingWorkload(requirement.phase_id.clone()))?;
         let workload = PreparedEnduranceWorkload::load(requirement, workload_path)?;
         let started_at_run_us = clock.elapsed_us();
-        let phase = capture.begin_phase(
+        let mut phase = capture.begin_phase(
             &requirement.phase_id,
             started_at_run_us,
             &request.evidence_directory,
@@ -1088,9 +1329,15 @@ where
                 capture.commit_phase(phase.finish_not_run()?)?;
             }
             EndurancePhaseAdmission::Started => {
+                let timing = runtime
+                    .begin_measurement(requirement, clock.elapsed_us())
+                    .map_err(|error| cleanup_started_phase(runtime, error))?;
+                phase
+                    .begin_measurement(timing)
+                    .map_err(|error| cleanup_started_phase(runtime, error.into()))?;
                 let manifest = execute_started_phase(
                     requirement,
-                    started_at_run_us,
+                    timing.measurement_started_at_run_us,
                     phase,
                     runtime,
                     process_memory,
@@ -1103,7 +1350,11 @@ where
     }
     let owner_closure = runtime.shutdown_run_owner()?;
     capture
-        .seal_manifest(&request.output_manifest_path, owner_closure)
+        .seal_manifest_with_owner_history(
+            &request.output_manifest_path,
+            owner_closure,
+            runtime.phase_owner_history(),
+        )
         .map_err(Into::into)
 }
 
@@ -1111,7 +1362,7 @@ where
 fn execute_started_phase<R, P, C>(
     requirement: &EndurancePhaseRequirement,
     started_at_run_us: u64,
-    mut phase: EndurancePhaseCapture,
+    phase: EndurancePhaseCapture,
     runtime: &mut R,
     process_memory: &P,
     clock: &C,
@@ -1122,6 +1373,69 @@ where
     P: ProcessMemoryProbe,
     C: EnduranceCampaignClock,
 {
+    std::thread::scope(|scope| {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = match std::thread::Builder::new()
+            .name("endurance-process-memory".to_owned())
+            .spawn_scoped(scope, move || {
+                while request_receiver.recv().is_ok() {
+                    let memory =
+                        process_memory.process_memory(ProcessMemoryScope::ProductProcessTree);
+                    let completed_at_run_us = clock.elapsed_us();
+                    if result_sender
+                        .send(CompletedProcessMemorySample { memory, completed_at_run_us })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                return Err(cleanup_started_phase(
+                    runtime,
+                    EnduranceCampaignError::Runtime(format!(
+                        "start process-memory sampler worker: {error}"
+                    )),
+                ));
+            }
+        };
+        let sampler = PhaseProcessMemorySampler { request_sender, result_receiver };
+        let result = execute_started_phase_with_sampler(
+            requirement,
+            started_at_run_us,
+            phase,
+            runtime,
+            &sampler,
+            clock,
+            sample_interval_us,
+        );
+        drop(sampler);
+        match (result, worker.join()) {
+            (Err(error), _) => Err(error),
+            (Ok(result), Ok(())) => Ok(result),
+            (Ok(_), Err(_)) => Err(EnduranceCampaignError::Runtime(
+                "process-memory sampler worker panicked".to_owned(),
+            )),
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_started_phase_with_sampler<R, C>(
+    requirement: &EndurancePhaseRequirement,
+    started_at_run_us: u64,
+    mut phase: EndurancePhaseCapture,
+    runtime: &mut R,
+    sampler: &PhaseProcessMemorySampler,
+    clock: &C,
+    sample_interval_us: u64,
+) -> Result<mondrian_platform::EndurancePhaseManifest, EnduranceCampaignError>
+where
+    R: EnduranceCampaignRuntime,
+    C: EnduranceCampaignClock,
+{
     let running = (|| {
         let mut sequence = 0_u64;
         let mut scheduled_at_us = 0_u64;
@@ -1130,12 +1444,13 @@ where
             capture_one_sample(
                 runtime,
                 &mut phase,
-                process_memory,
+                sampler,
                 clock,
                 requirement.kind,
                 started_at_run_us,
                 sequence,
                 scheduled_at_us,
+                true,
             )?;
             sequence = sequence.checked_add(1).ok_or(EnduranceCampaignError::TimeOverflow)?;
             scheduled_at_us = scheduled_at_us
@@ -1166,15 +1481,17 @@ where
         return Err(closure.incomplete_cleanup_error());
     }
     record_events(&mut phase, events)?;
+    phase.bind_ancillary_evidence(runtime.phase_ancillary_evidence())?;
     let final_snapshot = capture_one_sample(
         runtime,
         &mut phase,
-        process_memory,
+        sampler,
         clock,
         requirement.kind,
         started_at_run_us,
         sequence,
         final_scheduled_at_us,
+        false,
     )?;
     let completed_at_run_us = started_at_run_us
         .checked_add(final_snapshot.completed_at_us)
@@ -1189,6 +1506,64 @@ where
             closure.export,
         )
         .map_err(Into::into)
+}
+
+struct CompletedProcessMemorySample {
+    memory: mondrian_platform::ProcessMemoryProbeResult,
+    completed_at_run_us: u64,
+}
+
+struct PhaseProcessMemorySampler {
+    request_sender: mpsc::Sender<()>,
+    result_receiver: mpsc::Receiver<CompletedProcessMemorySample>,
+}
+
+impl PhaseProcessMemorySampler {
+    fn capture<R, C>(
+        &self,
+        runtime: &mut R,
+        phase: &mut EndurancePhaseCapture,
+        clock: &C,
+        continue_realtime_pump: bool,
+    ) -> Result<CompletedProcessMemorySample, EnduranceCampaignError>
+    where
+        R: EnduranceCampaignRuntime,
+        C: EnduranceCampaignClock,
+    {
+        self.request_sender.send(()).map_err(|_| {
+            EnduranceCampaignError::Runtime(
+                "process-memory sampler worker stopped before accepting a sample".to_owned(),
+            )
+        })?;
+        loop {
+            match self.result_receiver.try_recv() {
+                Ok(sample) => return Ok(sample),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(EnduranceCampaignError::Runtime(
+                        "process-memory sampler worker stopped before completing a sample"
+                            .to_owned(),
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) if continue_realtime_pump => {
+                    const MEMORY_WAIT_PUMP_QUANTUM_US: u64 = 2_000;
+                    let deadline_run_us = clock
+                        .elapsed_us()
+                        .checked_add(MEMORY_WAIT_PUMP_QUANTUM_US)
+                        .ok_or(EnduranceCampaignError::TimeOverflow)?;
+                    record_events(phase, runtime.pump_until(deadline_run_us)?)?;
+                    std::thread::yield_now();
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    return self.result_receiver.recv().map_err(|_| {
+                        EnduranceCampaignError::Runtime(
+                            "process-memory sampler worker stopped before completing the terminal sample"
+                                .to_owned(),
+                        )
+                    });
+                }
+            }
+        }
+    }
 }
 
 pub(super) fn cleanup_started_phase<R: EnduranceCampaignRuntime>(
@@ -1214,6 +1589,10 @@ fn pump_and_record<R: EnduranceCampaignRuntime>(
     started_at_run_us: u64,
     scheduled_at_us: u64,
 ) -> Result<(), EnduranceCampaignError> {
+    // Sample zero is the ready-owner baseline, not a zero-budget work residency.
+    if scheduled_at_us == 0 {
+        return Ok(());
+    }
     let deadline = started_at_run_us
         .checked_add(scheduled_at_us)
         .ok_or(EnduranceCampaignError::TimeOverflow)?;
@@ -1227,18 +1606,22 @@ fn record_events(
     for event in events {
         match event {
             EnduranceCampaignEvent::ExportArtifactVerified(VerifiedExportArtifactEvent {
+                ancillary,
                 completed_at_us,
                 artifact_id,
                 artifact_sha256,
                 validator_id,
                 validation_report_sha256,
-            }) => phase.record_export_artifact_verified(
-                completed_at_us,
-                &artifact_id,
-                &artifact_sha256,
-                &validator_id,
-                &validation_report_sha256,
-            )?,
+            }) => {
+                phase.record_ancillary_export_artifact(&artifact_id, ancillary)?;
+                phase.record_export_artifact_verified(
+                    completed_at_us,
+                    &artifact_id,
+                    &artifact_sha256,
+                    &validator_id,
+                    &validation_report_sha256,
+                )?;
+            }
             EnduranceCampaignEvent::RecoveryStepCompleted(event) => phase
                 .record_recovery_step_completed(
                     event.completed_at_us,
@@ -1255,26 +1638,25 @@ fn record_events(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_one_sample<R, P, C>(
+fn capture_one_sample<R, C>(
     runtime: &mut R,
     phase: &mut EndurancePhaseCapture,
-    process_memory: &P,
+    sampler: &PhaseProcessMemorySampler,
     clock: &C,
     expected_phase_kind: EndurancePhaseKind,
     started_at_run_us: u64,
     sequence: u64,
     scheduled_at_us: u64,
+    continue_realtime_pump: bool,
 ) -> Result<FinalSnapshot, EnduranceCampaignError>
 where
     R: EnduranceCampaignRuntime,
-    P: ProcessMemoryProbe,
     C: EnduranceCampaignClock,
 {
     let started_at_us = clock
         .elapsed_us()
         .checked_sub(started_at_run_us)
         .ok_or(EnduranceCampaignError::TimeRegression)?;
-    let memory = process_memory.process_memory(ProcessMemoryScope::ProductProcessTree);
     let mut snapshot = runtime.snapshot()?;
     if snapshot.phase_kind != expected_phase_kind {
         return Err(EnduranceCampaignError::SnapshotPhaseMismatch {
@@ -1282,8 +1664,9 @@ where
             actual: snapshot.phase_kind,
         });
     }
-    let completed_at_us = clock
-        .elapsed_us()
+    let completed = sampler.capture(runtime, phase, clock, continue_realtime_pump)?;
+    let completed_at_us = completed
+        .completed_at_run_us
         .checked_sub(started_at_run_us)
         .ok_or(EnduranceCampaignError::TimeRegression)?;
     snapshot.export.observed_at_us = completed_at_us;
@@ -1295,7 +1678,7 @@ where
             started_at_us,
             completed_at_us,
         },
-        &memory,
+        &completed.memory,
         &snapshot.playback,
         &snapshot.reference_output,
         snapshot.export,
@@ -1325,16 +1708,48 @@ fn validate_workload_map(
 }
 
 /// Stable consuming run-owner shutdown failure retained by campaign errors.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize)]
 #[error("endurance run owner shutdown failed: {diagnostic}")]
 pub struct EnduranceRunOwnerShutdownFailure {
     diagnostic: String,
+    closure: Option<Box<EnduranceRunOwnerClosureEvidence>>,
+    ffmpeg_closure: Option<Box<mondrian_media::QualifiedFfmpegShutdownReceipt>>,
 }
 
 impl EnduranceRunOwnerShutdownFailure {
     /// Construct a driver-owned typed failure without discarding its diagnostic.
     pub fn new(diagnostic: impl Into<String>) -> Self {
-        Self { diagnostic: diagnostic.into() }
+        Self {
+            diagnostic: diagnostic.into(),
+            closure: None,
+            ffmpeg_closure: None,
+        }
+    }
+
+    /// Retain actual combined closure even when its leaf owners failed.
+    pub fn with_closure(
+        diagnostic: impl Into<String>,
+        closure: EnduranceRunOwnerClosureEvidence,
+    ) -> Self {
+        Self {
+            diagnostic: diagnostic.into(),
+            closure: Some(Box::new(closure)),
+            ffmpeg_closure: None,
+        }
+    }
+    pub(crate) fn attach_ffmpeg_closure(
+        &mut self,
+        closure: mondrian_media::QualifiedFfmpegShutdownReceipt,
+    ) {
+        self.ffmpeg_closure = Some(Box::new(closure));
+    }
+    /// Raw combined receipt retained independently of the primary failure.
+    pub fn closure(&self) -> Option<&EnduranceRunOwnerClosureEvidence> {
+        self.closure.as_deref()
+    }
+    /// Exact capsule cleanup retained when the Surface itself failed to return evidence.
+    pub fn ffmpeg_closure(&self) -> Option<&mondrian_media::QualifiedFfmpegShutdownReceipt> {
+        self.ffmpeg_closure.as_deref()
     }
 
     /// Driver-provided failure diagnostic.
@@ -1346,6 +1761,26 @@ impl EnduranceRunOwnerShutdownFailure {
 /// Stable campaign coordination failure.
 #[derive(Debug, Error)]
 pub enum EnduranceCampaignError {
+    /// Failed run was durably published with all phase and outer owner receipts.
+    #[error("{primary}; complete failure report: {report_path}")]
+    WithFailureReport {
+        /// Original typed failure including its actual owner evidence.
+        #[source]
+        primary: Box<EnduranceCampaignError>,
+        /// Create-only report published by the existing evidence seam.
+        report_path: String,
+    },
+    /// Publication failure retains the original error and complete report bytes.
+    #[error("{primary}; failure report publication failed: {publication}")]
+    FailureReportPublication {
+        /// Original typed failure including its actual owner evidence.
+        #[source]
+        primary: Box<EnduranceCampaignError>,
+        /// Exact complete report that could not be published.
+        canonical_report_json: String,
+        /// Independent publication diagnostic.
+        publication: String,
+    },
     /// A failure still retains the exact run-level owner closure that preceded it.
     #[error("{primary}; run owner closure evidence retained")]
     WithRunOwnerClosureEvidence {
@@ -1447,8 +1882,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use mondrian_platform::{
-        EnduranceQualificationStatus, PreparedEnduranceQualification, ProcessMemoryProbeBackend,
-        ProcessMemoryProbeResult,
+        PreparedEnduranceQualification, ProcessMemoryProbeBackend, ProcessMemoryProbeResult,
     };
     use mondrian_playback::{PlaybackEvidenceCollector, PlaybackEvidenceConfig};
 
@@ -1531,9 +1965,18 @@ mod tests {
     #[ignore = "requires a real Headless GPU Adapter and native scheduling admission"]
     fn active_realtime_session_gates_raw_access_and_still_closes_all_owners() {
         let mut state = AppState::new();
+        let mut owners = EnduranceExecutionOwners::start(&state).expect("start execution owners");
+        let expired = owners.prepare_stopped_picture(&mut state, Instant::now());
+        assert!(expired
+            .expect_err("expired preparation must reject before work")
+            .to_string()
+            .contains("deadline elapsed before admission"));
+        assert!(owners.realtime.as_ref().expect("retained pair").preview().is_ok());
         state.set_playback_frame_running(0);
         assert!(state.is_playing());
-        let mut owners = EnduranceExecutionOwners::start(&state).expect("start execution owners");
+        assert!(owners
+            .prepare_stopped_picture(&mut state, Instant::now() + Duration::from_secs(1))
+            .is_err());
         {
             let realtime = owners.realtime.as_mut().expect("paired realtime session");
             realtime.begin_realtime(&state, None).expect("begin realtime residency");
@@ -1582,6 +2025,7 @@ mod tests {
     }
 
     struct FakeRuntime<'a> {
+        startup_delay_us: u64,
         clock: &'a FakeClock,
         preparation_calls: u32,
         begin_calls: u32,
@@ -1596,6 +2040,7 @@ mod tests {
     impl<'a> FakeRuntime<'a> {
         fn new(clock: &'a FakeClock) -> Self {
             Self {
+                startup_delay_us: 0,
                 clock,
                 preparation_calls: 0,
                 begin_calls: 0,
@@ -1638,6 +2083,7 @@ mod tests {
             self.phase_started_at_us = phase_started_at_run_us;
             self.verified_exports = 0;
             self.shutdown = false;
+            self.clock.0.fetch_add(self.startup_delay_us, Ordering::Relaxed);
             Ok(
                 if requirement.kind == mondrian_platform::EndurancePhaseKind::ContinuousExport {
                     EndurancePhaseAdmission::Started
@@ -1648,6 +2094,24 @@ mod tests {
                     }
                 },
             )
+        }
+
+        fn begin_measurement(
+            &mut self,
+            requirement: &EndurancePhaseRequirement,
+            measurement_started_at_run_us: u64,
+        ) -> Result<mondrian_platform::EndurancePhaseMeasurementTiming, EnduranceCampaignError>
+        {
+            let timing = mondrian_platform::EndurancePhaseMeasurementTiming {
+                startup_started_at_run_us: self.phase_started_at_us,
+                startup_deadline_at_run_us: self.phase_started_at_us + 120_000_000,
+                owners_ready_at_run_us: self.clock.elapsed_us(),
+                measurement_started_at_run_us,
+                measurement_deadline_at_run_us: measurement_started_at_run_us
+                    + requirement.minimum_duration_us,
+            };
+            self.phase_started_at_us = measurement_started_at_run_us;
+            Ok(timing)
         }
 
         fn pump_until(
@@ -2049,6 +2513,21 @@ mod tests {
     }
 
     impl EnduranceCampaignRuntime for FailpointRuntime<'_> {
+        fn begin_measurement(
+            &mut self,
+            requirement: &EndurancePhaseRequirement,
+            measurement_started_at_run_us: u64,
+        ) -> Result<mondrian_platform::EndurancePhaseMeasurementTiming, EnduranceCampaignError>
+        {
+            Ok(mondrian_platform::EndurancePhaseMeasurementTiming {
+                startup_started_at_run_us: measurement_started_at_run_us,
+                startup_deadline_at_run_us: measurement_started_at_run_us + 120_000_000,
+                owners_ready_at_run_us: measurement_started_at_run_us,
+                measurement_started_at_run_us,
+                measurement_deadline_at_run_us: measurement_started_at_run_us
+                    + requirement.minimum_duration_us,
+            })
+        }
         fn bind_machine_plan(
             &mut self,
             machine_plan: PreparedCommercialEnduranceMachinePlan,
@@ -2289,6 +2768,53 @@ mod tests {
     }
 
     #[test]
+    fn nine_second_startup_precedes_full_day_measurement_and_first_probe_budget() {
+        let (_temporary, request, _profile, evidence) = campaign_fixture();
+        let clock = FakeClock::default();
+        let mut runtime = FakeRuntime::new(&clock);
+        runtime.startup_delay_us = 9_000_000;
+        let manifest = run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock)
+            .expect("synthetic scheduling contract only");
+        let phase = &manifest.phases[1];
+        let timing = phase.producer.measurement_timing.expect("actual activation timing");
+        assert_eq!(
+            timing.owners_ready_at_run_us - timing.startup_started_at_run_us,
+            9_000_000
+        );
+        assert_eq!(
+            timing.measurement_started_at_run_us,
+            phase.started_at_run_us
+        );
+        assert_eq!(
+            timing.measurement_deadline_at_run_us - phase.started_at_run_us,
+            86_400_000_000
+        );
+        let read = |index: usize| -> mondrian_platform::EnduranceSampleChunk {
+            serde_json::from_slice(
+                &std::fs::read(evidence.join(&phase.chunks[index].file_name)).expect("chunk"),
+            )
+            .expect("typed chunk")
+        };
+        let first_chunk = read(0);
+        let last_chunk = read(phase.chunks.len() - 1);
+        let first = &first_chunk.samples[0];
+        let last = last_chunk.samples.last().expect("terminal sample");
+        assert_eq!(first.scheduled_at_us, 0);
+        assert_eq!(first.completed_at_us, 1);
+        assert_eq!(last.scheduled_at_us, 86_400_000_000);
+        assert_eq!(
+            last.counters.export_frames - first.counters.export_frames,
+            432_000
+        );
+        assert_eq!(
+            last.counters.export_artifacts_verified - first.counters.export_artifacts_verified,
+            24
+        );
+        // These are fake clock/owner counters, never physical qualification.
+        assert!(manifest.phase_owner_history.is_empty());
+    }
+
+    #[test]
     fn coordinator_runs_serial_cadence_and_seals_not_run_hardware_phases() {
         let (_temporary, request, profile, evidence) = campaign_fixture();
         let clock = FakeClock::default();
@@ -2313,18 +2839,17 @@ mod tests {
             EndurancePhaseTerminalStatus::NotRun
         );
         let prepared = PreparedEnduranceQualification::compile(profile).expect("compile profile");
-        let report = prepared
-            .evaluate(manifest, |receipt| {
-                let bytes = std::fs::read(evidence.join(&receipt.file_name))
-                    .map_err(|_| mondrian_platform::EnduranceQualificationError::EmptyChunk)?;
-                serde_json::from_slice(&bytes)
-                    .map_err(mondrian_platform::EnduranceQualificationError::Serialization)
-            })
-            .expect("evaluate campaign manifest");
-        assert_eq!(report.status, EnduranceQualificationStatus::Incomplete);
-        assert_eq!(
-            report.phases[1].status,
-            EnduranceQualificationStatus::Qualified
-        );
+        let result = prepared.evaluate(manifest, |receipt| {
+            let bytes = std::fs::read(evidence.join(&receipt.file_name))
+                .map_err(|_| mondrian_platform::EnduranceQualificationError::EmptyChunk)?;
+            serde_json::from_slice(&bytes)
+                .map_err(mondrian_platform::EnduranceQualificationError::Serialization)
+        });
+        // The fake clock/runtime prove cadence, not mapped native image or run
+        // owner closure. A synthetic completed phase cannot qualify a campaign.
+        assert!(matches!(
+            result,
+            Err(mondrian_platform::EnduranceQualificationError::InvalidRunOwnerClosure)
+        ));
     }
 }

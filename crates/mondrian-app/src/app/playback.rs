@@ -5,6 +5,12 @@ use super::*;
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioOutputClockCommit {
+    Observe,
+    Hold,
+}
+
 struct PreparedTimelineAudioSource {
     renderer: Arc<dyn AudioPcmRenderer>,
     continuity_model: AudioPcmContinuityModel,
@@ -378,6 +384,27 @@ struct AppliedFrameDelivery {
     snapshot_changed: bool,
 }
 
+/// Exact result of applying a timestamp-free Frame Delivery candidate.
+///
+/// Acceptance and visible Transport mutation are separate facts: consuming a
+/// demand while already in the same recovery state can be accepted without
+/// changing the public Playback snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameDeliveryCandidateReceipt {
+    accepted: bool,
+    transport_changed: bool,
+}
+
+impl FrameDeliveryCandidateReceipt {
+    pub(crate) const fn accepted(self) -> bool {
+        self.accepted
+    }
+
+    pub(crate) const fn transport_changed(self) -> bool {
+        self.transport_changed
+    }
+}
+
 impl PlaybackAdvance {
     /// Return whether UI models should refresh for this playback tick.
     pub fn requires_refresh(self) -> bool {
@@ -687,6 +714,22 @@ impl AppState {
     }
 
     pub fn pump_audio_output(&mut self) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_clock_commit(AudioOutputClockCommit::Observe)
+    }
+
+    /// Fill the physical audio render queue while retaining the current
+    /// transport coordinate. Headless AV validation uses this while the exact
+    /// current picture is still resolving, then submits the audio-clock
+    /// observation only after that picture has physical Ready evidence.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn pump_audio_output_without_clock_commit(&mut self) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_clock_commit(AudioOutputClockCommit::Hold)
+    }
+
+    fn pump_audio_output_with_clock_commit(
+        &mut self,
+        clock_commit: AudioOutputClockCommit,
+    ) -> mondrian_core::Result<()> {
         self.poll_audio_idle_warmup();
         let mode = self.audio_playback_mode();
         let poll_started_at = Instant::now();
@@ -712,7 +755,9 @@ impl AppState {
         }
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
         self.audio_idle_warmup.set_dispatch_enabled(false);
-        self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+        if clock_commit == AudioOutputClockCommit::Observe {
+            self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+        }
         Ok(())
     }
 
@@ -1607,6 +1652,7 @@ impl AppState {
             ready_media_frames,
             preservable_media_frames,
             true,
+            true,
             Instant::now(),
         )
     }
@@ -1616,6 +1662,7 @@ impl AppState {
         demand: FrameDemandIdentity,
         ready_media_frames: usize,
         preservable_media_frames: usize,
+        bounded_cold_activation_ready: bool,
         presentation_successor_ready: bool,
         observed_at: Instant,
     ) -> bool {
@@ -1623,6 +1670,7 @@ impl AppState {
             demand,
             ready_media_frames,
             preservable_media_frames,
+            bounded_cold_activation_ready,
             presentation_successor_ready,
         };
         let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
@@ -1703,17 +1751,75 @@ impl AppState {
     /// on the exact [`FramePresentationTicket`] deadline.
     pub fn playback_frame_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
         let demand = self.playback_engine.pending_frame_demand()?;
+        self.project_playback_work_deadline(demand, sampled_at)
+    }
+
+    /// Reissue the exact current playback picture against one bounded recovery deadline.
+    pub(crate) fn reissue_current_frame_demand_for_recovery_until(
+        &mut self,
+        recovery_deadline: Instant,
+    ) -> Result<mondrian_playback::FrameDemandIdentity, mondrian_playback::PlaybackError> {
+        self.reissue_current_frame_demand_for_recovery_at(Instant::now(), recovery_deadline)
+    }
+
+    fn reissue_current_frame_demand_for_recovery_at(
+        &mut self,
+        observed_at: Instant,
+        recovery_deadline: Instant,
+    ) -> Result<mondrian_playback::FrameDemandIdentity, mondrian_playback::PlaybackError> {
+        let remaining = recovery_deadline
+            .checked_duration_since(observed_at)
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(mondrian_playback::PlaybackError::InvalidRecoveryFrameDemand)?;
+        let observed_timestamp = self
+            .playback_timestamp_for_observation(observed_at)?
+            .max(self.playback_engine.monotonic_high_water());
+        let engine_deadline = observed_timestamp.checked_add(remaining)?;
+        let demand = self
+            .playback_engine
+            .reissue_current_frame_demand_for_recovery(observed_timestamp, engine_deadline)?;
+        let engine_now = self.playback_engine.monotonic_high_water();
+        self.reanchor_playback_observation_projection_at(observed_at, engine_now);
+        self.capture_playback_evidence();
+        Ok(demand.identity())
+    }
+
+    /// Read the original Priming work budget after its presentation ticket is consumed.
+    pub(crate) fn playback_priming_work_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
+        let snapshot = self.playback_engine.snapshot();
+        if snapshot.state != mondrian_playback::TransportState::Priming {
+            return None;
+        }
+        let demand = self.playback_engine.frame_demand()?;
+        if demand.epoch != snapshot.epoch
+            || demand.quality_revision != snapshot.quality_revision
+            || demand.target.frame != snapshot.position.frame
+        {
+            return None;
+        }
+        self.project_playback_work_deadline(demand, sampled_at)
+    }
+
+    fn project_playback_work_deadline(
+        &self,
+        demand: mondrian_playback::FrameDemand,
+        sampled_at: Instant,
+    ) -> Option<Instant> {
         let deadline = demand.deadline?;
         let sampled_timestamp = self
             .playback_timestamp_for_observation(sampled_at)
             .ok()?
             .max(self.playback_engine.monotonic_high_water());
-        let remaining = deadline
+        let target = deadline
             .duration_since_origin()
-            .checked_sub(sampled_timestamp.duration_since_origin())
-            .unwrap_or(Duration::ZERO);
-        let grace = Duration::from_nanos(demand.late_presentation_grace_ns);
-        sampled_at.checked_add(remaining.saturating_add(grace))
+            .checked_add(Duration::from_nanos(demand.late_presentation_grace_ns))?;
+        let sampled = sampled_timestamp.duration_since_origin();
+        if let Some(remaining) = target.checked_sub(sampled) {
+            sampled_at.checked_add(remaining)
+        } else {
+            // Preserve an expired instant instead of renewing late grace.
+            sampled_at.checked_sub(sampled.checked_sub(target)?)
+        }
     }
 
     /// Identity preview adapters may return only while the current demand still
@@ -1763,20 +1869,57 @@ impl AppState {
     }
 
     /// Complete a demand whose exact physical artifact was already visible at
-    /// the supplied observation instant.
+    /// or before the supplied observation instant.
     ///
-    /// This narrow seam is only valid for an exact prepared successor that
-    /// aliases the current physical output. The commit may synchronize
-    /// semantic ownership metadata, but it must not replace pixels or perform
-    /// any fallible work. A distinct prepared buffer must use ordinary
-    /// presentation completion at its real visibility-commit instant.
+    /// This narrow seam is only valid for an exact prepared successor or
+    /// current-plan reuse that aliases the continuously retained physical
+    /// output. The commit may synchronize semantic ownership metadata, but it
+    /// must not replace pixels or perform any fallible work. If semantic proof
+    /// finishes after the presentation deadline, the already-visible artifact
+    /// is conservatively classified at the deadline while terminal observation
+    /// retains the real current monotonic timestamp. A distinct prepared
+    /// buffer must use ordinary presentation completion at its real
+    /// visibility-commit instant.
     pub(crate) fn finalize_already_visible_frame_presentation<C: FnOnce()>(
         &mut self,
         ticket: Option<FramePresentationTicket>,
-        already_visible_at: Instant,
+        observed_at: Instant,
         publication: FramePresentationPublication<C>,
     ) -> FramePresentationDisposition {
-        self.finalize_frame_presentation_at(ticket, already_visible_at, publication)
+        let Some(ticket) = ticket else {
+            return self.finalize_frame_presentation_at(None, observed_at, publication);
+        };
+        let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
+            Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
+            Err(error) => {
+                tracing::warn!(%error, "rejected already-visible frame publication with an invalid observation timestamp");
+                return FramePresentationDisposition::LostAuthority;
+            }
+        };
+        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        let visibility_timestamp = ticket.deadline().map_or(observed_timestamp, |deadline| {
+            observed_timestamp.min(deadline)
+        });
+        let kind = ticket.delivery_kind_at(visibility_timestamp);
+        if !matches!(kind, FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded) {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        let FramePresentationPublication::Prepared(commit) = publication else {
+            return FramePresentationDisposition::OutputRejected;
+        };
+        let delivery = FrameDeliveryCandidate::for_demand(ticket.identity(), kind)
+            .complete_at(observed_timestamp);
+        let applied = self.observe_frame_delivery_at_wall(delivery, observed_at);
+        if !applied.accepted {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        commit();
+        FramePresentationDisposition::Presented(FramePresentationCompletion {
+            delivery,
+            transport_changed: applied.snapshot_changed,
+        })
     }
 
     fn finalize_frame_presentation_at<C: FnOnce()>(
@@ -1966,16 +2109,30 @@ impl AppState {
         candidate: FrameDeliveryCandidate,
         observed_at: Instant,
     ) -> bool {
+        let receipt = self.observe_frame_delivery_candidate_with_receipt(candidate, observed_at);
+        receipt.accepted() && receipt.transport_changed()
+    }
+
+    /// Apply a timestamp-free terminal candidate and retain acceptance even
+    /// when consuming its demand leaves the public Transport snapshot equal.
+    pub(crate) fn observe_frame_delivery_candidate_with_receipt(
+        &mut self,
+        candidate: FrameDeliveryCandidate,
+        observed_at: Instant,
+    ) -> FrameDeliveryCandidateReceipt {
         let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
             Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
             Err(error) => {
                 tracing::warn!(%error, ?candidate, "rejected Frame Delivery candidate with an invalid observation timestamp");
-                return false;
+                return FrameDeliveryCandidateReceipt { accepted: false, transport_changed: false };
             }
         };
         let applied = self
             .observe_frame_delivery_at_wall(candidate.complete_at(observed_timestamp), observed_at);
-        applied.accepted && applied.snapshot_changed
+        FrameDeliveryCandidateReceipt {
+            accepted: applied.accepted,
+            transport_changed: applied.snapshot_changed,
+        }
     }
 
     fn observe_frame_delivery_at_wall(
@@ -2220,7 +2377,14 @@ fn audio_device_clock_observation(
         age <= AUDIO_CALLBACK_STALE_AFTER
             && callback_age_frames.is_some_and(|frames| frames <= freshness_frame_limit)
     });
+    // Activation-wide callback count and the host monotonic clock are two
+    // independent physical clocks. Their ordinary ppm drift accumulates for
+    // the lifetime of a stream, so this absolute comparison is valid only for
+    // initial admission. Once AudioDevice owns the clock, PlaybackEngine
+    // validates every adjacent observation against its retained device anchor,
+    // including monotonic consumed frames, elapsed-time rate and uncertainty.
     let callback_position_plausible = terminal_frozen
+        || already_audio_master
         || match (snapshot.active_duration, snapshot.last_callback_age) {
             (Some(active_duration), Some(callback_age)) => {
                 let observed_span = active_duration
@@ -2326,7 +2490,7 @@ mod tests {
             .map(|demand| demand.identity())
             .expect("frame demand after play");
         let observed_at = state.playback_observation_instant_anchor;
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, observed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, observed_at));
         assert_eq!(
             state.advance_playback_clock(Duration::ZERO).status,
             PlaybackAdvanceStatus::WaitingForFrame,
@@ -2442,6 +2606,7 @@ mod tests {
             demand,
             0,
             0,
+            true,
             true,
             state.playback_observation_instant_anchor,
         ));
@@ -2719,6 +2884,66 @@ mod tests {
     }
 
     #[test]
+    fn long_lived_audio_master_uses_incremental_clock_validation_after_handoff() {
+        let mut state = state_with_sequence(20_000);
+        play_ready(&mut state);
+        let epoch = state.playback_engine.snapshot().epoch;
+        let initial_observed_at = state.playback_engine.monotonic_high_water();
+        let initial = audio_device_clock_observation(
+            audio_snapshot(),
+            epoch,
+            initial_observed_at,
+            false,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("initial observation");
+        state
+            .playback_engine
+            .observe_audio_device_clock(initial)
+            .expect("initial AudioDevice handoff");
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice)
+        );
+
+        // About 156 ppm of cumulative lead exceeds the old activation-wide
+        // one-buffer allowance after two minutes. The adjacent observation is
+        // still inside its explicit 10 ms uncertainty and remains a valid
+        // device-clock progression.
+        let mut long_lived = audio_snapshot();
+        long_lived.callback_consumed_frames = 5_761_380;
+        long_lived.active_callback_consumed_frames = 5_760_900;
+        long_lived.active_duration = Some(Duration::from_secs(120));
+        long_lived.callback_count = 12_000;
+        let observed_at = initial_observed_at
+            .checked_add(Duration::from_secs(120))
+            .expect("two-minute observation time");
+        let observation = audio_device_clock_observation(
+            long_lived,
+            epoch,
+            observed_at,
+            true,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("long-lived observation");
+        assert_eq!(observation.state, AudioDeviceClockState::Running);
+        state
+            .playback_engine
+            .observe_audio_device_clock(observation)
+            .expect("incremental device-clock validation");
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice),
+            "snapshot={:?}",
+            state.playback_engine.snapshot()
+        );
+    }
+
+    #[test]
     fn underrun_recovery_consumes_final_device_position_before_synthetic_handoff() {
         let mut state = state_with_sequence(20);
         play_ready(&mut state);
@@ -2878,7 +3103,7 @@ mod tests {
             Some(FrameDeliveryKind::Ready)
         );
         let demand = state.playback_engine.frame_demand().expect("warm seek demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, completed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, completed_at));
 
         let report = state.playback_evidence_report();
 
@@ -3083,6 +3308,67 @@ mod tests {
     }
 
     #[test]
+    fn already_visible_publication_observed_after_deadline_remains_presentable() {
+        let mut state = state_with_sequence(40);
+        state.set_playback_frame_running(4);
+        let ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("playing presentation ticket");
+        state.playback_observation_instant_anchor = Instant::now() - Duration::from_secs(10);
+        let observed_at = Instant::now();
+        let published = std::cell::Cell::new(false);
+
+        let disposition = state.finalize_already_visible_frame_presentation(
+            Some(ticket),
+            observed_at,
+            FramePresentationPublication::prepared(|| published.set(true)),
+        );
+
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::Presented(completion)
+                if completion.delivery().kind() == FrameDeliveryKind::Degraded
+                    && completion.delivery().completed_at()
+                        == state.playback_engine.monotonic_high_water()
+        ));
+        assert!(published.get());
+        assert_eq!(state.playback_evidence_report().deliveries.late, 0);
+        assert_eq!(state.playback_evidence_report().deliveries.degraded, 1);
+    }
+
+    #[test]
+    fn stale_already_visible_alias_cannot_consume_replacement_demand() {
+        let mut state = state_with_sequence(40);
+        state.set_playback_frame_running(4);
+        let stale = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("original presentation ticket");
+        state.set_playback_frame_running(5);
+        let replacement =
+            state.pending_playback_frame_demand_identity().expect("replacement demand");
+        let published = std::cell::Cell::new(false);
+        let rejected_before = state.playback_evidence_report().deliveries.rejected;
+
+        assert_eq!(
+            state.finalize_already_visible_frame_presentation(
+                Some(stale),
+                Instant::now(),
+                FramePresentationPublication::prepared(|| published.set(true)),
+            ),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert!(!published.get());
+        assert_eq!(
+            state.pending_playback_frame_demand_identity(),
+            Some(replacement)
+        );
+        assert_eq!(
+            state.playback_evidence_report().deliveries.rejected,
+            rejected_before
+        );
+    }
+
+    #[test]
     fn stale_epoch_publication_cannot_replace_current_output_or_evidence() {
         let mut state = state_with_sequence(40);
         state.set_playback_frame_running(4);
@@ -3262,6 +3548,61 @@ mod tests {
             deadline_at.duration_since(sampled_at),
             Duration::from_millis(10) + grace
         );
+    }
+
+    #[test]
+    fn bounded_recovery_deadline_is_shared_by_engine_and_preview_adapter() {
+        let mut state = state_with_sequence(40);
+        state.set_playback_frame_running(4);
+        let original = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("original presentation ticket");
+        let late_at = state.playback_observation_instant_anchor + Duration::from_secs(1);
+        assert!(matches!(
+            state.preflight_frame_presentation(Some(original), late_at),
+            FramePresentationPreflight::DroppedLate(_)
+        ));
+        let snapshot = state.playback_engine.snapshot();
+        let recovery_deadline = late_at + Duration::from_secs(5);
+
+        let recovery_identity = state
+            .reissue_current_frame_demand_for_recovery_at(late_at, recovery_deadline)
+            .expect("reissue exact recovery picture");
+        let recovery = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("recovery presentation ticket");
+        assert_eq!(recovery.identity(), recovery_identity);
+        assert_ne!(recovery.identity(), original.identity());
+        assert_eq!(state.playback_engine.snapshot(), snapshot);
+        let grace = Duration::from_nanos(
+            state
+                .playback_engine
+                .pending_frame_demand()
+                .expect("pending recovery demand")
+                .late_presentation_grace_ns,
+        );
+        assert_eq!(
+            state
+                .playback_frame_deadline_at(late_at)
+                .expect("projected recovery work deadline"),
+            recovery_deadline + grace
+        );
+        assert_eq!(
+            state.finalize_frame_presentation_at_for_test(
+                Some(original),
+                late_at,
+                FramePresentationPublication::prepared(|| {})
+            ),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert!(matches!(
+            state.finalize_frame_presentation_at_for_test(
+                Some(recovery),
+                recovery_deadline - Duration::from_millis(1),
+                FramePresentationPublication::prepared(|| {})
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
     }
 
     #[test]
@@ -3459,7 +3800,14 @@ mod tests {
             .is_some());
         let priming_completed_at = observation_anchor + Duration::from_millis(17);
         let demand = state.playback_engine.frame_demand().expect("priming demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, priming_completed_at));
+        assert!(state.observe_video_preroll_at_wall(
+            demand,
+            0,
+            0,
+            true,
+            true,
+            priming_completed_at
+        ));
         assert_eq!(
             state.playback_engine.monotonic_high_water(),
             MonotonicTimestamp::from_duration(Duration::from_millis(17))

@@ -175,7 +175,7 @@ fn golden_color_media_roundtrip_executes_production_interfaces() -> anyhow::Resu
     let contract = load_golden_contract(&root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
     let paths = new_run_paths(&root)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Color Media",
         settings,
@@ -185,7 +185,9 @@ fn golden_color_media_roundtrip_executes_production_interfaces() -> anyhow::Resu
             ..mondrian_core::ProjectSettings::default()
         },
     )?;
-    let report = execute_color_media_stage(&root, &contract, &mut workflow, &paths.directory)?;
+    let report = workflow.run_with(|workflow| {
+        execute_color_media_stage(&root, &contract, workflow, &paths.directory)
+    })?;
     write_report(&paths.report, &report)?;
     Ok(())
 }

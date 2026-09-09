@@ -179,7 +179,7 @@ fn playback_cursor_work_preserves_in_flight_locality_after_deadline() {
         job.access_mode = access_mode;
         job.deadline_at = Some(Instant::now() + Duration::from_secs(1));
         assert_eq!(
-            frame_work_request(job, mondrian_playback::FrameWorkResourceScope::Shared)
+            frame_work_request(job, mondrian_playback::FrameWorkResourceScope::Shared, None,)
                 .in_flight_deadline_policy,
             expected,
             "unexpected in-flight deadline policy for {priority:?}/{access_mode:?}"
@@ -1874,6 +1874,43 @@ fn media_preview_job_queue_clear_and_close_release_workers() {
 }
 
 #[test]
+fn media_receiver_acquisition_preserves_admission_until_the_actual_sender_closes() {
+    let scheduler = MediaPreviewScheduler::default();
+    let (sender, initial_receiver) = scheduler.job_queue();
+    drop(initial_receiver);
+    let receiver = scheduler.job_receiver();
+    assert!(matches!(
+        sender.enqueue(test_media_job(
+            test_media_key(31),
+            MediaPreviewRequestPriority::Prefetch
+        )),
+        MediaPreviewJobEnqueueStatus::Enqueued { .. }
+    ));
+    assert!(receiver.recv().is_some());
+    // A receiver is not an admission owner, including one dropped at construction.
+    drop(scheduler.job_receiver());
+    assert!(matches!(
+        sender.enqueue(test_media_job(
+            test_media_key(32),
+            MediaPreviewRequestPriority::Prefetch
+        )),
+        MediaPreviewJobEnqueueStatus::Enqueued { .. }
+    ));
+    assert!(receiver.recv().is_some());
+    drop(sender);
+    assert!(receiver.recv().is_none());
+    assert_eq!(
+        scheduler.request(
+            test_media_key(33),
+            scheduler.begin_generation(),
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor
+        ),
+        MediaPreviewRequestStatus::Closed
+    );
+}
+
+#[test]
 fn media_preview_worker_count_reserves_cpu_capacity() {
     assert_eq!(media_preview_worker_count_for(0), 1);
     assert_eq!(media_preview_worker_count_for(1), 1);
@@ -1882,8 +1919,8 @@ fn media_preview_worker_count_reserves_cpu_capacity() {
     assert_eq!(media_preview_worker_count_for(7), 2);
     assert_eq!(media_preview_worker_count_for(8), 2);
     assert_eq!(media_preview_worker_count_for(11), 2);
-    assert_eq!(media_preview_worker_count_for(12), 2);
-    assert_eq!(media_preview_worker_count_for(32), 2);
+    assert_eq!(media_preview_worker_count_for(12), 3);
+    assert_eq!(media_preview_worker_count_for(32), 3);
 }
 
 #[test]
@@ -1907,7 +1944,7 @@ fn media_preview_worker_lane_reserves_playback_only_when_parallel() {
     );
     assert_eq!(
         media_preview_worker_lane(2, 3),
-        MediaPreviewWorkerLane::NonPlayback
+        MediaPreviewWorkerLane::Still
     );
 }
 

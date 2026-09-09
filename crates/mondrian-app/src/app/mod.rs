@@ -111,6 +111,8 @@ mod clip_clipboard;
 mod clip_retime;
 mod dynamic_hdr_authoring;
 #[cfg(any(test, feature = "validation"))]
+pub mod endurance_ancillary;
+#[cfg(any(test, feature = "validation"))]
 pub mod endurance_campaign;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_export;
@@ -120,6 +122,8 @@ pub mod endurance_ffmpeg_toolchain;
 pub mod endurance_machine_factory;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_machine_plan;
+#[cfg(feature = "validation")]
+pub mod endurance_physical_machine;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_playback;
 #[cfg(feature = "validation")]
@@ -151,6 +155,8 @@ mod gallery_authoring;
 pub mod golden_project_acceptance;
 mod grade_authoring;
 #[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_av_evidence;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_execution_startup;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_preview_presentation;
@@ -163,6 +169,8 @@ pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;
 mod packaged_worker;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod perf_process_memory;
 mod playback;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
@@ -1272,5 +1280,8 @@ fn unix_now_ms() -> u64 {
 mod animation_selection_tests;
 #[cfg(test)]
 mod perf_tests;
+/// Bounded validation of the actual App/Preview performance owner protocol.
+#[cfg(any(test, feature = "validation"))]
+pub mod performance_owner_closure;
 #[cfg(test)]
 mod timeline_edit_tests;

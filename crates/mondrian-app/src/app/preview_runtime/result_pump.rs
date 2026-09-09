@@ -42,6 +42,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if expired.is_empty() {
             return PreviewWorkPoll::default();
         }
+        // Expiration synchronously removes the Broker publication owner. Any
+        // retained Timeline evaluation that names that exact producer can no
+        // longer make progress, even when an in-flight attempt is retained
+        // only to warm decoder locality. Remove the dependency level in the
+        // same Adapter turn so a replacement Playback demand re-resolves and
+        // either consumes residency or admits a fresh physical owner.
+        for request in &expired {
+            self.invalidate_evaluations_for_media_key(&request.key);
+        }
         let canceled_queued_jobs = expired.iter().fold(0u64, |total, request| {
             total.saturating_add(request.removed_queued_work as u64)
         });
@@ -156,6 +165,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let presentation_current = completion.is_current()
                 && (result.access_mode != PreviewDecodeAccessMode::PlaybackCursor
                     || owns_pending_playback_demand);
+            tracing::debug!(
+                asset_id = %result.key.asset_id,
+                path = %result.key.decode.source().path().display(),
+                source_sample = ?result.key.source_sample(),
+                generation = result.generation,
+                priority = ?result.priority,
+                access_mode = ?result.access_mode,
+                completion = ?completion,
+                owns_pending_playback_demand,
+                canceled = result.canceled,
+                failure = ?result.failure_reason,
+                queue_wait_us = result.queue_wait_us,
+                decode_elapsed_us = result.decode_elapsed_us,
+                decode_diagnostics = ?result.decode_diagnostics,
+                retained_cpu_bytes = ?result.frame.as_ref().map(MediaPreviewFrame::reserved_cpu_bytes),
+                "completed Preview media request"
+            );
             let startup_preroll = media_preview_result_is_startup_preroll(&result);
             if !startup_preroll {
                 match result.queue_disposition {
@@ -177,7 +203,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             if result.canceled {
-                self.invalidate_evaluations_for_asset(result.key.asset_id);
+                self.invalidate_evaluations_for_media_key(&result.key);
                 if result.cancellation_phase == Some(MediaPreviewCancellationPhase::Queued) {
                     // A request that expired before codec execution is a
                     // scheduler deadline drop, not cooperative-cancellation
@@ -267,9 +293,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.record_color_stage(diagnostics);
                     }
                     if completed_after_playback_deadline {
+                        // Resolving the scheduler lease means there is no
+                        // longer a producer behind any retained Timeline
+                        // wait for this exact media key. The late frame must
+                        // stay out of residency, but the evaluation must be
+                        // allowed to re-resolve and either consume another
+                        // resident copy or admit replacement work. Retaining
+                        // the wait here leaves Preview permanently Loading.
+                        self.invalidate_evaluations_for_media_key(&result.key);
                         continue;
                     }
                     if completion.should_cache() {
+                        let residency_class =
+                            result.residency_work.as_ref().map(|work| work.admission_class());
+                        let retained_cpu_bytes = frame.reserved_cpu_bytes();
                         let residency_admission = match result.residency_work.take() {
                             Some(work) => Some(self.frame_store.borrow_mut().insert_media_frame(
                                 result.key.clone(),
@@ -285,6 +322,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 asset_id = %result.key.asset_id,
                                 source_sample = ?result.key.source_sample(),
                                 admission = ?residency_admission,
+                                residency_class = ?residency_class,
+                                retained_cpu_bytes,
+                                priority = ?result.priority,
+                                owns_pending_playback_demand,
                                 "decoded Preview result could not transfer its physical residency lease"
                             );
                             let reason = if residency_admission.is_none() {
@@ -292,6 +333,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             } else {
                                 MediaPreviewFailureReason::ResidencyCapacityRejected
                             };
+                            // A speculative cache grant can lose capacity to a
+                            // later Current grant. Its retirement is not a source
+                            // failure and must not poison this generation. A
+                            // promoted/current demand and a missing lease remain
+                            // authoritative failures under the original policy.
+                            if reason == MediaPreviewFailureReason::ResidencyCapacityRejected
+                                && residency_class
+                                    == Some(mondrian_playback::MediaWorkReservationClass::Prefetch)
+                                && result.priority == MediaPreviewRequestPriority::Prefetch
+                                && !presentation_current
+                                && !owns_pending_playback_demand
+                            {
+                                continue;
+                            }
                             self.scrub_adaptation
                                 .borrow_mut()
                                 .observe_failure(result.access_mode, reason);
@@ -326,11 +381,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.media_execution_failures.borrow_mut().remove(&result.key);
                     }
                     outcome.visible_change |= presentation_current;
-                    // A decoded frame became available; evaluations waiting
-                    // on this exact asset (and, transitionally, every ready
-                    // evaluation) must re-resolve instead of serving stale
-                    // media content.
-                    self.invalidate_evaluations_for_asset(result.key.asset_id);
+                    // A decoded frame became available; only evaluations that
+                    // named this complete physical request identity must
+                    // re-resolve. Other samples of the same Asset remain valid.
+                    self.invalidate_evaluations_for_media_key(&result.key);
                 }
                 None => {
                     // A retained timeline evaluation may be waiting on this
@@ -339,7 +393,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // no longer actionable. Re-resolve so the current
                     // generation can re-admit work or project the retained
                     // terminal failure instead of waiting forever.
-                    self.invalidate_evaluations_for_asset(result.key.asset_id);
+                    self.invalidate_evaluations_for_media_key(&result.key);
                     if let Some(reason) = result.failure_reason {
                         self.scrub_adaptation
                             .borrow_mut()
@@ -403,7 +457,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         // therefore settle through cancellation, expiry, or another result's
         // resolution. Its exact Broker owner is the level predicate; unrelated
         // work cannot suppress or manufacture this one-shot candidate retry.
-        outcome.candidate_retry_required |= self.consume_settled_existing_work_retry();
+        outcome.candidate_retry_required |= self.consume_settled_media_retry();
         if max_results > 0 && drained == max_results {
             bump(&self.metrics.completion_poll_count_budget_exhaustions);
             outcome.needs_follow_up_poll = true;

@@ -675,6 +675,55 @@ fn nested_child_still_requires_a_complete_cpu_materialization_route() {
 }
 
 #[test]
+fn ordinary_current_layers_are_admitted_together_before_pending_is_returned() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let mut sequence = Sequence::new("video and static Current batch");
+    sequence.settings.resolution = Resolution { width: 2, height: 1 };
+    let video = AssetId::new();
+    let still = AssetId::new();
+    let duration = tt(60, sequence.time_base());
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(video, TimelineTime::ZERO, duration).expect("video"))
+        .expect("insert video");
+    sequence.video_tracks[1]
+        .add_clip(Clip::new_still_image(still, TimelineTime::ZERO, duration).expect("still"))
+        .expect("insert still");
+    for all_ready in [false, true] {
+        let mut requests = Vec::new();
+        let result = resolve_preview_timeline(
+            &sequence,
+            &[],
+            5,
+            sequence.settings.resolution,
+            PreviewResolutionScale::Full,
+            color_context(&sequence),
+            &mut |request: PreviewTimelineMediaRequest| {
+                requests.push(request.clone());
+                if all_ready || request.asset_id == still {
+                    ready_temporal_media_frame(&request, 0.25, 87)
+                } else {
+                    pending_media_frame()
+                }
+            },
+            &mut |_| panic!("no title"),
+        );
+        assert_eq!(
+            requests.len(),
+            2,
+            "each exact layer is admitted once per evaluation"
+        );
+        assert!(requests.iter().any(|request| request.asset_id == video));
+        assert!(requests.iter().any(|request| request.asset_id == still
+            && request.source_sample.time() == TimelineTime::ZERO));
+        if all_ready {
+            assert!(matches!(result, PreviewTimelineResolution::Ready(_)));
+        } else {
+            assert!(matches!(result, PreviewTimelineResolution::Pending { .. }));
+        }
+    }
+}
+
+#[test]
 fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
     let (sequence, asset_id, clip_id) = temporal_media_sequence();
     let target = sequence.settings.resolution;
@@ -698,7 +747,8 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
             dependency: PreviewTimelinePendingDependency::Temporal {
                 clip_id: pending_clip,
                 pending_sources: 2,
-            }
+            },
+            ..
         } if pending_clip == clip_id
     ));
     assert_eq!(scheduled.len(), 2);
@@ -774,7 +824,8 @@ fn temporal_preview_schedules_and_publishes_finite_lookahead() {
     assert!(matches!(
         pending,
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Temporal { pending_sources: 2, .. }
+            dependency: PreviewTimelinePendingDependency::Temporal { pending_sources: 2, .. },
+            ..
         }
     ));
     assert_eq!(
@@ -1429,7 +1480,8 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     assert!(matches!(
         result,
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. },
+            ..
         } if pending_id == asset_id
     ));
     assert_eq!(
@@ -1507,7 +1559,8 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             &mut |_| panic!("media plan must not request titles"),
         ),
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. },
+            ..
         } if pending_id == asset_id
     ));
 
@@ -1793,7 +1846,7 @@ fn nested_child_source_change_rotates_root_render_cache_identity() {
 fn preview_materializer_has_no_raw_sequence_relookup_seam() {
     let source = include_str!("../preview_timeline_execution.rs");
     let context = source
-        .split("struct PreviewTimelineExecutionContext")
+        .split("struct PreviewTimelineExecutionAdapter")
         .nth(1)
         .and_then(|suffix| suffix.split("fn prepared_visual_node").next())
         .expect("Preview materialization context source");

@@ -692,6 +692,19 @@ impl AppUiHost {
         disposition: FramePresentationDisposition,
         visible_changed_without_demand: bool,
     ) {
+        if matches!(
+            disposition,
+            FramePresentationDisposition::Presented(_) | FramePresentationDisposition::NoDemand
+        ) && let Some(output_key) =
+            self.preview_service.registered_exact_current_gpu_output_key()
+        {
+            let state = self.app_state.borrow();
+            let intent = state
+                .preview_execution_snapshot(std::time::Instant::now())
+                .transport()
+                .playback_intent();
+            self.preview_service.release_completed_gpu_evaluation(&output_key, intent);
+        }
         match disposition {
             FramePresentationDisposition::Presented(_) => {
                 self.preview_service.try_release_settled_transport_media_residency();
@@ -1985,7 +1998,7 @@ impl AppUiHost {
 }
 
 /// Typed consuming closure for the execution services owned by one Window Host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppUiServiceShutdownEvidence {
     pub(crate) preview: PreviewRuntimeShutdownEvidence,
     pub(crate) auxiliary: AppUiAuxiliaryShutdownEvidence,
@@ -1998,7 +2011,7 @@ impl AppUiServiceShutdownEvidence {
 }
 
 /// Exact auxiliary owner receipts shared by ordinary quit and validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppUiAuxiliaryShutdownEvidence {
     waveform: AudioWaveformShutdownEvidence,
     thumbnails: Result<

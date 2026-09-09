@@ -588,6 +588,16 @@ fn derive_phase_closures(
             EndurancePhaseKind::ContinuousExport => {
                 let export = export_plan(machine_plan, requirement)?;
                 let preset = load_export_preset(&requirement.phase_id, &export.preset)?;
+                if let Some(program) = machine_plan.ancillary_program() {
+                    mondrian_export::queue::check_ancillary_export_selection(
+                        program.program(),
+                        &preset.preset,
+                        root,
+                        export.range.timeline_range(),
+                        app.project_color_environment(),
+                    )
+                    .map_err(|detail| invalid_binding("ANC Export selection", detail))?;
+                }
                 let closure = dependency_sets(
                     root,
                     app.sequences(),
@@ -613,6 +623,16 @@ fn derive_phase_closures(
                 )?;
                 let export = export_plan(machine_plan, requirement)?;
                 let preset = load_export_preset(&requirement.phase_id, &export.preset)?;
+                if let Some(program) = machine_plan.ancillary_program() {
+                    mondrian_export::queue::check_ancillary_export_selection(
+                        program.program(),
+                        &preset.preset,
+                        root,
+                        export.range.timeline_range(),
+                        app.project_color_environment(),
+                    )
+                    .map_err(|detail| invalid_binding("ANC Export selection", detail))?;
+                }
                 let export = dependency_sets(
                     root,
                     app.sequences(),
@@ -907,7 +927,7 @@ fn prepare_source(
 }
 
 #[cfg(windows)]
-fn read_bound_file(
+pub(super) fn read_bound_file(
     binding: &EnduranceMachineFileBinding,
     maximum_bytes: u64,
     field: &'static str,
@@ -1411,15 +1431,17 @@ mod tests {
             &workload,
         )
         .expect("pre-start exact Continuous Export factory");
-        let token = workload.prepare_start(&inventory).expect("admit Continuous Export factory");
-        let build =
-            super::super::endurance_product_runtime::FreshEndurancePhaseFactory::build_phase(
-                &mut factory,
-                Arc::new(plan),
-                &requirement,
-                &workload,
-                token,
-            );
+        let missing = workload
+            .prepare_start(&inventory)
+            .expect_err("source inventory cannot attest a native preloader");
+        assert_eq!(missing.missing_capabilities(), vec![super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared]);
+        // Exercise the exact-source composition separately from process admission.
+        // This fixture never grants itself a native preloader qualification token.
+        let build = super::super::endurance_machine_factory::build_machine_phase(
+            Arc::new(plan),
+            &requirement,
+            None,
+        );
         assert!(matches!(
             build,
             super::super::endurance_product_runtime::FreshEndurancePhaseBuild::Ready(_)
@@ -1594,5 +1616,205 @@ mod tests {
             validate_phase_closures(&[wrong_phase], &[expected], &profile.phases[..1]),
             Err(EnduranceSourceInventoryError::PhaseClosure(_))
         ));
+    }
+}
+
+/// Native PSE installation and QC-file leases retained from phase admission through run close.
+#[derive(Debug)]
+pub(crate) struct PreparedEndurancePsePrerequisite {
+    pub(crate) outcome: mondrian_export::RegulatoryPseAdmission,
+    _profile: Option<PreparedEnduranceBroadcastQcProfile>,
+}
+
+pub(crate) enum EnduranceBmxAdmission {
+    NotRequired,
+    NotRun,
+    Available(mondrian_media::PreparedBmxRuntime),
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct EnduranceBmxPrepareFailure {
+    pub(crate) detail: String,
+    pub(crate) cleanup: Option<Box<mondrian_media::ApprovedProviderRuntimeCleanupReceipt>>,
+    pub(crate) native_cleanup: Option<Box<mondrian_media::SupervisedProcessCleanupReceipt>>,
+}
+
+impl From<String> for EnduranceBmxPrepareFailure {
+    fn from(detail: String) -> Self {
+        Self { detail, cleanup: None, native_cleanup: None }
+    }
+}
+
+pub(crate) fn prepare_bmx_prerequisite(
+    machine_plan: &PreparedCommercialEnduranceMachinePlan,
+    phase_id: &str,
+    preparation_deadline: std::time::Instant,
+    owner_deadline: std::time::Instant,
+    cancellation: &mondrian_core::ExecutionCancellationToken,
+) -> Result<EnduranceBmxAdmission, EnduranceBmxPrepareFailure> {
+    let Some(export) =
+        machine_plan.plan().exports.iter().find(|export| export.phase_id == phase_id)
+    else {
+        return Ok(EnduranceBmxAdmission::NotRequired);
+    };
+    #[cfg(not(windows))]
+    {
+        let _ = (export, preparation_deadline, owner_deadline, cancellation);
+        Ok(EnduranceBmxAdmission::NotRun)
+    }
+    #[cfg(windows)]
+    {
+        use mondrian_export::preset::ProfessionalDeliveryProfile;
+        use mondrian_export::professional_delivery::{
+            ProfessionalDeliveryTool, ProfessionalDeliveryToolchain,
+        };
+        let preset =
+            load_export_preset(phase_id, &export.preset).map_err(|error| error.to_string())?;
+        let Some(delivery) = preset.preset.professional_delivery() else {
+            return Ok(EnduranceBmxAdmission::NotRequired);
+        };
+        // Other professional profiles require additional CineCert/Photon
+        // runtime owners, which this BMX authority deliberately cannot forge.
+        if delivery.profile != ProfessionalDeliveryProfile::As11X9NabaHd720p5994 {
+            return Ok(EnduranceBmxAdmission::NotRun);
+        }
+        let Some(tools) = &machine_plan.plan().verifier_tools.bmx else {
+            return Ok(EnduranceBmxAdmission::NotRun);
+        };
+        let Some(runtime_files) = &tools.runtime_files else {
+            return Ok(EnduranceBmxAdmission::NotRun);
+        };
+        for binding in [&tools.raw2bmx, &tools.mxf2raw].into_iter().chain(runtime_files) {
+            match std::fs::symlink_metadata(&binding.path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(EnduranceBmxAdmission::NotRun)
+                }
+                Err(error) => return Err(error.to_string().into()),
+                Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                    return Err("BMX approval names a non-direct file".to_owned().into())
+                }
+                Ok(_) => {}
+            }
+        }
+        let approved = |binding: &EnduranceMachineFileBinding| -> Result<mondrian_media::ApprovedProviderFile, String> {
+            if cancellation.is_canceled() || std::time::Instant::now() >= preparation_deadline { return Err("original BMX startup admission deadline/cancellation reached".to_owned()); }
+            let mut digest = [0_u8; 32];
+            if binding.sha256.len() != 64 { return Err("invalid BMX approved SHA-256 length".to_owned()); }
+            for (index, byte) in digest.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&binding.sha256[index * 2..index * 2 + 2], 16).map_err(|error| error.to_string())?;
+            }
+            let file = super::project_runtime::open_direct_read_file(&binding.path, "approved BMX input")
+                .map_err(|error| error.to_string())?;
+            Ok(mondrian_media::ApprovedProviderFile::from_retained(binding.path.clone(), digest, file))
+        };
+        let executables = [approved(&tools.raw2bmx)?, approved(&tools.mxf2raw)?];
+        let dependencies = runtime_files.iter().map(approved).collect::<Result<Vec<_>, _>>()?;
+        let Some(owner) = mondrian_media::prepare_bmx_runtime_for_phase(
+            executables,
+            Some(dependencies),
+            preparation_deadline,
+            owner_deadline,
+            cancellation,
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            return Ok(EnduranceBmxAdmission::NotRun);
+        };
+        let mut native_cleanup = None;
+        let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            let toolchain = ProfessionalDeliveryToolchain::discover_with_bmx(delivery.profile, Some(owner.handle())).map_err(|error| error.to_string())?;
+            let probe_deadline = preparation_deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(30));
+            let identities = toolchain.qualify_for_until(delivery.profile, probe_deadline, cancellation).map_err(|error| {
+                if let mondrian_export::professional_delivery::ProfessionalDeliveryToolchainError::Native { source, .. } = &error
+                    && let mondrian_media::SupervisedProcessError::Cleanup { cleanup, .. } = source.as_ref()
+                { native_cleanup = Some(cleanup.clone()); }
+                if let mondrian_export::professional_delivery::ProfessionalDeliveryToolchainError::VersionRejected { output, .. } = &error {
+                    native_cleanup = Some(Box::new(output.cleanup.clone()));
+                }
+                error.to_string()
+            })?;
+            for identity in identities {
+                let expected = match identity.tool {
+                    ProfessionalDeliveryTool::BmxRaw2Bmx => &tools.raw2bmx_version_output_sha256,
+                    ProfessionalDeliveryTool::BmxMxf2Raw => &tools.mxf2raw_version_output_sha256,
+                    _ => return Err("BMX admission returned an unrelated tool role".to_owned()),
+                };
+                if identity.version_output_sha256 != *expected || !identity.native_cleanup.all_resources_released() {
+                    native_cleanup = Some(Box::new(identity.native_cleanup.clone()));
+                    return Err(format!("BMX {:?} version/cleanup differs from approval: {identity:?}", identity.tool));
+                }
+            }
+            Ok(())
+        })).unwrap_or_else(|payload| Err(super::execution_panic_diagnostic::execution_panic_diagnostic(payload, "BMX pre-start probe").to_string()));
+        if let Err(detail) = probe {
+            let cleanup = owner.close_until(owner_deadline);
+            return Err(EnduranceBmxPrepareFailure {
+                detail,
+                cleanup: Some(Box::new(cleanup)),
+                native_cleanup,
+            });
+        }
+        Ok(EnduranceBmxAdmission::Available(owner))
+    }
+}
+
+pub(crate) fn prepare_regulatory_pse_prerequisite(
+    machine_plan: &PreparedCommercialEnduranceMachinePlan,
+    phase_id: &str,
+) -> Result<Option<PreparedEndurancePsePrerequisite>, String> {
+    let Some(export) =
+        machine_plan.plan().exports.iter().find(|export| export.phase_id == phase_id)
+    else {
+        return Ok(None);
+    };
+    if export.broadcast_qc.is_none() {
+        return Ok(None);
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Some(PreparedEndurancePsePrerequisite {
+            outcome: mondrian_export::RegulatoryPseAdmission::NotRun(
+                mondrian_export::RegulatoryPseNotRun::NativeIdentityLeaseUnavailable,
+            ),
+            _profile: None,
+        }))
+    }
+    #[cfg(windows)]
+    {
+        let profile = load_broadcast_qc_profile(phase_id, export.broadcast_qc.as_ref())
+            .map_err(|error| error.to_string())?;
+        let Some(profile) = profile else {
+            return Ok(None);
+        };
+        if !profile.profile().require_regulatory_flash_analysis {
+            return Ok(None);
+        }
+        if export
+            .regulatory_pse
+            .as_ref()
+            .is_some_and(|provider| provider.runtime_files.is_none())
+        {
+            return Ok(Some(PreparedEndurancePsePrerequisite {
+                outcome: mondrian_export::RegulatoryPseAdmission::NotRun(
+                    mondrian_export::RegulatoryPseNotRun::RuntimeClosureMissing,
+                ),
+                _profile: Some(profile),
+            }));
+        }
+        let fingerprint = profile.profile().fingerprint().map_err(|error| error.to_string())?;
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .ok_or_else(|| "PSE pre-start deadline overflow".to_owned())?;
+        let outcome = mondrian_export::admit_regulatory_pse_provider(
+            export.regulatory_pse.as_ref(),
+            fingerprint,
+            deadline,
+            &mondrian_core::ExecutionCancellationToken::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Some(PreparedEndurancePsePrerequisite {
+            outcome,
+            _profile: Some(profile),
+        }))
     }
 }

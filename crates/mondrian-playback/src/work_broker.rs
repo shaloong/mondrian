@@ -39,7 +39,13 @@ pub enum FrameWorkerLane {
     Interactive,
     /// Worker reserved for deterministic still work.
     Still,
-    /// Shared worker for interactive and still work.
+    /// Shared worker reserved from ordinary playback-current work.
+    ///
+    /// It directly accepts interactive and still work. The dequeue policy may
+    /// also lend capacity to playback Prefetch while the playback-reserved
+    /// worker is executing current work. This permits cold-source preparation
+    /// in parallel without taking sequential lookahead after that worker is
+    /// free to preserve its decoder session.
     NonPlayback,
 }
 
@@ -67,6 +73,13 @@ pub struct FrameWorkRequest<K, D, P> {
     pub priority: FrameWorkPriority,
     /// Playback, interactive, or still execution semantics.
     pub work_class: FrameWorkClass,
+    /// Exact worker lane that owns reusable execution-local state, when known.
+    ///
+    /// This affinity overrides ordinary class-based lane selection while the
+    /// `Any` lane remains a valid single-worker fallback. Adapters use it only
+    /// after establishing stateful locality such as a worker-owned decoder
+    /// Session; it is not a general priority mechanism.
+    pub worker_affinity: Option<FrameWorkerLane>,
     /// Exact physical resource-ownership scope eligible for work reuse.
     pub resource_scope: FrameWorkResourceScope,
     /// Playback demand identity when demand-backed.
@@ -1384,7 +1397,11 @@ where
         removed
     }
 
-    /// Expire latest Playback-current bindings older than `max_age`.
+    /// Expire latest Playback-current bindings at their admitted deadline.
+    ///
+    /// `max_age` is a fail-safe only for malformed Playback-current work that
+    /// was admitted without a presentation deadline. A concrete deadline is
+    /// owner state and always wins over the generic stall watchdog.
     ///
     /// Interactive scrub work is deliberately excluded. It has latest-wins
     /// cancellation through generations, but no presentation deadline and may
@@ -1404,7 +1421,10 @@ where
                 pending.binding.priority == FrameWorkPriority::Current
                     && pending.binding.work_class == FrameWorkClass::Playback
                     && pending.binding.generation >= latest
-                    && elapsed_since(now, pending.requested_at) >= max_age
+                    && pending.deadline_at.map_or_else(
+                        || elapsed_since(now, pending.requested_at) >= max_age,
+                        |deadline_at| deadline_at <= now,
+                    )
             })
             .map(|(key, pending)| ExpiredFrameWork {
                 key: key.clone(),
@@ -2400,8 +2420,20 @@ where
 {
     refresh_in_flight_invalidations_locked(state, now);
     let allow_current_playback_failover = non_playback_current_failover_allowed(state, lane, now);
-    let index =
-        next_work_index_with_failover(&state.queue, lane, now, allow_current_playback_failover)?;
+    let allow_playback_prefetch_borrow = lane == FrameWorkerLane::NonPlayback
+        && state.in_flight.values().any(|execution| {
+            execution.worker_lane == Some(FrameWorkerLane::Playback)
+                && execution.priority == FrameWorkPriority::Current
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.completed_at.is_none()
+        });
+    let index = next_work_index_with_failover(
+        &state.queue,
+        lane,
+        now,
+        allow_current_playback_failover,
+        allow_playback_prefetch_borrow,
+    )?;
     let queued = state.queue.remove(index)?;
     let queue_wait = state.pending.get(&queued.request.key).map_or(Duration::ZERO, |pending| {
         elapsed_since(now, pending.requested_at)
@@ -2542,7 +2574,7 @@ fn next_work_index<K, D, P>(
     lane: FrameWorkerLane,
     now: MonotonicTimestamp,
 ) -> Option<usize> {
-    next_work_index_with_failover(queue, lane, now, false)
+    next_work_index_with_failover(queue, lane, now, false, false)
 }
 
 fn next_work_index_with_failover<K, D, P>(
@@ -2550,18 +2582,18 @@ fn next_work_index_with_failover<K, D, P>(
     lane: FrameWorkerLane,
     now: MonotonicTimestamp,
     allow_current_playback_failover: bool,
+    allow_playback_prefetch_borrow: bool,
 ) -> Option<usize> {
     queue
         .iter()
         .enumerate()
         .filter(|(_, queued)| {
             queued.request.priority == FrameWorkPriority::Current
-                && (lane.accepts(queued.request.work_class)
-                    || (allow_current_playback_failover
-                        && queued.request.work_class == FrameWorkClass::Playback))
+                && lane_accepts_current(lane, &queued.request, allow_current_playback_failover)
         })
         .min_by_key(|(_, queued)| {
             let authorized_playback_failover = allow_current_playback_failover
+                && queued.request.worker_affinity.is_none()
                 && queued.request.work_class == FrameWorkClass::Playback
                 && !lane.accepts(queued.request.work_class);
             (
@@ -2572,16 +2604,46 @@ fn next_work_index_with_failover<K, D, P>(
         })
         .map(|(index, _)| index)
         .or_else(|| {
-            queue
-                .iter()
-                .enumerate()
-                .filter(|(_, queued)| {
-                    queued.request.priority == FrameWorkPriority::Prefetch
-                        && lane.accepts(queued.request.work_class)
-                })
+            let eligible = queue.iter().enumerate().filter(|(_, queued)| {
+                queued.request.priority == FrameWorkPriority::Prefetch
+                    && lane_accepts_prefetch(
+                        lane,
+                        queued.request.work_class,
+                        queued.request.worker_affinity,
+                        allow_playback_prefetch_borrow,
+                    )
+            });
+            eligible
                 .min_by_key(|(_, queued)| deadline_expired(queued.deadline_at, now))
                 .map(|(index, _)| index)
         })
+}
+
+fn lane_accepts_current<K, D, P>(
+    lane: FrameWorkerLane,
+    request: &FrameWorkRequest<K, D, P>,
+    allow_current_playback_failover: bool,
+) -> bool {
+    if let Some(worker_affinity) = request.worker_affinity {
+        return lane == FrameWorkerLane::Any || lane == worker_affinity;
+    }
+    lane.accepts(request.work_class)
+        || (allow_current_playback_failover && request.work_class == FrameWorkClass::Playback)
+}
+
+fn lane_accepts_prefetch(
+    lane: FrameWorkerLane,
+    class: FrameWorkClass,
+    worker_affinity: Option<FrameWorkerLane>,
+    allow_playback_prefetch_borrow: bool,
+) -> bool {
+    if let Some(worker_affinity) = worker_affinity {
+        return lane == FrameWorkerLane::Any || lane == worker_affinity;
+    }
+    lane.accepts(class)
+        || (allow_playback_prefetch_borrow
+            && lane == FrameWorkerLane::NonPlayback
+            && class == FrameWorkClass::Playback)
 }
 
 fn non_playback_current_failover_allowed<K, D, P>(
@@ -2623,6 +2685,7 @@ where
         || !state.queue.iter().any(|queued| {
             queued.request.priority == FrameWorkPriority::Current
                 && queued.request.work_class == FrameWorkClass::Playback
+                && queued.request.worker_affinity.is_none()
         })
         || state.in_flight.values().any(|execution| {
             execution.worker_lane == Some(FrameWorkerLane::NonPlayback)

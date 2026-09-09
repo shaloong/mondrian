@@ -1721,8 +1721,8 @@ completion. The successor remains ticketless and cannot publish early, while
 the shared two-owner admission prevents speculation from running ahead.
 
 Window and Headless additionally share `PreviewGpuFrameStaging`, a bounded
-four-entry CPU-ready queue keyed by the complete playback intent. It warms the
-next three coordinates beyond the immediate successor without consuming GPU
+six-entry CPU-ready queue keyed by the complete playback intent. It warms the
+next five coordinates beyond the immediate successor without consuming GPU
 output capacity. Staging also invokes the Renderer command-free compact-YUV
 preflight, so the renderer-owned worker can fill its mapped transfer buffer
 several frame intervals before the exact candidate is submitted; this is
@@ -2317,3 +2317,29 @@ commands. It uses create-new, writes all bytes, synchronizes the file handle,
 then prints the path; a typed validation failure returns nonzero only after
 that publication. It never overwrites an existing report and makes no
 parent-directory crash-durability claim.
+### Canonical ANC export selection
+
+The Export panel imports an explicit `FrozenAncillaryProgram` JSON through the
+native file dialog and typed `ExportDraftEdit::ImportAncillary` action. App
+reads at most 8 MiB, validates the Broadcast-owned schema and ST436 carriage,
+and atomically retains immutable bytes-derived identity plus an Arc-owned
+program. Failed import or dialog cancellation retains the prior selection.
+The panel shows the source, exact source start/output frame range/cadence,
+packet count and qualified scope; removal is another typed draft action.
+
+Profile/range readiness uses Export's sole range/cadence resolver, including
+after preset, Sequence or range changes. Unsupported selections disable queue
+admission. `EnqueueDraft` freezes the full request only on user dispatch, so
+painting and action availability never clone/serialize a large ANC inventory.
+The same frozen attachment reaches AS-11 and its actual final-MXF ANC reimport.
+Software structure/readiness does not grant physical SDI qualification.
+
+The existing typed ANC import/clear UI also accepts `.scc` and raw `.cdp`. Caption
+import first requires the implemented AS-11 output selection, binds exact sequence
+timecode origin/range, and freezes source bytes into Broadcast's sole canonical
+program. Import failure retains the previous attachment. The panel shows original
+caption format/version, 608 channel inventory, 708 service inventory, bounded input
+and placement constraints, and Transport qualification; it never displays Semantic,
+caption-renderer or SDI qualification. The original JSON import remains available.
+Tests route SCC and CDP through the same typed draft action and final enqueue model,
+including unsupported-preset rejection, parity failure and source-file mutation.

@@ -130,7 +130,7 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
     #[error("admitted media probe has no video stream")]
     SourceVideoStreamUnavailable,
     #[error(
-        "admitted video stream has no proven, internally consistent sampling contract; open Interpret Asset and set source color space/range before Preview"
+        "admitted video stream has no proven, internally consistent pixel format, bit depth and alpha contract; color/range overrides cannot repair unsupported decoder sampling"
     )]
     SourceSamplingUnavailable,
     #[error("source file revision changed after the admitted media probe")]
@@ -211,7 +211,7 @@ pub(crate) fn resolve_preview_media_source(
             primary_video.color_range,
         )
     };
-    let (mut source_color, preparation_intent) = match input_color_resolution.resolved {
+    let (mut source_color, mut preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
             PreviewSourceColorContract::new(color_space, input_video_range),
             SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
@@ -294,6 +294,13 @@ pub(crate) fn resolve_preview_media_source(
         source_fingerprint,
     } = resolved_path;
 
+    let decode_source =
+        if request.asset.kind == AssetKind::StillImage && decode_source.path() == source_path {
+            decode_source.with_still_image_source()
+        } else {
+            decode_source
+        };
+
     let field_processing =
         mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan());
     let payload_requirement = if request.cpu_working_required
@@ -324,6 +331,15 @@ pub(crate) fn resolve_preview_media_source(
             );
         }
     };
+    if representation.is_native_surface() {
+        // A decoder-native surface reaches the renderer without a CPU raster.
+        // Bind the matching GPU OCIO input intent into the same immutable media
+        // key; carrying the CPU intent here would admit native decode and then
+        // fail only after the Viewer owns the physical D3D12/Metal surface.
+        preparation_intent = SourceFramePreparationIntent::ColorManaged(
+            SourceColorModule::gpu_intent(request.input_color),
+        );
+    }
     let decode_result = match primary_video.camera_raw.as_ref() {
         Some(raw) => mondrian_media::CameraRawDecodeIntent::new(
             raw.adapter,

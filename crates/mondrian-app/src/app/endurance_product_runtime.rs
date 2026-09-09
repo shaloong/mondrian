@@ -42,6 +42,7 @@ use super::AppState;
 /// Fixed latency bounds for one product endurance runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnduranceProductRuntimeTimeouts {
+    startup: Duration,
     interval: Duration,
     recovery: Duration,
     surface_reopen: Duration,
@@ -63,7 +64,13 @@ impl EnduranceProductRuntimeTimeouts {
         {
             return Err(runtime_error("endurance runtime timeouts must be nonzero"));
         }
-        Ok(Self { interval, recovery, surface_reopen, shutdown })
+        Ok(Self {
+            startup: Duration::from_secs(120),
+            interval,
+            recovery,
+            surface_reopen,
+            shutdown,
+        })
     }
 }
 
@@ -72,6 +79,8 @@ pub struct EnduranceReferenceOutputPlan {
     device: ReferenceOutputDeviceDescriptor,
     request: ReferenceOutputOpenRequest,
     first_frame_index: u64,
+    wire_correlation: Option<mondrian_broadcast::AncillaryWireCorrelation>,
+    ancillary_program: Option<Arc<super::endurance_ancillary::PreparedEnduranceAncillaryProgram>>,
 }
 
 impl EnduranceReferenceOutputPlan {
@@ -81,7 +90,29 @@ impl EnduranceReferenceOutputPlan {
         request: ReferenceOutputOpenRequest,
         first_frame_index: u64,
     ) -> Self {
-        Self { device, request, first_frame_index }
+        Self {
+            device,
+            request,
+            first_frame_index,
+            wire_correlation: None,
+            ancillary_program: None,
+        }
+    }
+    /// Carry the retained canonical program into physical output.
+    pub fn with_ancillary_program(
+        mut self,
+        program: Option<Arc<super::endurance_ancillary::PreparedEnduranceAncillaryProgram>>,
+    ) -> Self {
+        self.ancillary_program = program;
+        self
+    }
+    /// Carry the phase-owned canonical validation marker into the physical pump.
+    pub fn with_wire_correlation(
+        mut self,
+        correlation: Option<mondrian_broadcast::AncillaryWireCorrelation>,
+    ) -> Self {
+        self.wire_correlation = correlation;
+        self
     }
 }
 
@@ -303,12 +334,61 @@ impl<F> PreparedEnduranceMachinePhaseFactory<F> {
     where
         B: FnOnce(&PreparedEnduranceFfmpegToolchain) -> Result<F, EnduranceCampaignError>,
     {
+        #[cfg(windows)]
+        if let Some(binding) = &request.machine_plan().plan().verifier_tools.preloader {
+            let launcher = mondrian_validation_launcher::FileBinding {
+                path: binding.path.clone(),
+                sha256: binding.sha256.clone(),
+            };
+            let runtime_files = request
+                .machine_plan()
+                .plan()
+                .verifier_tools
+                .runtime_files
+                .iter()
+                .map(|binding| mondrian_validation_launcher::FileBinding {
+                    path: binding.path.clone(),
+                    sha256: binding.sha256.clone(),
+                })
+                .collect::<Vec<_>>();
+            mondrian_validation_launcher::prepare_process_authority(
+                mondrian_validation_launcher::AttestationExpectation {
+                    launcher: &launcher,
+                    application_sha256: request.runtime_image_sha256(),
+                    request_sha256: request.request_sha256(),
+                    machine_plan_sha256: request.machine_plan().sha256(),
+                    runtime_files: &runtime_files,
+                },
+            )
+            .map_err(|error| runtime_error(error.to_string()))?;
+        }
         let ffmpeg = PreparedEnduranceFfmpegToolchain::prepare_and_install(request.machine_plan())
             .map_err(|error| {
                 runtime_error(format!("prepare exact endurance FFmpeg authority: {error}"))
             })?;
-        let inner = build(&ffmpeg)?;
+        let inner = match build(&ffmpeg) {
+            Ok(inner) => inner,
+            Err(primary) => {
+                let receipt = ffmpeg.shutdown_until(Instant::now() + Duration::from_secs(5));
+                let mut shutdown = EnduranceRunOwnerShutdownFailure::new(
+                    "factory construction failed; exact-runtime closure retained",
+                );
+                shutdown.attach_ffmpeg_closure(receipt);
+                return Err(EnduranceCampaignError::RunOwnerShutdownAfterFailure {
+                    primary: Box::new(primary),
+                    shutdown,
+                });
+            }
+        };
         Ok(Self { inner, ffmpeg })
+    }
+
+    /// Explicit preflight-only closure when no campaign runtime was constructed.
+    pub fn shutdown_ffmpeg_capsule_until(
+        &self,
+        deadline: Instant,
+    ) -> mondrian_media::QualifiedFfmpegShutdownReceipt {
+        self.ffmpeg.shutdown_until(deadline)
     }
 
     /// Canonical exact-runtime receipt retained by this campaign factory.
@@ -333,6 +413,14 @@ impl<F> PreparedEnduranceMachinePhaseFactory<F> {
 /// Capability inventory is observed before `build_phase`; a `NotRun` result
 /// therefore creates no App, worker, device, Queue, or child-process owner.
 pub trait FreshEndurancePhaseFactory {
+    /// Consume a retained exact-runtime capsule after all phase and Surface owners.
+    fn shutdown_ffmpeg_capsule(
+        &mut self,
+        _deadline: Instant,
+    ) -> Option<mondrian_media::QualifiedFfmpegShutdownReceipt> {
+        None
+    }
+
     /// Observe all exact prerequisites without starting phase owners.
     fn pre_start_capability_inventory(
         &mut self,
@@ -358,6 +446,13 @@ impl<F> FreshEndurancePhaseFactory for PreparedEnduranceMachinePhaseFactory<F>
 where
     F: FreshEndurancePhaseFactory,
 {
+    fn shutdown_ffmpeg_capsule(
+        &mut self,
+        deadline: Instant,
+    ) -> Option<mondrian_media::QualifiedFfmpegShutdownReceipt> {
+        Some(self.ffmpeg.shutdown_until(deadline))
+    }
+
     fn pre_start_capability_inventory(
         &mut self,
         machine_plan: &PreparedCommercialEnduranceMachinePlan,
@@ -365,7 +460,15 @@ where
         workload: &PreparedEnduranceWorkload,
     ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError> {
         self.validate_machine_plan(machine_plan)?;
-        self.inner.pre_start_capability_inventory(machine_plan, requirement, workload)
+        let mut inventory =
+            self.inner.pre_start_capability_inventory(machine_plan, requirement, workload)?;
+        // The capability is derived only from the completed native handshake.
+        inventory.revoke(super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared);
+        #[cfg(windows)]
+        if mondrian_validation_launcher::process_authority().is_some() {
+            inventory.admit(super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared);
+        }
+        Ok(inventory)
     }
 
     fn build_phase(
@@ -613,8 +716,11 @@ enum RuntimeState {
 }
 
 struct PhaseOwners {
+    prepared_export: Option<super::endurance_export::PreparedFrozenRepeatedExportPhase>,
+    measurement_timing: Option<mondrian_platform::EndurancePhaseMeasurementTiming>,
     startup_failure: Option<super::endurance_campaign::EnduranceExecutionStartFailure>,
     kind: EndurancePhaseKind,
+    phase_id: String,
     app: Option<AppState>,
     authority: Option<PreparedEndurancePhaseAuthority>,
     execution: Option<EnduranceExecutionOwners>,
@@ -623,6 +729,7 @@ struct PhaseOwners {
     export: Option<FrozenRepeatedExportPhase>,
     reference_plan: Option<EnduranceReferenceOutputPlan>,
     export_request: Option<FrozenRepeatedExportRequest>,
+    bmx_runtime: Option<mondrian_media::PreparedBmxRuntime>,
     seek_targets: VecDeque<i64>,
     phase_started_us: u64,
     minimum_duration_us: u64,
@@ -664,9 +771,24 @@ impl PhaseOwners {
             #[cfg(test)]
             FreshEndurancePhaseInputs::Test(_) => (None, None, VecDeque::new()),
         };
+        let ancillary_matches = reference_plan.as_ref().is_none_or(|plan| {
+            super::endurance_ancillary::same_program(
+                machine_plan.ancillary_program(),
+                plan.ancillary_program.as_ref(),
+            )
+        }) && export_request.as_ref().is_none_or(|plan| {
+            plan.phase_id == requirement.phase_id
+                && super::endurance_ancillary::same_program(
+                    machine_plan.ancillary_program(),
+                    plan.frozen_ancillary.as_ref(),
+                )
+        });
         let owners = Self {
+            prepared_export: None,
+            measurement_timing: None,
             startup_failure: None,
             kind: requirement.kind,
+            phase_id: requirement.phase_id.clone(),
             app: Some(fresh.app_state),
             authority: Some(fresh.authority),
             execution: None,
@@ -675,6 +797,7 @@ impl PhaseOwners {
             export: None,
             reference_plan,
             export_request,
+            bmx_runtime: None,
             seek_targets,
             phase_started_us,
             minimum_duration_us: requirement.minimum_duration_us,
@@ -683,6 +806,12 @@ impl PhaseOwners {
             settled: false,
             fault: None,
         };
+        if !ancillary_matches {
+            return Err((
+                Box::new(owners),
+                "phase ANC owner differs from retained machine-plan source".to_owned(),
+            ));
+        }
         if let Some(detail) = authority_failure {
             return Err((Box::new(owners), detail));
         }
@@ -709,6 +838,7 @@ impl PhaseOwners {
     }
 
     fn failed_before_start(
+        phase_id: String,
         kind: EndurancePhaseKind,
         app_state: AppState,
         authority: Option<PreparedEndurancePhaseAuthority>,
@@ -718,6 +848,9 @@ impl PhaseOwners {
         detail: String,
     ) -> Self {
         Self {
+            phase_id,
+            prepared_export: None,
+            measurement_timing: None,
             kind,
             startup_failure: None,
             app: Some(app_state),
@@ -728,6 +861,7 @@ impl PhaseOwners {
             export: None,
             reference_plan: None,
             export_request: None,
+            bmx_runtime: None,
             seek_targets: VecDeque::new(),
             phase_started_us,
             minimum_duration_us,
@@ -743,6 +877,7 @@ impl PhaseOwners {
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
         timeouts: EnduranceProductRuntimeTimeouts,
+        phase_deadline: Instant,
     ) -> Result<(), String> {
         if let (Some(authority), Some(app)) = (&self.authority, &self.app) {
             authority
@@ -777,7 +912,7 @@ impl PhaseOwners {
                     execution,
                     requirement,
                     workload,
-                    None,
+                    Some(phase_deadline),
                     timeouts.interval,
                 )
                 .map_err(|error| error.to_string())?;
@@ -787,12 +922,18 @@ impl PhaseOwners {
                     .reference_plan
                     .take()
                     .ok_or("realtime endurance phase is missing Reference Output composition")?;
-                let reference = PersistentReferenceOutputPump::prepare(
+                let mut reference = PersistentReferenceOutputPump::prepare(
                     self.app_ref()?,
                     plan.request,
                     plan.first_frame_index,
                 )
                 .map_err(|error| error.to_string())?;
+                reference
+                    .set_wire_correlation(plan.wire_correlation)
+                    .map_err(|error| error.to_string())?;
+                reference
+                    .set_ancillary_program(plan.ancillary_program)
+                    .map_err(|error| error.to_string())?;
                 self.reference = Some(reference);
                 let app = self.app.as_mut().ok_or("phase App owner is missing")?;
                 let _physical_start = self
@@ -813,9 +954,20 @@ impl PhaseOwners {
                 .export_request
                 .take()
                 .ok_or("Export endurance phase is missing frozen Export composition")?;
-            let export = FrozenRepeatedExportPhase::start(self.app_ref()?, request)
+            let export = super::endurance_export::PreparedFrozenRepeatedExportPhase::prepare(
+                self.app_ref()?,
+                request,
+            )
+            .map_err(|error| error.to_string())?;
+            self.prepared_export = Some(export);
+        }
+        if let (Some(timeline), Some(app), Some(execution)) =
+            (&mut self.timeline, &mut self.app, &mut self.execution)
+        {
+            timeline
+                .refresh_pre_measurement_picture(app, execution, phase_deadline)
                 .map_err(|error| error.to_string())?;
-            self.export = Some(export);
+            self.settled = true;
         }
         Ok(())
     }
@@ -872,12 +1024,12 @@ impl PhaseOwners {
         if !self.settled || self.timeline.is_none() {
             return Ok(());
         }
-        let app = self.app.as_ref().ok_or("phase App owner is missing")?;
+        let app = self.app.as_mut().ok_or("phase App owner is missing")?;
         let execution = self.execution.as_mut().ok_or("execution owner is missing")?;
         self.timeline
             .as_mut()
             .ok_or("Timeline owner is missing")?
-            .resume_window(app, execution, Some(deadline))
+            .resume_audio_device_window(app, execution, Some(deadline))
             .map_err(|error| error.to_string())?;
         self.settled = false;
         Ok(())
@@ -902,6 +1054,7 @@ impl PhaseOwners {
                 .map_err(|error| error.to_string())?;
         }
         if let Some(export) = self.export.as_mut() {
+            self.app.as_mut().ok_or("phase App owner is missing")?.poll_export_queue();
             return export.poll(completed_at_us).map_err(|error| error.to_string());
         }
         Ok(Vec::new())
@@ -1090,24 +1243,29 @@ impl PhaseOwners {
                 )
                 .with_capture_facts(capture_facts))
             }
-            EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery => {
-                if !self.settled {
-                    return Err(
-                        "realtime endurance snapshot requires a settled boundary".to_owned()
-                    );
-                }
-                self.execution
-                    .as_ref()
-                    .ok_or("execution owner is missing")?
-                    .runtime_snapshot(app, self.kind)
-                    .map_err(|error| error.to_string())
-            }
+            EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery => self
+                .execution
+                .as_ref()
+                .ok_or("execution owner is missing")?
+                .runtime_snapshot(app, self.kind)
+                .map_err(|error| error.to_string()),
         }
     }
 }
 
 /// Concrete runtime over fresh App owners and the production phase drivers.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct EndurancePhaseStartupTiming {
+    startup_started_at_run_us: u64,
+    startup_deadline_at_run_us: u64,
+    owners_ready_at_run_us: Option<u64>,
+}
+
 pub(crate) struct ProductEnduranceCampaignRuntime<F, S, C> {
+    phase_startup: Option<EndurancePhaseStartupTiming>,
+    startup_deadline: Option<Instant>,
+    phase_hard_deadline: Option<Instant>,
+    terminal_measurement: Option<mondrian_platform::EndurancePhaseMeasurementTiming>,
     state: RuntimeState,
     surface: Option<S>,
     run_owner_closure: Option<EnduranceRunOwnerClosureEvidence>,
@@ -1116,11 +1274,25 @@ pub(crate) struct ProductEnduranceCampaignRuntime<F, S, C> {
     clock: Arc<C>,
     timeouts: Option<EnduranceProductRuntimeTimeouts>,
     machine_plan: Option<Arc<PreparedCommercialEnduranceMachinePlan>>,
+    owner_report_location: Option<(String, std::path::PathBuf)>,
+    phase_owner_history: Vec<mondrian_platform::EndurancePhaseOwnerReceipt>,
+    terminal_ancillary: Option<mondrian_platform::EnduranceAncillaryPhaseEvidence>,
+    regulatory_pse_prerequisites:
+        Vec<super::endurance_source_inventory::PreparedEndurancePsePrerequisite>,
+    pending_bmx: Option<mondrian_media::PreparedBmxRuntime>,
+    bmx_pre_start_closures: Vec<mondrian_media::ApprovedProviderRuntimeCleanupReceipt>,
+    bmx_pre_start_failures: Vec<super::endurance_source_inventory::EnduranceBmxPrepareFailure>,
+    #[cfg(test)]
+    phase_close_checkpoint: Option<fn()>,
 }
 
 impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
     fn new(factory: F, surface: S, clock: Arc<C>) -> Self {
         Self {
+            phase_startup: None,
+            startup_deadline: None,
+            phase_hard_deadline: None,
+            terminal_measurement: None,
             state: RuntimeState::Empty,
             surface: Some(surface),
             run_owner_closure: None,
@@ -1129,6 +1301,15 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
             clock,
             timeouts: None,
             machine_plan: None,
+            owner_report_location: None,
+            phase_owner_history: Vec::new(),
+            terminal_ancillary: None,
+            regulatory_pse_prerequisites: Vec::new(),
+            pending_bmx: None,
+            bmx_pre_start_closures: Vec::new(),
+            bmx_pre_start_failures: Vec::new(),
+            #[cfg(test)]
+            phase_close_checkpoint: None,
         }
     }
 }
@@ -1153,21 +1334,142 @@ where
     P: ProcessMemoryProbe,
 {
     let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
+    runtime.owner_report_location = Some((
+        prepared_request.request().identity.run_id.clone(),
+        prepared_request.request().evidence_directory.clone(),
+    ));
     let result = runtime.run_with_terminal_evidence(|runtime| {
         runtime.factory.validate_machine_plan(prepared_request.machine_plan())?;
         let request = prepared_request.into_campaign_request();
         run_endurance_campaign(request, runtime, process_memory, clock.as_ref())
     });
-    runtime.finish_run(result)
+    let result = runtime.finish_run(result);
+    runtime.publish_failed_run(result)
 }
 
 impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
+    fn publish_phase_owner_receipt(
+        &mut self,
+        phase_id: &str,
+    ) -> Result<(), EnduranceCampaignError> {
+        use sha2::{Digest, Sha256};
+        let Some((run_id, directory)) = &self.owner_report_location else {
+            return Ok(());
+        };
+        let RuntimeState::Terminal { evidence: Some(terminal), .. } = &self.state else {
+            return Err(runtime_error(
+                "phase publication lost its actual terminal owner receipt",
+            ));
+        };
+        if self.phase_owner_history.len() >= 8
+            || self.phase_owner_history.iter().any(|receipt| receipt.phase_id == phase_id)
+        {
+            return Err(runtime_error(
+                "phase owner history exceeds its bounded unique inventory",
+            ));
+        }
+        let mut report = serde_json::json!({
+            "schema_version": 2, "run_id": run_id, "phase_id": phase_id,
+            "ordinal": self.phase_owner_history.len(), "terminal": terminal,
+        });
+        if let Some(timing) = self.terminal_measurement {
+            report["measurement_timing"] =
+                serde_json::to_value(timing).map_err(|error| runtime_error(error.to_string()))?;
+        }
+        if let Some(ancillary) = &self.terminal_ancillary {
+            let fields = serde_json::to_value(ancillary)
+                .map_err(|error| runtime_error(error.to_string()))?;
+            let fields = fields
+                .as_object()
+                .ok_or_else(|| runtime_error("ANC evidence omitted its typed object"))?;
+            report
+                .as_object_mut()
+                .ok_or_else(|| runtime_error("phase owner report omitted its object"))?
+                .extend(fields.clone());
+        }
+        let canonical_json =
+            serde_json::to_string(&report).map_err(|error| runtime_error(error.to_string()))?;
+        let path = directory.join(format!(
+            "phase-owner-{:02}.json",
+            self.phase_owner_history.len()
+        ));
+        let receipt = mondrian_platform::EndurancePhaseOwnerReceipt {
+            phase_id: phase_id.to_owned(),
+            report_path: path.to_string_lossy().into_owned(),
+            sha256: format!("{:x}", Sha256::digest(canonical_json.as_bytes())),
+            canonical_json,
+        };
+        // Retain the exact attempted publication even if the filesystem rejects it.
+        self.phase_owner_history.push(receipt.clone());
+        super::endurance_qualification::write_json_create_new(&path, &receipt)?;
+        Ok(())
+    }
+
+    fn publish_failed_run<T>(
+        &self,
+        result: Result<T, EnduranceCampaignError>,
+    ) -> Result<T, EnduranceCampaignError> {
+        let primary = match result {
+            Ok(value) => return Ok(value),
+            Err(primary) => primary,
+        };
+        let Some((run_id, directory)) = &self.owner_report_location else {
+            return Err(primary);
+        };
+        let current_terminal =
+            terminal_receipt_from_error(&primary).or_else(|| match &self.state {
+                RuntimeState::Terminal { evidence: Some(terminal), .. } => Some(terminal.as_ref()),
+                _ => None,
+            });
+        let report = serde_json::json!({
+            "schema_version": 1, "qualifying": false, "run_id": run_id,
+            "diagnostic": primary.to_string(), "phase_owner_history": self.phase_owner_history,
+            "current_terminal": current_terminal, "run_owner_closure": self.run_owner_closure,
+            "phase_startup": self.phase_startup,
+            "run_owner_shutdown_failure": self.run_owner_shutdown_failure,
+            "bmx_pre_start_closures": self.bmx_pre_start_closures,
+            "bmx_pre_start_failures": self.bmx_pre_start_failures,
+        });
+        let path = directory.join("run-failure.json");
+        match super::endurance_qualification::write_json_create_new(&path, &report) {
+            Ok(()) => Err(EnduranceCampaignError::WithFailureReport {
+                primary: Box::new(primary),
+                report_path: path.to_string_lossy().into_owned(),
+            }),
+            Err(error) => Err(EnduranceCampaignError::FailureReportPublication {
+                primary: Box::new(primary),
+                canonical_report_json: report.to_string(),
+                publication: error.to_string(),
+            }),
+        }
+    }
     /// Attach the current receipt once, including failures after successful cleanup.
     fn run_with_terminal_evidence<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, EnduranceCampaignError>,
-    ) -> Result<T, EnduranceCampaignError> {
-        let result = operation(self);
+    ) -> Result<T, EnduranceCampaignError>
+    where
+        F: FreshEndurancePhaseFactory,
+        S: EnduranceSurfaceReopenDriver,
+        C: EnduranceCampaignClock,
+    {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)))
+            .unwrap_or_else(|payload| {
+                Err(runtime_error(
+                    super::execution_panic_diagnostic::execution_panic_diagnostic(
+                        payload,
+                        "endurance campaign operation",
+                    )
+                    .to_string(),
+                ))
+            });
+        let result = result.map_err(|primary| {
+            if matches!(self.state, RuntimeState::Owned(_)) {
+                super::endurance_campaign::cleanup_started_phase(self, primary)
+            } else {
+                primary
+            }
+        });
         result.map_err(|primary| {
             let RuntimeState::Terminal { evidence, .. } = &mut self.state else {
                 return primary;
@@ -1187,12 +1489,14 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
     ) -> Result<EnduranceRunOwnerClosureEvidence, EnduranceCampaignError>
     where
         S: EnduranceSurfaceReopenDriver,
+        F: FreshEndurancePhaseFactory,
     {
         if matches!(self.state, RuntimeState::Owned(_)) {
             return Err(runtime_error(
                 "cannot close the campaign Surface driver while phase owners remain",
             ));
         }
+        self.regulatory_pse_prerequisites.clear();
         if let Some(closure) = &self.run_owner_closure {
             return Ok(closure.clone());
         }
@@ -1202,14 +1506,56 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
         let surface = self.surface.take().ok_or_else(|| {
             runtime_error("campaign Surface driver was consumed without terminal evidence")
         })?;
-        match surface.shutdown() {
+        let deadline = Instant::now()
+            + self.timeouts.map_or(Duration::from_secs(5), |timeouts| timeouts.shutdown);
+        let surface_result = surface.shutdown();
+        if let Some(owner) = self.pending_bmx.take() {
+            self.bmx_pre_start_closures.push(owner.close_until(deadline));
+        }
+        let ffmpeg = self.factory.shutdown_ffmpeg_capsule(deadline);
+        let result = match surface_result {
             Ok(evidence) => {
-                let closure = evidence.into_run_owner_closure();
-                if !closure.all_owned_authority_released() {
-                    return Err(runtime_error(
+                let surface = evidence.into_run_owner_closure();
+                if let Some(ffmpeg) = ffmpeg {
+                    let closure = EnduranceRunOwnerClosureEvidence::WithFfmpeg {
+                        surface: Box::new(surface),
+                        ffmpeg,
+                    };
+                    if closure.all_owned_authority_released() {
+                        Ok(closure)
+                    } else {
+                        Err(EnduranceRunOwnerShutdownFailure::with_closure(
+                            "campaign exact-runtime closure was incomplete",
+                            closure,
+                        ))
+                    }
+                } else if surface.all_owned_authority_released() {
+                    Ok(surface)
+                } else {
+                    Err(EnduranceRunOwnerShutdownFailure::with_closure(
                         "campaign Surface driver returned incomplete owner closure",
-                    ));
+                        surface,
+                    ))
                 }
+            }
+            Err(mut failure) => {
+                if let Some(ffmpeg) = ffmpeg {
+                    failure.attach_ffmpeg_closure(ffmpeg);
+                }
+                Err(failure)
+            }
+        };
+        let result = result.and_then(|closure| {
+            if self.bmx_pre_start_closures.iter().any(|receipt| !receipt.all_resources_released())
+                || self.bmx_pre_start_failures.iter().any(|failure| failure.cleanup.as_ref().is_some_and(|receipt| !receipt.all_resources_released()))
+            {
+                Err(EnduranceRunOwnerShutdownFailure::with_closure(
+                    "campaign BMX pre-start owner closure was incomplete; raw receipts retained in failure report", closure,
+                ))
+            } else { Ok(closure) }
+        });
+        match result {
+            Ok(closure) => {
                 self.run_owner_closure = Some(closure.clone());
                 Ok(closure)
             }
@@ -1219,13 +1565,13 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
             }
         }
     }
-
     fn finish_run<T>(
         &mut self,
         result: Result<T, EnduranceCampaignError>,
     ) -> Result<T, EnduranceCampaignError>
     where
         S: EnduranceSurfaceReopenDriver,
+        F: FreshEndurancePhaseFactory,
     {
         match result {
             Ok(value) if self.run_owner_closure.is_some() => Ok(value),
@@ -1294,6 +1640,14 @@ where
     S: EnduranceSurfaceReopenDriver,
     C: EnduranceCampaignClock,
 {
+    fn phase_owner_history(&self) -> Vec<mondrian_platform::EndurancePhaseOwnerReceipt> {
+        self.phase_owner_history.clone()
+    }
+    fn phase_ancillary_evidence(
+        &self,
+    ) -> Option<mondrian_platform::EnduranceAncillaryPhaseEvidence> {
+        self.terminal_ancillary.clone()
+    }
     fn shutdown_run_owner(
         &mut self,
     ) -> Result<EnduranceRunOwnerClosureEvidence, EnduranceCampaignError> {
@@ -1301,6 +1655,11 @@ where
     }
 
     fn begin_phase_preparation(&mut self) {
+        self.phase_startup = None;
+        self.startup_deadline = None;
+        self.phase_hard_deadline = None;
+        self.terminal_measurement = None;
+        self.terminal_ancillary = None;
         if let RuntimeState::Terminal { evidence, .. } = &mut self.state {
             *evidence = None;
         }
@@ -1316,12 +1675,13 @@ where
             ));
         }
         let planned = machine_plan.plan().timeouts;
-        let timeouts = EnduranceProductRuntimeTimeouts::new(
+        let mut timeouts = EnduranceProductRuntimeTimeouts::new(
             Duration::from_millis(planned.interval_ms),
             Duration::from_millis(planned.recovery_ms),
             Duration::from_millis(planned.surface_reopen_ms),
             Duration::from_millis(planned.shutdown_ms),
         )?;
+        timeouts.startup = Duration::from_millis(planned.startup_ms);
         self.machine_plan = Some(Arc::new(machine_plan));
         self.timeouts = Some(timeouts);
         Ok(())
@@ -1333,6 +1693,14 @@ where
         workload: &PreparedEnduranceWorkload,
         phase_started_at_run_us: u64,
     ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
+        if self.pending_bmx.is_some()
+            || self.bmx_pre_start_failures.len() >= 16
+            || self.bmx_pre_start_closures.len() >= 16
+        {
+            return Err(runtime_error(
+                "BMX admission retained a prior owner or exhausted bounded failure history",
+            ));
+        }
         match self.state {
             RuntimeState::Owned(_) => {
                 return Err(runtime_error(
@@ -1356,6 +1724,50 @@ where
                 .ok_or_else(|| runtime_error("commercial endurance machine plan is not bound"))?,
         );
 
+        // Startup and measured work are separate leases. Freeze the original
+        // startup limit and maximum capsule lifetime before any factory work.
+        let startup_us = u64::try_from(timeouts.startup.as_micros())
+            .map_err(|_| runtime_error("startup budget overflow"))?;
+        let startup_end_run_us = phase_started_at_run_us
+            .checked_add(startup_us)
+            .ok_or_else(|| runtime_error("startup clock coordinate overflow"))?;
+        let startup_deadline = Instant::now()
+            .checked_add(Duration::from_micros(
+                startup_end_run_us.saturating_sub(self.clock.elapsed_us()),
+            ))
+            .ok_or_else(|| runtime_error("startup absolute deadline overflow"))?;
+        let phase_deadline = startup_deadline
+            .checked_add(Duration::from_micros(requirement.minimum_duration_us))
+            .and_then(|deadline| deadline.checked_add(timeouts.shutdown))
+            .ok_or_else(|| runtime_error("phase capsule horizon overflow"))?;
+        self.phase_startup = Some(EndurancePhaseStartupTiming {
+            startup_started_at_run_us: phase_started_at_run_us,
+            startup_deadline_at_run_us: startup_end_run_us,
+            owners_ready_at_run_us: None,
+        });
+        self.startup_deadline = Some(startup_deadline);
+        self.phase_hard_deadline = Some(phase_deadline);
+        if Instant::now() >= startup_deadline || self.clock.elapsed_us() >= startup_end_run_us {
+            return Err(EnduranceCampaignError::PreStartRuntime(
+                "startup deadline elapsed before factory admission".to_owned(),
+            ));
+        }
+
+        if workload.program_frame_rate().is_some_and(|rate| {
+            rate != machine_plan.plan().reference_output.open_request.signal.frame_rate
+        }) {
+            return Err(EnduranceCampaignError::PreStartRuntime(
+                "machine Reference cadence differs from the workload".to_owned(),
+            ));
+        }
+        if machine_plan.ancillary_program_missing() {
+            return Ok(EndurancePhaseAdmission::NotRun(
+                super::endurance_workload::EnduranceNotRunAdmission::missing_ancillary(
+                    requirement.phase_id.clone(),
+                    workload.workload_id().to_owned(),
+                ),
+            ));
+        }
         let inventory = self
             .factory
             .pre_start_capability_inventory(machine_plan.as_ref(), requirement, workload)
@@ -1365,6 +1777,56 @@ where
             Err(not_run) => return Ok(EndurancePhaseAdmission::NotRun(not_run)),
         };
 
+        if let Some(prerequisite) =
+            super::endurance_source_inventory::prepare_regulatory_pse_prerequisite(
+                machine_plan.as_ref(),
+                &requirement.phase_id,
+            )
+            .map_err(EnduranceCampaignError::PreStartRuntime)?
+        {
+            if matches!(
+                prerequisite.outcome,
+                mondrian_export::RegulatoryPseAdmission::NotRun(_)
+            ) {
+                return Ok(EndurancePhaseAdmission::NotRun(
+                    super::endurance_workload::EnduranceNotRunAdmission::missing_regulatory_pse(
+                        requirement.phase_id.clone(),
+                        workload.workload_id().to_owned(),
+                    ),
+                ));
+            }
+            if self.regulatory_pse_prerequisites.len() >= 16 {
+                return Err(EnduranceCampaignError::PreStartRuntime(
+                    "PSE preparation history exceeds the bounded phase inventory".to_owned(),
+                ));
+            }
+            self.regulatory_pse_prerequisites.push(prerequisite);
+        }
+        match super::endurance_source_inventory::prepare_bmx_prerequisite(
+            machine_plan.as_ref(),
+            &requirement.phase_id,
+            startup_deadline,
+            phase_deadline,
+            &mondrian_core::ExecutionCancellationToken::new(),
+        ) {
+            Ok(super::endurance_source_inventory::EnduranceBmxAdmission::NotRequired) => {}
+            Ok(super::endurance_source_inventory::EnduranceBmxAdmission::NotRun) => {
+                return Ok(EndurancePhaseAdmission::NotRun(
+                    super::endurance_workload::EnduranceNotRunAdmission::missing_bmx(
+                        requirement.phase_id.clone(),
+                        workload.workload_id().to_owned(),
+                    ),
+                ));
+            }
+            Ok(super::endurance_source_inventory::EnduranceBmxAdmission::Available(owner)) => {
+                self.pending_bmx = Some(owner)
+            }
+            Err(failure) => {
+                let detail = failure.detail.clone();
+                self.bmx_pre_start_failures.push(failure);
+                return Err(EnduranceCampaignError::PreStartRuntime(detail));
+            }
+        }
         let build = self.factory.build_phase(
             Arc::clone(&machine_plan),
             requirement,
@@ -1373,6 +1835,9 @@ where
         );
         let mut owners = match build {
             FreshEndurancePhaseBuild::Rejected { detail } => {
+                if let Some(owner) = self.pending_bmx.take() {
+                    self.bmx_pre_start_closures.push(owner.close_until(phase_deadline));
+                }
                 return Err(EnduranceCampaignError::PreStartRuntime(detail));
             }
             FreshEndurancePhaseBuild::Ready(fresh) => {
@@ -1385,6 +1850,7 @@ where
                 ) {
                     Ok(owners) => owners,
                     Err((mut owners, detail)) => {
+                        owners.bmx_runtime = self.pending_bmx.take();
                         owners.fault = Some(detail.clone());
                         self.state = RuntimeState::Owned(owners);
                         return Err(runtime_error(detail));
@@ -1392,7 +1858,8 @@ where
                 }
             }
             FreshEndurancePhaseBuild::Failed { app_state, authority, detail } => {
-                let owners = PhaseOwners::failed_before_start(
+                let mut owners = PhaseOwners::failed_before_start(
+                    requirement.phase_id.clone(),
                     requirement.kind,
                     *app_state,
                     authority.map(|authority| *authority),
@@ -1401,17 +1868,140 @@ where
                     workload.recovery_cycle_count(),
                     detail.clone(),
                 );
+                owners.bmx_runtime = self.pending_bmx.take();
                 self.state = RuntimeState::Owned(Box::new(owners));
                 return Err(runtime_error(detail));
             }
         };
-        if let Err(detail) = owners.start(requirement, workload, timeouts) {
+        owners.bmx_runtime = self.pending_bmx.take();
+        if let Some(request) = &mut owners.export_request {
+            request.approved_bmx = owners.bmx_runtime.as_ref().map(|owner| owner.handle());
+        }
+        if Instant::now() >= startup_deadline || self.clock.elapsed_us() >= startup_end_run_us {
+            owners.fault =
+                Some("cold factory preparation exceeded the original startup lease".to_owned());
+            self.state = RuntimeState::Owned(owners);
+            return Err(runtime_error(
+                "cold factory preparation exceeded the original startup lease",
+            ));
+        }
+        if let Err(detail) = owners.start(requirement, workload, timeouts, startup_deadline) {
             owners.fault = Some(detail.clone());
             self.state = RuntimeState::Owned(owners);
             return Err(runtime_error(detail));
         }
+        let ready_at = self.clock.elapsed_us();
+        if ready_at >= startup_end_run_us || Instant::now() >= startup_deadline {
+            owners.fault = Some("phase startup exceeded its original deadline".to_owned());
+            self.state = RuntimeState::Owned(owners);
+            return Err(runtime_error(
+                "phase startup exceeded its original deadline",
+            ));
+        }
+        if let Some(startup) = &mut self.phase_startup {
+            startup.owners_ready_at_run_us = Some(ready_at);
+        }
         self.state = RuntimeState::Owned(owners);
         Ok(EndurancePhaseAdmission::Started)
+    }
+
+    fn begin_measurement(
+        &mut self,
+        requirement: &EndurancePhaseRequirement,
+        measurement_started_at_run_us: u64,
+    ) -> Result<mondrian_platform::EndurancePhaseMeasurementTiming, EnduranceCampaignError> {
+        let startup = self.phase_startup.ok_or_else(|| runtime_error("missing startup lease"))?;
+        let owners_ready_at_run_us = startup
+            .owners_ready_at_run_us
+            .ok_or_else(|| runtime_error("phase owners have not completed cold preparation"))?;
+        let timing = mondrian_platform::EndurancePhaseMeasurementTiming {
+            startup_started_at_run_us: startup.startup_started_at_run_us,
+            startup_deadline_at_run_us: startup.startup_deadline_at_run_us,
+            owners_ready_at_run_us,
+            measurement_started_at_run_us,
+            measurement_deadline_at_run_us: measurement_started_at_run_us
+                .checked_add(requirement.minimum_duration_us)
+                .ok_or_else(|| runtime_error("measurement clock horizon overflow"))?,
+        };
+        let startup_deadline =
+            self.startup_deadline.ok_or_else(|| runtime_error("missing startup deadline"))?;
+        if !timing.validates()
+            || Instant::now() >= startup_deadline
+            || self.clock.elapsed_us() >= timing.startup_deadline_at_run_us
+            || measurement_started_at_run_us > self.clock.elapsed_us()
+        {
+            return Err(runtime_error(
+                "measurement activation exceeded the original startup lease",
+            ));
+        }
+        let timeouts = self.timeouts.ok_or_else(|| runtime_error("missing phase timeouts"))?;
+        let horizon = Instant::now()
+            .checked_add(Duration::from_micros(
+                timing.measurement_deadline_at_run_us.saturating_sub(self.clock.elapsed_us()),
+            ))
+            .and_then(|deadline| deadline.checked_add(timeouts.shutdown))
+            .ok_or_else(|| runtime_error("measurement close horizon overflow"))?
+            .min(
+                self.phase_hard_deadline
+                    .ok_or_else(|| runtime_error("missing original capsule horizon"))?,
+            );
+        let RuntimeState::Owned(owners) = &mut self.state else {
+            return Err(runtime_error("measurement activation has no phase owners"));
+        };
+        if owners.measurement_timing.is_some()
+            || owners.phase_id != requirement.phase_id
+            || owners.minimum_duration_us != requirement.minimum_duration_us
+            || owners.fault.is_some()
+        {
+            return Err(runtime_error(
+                "measurement activation is duplicate or has incompatible owners",
+            ));
+        }
+        if owners.timeline.is_some() {
+            let app = owners.app_ref().map_err(runtime_error)?;
+            let remaining = app
+                .last_content_frame()
+                .map_err(|error| runtime_error(error.to_string()))?
+                .checked_sub(app.current_frame())
+                .and_then(|value| u64::try_from(value).ok());
+            if remaining.is_none_or(|frames| {
+                frames < requirement.counters.minimum_playback_presented_frames
+            }) {
+                return Err(runtime_error("Timeline fixture lacks the complete measured extent after Audio startup; extend the actual fixture before admission"));
+            }
+        }
+        owners.phase_started_us = measurement_started_at_run_us;
+        owners.measurement_timing = Some(timing);
+        if let Some(prepared) = owners.prepared_export.take() {
+            match prepared.activate_until(horizon) {
+                Ok(export) => {
+                    owners.export = Some(export);
+                    // Export activation changes the App-owned queue after the
+                    // startup resource snapshot. Publish that exact demand now
+                    // so Concurrent Recovery can receive its bounded realtime slot.
+                    owners
+                        .app_ref()
+                        .map_err(runtime_error)?
+                        .refresh_internal_execution_resource_decision();
+                }
+                Err(error) => {
+                    owners.fault = Some(error.to_string());
+                    return Err(runtime_error(error.to_string()));
+                }
+            }
+        }
+        if Instant::now() >= startup_deadline
+            || self.clock.elapsed_us() >= timing.startup_deadline_at_run_us
+        {
+            owners.fault = Some("Export activation exceeded the original startup lease".to_owned());
+            return Err(runtime_error(
+                "Export activation exceeded the original startup lease",
+            ));
+        }
+        // Retire the startup driver (not the paired Preview/GPU owners). Its
+        // absolute deadline must never be renewed into the measured residency.
+        owners.settle().map_err(runtime_error)?;
+        Ok(timing)
     }
 
     fn pump_until(
@@ -1468,10 +2058,6 @@ where
                 std::thread::yield_now();
             }
         }
-        if let Err(detail) = owners.settle() {
-            owners.fault = Some(detail.clone());
-            return Err(runtime_error(detail));
-        }
         Ok(events)
     }
 
@@ -1502,6 +2088,10 @@ where
                 "no owned endurance phase is available to shut down",
             ));
         };
+        // Keep the BMX consuming owner on the runtime during fallible App
+        // closure, so even an early return/panic leaves it for run-owner close.
+        self.pending_bmx = owners.bmx_runtime.take();
+        drop(owners.export_request.take());
         let (deadline, deadline_failure) = match Instant::now().checked_add(timeouts.shutdown) {
             Some(deadline) => (deadline, None),
             None => (
@@ -1521,75 +2111,104 @@ where
         }
         let mut events = Vec::new();
 
-        if let Some(export) = owners.export.as_mut() {
-            export.begin_close();
-        }
-        if owners.timeline.is_some() {
-            let close = {
-                let app = owners.app.as_mut().ok_or("phase App owner is missing");
-                let execution = owners.execution.as_mut().ok_or("execution owner is missing");
-                match (app, execution, owners.timeline.as_mut()) {
-                    (Ok(app), Ok(execution), Some(timeline)) => {
-                        timeline.begin_close(app, execution).map_err(|error| error.to_string())
+        // Keep every actual owner outside fallible phase close and verifier work.
+        let preparation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(checkpoint) = self.phase_close_checkpoint.take() {
+                checkpoint();
+            }
+            if let Some(export) = owners.export.as_mut() {
+                export.begin_close();
+            }
+            if owners.timeline.is_some() {
+                let close = {
+                    let app = owners.app.as_mut().ok_or("phase App owner is missing");
+                    let execution = owners.execution.as_mut().ok_or("execution owner is missing");
+                    match (app, execution, owners.timeline.as_mut()) {
+                        (Ok(app), Ok(execution), Some(timeline)) => {
+                            timeline.begin_close(app, execution).map_err(|error| error.to_string())
+                        }
+                        (Err(detail), _, _) | (_, Err(detail), _) => Err(detail.to_owned()),
+                        (_, _, None) => Ok(()),
                     }
-                    (Err(detail), _, _) | (_, Err(detail), _) => Err(detail.to_owned()),
-                    (_, _, None) => Ok(()),
-                }
-            };
-            if let Err(detail) = close {
-                failures.push(detail);
-            } else {
-                owners.settled = true;
-            }
-        }
-        if owners.reference.is_some() {
-            let close = match (owners.app.as_mut(), owners.reference.as_mut()) {
-                (Some(app), Some(reference)) => {
-                    reference.begin_close(app).map_err(|error| error.to_string())
-                }
-                _ => Err("Reference close lost its App or phase owner".to_owned()),
-            };
-            if let Err(detail) = close {
-                failures.push(detail);
-            }
-        }
-
-        while owners.export.as_ref().is_some_and(|export| !export.is_quiescent()) {
-            if Instant::now() >= deadline {
-                failures
-                    .push("repeated Export close exceeded the shared shutdown deadline".to_owned());
-                break;
-            }
-            let completed_at_us = match owners.phase_elapsed_us(self.clock.as_ref()) {
-                Ok(completed_at_us) => completed_at_us,
-                Err(detail) => {
+                };
+                if let Err(detail) = close {
                     failures.push(detail);
-                    0
+                } else {
+                    owners.settled = true;
                 }
-            };
-            let Some(export) = owners.export.as_mut() else {
-                failures.push("repeated Export owner disappeared during close".to_owned());
-                break;
-            };
-            let polled = export.poll(completed_at_us);
-            match polled {
-                Ok(close_events) => events.extend(close_events),
-                Err(error) => {
-                    failures.push(error.to_string());
+            }
+            if owners.reference.is_some() {
+                let close = match (owners.app.as_mut(), owners.reference.as_mut()) {
+                    (Some(app), Some(reference)) => {
+                        reference.begin_close(app).map_err(|error| error.to_string())
+                    }
+                    _ => Err("Reference close lost its App or phase owner".to_owned()),
+                };
+                if let Err(detail) = close {
+                    failures.push(detail);
+                }
+            }
+
+            while owners.export.as_ref().is_some_and(|export| !export.is_quiescent()) {
+                if Instant::now() >= deadline {
+                    failures.push(
+                        "repeated Export close exceeded the shared shutdown deadline".to_owned(),
+                    );
                     break;
                 }
+                let completed_at_us = match owners.phase_elapsed_us(self.clock.as_ref()) {
+                    Ok(completed_at_us) => completed_at_us,
+                    Err(detail) => {
+                        failures.push(detail);
+                        0
+                    }
+                };
+                let Some(export) = owners.export.as_mut() else {
+                    failures.push("repeated Export owner disappeared during close".to_owned());
+                    break;
+                };
+                let polled = export.poll(completed_at_us);
+                match polled {
+                    Ok(close_events) => events.extend(close_events),
+                    Err(error) => {
+                        failures.push(error.to_string());
+                        break;
+                    }
+                }
+                std::thread::yield_now();
             }
-            std::thread::yield_now();
-        }
 
-        let live_snapshot = match owners.live_snapshot() {
-            Ok(snapshot) => Some(snapshot),
-            Err(detail) => {
-                failures.push(detail);
+            match owners.live_snapshot() {
+                Ok(snapshot) => Some(snapshot),
+                Err(detail) => {
+                    failures.push(detail);
+                    None
+                }
+            }
+        }));
+        let live_snapshot = match preparation {
+            Ok(snapshot) => snapshot,
+            Err(payload) => {
+                failures.push(
+                    super::execution_panic_diagnostic::execution_panic_diagnostic(
+                        payload,
+                        "endurance phase close preparation",
+                    )
+                    .to_string(),
+                );
                 None
             }
         };
-        drop(owners.export.take());
+        let export_verifier = owners.export.take().map(|export| export.shutdown_until(deadline));
+        drop(owners.prepared_export.take());
+        if export_verifier
+            .as_ref()
+            .is_some_and(|receipt| !receipt.all_resources_released())
+        {
+            failures
+                .push("independent Export verifier retained resources or lost evidence".to_owned());
+        }
         drop(owners.reference.take());
         drop(owners.timeline.take());
         let continuous_background = if owners.execution.is_none() {
@@ -1661,6 +2280,10 @@ where
                     workers,
                 )
             };
+        let bmx_runtime = self.pending_bmx.take().map(|owner| owner.close_until(deadline));
+        if bmx_runtime.as_ref().is_some_and(|receipt| !receipt.all_resources_released()) {
+            failures.push("approved BMX runtime consuming closure failed".to_owned());
+        }
         let app_shutdown = terminal_owners.app();
         let export_shutdown = app_shutdown.export;
         let supervised_child_processes_remaining =
@@ -1676,6 +2299,42 @@ where
                 capture_facts,
             )
         });
+        // Read only identities minted by the joined Export verifier and the
+        // consumed native wire owners; never infer journals by scanning files.
+        self.terminal_ancillary = self
+            .machine_plan
+            .as_ref()
+            .and_then(|plan| plan.ancillary_program())
+            .map(|program| {
+                let exports = program.verified_exports(&owners.phase_id).unwrap_or_else(|error| {
+                    failures.push(format!("ANC Export owner inventory failed: {error}"));
+                    Vec::new()
+                });
+                let journals =
+                    program.closed_wire_journals(&owners.phase_id).unwrap_or_else(|error| {
+                        failures.push(format!("ANC native wire owner inventory failed: {error}"));
+                        Vec::new()
+                    });
+                let evidence = mondrian_platform::EnduranceAncillaryPhaseEvidence {
+                    ancillary_program_sha256: program.sha256().to_owned(),
+                    ancillary_export_artifacts: exports,
+                    wire_journals: journals
+                        .into_iter()
+                        .map(|journal| mondrian_platform::EnduranceAncillaryWireJournal {
+                            path: journal.path,
+                            sha256: journal.sha256,
+                        })
+                        .collect(),
+                };
+                if !evidence.validates_inventory() {
+                    failures.push(
+                        "ANC phase owner inventory violates bounded unique identity contract"
+                            .to_owned(),
+                    );
+                }
+                evidence
+            });
+        self.terminal_measurement = owners.measurement_timing;
         let status = if failures.is_empty() {
             EndurancePhaseTerminalStatus::Completed
         } else {
@@ -1687,15 +2346,19 @@ where
             supervised_child_processes_remaining,
             export: export_shutdown,
         };
+        let phase_id = owners.phase_id.clone();
         self.state = RuntimeState::Terminal {
             snapshot: terminal_snapshot.map(Box::new),
             evidence: Some(Box::new(EndurancePhaseTerminalEvidence {
                 phase_kind: owners.kind,
                 closure,
                 owners: terminal_owners,
+                export_verifier,
+                bmx_runtime,
                 failures,
             })),
         };
+        self.publish_phase_owner_receipt(&phase_id)?;
         Ok((closure, events))
     }
 }
@@ -1704,6 +2367,21 @@ fn runtime_error(detail: impl Into<String>) -> EnduranceCampaignError {
     EnduranceCampaignError::Runtime(detail.into())
 }
 
+fn terminal_receipt_from_error(
+    error: &EnduranceCampaignError,
+) -> Option<&EndurancePhaseTerminalEvidence> {
+    match error {
+        EnduranceCampaignError::WithTerminalEvidence { terminal, .. } => Some(terminal),
+        EnduranceCampaignError::WithRunOwnerClosureEvidence { primary, .. }
+        | EnduranceCampaignError::WithFailureReport { primary, .. }
+        | EnduranceCampaignError::FailureReportPublication { primary, .. }
+        | EnduranceCampaignError::RunOwnerShutdownAfterFailure { primary, .. }
+        | EnduranceCampaignError::StartedPhaseCleanup { primary, .. } => {
+            terminal_receipt_from_error(primary)
+        }
+        _ => None,
+    }
+}
 fn retains_run_owner_shutdown(error: &EnduranceCampaignError) -> bool {
     match error {
         EnduranceCampaignError::RunOwnerShutdown(_) => true,
@@ -1954,7 +2632,8 @@ mod tests {
         let (requirement, workload) = continuous_export_contract();
         let build_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
-            inventory: EndurancePreStartCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]),
             build_calls: Rc::clone(&build_calls),
             fail_build: false,
         };
@@ -1979,6 +2658,7 @@ mod tests {
         let build_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
             inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
                 EndurancePreStartCapability::FrozenExportFixtureDeclared,
                 EndurancePreStartCapability::IndependentExportVerifierPrepared,
             ]),
@@ -2009,6 +2689,7 @@ mod tests {
     ) {
         let factory = TestFactory {
             inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,
                 EndurancePreStartCapability::FrozenExportFixtureDeclared,
                 EndurancePreStartCapability::IndependentExportVerifierPrepared,
             ]),
@@ -2024,6 +2705,65 @@ mod tests {
         (runtime, temporary)
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn required_regulatory_pse_missing_provider_is_notrun_before_phase_factory() {
+        use sha2::{Digest, Sha256};
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, temporary) = failed_setup_runtime();
+        let qc = mondrian_broadcast::BroadcastQcProfile {
+            id: "synthetic-prestart".to_owned(),
+            edition: "1".to_owned(),
+            source_sha256: [1; 32],
+            signal_color_space: mondrian_core::ColorSpace::Rec709,
+            observation_tap:
+                mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: mondrian_broadcast::QcActivePicture::full(1, 1),
+            rules: vec![mondrian_broadcast::BroadcastQcRule::LumaFlashCandidate {
+                rule_id: "triage-only".to_owned(),
+                minimum_mean_luma_delta: 0.5,
+                severity: mondrian_broadcast::BroadcastQcSeverity::Info,
+            }],
+            maximum_retained_findings: 1,
+            require_regulatory_flash_analysis: true,
+            require_encoded_artifact_revalidation: true,
+        };
+        let qc_bytes = serde_json::to_vec(&qc).expect("QC JSON");
+        let qc_path = temporary.path().join("required-pse-qc.json");
+        std::fs::write(&qc_path, &qc_bytes).expect("QC fixture");
+        let mut plan = runtime.machine_plan.as_ref().expect("bound plan").plan().clone();
+        let export = plan
+            .exports
+            .iter_mut()
+            .find(|export| export.phase_id == requirement.phase_id)
+            .expect("phase export");
+        export.broadcast_qc = Some(
+            crate::app::endurance_machine_plan::EnduranceMachineFileBinding {
+                path: mondrian_assets::canonical_native_path(&qc_path).expect("QC canonical path"),
+                sha256: format!("{:x}", Sha256::digest(&qc_bytes)),
+            },
+        );
+        export.regulatory_pse = None;
+        let plan_path = temporary.path().join("pse-machine-plan.json");
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).expect("plan JSON")).expect("plan");
+        runtime.machine_plan = Some(Arc::new(
+            PreparedCommercialEnduranceMachinePlan::load(&plan_path, &qualification_profile(), 24)
+                .expect("new exact plan"),
+        ));
+        let EndurancePhaseAdmission::NotRun(not_run) =
+            runtime.begin_phase(&requirement, &workload, 0).expect("pre-start admission")
+        else {
+            panic!("missing provider must never start phase")
+        };
+        assert_eq!(
+            not_run.missing_capabilities(),
+            &[EndurancePreStartCapability::RegulatoryPseProviderPrepared]
+        );
+        assert_eq!(runtime.factory.build_calls.get(), 0);
+        assert!(matches!(runtime.state, RuntimeState::Empty));
+        assert!(runtime.phase_owner_history.is_empty());
+        assert!(runtime.regulatory_pse_prerequisites.is_empty());
+    }
     #[test]
     fn public_failure_retains_real_clean_shutdown_without_inventing_cleanup_error() {
         let (requirement, workload) = continuous_export_contract();
@@ -2063,10 +2803,120 @@ mod tests {
     }
 
     #[test]
+    fn operation_error_panic_and_close_panic_retain_actual_export_and_app_receipts() {
+        for path in 0..3 {
+            let (requirement, workload) = continuous_export_contract();
+            let (mut runtime, temporary) = failed_setup_runtime();
+            let directory = temporary.path().join("owners");
+            std::fs::create_dir(&directory).expect("create owner evidence directory");
+            runtime.owner_report_location =
+                Some(("bounded-owner-run".to_owned(), directory.clone()));
+            let error = runtime
+                .run_with_terminal_evidence::<()>(|runtime| {
+                    assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+                    match path {
+                        0 => Err(runtime_error("injected operation error before cleanup")),
+                        1 => panic!("injected campaign operation panic"),
+                        _ => {
+                            runtime.phase_close_checkpoint =
+                                Some(|| panic!("injected close verifier panic"));
+                            let (closure, _) = runtime.shutdown_phase()?;
+                            assert_eq!(closure.status, EndurancePhaseTerminalStatus::Failed);
+                            Err(runtime_error("close preparation failed"))
+                        }
+                    }
+                })
+                .expect_err("the injected failure cannot become a successful campaign");
+            assert_eq!(runtime.phase_owner_history.len(), 1);
+            let durable: mondrian_platform::EndurancePhaseOwnerReceipt = serde_json::from_slice(
+                &std::fs::read(directory.join("phase-owner-00.json"))
+                    .expect("durable phase report"),
+            )
+            .expect("phase owner schema");
+            assert_eq!(durable, runtime.phase_owner_history[0]);
+            let failure = runtime
+                .publish_failed_run::<()>(Err(error))
+                .expect_err("failed run cannot be accepted");
+            let EnduranceCampaignError::WithFailureReport { primary, .. } = failure else {
+                panic!("path {path} did not durably publish complete failure report");
+            };
+            let published: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.join("run-failure.json")).expect("durable run failure"),
+            )
+            .expect("failure JSON");
+            assert_eq!(
+                published["phase_owner_history"].as_array().expect("history").len(),
+                1
+            );
+            assert!(!published["current_terminal"].is_null());
+            let EnduranceCampaignError::WithTerminalEvidence { terminal, .. } = *primary else {
+                panic!("path {path} lost actual App/Export closure");
+            };
+            assert!(
+                terminal.owners.app().all_resources_released(),
+                "path {path}: {terminal:?}"
+            );
+            assert!(terminal.owners.app().export.all_resources_released());
+            assert!(terminal.owners.app().export_terminal_snapshot.shutdown_requested);
+            if path == 2 {
+                assert!(terminal
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains("injected close verifier panic")));
+            }
+            assert!(
+                runtime.shutdown_phase().is_err(),
+                "actual owner consumed exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_history_survives_phase_boundary_and_failure_report_collision() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, temporary) = failed_setup_runtime();
+        let directory = temporary.path().join("owners");
+        std::fs::create_dir(&directory).expect("create owner directory");
+        runtime.owner_report_location = Some(("history-run".to_owned(), directory.clone()));
+        assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+        if let RuntimeState::Owned(owners) = &mut runtime.state {
+            owners.fault = None;
+        }
+        let (closure, _) = runtime.shutdown_phase().expect("consume successful phase owners");
+        assert_eq!(closure.status, EndurancePhaseTerminalStatus::Completed);
+        let original = runtime.phase_owner_history.clone();
+        runtime.begin_phase_preparation();
+        std::fs::write(directory.join("run-failure.json"), b"existing evidence")
+            .expect("occupy create-only report path");
+        let primary = runtime
+            .run_with_terminal_evidence::<()>(|_| Err(runtime_error("next phase admission failed")))
+            .expect_err("next phase failure");
+        let error = runtime
+            .publish_failed_run::<()>(Err(primary))
+            .expect_err("create-only collision");
+        let EnduranceCampaignError::FailureReportPublication { canonical_report_json, .. } = error
+        else {
+            panic!("publication error lost exact report bytes")
+        };
+        let report: serde_json::Value =
+            serde_json::from_str(&canonical_report_json).expect("retained complete report");
+        assert_eq!(
+            report["phase_owner_history"],
+            serde_json::to_value(&original).expect("history JSON")
+        );
+        assert_eq!(
+            std::fs::read(directory.join("run-failure.json")).expect("existing evidence"),
+            b"existing evidence"
+        );
+        assert_eq!(runtime.phase_owner_history, original);
+    }
+
+    #[test]
     fn run_owner_shutdown_is_exactly_once_and_retained_on_primary_failure() {
         let shutdown_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
-            inventory: EndurancePreStartCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]),
             build_calls: Rc::new(Cell::new(0)),
             fail_build: false,
         };
@@ -2108,7 +2958,8 @@ mod tests {
         let shutdown_calls = Rc::new(Cell::new(0));
         let phase_terminal = Rc::new(Cell::new(false));
         let factory = TestFactory {
-            inventory: EndurancePreStartCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]),
             build_calls: Rc::new(Cell::new(0)),
             fail_build: false,
         };
@@ -2138,7 +2989,8 @@ mod tests {
     fn run_owner_shutdown_failure_does_not_overwrite_primary_failure() {
         let shutdown_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
-            inventory: EndurancePreStartCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]),
             build_calls: Rc::new(Cell::new(0)),
             fail_build: false,
         };
@@ -2256,6 +3108,7 @@ mod tests {
         let (requirement, workload) = continuous_export_contract();
         let (mut runtime, _temporary) = failed_setup_runtime();
         runtime.state = RuntimeState::Owned(Box::new(PhaseOwners::failed_before_start(
+            "test-phase".to_owned(),
             EndurancePhaseKind::PlaybackReference,
             AppState::new(),
             None,
@@ -2286,6 +3139,7 @@ mod tests {
         use crate::app::headless_viewer_gpu::HeadlessViewerGpuAdapter;
         let (mut runtime, _temporary) = failed_setup_runtime();
         let mut owners = PhaseOwners::failed_before_start(
+            "test-phase".to_owned(),
             EndurancePhaseKind::PlaybackReference,
             AppState::new(),
             None,
@@ -2365,7 +3219,8 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, EnduranceCampaignError::Runtime(ref detail)
             if detail == "next workload could not be loaded"));
-        runtime.factory.inventory = EndurancePreStartCapabilityInventory::new([]);
+        runtime.factory.inventory = EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]);
         assert!(matches!(
             runtime.begin_phase(&requirement, &workload, 0),
             Ok(EndurancePhaseAdmission::NotRun(_))
@@ -2388,6 +3243,7 @@ mod tests {
     fn phase_event_time_uses_the_phase_origin() {
         let clock = TestClock(AtomicU64::new(10_000));
         let owners = PhaseOwners::failed_before_start(
+            "test-phase".to_owned(),
             EndurancePhaseKind::ContinuousExport,
             AppState::new(),
             None,
@@ -2404,11 +3260,13 @@ mod tests {
     fn overdue_zero_cadence_settles_and_snapshots_instead_of_failing() {
         let clock = Arc::new(TestClock(AtomicU64::new(10_500)));
         let factory = TestFactory {
-            inventory: EndurancePreStartCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([
+            super::super::endurance_workload::EndurancePreStartCapability::PreloaderMappedImageIdentityPrepared,]),
             build_calls: Rc::new(Cell::new(0)),
             fail_build: false,
         };
         let mut owners = PhaseOwners::failed_before_start(
+            "test-phase".to_owned(),
             EndurancePhaseKind::ContinuousExport,
             AppState::new(),
             None,
