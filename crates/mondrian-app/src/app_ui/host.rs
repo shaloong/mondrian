@@ -1250,16 +1250,31 @@ impl AppUiHost {
             // a new frame target/deadline; otherwise callback age can mint an
             // unnecessarily expired demand that a fresh observation is not
             // allowed to extend.
+            let previous_frame = state.current_frame();
             let audio_result = state.pump_audio_output();
+            let frame_after_audio = state.current_frame();
             // The pump can reanchor the mapping at its newly captured device
             // point. Sample the tick after that operation, never before it.
             let observed_at = Instant::now().max(observed_at);
             let advance = state.advance_playback_clock_at(observed_at);
-            let changed = advance.requires_refresh();
+            // Audio observations can already advance the Engine before tick
+            // captures its own previous frame. Observe the whole owner turn,
+            // otherwise those authoritative frame changes never repaint.
+            let crossed_frame = state.current_frame() != previous_frame;
+            let changed = advance.requires_refresh() || crossed_frame;
+            if crossed_frame {
+                tracing::trace!(
+                    previous_frame,
+                    frame_after_audio,
+                    current_frame = state.current_frame(),
+                    tick_frames_advanced = advance.frames_advanced,
+                    "Window observed Playback frame change across audio pump and tick"
+                );
+            }
             if let Err(error) = audio_result {
                 tracing::error!(%error, "audio output pump failed closed");
             }
-            (changed, advance.frames_advanced != 0, observed_at)
+            (changed, crossed_frame, observed_at)
         };
         if crossed_frame {
             self.last_playback_frame_advance_at.set(Some(observed_at));
@@ -1297,15 +1312,7 @@ impl AppUiHost {
             && self.playback_feedback == ViewerPlaybackFeedback::Loading
     }
 
-    /// Whether GPU preview preparation should yield to interactive shell input.
-    ///
-    /// Pending Viewer work does not hold the Clock Master, but another redraw
-    /// must not synchronously reconstruct the same GPU candidate. This gate is
-    /// presentation feedback only and has no transport authority.
-    pub(crate) fn should_defer_gpu_preview_prepare_for_interaction(&self) -> bool {
-        self.app_state.borrow().is_playing() && self.playback_feedback.should_defer_gpu_prepare()
-    }
-
+    /// Project Viewer feedback and independently observe production video preroll.
     fn sync_playback_feedback_from_viewer(&mut self) -> bool {
         let raw_feedback = self.root.viewer_playback_feedback();
         // Ready and Blocked are projections of work already evaluated by
@@ -2958,6 +2965,53 @@ mod tests {
     }
 
     #[test]
+    fn retired_paused_carrier_rebinds_without_reviving_its_consumed_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.seek(4).expect("seek still picture");
+        let old = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("still ticket");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("spatial-ticket-retirement"),
+        );
+        assert!(matches!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        host.renew_still_frame_demand_after_output_retirement()
+            .expect("retire old geometry");
+        let new = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("replacement still ticket");
+        assert_ne!(new, old.identity());
+        assert_eq!(host.app_state.borrow().current_frame(), 4);
+        assert!(!host.app_state.borrow().is_playing());
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Current)
+        );
+        assert_eq!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(new)
+        );
+    }
+
+    #[test]
     fn paused_untimed_current_output_completes_through_window_presentation_authority() {
         let host = workspace_host_without_preview_workers("paused-current-authority");
         let ticket = {
@@ -3659,7 +3713,31 @@ mod tests {
     }
 
     #[test]
-    fn loading_feedback_defers_duplicate_gpu_prepare_without_holding_clock() {
+    fn widget_loading_cannot_block_an_exact_ready_gpu_candidate() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.play().expect("start priming");
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("loading-ready-candidate"),
+        );
+        host.playback_feedback = ViewerPlaybackFeedback::Loading;
+        assert!(
+            matches!(
+                host.gpu_preview_frame_for_current_state(),
+                PreviewGpuFrameState::Transparent(_)
+            ),
+            "production Preview has a ready transparent picture"
+        );
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Current),
+            "payload-free Widget Loading must not veto an exact production candidate"
+        );
+    }
+
+    #[test]
+    fn loading_feedback_preserves_transport_toggle_without_owning_gpu_admission() {
         struct LoadingPreview;
 
         impl crate::app_ui::panels::ViewerPreviewSource for LoadingPreview {
@@ -3685,9 +3763,9 @@ mod tests {
         assert!(host.sync_playback_feedback_from_viewer());
 
         assert!(host.app_state.borrow().is_playing());
-        assert!(
-            host.should_defer_gpu_preview_prepare_for_interaction(),
-            "a redraw while already waiting must not synchronously re-enter GPU preview preparation"
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Current)
         );
 
         let pending = PendingUiActions::default();
@@ -3699,7 +3777,7 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
+        assert!(!host.app_state.borrow().is_playing());
     }
 
     #[test]
@@ -3812,7 +3890,6 @@ mod tests {
 
         assert!(host.poll_background_tasks(bounds).repaint_required);
         assert!(host.app_state.borrow().is_playing());
-        assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
         let diagnostics = host.preview_service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
         assert_eq!(diagnostics.scheduler.pending_requests, 0);

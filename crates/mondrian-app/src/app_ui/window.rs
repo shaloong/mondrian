@@ -6546,6 +6546,17 @@ fn prepare_viewer_gpu_preview(
         host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
+    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
+        clear_viewer_spatial_presentation(session, host);
+        session.viewer_gpu_output_telemetry.record_unavailable_skip();
+        finish_prepare!();
+    };
+    if let Err(error) =
+        synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation)
+    {
+        tracing::error!(%error, "Window spatial output retirement could not bind a new still ticket");
+        finish_prepare!();
+    }
     let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
     if session.viewer_gpu_submissions.is_at_capacity() {
         stage_window_viewer_gpu_lookahead(session, host);
@@ -6618,20 +6629,6 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         session.program_scopes_refresh_requested = true;
     }
-    if host.should_defer_gpu_preview_prepare_for_interaction() {
-        session.viewer_gpu_output_telemetry.record_preview_candidate_state(
-            AppUiViewerGpuOutputPreviewCandidateState::Loading,
-            None,
-        );
-        session.viewer_gpu_output_telemetry.record_loading_skip();
-        finish_prepare!();
-    }
-    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
-        clear_viewer_spatial_presentation(session, host);
-        session.viewer_gpu_output_telemetry.record_unavailable_skip();
-        finish_prepare!();
-    };
-    synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation);
     if program_scopes_requested
         && !session.program_scopes_registered
         && !session.program_scopes_refresh_requested
@@ -7619,12 +7616,20 @@ fn synchronize_viewer_spatial_presentation(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
     presentation: ViewerExternalTexturePresentation,
-) {
+) -> Result<(), mondrian_playback::PlaybackError> {
     if session.viewer_gpu_presentation.presentation() == Some(presentation) {
-        return;
+        return Ok(());
     }
+    let replaced_carrier = session.viewer_gpu_presentation.presentation().is_some();
     clear_viewer_spatial_presentation(session, host);
+    if replaced_carrier {
+        // Geometry is part of the physical output identity. Retire it before
+        // renewing the Engine's still demand, including an already consumed
+        // ticket; timed playback demands keep their original deadlines.
+        host.renew_still_frame_demand_after_output_retirement()?;
+    }
     session.viewer_gpu_presentation.set_presentation(presentation);
+    Ok(())
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {

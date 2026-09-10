@@ -2336,3 +2336,24 @@ The Window also captures its tick instant after pumping the native audio output:
 the pump may reanchor the App timestamp mapping at a later callback capture point,
 so a pre-pump instant would be an invalid backwards observation. Raw device counter
 and anchor checks remain in the Playback Engine and are not clamped by the Window.
+
+Widget `Loading` feedback never suppresses Window GPU candidate preparation.
+It is a payload-free projection and can lag a completed media dependency or a
+ready transparent picture. The production evaluation working set already deduplicates
+pending exact work; only its real dependency owners, resource admission, and the
+Playback presentation ticket may block an attempt. This prevents the display model
+from becoming a second Preview work authority or stranding a ready successor.
+
+Window refresh observes the Engine frame before the audio pump and after the tick
+under one AppState borrow. An accepted device observation can move the Engine
+frame and issue its demand before `tick` runs, so `tick.frames_advanced == 0` does
+not prove the full turn was unchanged. The Window reports and repaints the actual
+owner transition, without advancing time itself or issuing replacement demands.
+
+Spatial Viewer layout replacement follows the same retirement seam as native
+Window replacement. Before current-ticket preflight or in-flight capacity checks,
+the Window revokes the prior geometry's output and quarantines its submissions,
+then asks the existing Engine to renew a persistent still ticket. Unchanged
+geometry does nothing; initial geometry does not renew a ticket, and timed
+Playback deadlines remain unchanged. A consumed paused ticket can therefore not
+strand a resized Viewer behind the preflight that it needs to replace.
