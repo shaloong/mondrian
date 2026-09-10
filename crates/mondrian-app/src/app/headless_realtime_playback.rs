@@ -19,10 +19,11 @@ use serde::Serialize;
 use super::audio_playback_acceptance::ProfessionalVideoCoordinatorObservation;
 use super::endurance_shutdown::{AppBackgroundDomainSnapshot, AppBackgroundEnduranceSnapshot};
 use super::headless_preview_presentation::{
-    prepare_headless_preview_successor, present_headless_preview_candidate,
-    present_headless_preview_candidate_at, retain_headless_preview_lookahead,
-    stage_headless_preview_lookahead, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
-    HeadlessPreviewCandidate, HeadlessPreviewRuntime,
+    drive_headless_gpu_submission, prepare_headless_preview_successor,
+    present_headless_preview_candidate, present_headless_preview_candidate_at,
+    retain_headless_preview_lookahead, stage_headless_preview_lookahead,
+    HeadlessCompletedGpuDisposition, HeadlessPresentedOutput, HeadlessPreviewCandidate,
+    HeadlessPreviewRuntime,
 };
 use super::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessPreviewGpuDependencyBarrierEvidence,
@@ -1137,6 +1138,37 @@ impl HeadlessRealtimePlaybackSession {
             "Headless Preview/GPU setup access is unavailable during realtime residency"
         );
         Ok((&self.preview, &mut self.gpu))
+    }
+
+    /// Retire already submitted frames before a settled resource-policy change.
+    /// No frame is admitted and the caller's deadline is never renewed.
+    pub(crate) fn settle_gpu_submissions(
+        &mut self,
+        state: &mut AppState,
+        deadline: Instant,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.driver.is_none(),
+            "GPU settlement requires inactive scheduling"
+        );
+        let watch = self.preview.work_watch();
+        while self.gpu.has_submission_in_flight() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "GPU settlement exceeded recovery deadline"
+            );
+            let revision = watch.revision();
+            drive_headless_gpu_submission(&self.preview, state, &mut self.gpu)?;
+            if self.gpu.has_submission_in_flight() {
+                wait_for_headless_preview_revision(
+                    &watch,
+                    revision,
+                    deadline.min(Instant::now() + HEADLESS_PREVIEW_CLOCK_TICK_MAX_WAIT),
+                    false,
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Capture the paired execution inventory at a declared observation boundary.

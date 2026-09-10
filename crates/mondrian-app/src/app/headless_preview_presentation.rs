@@ -737,7 +737,9 @@ fn headless_lookahead_candidate_is_semantically_prepared(candidate: &PreviewGpuF
     )
 }
 
-fn drive_headless_gpu_submission(
+/// Reconcile existing submissions through the ordinary presentation lifecycle
+/// without admitting a new frame.
+pub(crate) fn drive_headless_gpu_submission(
     preview: &HeadlessPreviewRuntime,
     state: &mut AppState,
     gpu: &mut HeadlessViewerGpuAdapter,

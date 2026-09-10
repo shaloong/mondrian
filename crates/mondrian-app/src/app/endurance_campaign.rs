@@ -614,6 +614,23 @@ impl EnduranceExecutionOwners {
         })
     }
 
+    /// Reconcile the persistent session's submitted resources before changing grants.
+    pub(super) fn settle_gpu_submissions(
+        &mut self,
+        app: &mut AppState,
+        deadline: Instant,
+    ) -> Result<(), EnduranceCampaignError> {
+        self.realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .settle_gpu_submissions(app, deadline)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
+    }
+
     pub(super) fn apply_cache_pressure(
         &mut self,
         app: &AppState,

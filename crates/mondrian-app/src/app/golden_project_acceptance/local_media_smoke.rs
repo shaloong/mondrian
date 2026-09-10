@@ -143,6 +143,19 @@ fn run_profile(
             tools.push(json!({"requested_program":requested,"available_provider_file":mondrian_assets::canonical_native_path(&candidate)?}));
         }
         report["command_provider_admission"] = json!(tools);
+        let sequence = SequenceSettings::default();
+        let audio = mondrian_media::probe_realtime_audio_output_contract(
+            &mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            sequence.audio_sample_rate,
+            sequence.audio_channel_layout,
+        )
+        .context("physical Audio contract is unavailable before App admission")?;
+        report["audio_device_admission"] = json!({
+            "host": audio.host_name,
+            "device_id": audio.device_id.as_str(),
+            "contract": format!("{:?}", audio.contract),
+            "stream_opened": false,
+        });
         let memory = SystemPlatformService.product_process_tree_memory();
         ensure!(
             memory.inventory_complete && memory.private_memory_bytes.is_some(),

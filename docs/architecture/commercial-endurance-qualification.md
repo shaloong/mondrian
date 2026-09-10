@@ -1,5 +1,24 @@
 # Commercial Endurance Qualification
 
+Cache-pressure recovery stops scheduling and pauses transport before changing
+resource grants, then reconciles all already submitted GPU frames through the
+existing Headless presentation lifecycle. Leaving realtime scheduling alone
+does not prove submission retirement. This drain admits no new frame and shares
+the original picture-recovery deadline; a timeout retains the owning session
+for shutdown and cannot produce a successful recovery receipt. Critical and
+Nominal grants are applied only after that submission barrier.
+The terminal policy comparison also pauses transport and drains submissions
+before applying its settled Nominal grant. Minimum-memory realtime policy may
+trim speculative residency even at Nominal pressure; comparing that active
+grant with a paused grant is not valid recovery evidence. The exact A/V rebuild
+must still pass first, failure counters must remain unchanged, and the owner
+must reacquire AudioDevice before measured work resumes.
+Local media smoke performs the same production audio-contract negotiation as
+campaign admission before creating an App or starting any phase. A missing or
+incompatible default device produces durable NotRun evidence. That preflight
+does not open a stream or prove callback timing: the persistent production
+Playback owner must still open and qualify the live device during execution.
+
 Machine-plan `verifier_tools.bmx` binds raw2bmx/mxf2raw executable hashes,
 version-output hashes and a complete optional DLL inventory. AS-11 pre-start
 admission requires this inventory, retains one Media `PreparedBmxRuntime`, and

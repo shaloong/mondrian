@@ -665,6 +665,16 @@ impl PersistentTimelinePlaybackPhase {
         // through Priming so current and bounded cold-activation resources are
         // rebuilt before AudioDevice can own measured time again.
         self.freeze_transport_for_settled_work(app, owners, "cache-pressure recovery")?;
+        let recovery_timeout = cache_pressure_picture_recovery_timeout(
+            self.interval_timeout,
+            absolute_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+        );
+        let recovery_deadline = Instant::now().checked_add(recovery_timeout).ok_or_else(|| {
+            self.latch_fault("cache-pressure recovery deadline overflow".to_owned())
+        })?;
+        owners
+            .settle_gpu_submissions(app, recovery_deadline)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
         let before = owners
             .capture_cache_pressure_observation(app)
             .map_err(|error| self.latch_fault(error.to_string()))?;
@@ -691,21 +701,20 @@ impl PersistentTimelinePlaybackPhase {
         validate_cache_pressure_policy_transition(&before, &pressure, &recovered)
             .map_err(|detail| self.latch_fault(detail))?;
 
-        let recovery_timeout = cache_pressure_picture_recovery_timeout(
-            self.interval_timeout,
-            absolute_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
-        );
-        let recovery_deadline = Instant::now().checked_add(recovery_timeout).ok_or_else(|| {
-            self.latch_fault("cache-pressure recovery deadline overflow".to_owned())
-        })?;
         self.resume_audio_device_window(app, owners, Some(recovery_deadline))?;
         self.validate_binding(app)?;
         validate_expected_coordinate(self.expected_epoch, self.expected_frame, app)
             .map_err(|detail| self.latch_fault(detail))?;
 
-        self.settle_window(app, owners)?;
+        // Compare grants in the same paused domain as the initial pressure
+        // transition. Nominal realtime policy may legitimately trim speculative
+        // residency on a minimum-memory machine; it is not the settled grant.
+        self.freeze_transport_for_settled_work(app, owners, "cache-pressure terminal evidence")?;
+        owners
+            .settle_gpu_submissions(app, recovery_deadline)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
         let after_exact_picture = owners
-            .capture_cache_pressure_observation(app)
+            .apply_cache_pressure(app, ExecutionResourcePressure::Nominal)
             .map_err(|error| self.latch_fault(error.to_string()))?;
         validate_cache_pressure_terminal_health(&before, &recovered, &after_exact_picture)
             .map_err(|detail| self.latch_fault(detail))?;
