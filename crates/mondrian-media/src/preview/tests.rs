@@ -3928,6 +3928,42 @@ fn preview_decode_fixture_perf_smoke() {
 }
 
 #[test]
+#[ignore = "requires a three-second 25 fps HEVC Main10 fixture with reordered open GOPs; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
+fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE")
+            .expect("explicit synthetic HEVC fixture is required"),
+    );
+    clear_thread_local_preview_decode_session();
+    // Both sides of the 24-frame GOP boundaries, sampled by a 24 fps program.
+    // Descending requests also prove that the reused owner really seeks back.
+    for frame_index in (0..70).chain((0..70).rev()) {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(frame_index, 24).expect("exact program sample"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        );
+        let outcome = decode_preview_frame_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("program frame {frame_index}: {error}"));
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
+            panic!("Main10 software decode must retain the production float representation");
+        };
+        let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
+        let requested = frame.diagnostics.requested_pts.expect("requested stream coordinate");
+        assert!(
+            selection.selected_pts <= requested,
+            "program frame {frame_index}"
+        );
+        assert!(
+            requested < selection.selected_pts + selection.selected_duration_pts,
+            "program frame {frame_index}"
+        );
+    }
+    clear_thread_local_preview_decode_session();
+}
+
+#[test]
 #[ignore = "manual sequential decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
 fn preview_decode_fixture_sequence_perf_smoke() {
     let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from) else {

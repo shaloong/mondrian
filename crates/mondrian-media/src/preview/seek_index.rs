@@ -18,6 +18,7 @@ pub(super) struct PreviewSeekIndexDiagnostics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PreviewSeekResolution {
     pub(super) used_index: bool,
+    /// Container decode-order seek coordinate; never a covering-frame PTS proof.
     pub(super) anchor_pts: Option<i64>,
 }
 

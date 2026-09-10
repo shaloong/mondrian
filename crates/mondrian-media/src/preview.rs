@@ -1373,7 +1373,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the current seek used a known keyframe anchor from the session-local index.
     #[serde(default)]
     pub seek_index_used: bool,
-    /// Keyframe PTS used to bound the current seek, when available.
+    /// Actual keyframe seek timestamp in stream ticks, when available.
+    /// Despite the retained field name this is the container's DTS/index
+    /// coordinate (PTS only when DTS is absent), not presentation coverage.
     #[serde(default)]
     pub seek_index_anchor_pts: Option<i64>,
     /// Decoded frames consumed by this request before selecting the output frame.

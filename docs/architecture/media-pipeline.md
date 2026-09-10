@@ -1,5 +1,13 @@
 # Media Pipeline
 
+Exact random access treats container keyframe timestamps as decode anchors,
+not presentation-coverage proof. Before submitting a seek root, the existing
+decode session inspects its real packet PTS. A reordered future key picture
+without an earlier decoded candidate requires a strictly earlier indexed root;
+each retreat is charged to the unchanged forward-work budget and uses the same
+cancellation path. Diagnostics retain the actual final anchor. No later frame
+or lower-precision representation substitutes for the requested covering extent.
+
 Preview decode sources retain an explicit single-image fact only when the Asset's frozen kind identifies the original source as a still image. Filename extensions and generated video proxies cannot infer this fact. Such CPU RGBA requests use the existing context-owned `CpuStill` session slot even during `PlaybackCursor` work, preserving the video cursor in its separate slot. Scheduling lane, cancellation, original deadline, exact source-time selection, and residency authority remain unchanged; context clear and consuming shutdown release both slots. Multi-layer Current admission therefore does not create another worker or replace the current video decoder whenever an image overlay is sampled.
 
 Preview CPU residency freezes component depth from the admitted stream sampling

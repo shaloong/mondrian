@@ -2033,6 +2033,7 @@ impl PreviewDecodeSession {
             policy,
             adaptive_hints.playback_direction,
             &session_output_lease,
+            &mut seek_resolution,
             should_cancel,
         )?;
         self.last_decoded_frame = result.retained_selected_frame.take();
@@ -2404,6 +2405,7 @@ impl PreviewDecodeSession {
         policy: PreviewDecodeAccessPolicy,
         playback_direction: PreviewPlaybackDirection,
         session_output_lease: &PreviewDecodeSessionOutputLease,
+        seek_resolution: &mut PreviewSeekResolution,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeForwardResult> {
         let interrupt_state = Arc::clone(&self.interrupt_state);
@@ -2644,6 +2646,39 @@ impl PreviewDecodeSession {
                 video_packets_submitted,
             )) {
                 break;
+            }
+
+            // Container indexes name decode timestamps. A key packet selected
+            // before the requested PTS can nevertheless present after it (for
+            // example an HEVC CRA whose leading pictures require the prior GOP).
+            // Inspect the real packet before accepting that random-access root.
+            // Retreat only through strictly earlier indexed anchors, charging
+            // each probe against the existing forward-work budget.
+            if !policy.keyframe_only
+                && frames_decoded == 0
+                && candidates.before().is_none()
+                && packet.is_key()
+                && packet.pts().is_some_and(|pts| pts > target_pts)
+                && let Some(earlier) = packet
+                    .dts()
+                    .or_else(|| packet.pts())
+                    .and_then(|dts| dts.checked_sub(1))
+                    .and_then(|before| self.seek_index.keyframe_at_or_before(before))
+                && seek_resolution.anchor_pts.is_some_and(|anchor| earlier < anchor)
+            {
+                video_packets_submitted = video_packets_submitted.saturating_add(1);
+                match self.seek_to_target(earlier, policy, should_cancel)? {
+                    PreviewSeekToTarget::Complete(resolution) => *seek_resolution = resolution,
+                    PreviewSeekToTarget::DirectCanceled => {
+                        return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                    }
+                    PreviewSeekToTarget::IsolatedCanceled => {
+                        return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
+                            frames_decoded,
+                        ));
+                    }
+                }
+                continue;
             }
 
             if non_reference_discard_until_pts.is_some_and(|switch_pts| {
