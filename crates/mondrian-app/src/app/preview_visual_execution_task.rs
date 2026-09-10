@@ -32,7 +32,7 @@ use mondrian_renderer::{
     HeterogeneousGpuResourceGrant,
 };
 
-use super::preview_media_frame::PreviewMediaResidencyGuard;
+use super::preview_media_residency::PreviewMediaResidencyGuard;
 use super::preview_work_notification::PreviewWorkNotifier;
 use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 

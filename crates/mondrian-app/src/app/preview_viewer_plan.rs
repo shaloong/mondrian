@@ -28,7 +28,8 @@ use mondrian_timeline::sequence::ProgramColorContext;
 use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentityBuilder,
 };
-use super::preview_media_frame::{MediaPreviewFrame, PreviewMediaResidencyGuard};
+use super::preview_media_frame::MediaPreviewFrame;
+use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),

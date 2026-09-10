@@ -310,7 +310,7 @@ pub(crate) struct PreviewGpuFrame {
     heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
     // Intentionally unread: dropping the complete submitted frame releases
     // these physical Frame Store leases only after exact GPU completion.
-    _media_residency_guards: Vec<super::preview_media_frame::PreviewMediaResidencyGuard>,
+    _media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
     #[cfg_attr(not(test), allow(dead_code))]
     decode_execution: PreviewDecodeExecutionSummary,
 }
@@ -336,7 +336,7 @@ impl PreviewGpuFrame {
         presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
         decode_execution: PreviewDecodeExecutionSummary,
         heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
-        media_residency_guards: Vec<super::preview_media_frame::PreviewMediaResidencyGuard>,
+        media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
     ) -> Self {
         Self {
             output_key,

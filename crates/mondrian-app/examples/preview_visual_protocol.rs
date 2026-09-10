@@ -15,6 +15,10 @@ mod preview_worker_lifecycle;
 mod preview_work_notification;
 
 #[cfg(test)]
+#[path = "../src/app/preview_media_residency.rs"]
+mod preview_media_residency;
+
+#[cfg(test)]
 #[allow(dead_code)] // This target deliberately tests only the visual protocol Interface.
 #[path = "../src/app/preview_visual_execution_task.rs"]
 mod preview_visual_execution_task;

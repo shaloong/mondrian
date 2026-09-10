@@ -2377,3 +2377,8 @@ by their inputs. Ticketless successors keep their ordinary allocation charged
 through completion without acquiring Current protection. Retiring an evaluation
 or evicting a Frame Store entry therefore cannot make in-flight source bytes
 disappear from the physical ledger; completion drops the same shared leases.
+
+The standalone `preview_visual_protocol` test target compiles the same
+`preview_media_residency` lease carrier as App and its visual worker. The carrier
+is independent of decoded-frame/color adaptation, so protocol tests retain real
+Frame Store resource and protection leases without a substitute payload type.

@@ -26,22 +26,7 @@ use mondrian_renderer::{
 
 use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIdentity};
 
-/// Existing Frame Store leases carried by lowered GPU or asynchronous CPU work.
-#[derive(Debug, Clone)]
-pub(crate) struct PreviewMediaResidencyGuard {
-    _resource: Option<mondrian_playback::MediaFrameResourceLease>,
-    _protection: Option<mondrian_playback::MediaFrameProtectionLease>,
-}
-
-impl PreviewMediaResidencyGuard {
-    /// Carry existing leases without changing their admission class or charge.
-    pub(crate) fn from_leases(
-        resource: Option<mondrian_playback::MediaFrameResourceLease>,
-        protection: Option<mondrian_playback::MediaFrameProtectionLease>,
-    ) -> Self {
-        Self { _resource: resource, _protection: protection }
-    }
-}
+use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
