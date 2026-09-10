@@ -595,8 +595,10 @@ fn transient_stale_callback_keeps_audio_master_within_grace() {
     let held = engine.observe_audio_device_clock(uncertain).unwrap();
     assert_eq!(held.clock_master, Some(ClockMaster::AudioDevice));
 
+    // A fresh callback catches up the exact count to 100 ms. Returning only
+    // 40 ms of samples here would be an impossible 60 ms phase regression.
     let resumed = engine
-        .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(100)))
+        .observe_audio_device_clock(audio_observation(&engine, 5_800, ts(100)))
         .unwrap();
     assert_eq!(resumed.clock_master, Some(ClockMaster::AudioDevice));
 }
@@ -681,6 +683,107 @@ fn latency_estimate_jitter_at_callback_boundary_keeps_audio_clock_authority() {
 
     assert_eq!(retained.clock_master, Some(ClockMaster::AudioDevice));
     assert_eq!(retained.position.frame, acquired.position.frame);
+}
+
+#[test]
+fn refreshed_audio_point_cannot_rewind_an_already_extrapolated_phase() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+    assert_eq!(
+        engine.tick(ts(40)).expect("advance old observation").position.frame,
+        1
+    );
+
+    let mut refreshed = audio_observation(&engine, 2_680, ts(40));
+    refreshed.uncertainty_frames = 512;
+    let retained = engine.observe_audio_device_clock(refreshed).expect("refresh audio");
+    assert_eq!(retained.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(engine.tick(ts(40)).expect("same instant").position.frame, 1);
+    let sample = engine
+        .authoritative_audio_sample_position_at(
+            retained.epoch,
+            ts(40),
+            AudioSampleRate::new(48_000).expect("sample rate"),
+        )
+        .expect("continuous phase");
+    assert_eq!(sample.sample(), 1_920);
+    assert_eq!(
+        engine.audio_device_anchor.expect("retained anchor").last_uncertainty_frames,
+        752
+    );
+}
+
+#[test]
+fn uncertain_audio_cannot_hide_counter_or_anchor_lifecycle_violations() {
+    for violation in 0..3 {
+        let mut engine = engine();
+        engine.play(100, ts(0)).expect("play");
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .expect("acquire audio");
+        let mut observation = audio_observation(&engine, 1_000, ts(10));
+        observation.state = AudioDeviceClockState::Uncertain;
+        match violation {
+            0 => observation.consumed_frames = 999,
+            1 => {
+                observation.media_anchor = AudioSamplePosition::new(
+                    48_000,
+                    AudioSampleRate::new(48_000).expect("sample rate"),
+                )
+            }
+            _ => observation.stream_generation += 1,
+        }
+        let rejected = engine.observe_audio_device_clock(observation).expect("fail closed");
+        assert_eq!(
+            rejected.clock_master,
+            Some(ClockMaster::Synthetic),
+            "violation {violation}"
+        );
+        assert_eq!(rejected.position.frame, 0);
+    }
+}
+
+#[test]
+fn audio_phase_clamp_cannot_hide_error_beyond_the_existing_policy() {
+    let mut engine = engine();
+    engine.policy.max_audio_clock_uncertainty = Duration::from_millis(12);
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+    engine.tick(ts(40)).expect("advance old observation");
+    let mut refreshed = audio_observation(&engine, 2_680, ts(40));
+    refreshed.uncertainty_frames = 512;
+    let fallback = engine.observe_audio_device_clock(refreshed).expect("refresh audio");
+    // The raw 10.667 ms estimate is admitted, but its 5 ms displacement is not
+    // free precision: the corrected 15.667 ms bound exceeds this 12 ms policy.
+    assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(engine.tick(ts(40)).expect("same instant").position.frame, 1);
+}
+
+#[test]
+fn audio_refresh_outside_phase_uncertainty_fails_closed_without_rewind() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    engine
+        .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+        .expect("acquire audio");
+    assert_eq!(
+        engine.tick(ts(80)).expect("advance old observation").position.frame,
+        2
+    );
+    let fallback = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(80)))
+        .expect("reject impossible slow device slope");
+    assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(engine.tick(ts(80)).expect("same instant").position.frame, 2);
 }
 
 #[test]

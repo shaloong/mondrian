@@ -360,6 +360,17 @@ consumption interval. The raw host callback counter is an exact monotonic fact;
 a changed anchor or decreasing raw counter hands off continuously to Synthetic
 Master before the new observation can move the timeline. The delay-corrected
 device position is a point estimate inside the recorded uncertainty interval.
+The exact counter/anchor checks precede the `Uncertain` grace branch; that branch
+cannot hide a raw rollback or keep the old Audio authority across an unqualified
+stream-generation replacement.
+A refreshed callback must also preserve the continuous phase already extrapolated
+from the previous observation. The Engine clamps an overlapping backward phase
+estimate before replacing its audio anchor, includes the clamp displacement in
+the retained uncertainty, and rejects a correction outside the original policy
+bound. A snapshot-only frame clamp is insufficient: the next tick would otherwise
+rewind. An impossibly slow refresh hands off to Synthetic without moving the
+existing phase backward, just as an impossibly fast sample slope does.
+
 Across a callback boundary that point may move slightly backward when the
 counter and the host playback-delay estimate advance together. Adjacent
 overlapping uncertainty intervals retain the last proven device position;

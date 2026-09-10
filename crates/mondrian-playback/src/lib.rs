@@ -1412,6 +1412,21 @@ impl PlaybackEngine {
             self.handoff_to_synthetic(observation.observed_at)?;
             return Ok(self.snapshot());
         }
+        // Uncertainty describes the sampled device point, not exact callback
+        // identity. Never let its grace period conceal a raw counter rollback,
+        // a changed active anchor, or a different unqualified stream.
+        if self.audio_device_anchor.is_some_and(|anchor| {
+            if anchor.stream_generation == observation.stream_generation {
+                observation.consumed_frames < anchor.last_consumed_frames
+                    || observation.media_anchor != anchor.media_anchor
+            } else {
+                observation.state == AudioDeviceClockState::Uncertain
+            }
+        }) {
+            self.audio_uncertain_since = None;
+            self.handoff_to_synthetic(observation.observed_at)?;
+            return Ok(self.snapshot());
+        }
         if observation.state == AudioDeviceClockState::Uncertain {
             let uncertain_since =
                 *self.audio_uncertain_since.get_or_insert(observation.observed_at);
@@ -1446,14 +1461,6 @@ impl PlaybackEngine {
             .consumed_frames
             .checked_sub(observation.estimated_latency_frames as u64)
             .ok_or(PlaybackError::InvalidAudioClockPosition)?;
-        if self.audio_device_anchor.is_some_and(|anchor| {
-            anchor.stream_generation == observation.stream_generation
-                && (observation.consumed_frames < anchor.last_consumed_frames
-                    || observation.media_anchor != anchor.media_anchor)
-        }) {
-            self.handoff_to_synthetic(observation.observed_at)?;
-            return Ok(self.snapshot());
-        }
         let Some(anchor) = self
             .audio_device_anchor
             .filter(|anchor| anchor.stream_generation == observation.stream_generation)
@@ -1543,7 +1550,45 @@ impl PlaybackEngine {
             return Ok(self.snapshot());
         }
 
-        let media_position_ns = audio_media_position_ns(observation, effective_consumed)?;
+        let measured_media_position_ns =
+            audio_media_position_ns(observation, measured_effective_consumed)?;
+        // The previous observation may already have advanced the continuous
+        // phase between callbacks. Clamping only its sampled counter would
+        // preserve this snapshot but let the next tick rewind the Timeline.
+        let prior_phase_ns = self
+            .audio_phase_ns_at(observation.observed_at)?
+            .ok_or(PlaybackError::InvalidAudioClockPosition)?;
+        let phase_regression_ns = prior_phase_ns
+            .checked_sub(measured_media_position_ns)
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?
+            .max(0);
+        let phase_regression_ns = u128::try_from(phase_regression_ns)
+            .map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
+        if phase_regression_ns
+            > sample_frames_ns_ceil(adjacent_uncertainty_frames, observation_rate)?
+        {
+            self.handoff_to_synthetic(observation.observed_at)?;
+            return Ok(self.snapshot());
+        }
+        // Moving the point estimate must retain its displacement in the error
+        // bound. Never advertise the fresh callback's smaller uncertainty for
+        // a clamped phase, or silently exceed the existing Audio policy.
+        let correction_frames = phase_regression_ns
+            .checked_mul(u128::from(observation.sample_rate))
+            .and_then(|value| value.checked_add(999_999_999))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?
+            / 1_000_000_000;
+        let corrected_uncertainty_frames = u128::from(observation.uncertainty_frames)
+            .checked_add(correction_frames)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        if sample_frames_ns_ceil(u64::from(corrected_uncertainty_frames), observation_rate)?
+            > self.policy.max_audio_clock_uncertainty.as_nanos()
+        {
+            self.handoff_to_synthetic(observation.observed_at)?;
+            return Ok(self.snapshot());
+        }
+        let media_position_ns = measured_media_position_ns.max(prior_phase_ns);
         let target = timeline_frame_at_ns(media_position_ns, self.position.time_base)?;
         self.position.frame = self.position.frame.max(target).min(self.end_frame);
         self.audio_device_anchor = Some(AudioDeviceClockAnchor {
@@ -1553,7 +1598,7 @@ impl PlaybackEngine {
             last_effective_consumed_frames: effective_consumed,
             last_observed_at: observation.observed_at,
             last_media_position_ns: media_position_ns,
-            last_uncertainty_frames: observation.uncertainty_frames,
+            last_uncertainty_frames: corrected_uncertainty_frames,
         });
         self.clock_master = Some(ClockMaster::AudioDevice);
         if self.position.frame >= self.end_frame {
