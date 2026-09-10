@@ -68,7 +68,7 @@ pub use crate::app_ui::event_loop_owner::{
 };
 use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
-    AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
+    AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands, ViewerGpuPreparation,
 };
 use crate::app_ui::product_logging::init_product_tracing;
 #[cfg(test)]
@@ -6567,12 +6567,9 @@ fn prepare_viewer_gpu_preview(
         session.frame_renderer.unregister_external_texture(stale.artifact());
         drop(stale);
     }
-    if !host.preflight_pending_viewer_gpu_presentation() {
-        session
-            .viewer_gpu_output_telemetry
-            .record_prepare_duration(prepare_started.elapsed());
-        return;
-    }
+    let Some(preparation) = host.viewer_gpu_preparation() else {
+        finish_prepare!();
+    };
     if !submission_in_flight {
         host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
     }
@@ -6645,14 +6642,29 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         session.program_scopes_refresh_requested = true;
     }
-    let staged_current = session
-        .staged_viewer_gpu_successors
-        .take_exact(host.viewer_gpu_current_intent())
-        .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
-    let current_candidate = staged_current.map_or_else(
-        || host.gpu_preview_frame_for_current_state(),
-        PreviewGpuFrameState::Ready,
-    );
+    let current_candidate = match preparation {
+        ViewerGpuPreparation::Current => {
+            let staged_current = session
+                .staged_viewer_gpu_successors
+                .take_exact(host.viewer_gpu_current_intent())
+                .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
+            staged_current.map_or_else(
+                || host.gpu_preview_frame_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+        ViewerGpuPreparation::Successor => {
+            let staged = host
+                .viewer_gpu_successor_intent()
+                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
+            let candidate = staged.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            );
+            stage_window_viewer_gpu_lookahead(session, host);
+            candidate
+        }
+    };
     let mut frame = match current_candidate {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(candidate) => {

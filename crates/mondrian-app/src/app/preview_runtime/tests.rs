@@ -15775,3 +15775,60 @@ fn preview_representation_quality_selects_a_reduced_decode_identity() {
     drop(state);
     std::fs::remove_dir_all(root).expect("remove preview test root");
 }
+
+#[test]
+fn completed_ticketless_successor_media_wakes_its_exact_evaluation() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let key = test_media_key(1987);
+    let result_tx = install_preview_result_channel_for_test(&service);
+    let generation = service.scheduler.begin_generation();
+    assert_eq!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            None,
+            None,
+        ),
+        MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+    );
+    let sequence = Sequence::new("successor media wake");
+    let evaluation_key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 1,
+        width: 320,
+        height: 180,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    service.evaluation_working_set.borrow_mut().insert_waiting(
+        evaluation_key,
+        MediaPreviewRequestPriority::Prefetch,
+        Arc::from([EvaluationDependency::MediaProducer(key.clone())]),
+    );
+    let mut result = test_successful_media_preview_result(&service, key, generation, 9);
+    result.priority = MediaPreviewRequestPriority::Prefetch;
+    result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+    result.demand_identity = None;
+    result_tx.send(result).expect("publish speculative media");
+    let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(
+        outcome.candidate_retry_required,
+        "an exact waiting successor must be retried"
+    );
+    assert!(
+        !outcome.visible_change,
+        "speculation does not publish a current picture"
+    );
+    assert!(outcome.frame_delivery_candidates.is_empty());
+    let second = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
+    assert!(
+        !second.candidate_retry_required,
+        "the consumed wait cannot create a repaint loop"
+    );
+    service.shutdown();
+}

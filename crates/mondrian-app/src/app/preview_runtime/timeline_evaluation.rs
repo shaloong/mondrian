@@ -194,9 +194,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         .0
     }
 
-    /// Invalidate only evaluations that consumed one exact physical media key.
-    pub(super) fn invalidate_evaluations_for_media_key(&self, key: &MediaPreviewKey) {
-        self.evaluation_working_set.borrow_mut().invalidate_for_media_key(key);
+    /// Invalidate exact media dependents and report a released candidate wait.
+    pub(super) fn invalidate_evaluations_for_media_key(&self, key: &MediaPreviewKey) -> bool {
+        self.evaluation_working_set.borrow_mut().invalidate_for_media_key(key)
     }
 
     /// Resolve the timeline exactly once per miss.

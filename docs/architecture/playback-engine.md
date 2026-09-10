@@ -2318,3 +2318,21 @@ old in-flight and already-consumed tickets cannot publish into the replacement.
 Both ordinary native-window replacement and device-reopen validation use this
 production seam. Timed Playback demands are left untouched, and the Window's
 original construction/recovery deadline is not extended.
+
+After the current priming picture consumes its ticket, the Window continues the
+existing exact ticketless successor preparation lane. That work retains only a
+prepared physical output and cannot republish the consumed current ticket. The
+Window selects this lane only when no current demand is pending and the canonical
+Preview snapshot supplies a successor. Pending current work still passes its
+ordinary deadline preflight; priming budgets and readiness requirements do not
+change. Otherwise the Window and Engine would wait on each other: the Window
+would stop at the consumed current ticket while priming waited for its successor.
+
+A media result that releases an exact retained evaluation wait emits one candidate
+retry edge, including ticketless successor waits. Unrelated prefetch completions
+and invalidation of ready cache entries alone do not request a repaint. The same
+working-set dependency removal supplies that fact; there is no second wait list.
+The Window also captures its tick instant after pumping the native audio output:
+the pump may reanchor the App timestamp mapping at a later callback capture point,
+so a pre-pump instant would be an invalid backwards observation. Raw device counter
+and anchor checks remain in the Playback Engine and are not clamped by the Window.

@@ -203,7 +203,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             if result.canceled {
-                self.invalidate_evaluations_for_media_key(&result.key);
+                outcome.candidate_retry_required |=
+                    self.invalidate_evaluations_for_media_key(&result.key);
                 if result.cancellation_phase == Some(MediaPreviewCancellationPhase::Queued) {
                     // A request that expired before codec execution is a
                     // scheduler deadline drop, not cooperative-cancellation
@@ -300,7 +301,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         // allowed to re-resolve and either consume another
                         // resident copy or admit replacement work. Retaining
                         // the wait here leaves Preview permanently Loading.
-                        self.invalidate_evaluations_for_media_key(&result.key);
+                        outcome.candidate_retry_required |=
+                            self.invalidate_evaluations_for_media_key(&result.key);
                         continue;
                     }
                     if completion.should_cache() {
@@ -384,7 +386,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // A decoded frame became available; only evaluations that
                     // named this complete physical request identity must
                     // re-resolve. Other samples of the same Asset remain valid.
-                    self.invalidate_evaluations_for_media_key(&result.key);
+                    outcome.candidate_retry_required |=
+                        self.invalidate_evaluations_for_media_key(&result.key);
                 }
                 None => {
                     // A retained timeline evaluation may be waiting on this
@@ -393,7 +396,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // no longer actionable. Re-resolve so the current
                     // generation can re-admit work or project the retained
                     // terminal failure instead of waiting forever.
-                    self.invalidate_evaluations_for_media_key(&result.key);
+                    outcome.candidate_retry_required |=
+                        self.invalidate_evaluations_for_media_key(&result.key);
                     if let Some(reason) = result.failure_reason {
                         self.scrub_adaptation
                             .borrow_mut()

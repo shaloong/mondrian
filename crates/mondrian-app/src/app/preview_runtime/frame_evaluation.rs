@@ -435,8 +435,9 @@ impl EvaluationWorkingSet {
         self.waiting.push(EvaluationWaitEntry { key, priority, dependencies });
     }
 
-    /// Drop only waits and ready evaluations that consume one exact media key.
-    pub(crate) fn invalidate_for_media_key(&mut self, media_key: &MediaPreviewKey) {
+    /// Drop exact dependents and report whether a waiting candidate became actionable.
+    pub(crate) fn invalidate_for_media_key(&mut self, media_key: &MediaPreviewKey) -> bool {
+        let waiting_before = self.waiting.len();
         self.waiting.retain(|entry| {
             !entry.dependencies.iter().any(|dependency| {
                 matches!(
@@ -453,6 +454,7 @@ impl EvaluationWorkingSet {
                 )
             })
         });
+        self.waiting.len() != waiting_before
     }
 }
 

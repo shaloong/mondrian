@@ -544,6 +544,23 @@ impl AppUiHost {
         Ok(())
     }
 
+    /// Select current presentation or ticketless successor preparation.
+    pub(crate) fn viewer_gpu_preparation(&self) -> Option<ViewerGpuPreparation> {
+        // Consuming the current ticket must not close the existing speculative
+        // successor lane: priming waits for that physical preparation.
+        let successor_only = {
+            let state = self.app_state.borrow();
+            state.pending_playback_frame_demand_identity().is_none()
+                && state.preview_successor_execution_request(Instant::now()).is_some()
+        };
+        if successor_only {
+            Some(ViewerGpuPreparation::Successor)
+        } else {
+            self.preflight_pending_viewer_gpu_presentation()
+                .then_some(ViewerGpuPreparation::Current)
+        }
+    }
+
     /// Consume an already-expired current demand before the Window builds a
     /// Viewer candidate.
     pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
@@ -1226,8 +1243,7 @@ impl AppUiHost {
 
     /// Advance active playback and refresh UI models when the visible frame changes.
     pub fn advance_playback_clock(&mut self, observed_at: Instant, bounds: Rect) -> bool {
-        let observed_at = Instant::now().max(observed_at);
-        let (playback_changed, crossed_frame) = {
+        let (playback_changed, crossed_frame, observed_at) = {
             let mut state = self.app_state.borrow_mut();
             // Audio Device Clock is the authority while available. Apply its
             // latest coherent callback fact before asking the Engine to derive
@@ -1235,12 +1251,15 @@ impl AppUiHost {
             // unnecessarily expired demand that a fresh observation is not
             // allowed to extend.
             let audio_result = state.pump_audio_output();
+            // The pump can reanchor the mapping at its newly captured device
+            // point. Sample the tick after that operation, never before it.
+            let observed_at = Instant::now().max(observed_at);
             let advance = state.advance_playback_clock_at(observed_at);
             let changed = advance.requires_refresh();
             if let Err(error) = audio_result {
                 tracing::error!(%error, "audio output pump failed closed");
             }
-            (changed, advance.frames_advanced != 0)
+            (changed, advance.frames_advanced != 0, observed_at)
         };
         if crossed_frame {
             self.last_playback_frame_advance_at.set(Some(observed_at));
@@ -2488,6 +2507,15 @@ fn parse_asset_browser_navigation(
     }
 }
 
+/// Window work selection; successor preparation never grants presentation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewerGpuPreparation {
+    /// Build a candidate under the current presentation preflight.
+    Current,
+    /// Prepare the exact next frame without a current presentation ticket.
+    Successor,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2877,6 +2905,31 @@ mod tests {
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Loading
         ));
+    }
+
+    #[test]
+    fn presented_priming_frame_does_not_block_ticketless_successor_preparation() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.play().expect("prime playback");
+        let ticket = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("priming current ticket");
+        assert!(state.complete_frame_presentation(ticket, Instant::now()).is_some());
+        assert!(state.pending_playback_frame_demand_identity().is_none());
+        assert!(state.preview_successor_execution_request(Instant::now()).is_some());
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("priming-successor"),
+        );
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Successor)
+        );
+        assert!(
+            !host.preflight_viewer_gpu_presentation(Some(ticket)),
+            "consumed current ticket must remain invalid"
+        );
     }
 
     #[test]
