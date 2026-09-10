@@ -2352,3 +2352,11 @@ and placement constraints, and Transport qualification; it never displays Semant
 caption-renderer or SDI qualification. The original JSON import remains available.
 Tests route SCC and CDP through the same typed draft action and final enqueue model,
 including unsupported-preset rejection, parity failure and source-file mutation.
+
+Text atlas admission excludes nonempty whitespace-only spans from the existing
+cosmic-text layout run. Layout advances and line positioning remain unchanged;
+line-relative glyph offsets are resolved against that run's text, including in
+multiline layouts. Unknown spans and all non-whitespace glyphs still request
+atlas images, and rasterization/allocation failures remain missing-glyph
+diagnostics. Whitespace is neither a failed image nor a fabricated resolved
+image in the counters.

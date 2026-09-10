@@ -94,7 +94,21 @@ impl TextRenderer {
 
         let mut commands = Vec::new();
         let mut stats = TextResolveStats::default();
-        for (line_y, glyph) in layout.positioned_glyphs() {
+        // Whitespace has layout advance but no image. Use each run's text:
+        // glyph byte offsets are line-relative for multiline layouts.
+        let atlas_glyphs = layout.runs().into_iter().flat_map(|run| {
+            let text = run.text;
+            let line_y = run.line_y;
+            run.glyphs
+                .iter()
+                .filter(move |glyph| {
+                    !text.get(glyph.start..glyph.end).is_some_and(|span| {
+                        !span.is_empty() && span.chars().all(char::is_whitespace)
+                    })
+                })
+                .map(move |glyph| (line_y, glyph))
+        });
+        for (line_y, glyph) in atlas_glyphs {
             stats.glyphs_requested = stats.glyphs_requested.saturating_add(1);
             match self.atlas.get_or_rasterize_with_policy(
                 font_system,
@@ -772,6 +786,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn whitespace_is_not_reported_as_a_missing_glyph() {
+        let mut renderer = TextRenderer::new();
+        for text in ["A B", "   ", "A\u{00a0}B"] {
+            let resolved = renderer.layout_and_render_with_stats(
+                text,
+                14.0,
+                Point::new(0.0, 0.0),
+                Color::WHITE,
+                None,
+                true,
+            );
+            assert_eq!(resolved.stats.missing_glyphs, 0, "text: {text:?}");
+            let visible_glyphs = if text.trim().is_empty() { 0 } else { 2 };
+            assert_eq!(resolved.commands.len(), visible_glyphs);
+            assert_eq!(resolved.stats.glyphs_resolved as usize, visible_glyphs);
+        }
+    }
+
+    #[test]
+    fn whitespace_preserves_spacing_and_multiline_visible_glyphs() {
+        let mut renderer = TextRenderer::new();
+        let spaced_width = renderer.measure_text("A B", 14.0).0;
+        let compact_width = renderer.measure_text("AB", 14.0).0;
+        assert!(spaced_width > compact_width);
+        let resolved = renderer.layout_and_render_with_stats(
+            " A \n B",
+            14.0,
+            Point::new(0.0, 0.0),
+            Color::WHITE,
+            Some(80.0),
+            true,
+        );
+        assert_eq!(resolved.stats.missing_glyphs, 0);
+        let bounds = image_bounds(&resolved.commands);
+        assert_eq!(bounds.len(), 2);
+        assert!(bounds[1].y > bounds[0].y);
+    }
+
+    #[test]
+    fn visible_glyph_allocation_failure_remains_missing() {
+        let mut renderer = TextRenderer::new();
+        renderer.atlas = GlyphAtlas::new(1);
+        let resolved = renderer.layout_and_render_with_stats(
+            "A B",
+            14.0,
+            Point::new(0.0, 0.0),
+            Color::WHITE,
+            None,
+            false,
+        );
+        assert_eq!(resolved.stats.glyphs_requested, 2);
+        assert_eq!(resolved.stats.missing_glyphs, 2);
+        assert!(resolved.commands.is_empty());
     }
 
     #[test]
