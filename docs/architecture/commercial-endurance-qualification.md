@@ -692,8 +692,14 @@ cancellation; Concurrent Recovery fixes all realtime/Export policies plus the
 ordered seek, surface/device reopen, Export cancel/retry, and cache-pressure
 cycle and exact cycle/cancellation counts.
 
-Realtime frame opportunities keep the phase's strict interval timeout. The
-cache-pressure recovery step intentionally evicts optional media residency, so
+Realtime frame opportunities keep the phase's strict interval timeout.
+
+The cache-pressure transition requires a Nominal baseline as well as the observed
+Critical and restored Nominal decisions. A failed transition retains all three
+pressure levels, trim policies, and decision revisions in its diagnostic;
+pre-existing native memory pressure is not silently relabeled as a recovery pass.
+
+The cache-pressure recovery step intentionally evicts optional media residency, so
 its exact current-picture rebuild uses a separate five-second cold-open budget,
 capped by the unchanged campaign absolute deadline. This permits one real
 decoder or still-image session reconstruction without weakening continuous

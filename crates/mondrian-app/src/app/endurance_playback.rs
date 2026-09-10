@@ -1016,9 +1016,18 @@ fn validate_cache_pressure_policy_transition(
         || recovered.pressure != ExecutionResourcePressure::Nominal
         || recovered.trim != ResourceTrimRequest::None
     {
-        return Err(
-            "cache-pressure recovery did not apply Critical then Nominal policy".to_owned(),
-        );
+        return Err(format!(
+            "cache-pressure recovery did not apply Critical then Nominal policy: before=(pressure={:?}, trim={:?}, revision={}), critical=(pressure={:?}, trim={:?}, revision={}), recovered=(pressure={:?}, trim={:?}, revision={})",
+            before.pressure,
+            before.trim,
+            before.decision_revision,
+            pressure.pressure,
+            pressure.trim,
+            pressure.decision_revision,
+            recovered.pressure,
+            recovered.trim,
+            recovered.decision_revision,
+        ));
     }
     if pressure.decision_revision <= before.decision_revision
         || recovered.decision_revision <= pressure.decision_revision
@@ -1390,6 +1399,14 @@ mod tests {
         );
 
         assert!(validate_cache_pressure_policy_transition(&before, &pressure, &recovered).is_ok());
+        let mut elevated_before = before.clone();
+        elevated_before.pressure = ExecutionResourcePressure::Elevated;
+        let diagnostic =
+            validate_cache_pressure_policy_transition(&elevated_before, &pressure, &recovered)
+                .expect_err("an already pressured baseline must remain a failure");
+        assert!(diagnostic.contains("before=(pressure=Elevated"));
+        assert!(diagnostic.contains("critical=(pressure=Critical"));
+        assert!(diagnostic.contains("recovered=(pressure=Nominal"));
         assert!(
             validate_cache_pressure_terminal_health(&before, &recovered, &after_exact_picture)
                 .is_ok()
