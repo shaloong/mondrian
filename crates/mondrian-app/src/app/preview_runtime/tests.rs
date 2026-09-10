@@ -943,7 +943,34 @@ fn execute_preview_presentation_for_test_app<O: Clone>(
     runtime: &PreviewProductionRuntime<O>,
     state: &AppState,
 ) -> PreviewPresentationState<O> {
-    runtime.presentation(state.preview_frame_execution_request(Instant::now()))
+    runtime.presentation(
+        state.preview_frame_execution_request(Instant::now()),
+        crate::app::preview_runtime::PreviewPresentationCarrier::CpuRaster,
+    )
+}
+
+#[test]
+fn warm_cpu_raster_cannot_become_current_for_an_external_gpu_carrier() {
+    let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    assert!(matches!(
+        execute_preview_presentation_for_test_app(&runtime, &state),
+        PreviewPresentationState::Ready(_),
+    ));
+    let pending = state.pending_playback_frame_demand_identity();
+    let projection = runtime.presentation(
+        state.preview_frame_execution_request(Instant::now()),
+        PreviewPresentationCarrier::ExternalGpu,
+    );
+    assert!(matches!(
+        projection,
+        PreviewPresentationState::Loading | PreviewPresentationState::Stale(_)
+    ));
+    assert_eq!(state.pending_playback_frame_demand_identity(), pending);
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Ready(_)
+    ));
 }
 
 #[test]

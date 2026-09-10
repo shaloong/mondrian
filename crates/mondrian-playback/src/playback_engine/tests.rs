@@ -718,6 +718,61 @@ fn refreshed_audio_point_cannot_rewind_an_already_extrapolated_phase() {
 }
 
 #[test]
+fn output_retirement_renews_pending_and_consumed_still_tickets_without_seeking() {
+    for completed in [false, true] {
+        let mut engine = engine();
+        engine
+            .seek_timeline(
+                timeline_binding(100),
+                FramePosition::new(4, Rational::new(1, 25)),
+                ts(0),
+            )
+            .expect("seek still");
+        let old = engine.frame_demand().expect("original still");
+        if completed {
+            engine
+                .observe_frame_delivery(current_delivery(&engine, FrameDeliveryKind::Ready, ts(0)))
+                .expect("present original");
+        }
+        let before = engine.snapshot();
+        let renewed = engine
+            .renew_still_frame_demand_after_output_retirement(ts(1))
+            .expect("retired output")
+            .expect("fresh still");
+        assert_eq!(engine.snapshot(), before);
+        assert_ne!(renewed.identity(), old.identity());
+        assert_eq!(renewed.kind, FrameDemandKind::PersistentStill);
+        assert_eq!(renewed.deadline, None);
+        assert_eq!(engine.pending_frame_demand(), Some(renewed));
+        let old_delivery =
+            FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                .complete_at(ts(2));
+        assert!(!engine
+            .observe_frame_delivery(old_delivery)
+            .expect("reject old ticket")
+            .accepted());
+        assert_eq!(engine.pending_frame_demand(), Some(renewed));
+    }
+}
+
+#[test]
+fn still_output_retirement_never_renews_a_timed_playback_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let before = engine.frame_demand();
+    let snapshot = engine.snapshot();
+    assert_eq!(
+        engine
+            .renew_still_frame_demand_after_output_retirement(ts(1))
+            .expect("ignore timed"),
+        None
+    );
+    assert_eq!(engine.frame_demand(), before);
+    assert_eq!(engine.snapshot(), snapshot);
+}
+
+#[test]
 fn uncertain_audio_cannot_hide_counter_or_anchor_lifecycle_violations() {
     for violation in 0..3 {
         let mut engine = engine();

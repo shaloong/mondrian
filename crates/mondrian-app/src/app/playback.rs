@@ -1754,6 +1754,25 @@ impl AppState {
         self.project_playback_work_deadline(demand, sampled_at)
     }
 
+    /// Renew only the persistent still obligation after a native output replacement.
+    pub(crate) fn renew_still_frame_demand_after_output_retirement(
+        &mut self,
+    ) -> Result<Option<mondrian_playback::FrameDemandIdentity>, mondrian_playback::PlaybackError>
+    {
+        let observed_at = Instant::now();
+        let timestamp = self
+            .playback_timestamp_for_observation(observed_at)?
+            .max(self.playback_engine.monotonic_high_water());
+        let demand = self
+            .playback_engine
+            .renew_still_frame_demand_after_output_retirement(timestamp)?;
+        if demand.is_some() {
+            self.reanchor_playback_observation_projection_at(observed_at, timestamp);
+            self.capture_playback_evidence();
+        }
+        Ok(demand.map(|demand| demand.identity()))
+    }
+
     /// Reissue the exact current playback picture against one bounded recovery deadline.
     pub(crate) fn reissue_current_frame_demand_for_recovery_until(
         &mut self,

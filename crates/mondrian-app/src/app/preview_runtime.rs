@@ -416,6 +416,15 @@ impl PreviewWorkerIsolation {
     }
 }
 
+/// Physical carrier whose production Adapter owns this presentation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewPresentationCarrier {
+    /// A CPU-only consumer explicitly requests the canonical raster boundary.
+    CpuRaster,
+    /// The Window GPU owner must publish its exact external texture first.
+    ExternalGpu,
+}
+
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Enter bounded CPU Viewer execution after a concrete Window GPU failure.
     /// The active semantic generation is retained; only the execution Adapter

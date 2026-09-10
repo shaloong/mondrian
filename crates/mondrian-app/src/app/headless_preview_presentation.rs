@@ -1230,7 +1230,10 @@ pub(crate) fn present_headless_preview_output(
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
     match present_headless_preview_candidate(preview, state, gpu, gpu_completion_deadline)? {
         HeadlessPreviewCandidate::Unavailable(_) => {
-            match preview.presentation(state.preview_frame_execution_request(Instant::now())) {
+            match preview.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                crate::app::preview_runtime::PreviewPresentationCarrier::CpuRaster,
+            ) {
                 PreviewPresentationState::Ready(candidate) => {
                     let ticket = candidate.presentation_ticket();
                     match candidate.into_value() {

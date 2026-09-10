@@ -2473,6 +2473,7 @@ fn reopen_window_surface_and_device(
                 device_generation_before,
             )?;
             retired_session.window.set_visible(false);
+            host.renew_still_frame_demand_after_output_retirement()?;
             publish_active_window_session(host, active_session, bounds);
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
@@ -8432,9 +8433,11 @@ fn replace_window_session(
         session,
         &mut next_session,
         |active_session, _retired_session| {
+            host.renew_still_frame_demand_after_output_retirement()?;
             publish_active_window_session(host, active_session, bounds);
+            Ok::<_, mondrian_playback::PlaybackError>(())
         },
-    );
+    )?;
     tracing::info!(
         ?old_role,
         ?role,

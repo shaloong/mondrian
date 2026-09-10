@@ -2299,3 +2299,22 @@ eligible even when no current Playback execution permits borrowing.
 Preview decode admission diagnostics count accepted Broker submissions or exact
 queued/in-flight reuse. Projecting a deadline alone does not count a decode:
 requests deferred under sustained execution pressure retain their skip evidence.
+
+### Window presentation carrier ownership
+
+The Window requests `ExternalGpu` from the same production Preview arbitration
+Module used by CPU consumers. While that carrier owns the attempt, a paused-frame
+CPU raster cache hit or inline CPU composite cannot consume its presentation
+ticket before the GPU texture is registered. Explicit bounded CPU fallback admits
+the canonical raster result through the existing runtime and ticket; it does not
+create another Timeline, color interpretation, or presentation authority. This
+also prevents a warm CPU cache from stranding paused Linux Viewer GPU output in
+`LostAuthority` before Surface/device recovery can present its original picture.
+
+After a Window/Surface replacement installs its candidate and retires the old
+carrier, the same Playback Engine renews a persistent still demand with a fresh
+sequence identity. Epoch, frame, quality and transport state stay unchanged;
+old in-flight and already-consumed tickets cannot publish into the replacement.
+Both ordinary native-window replacement and device-reopen validation use this
+production seam. Timed Playback demands are left untouched, and the Window's
+original construction/recovery deadline is not extended.

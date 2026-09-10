@@ -788,6 +788,9 @@ pub enum PlaybackError {
         "bounded playback recovery requires the exact current running frame and a future deadline"
     )]
     InvalidRecoveryFrameDemand,
+    /// Output retirement could not bind the exact current persistent still picture.
+    #[error("output retirement requires the exact current persistent still frame")]
+    InvalidStillFrameDemandRenewal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1853,6 +1856,38 @@ impl PlaybackEngine {
         } else {
             None
         }
+    }
+
+    /// Renew a persistent picture after its physical output carrier was retired.
+    ///
+    /// Both pending and consumed still tickets become stale. Epoch, Timeline
+    /// coordinate and quality remain unchanged; timed Playback demands and their
+    /// original deadlines are never renewed by this operation. The replacement
+    /// owner remains responsible for its bounded construction/shutdown deadline.
+    pub fn renew_still_frame_demand_after_output_retirement(
+        &mut self,
+        now: MonotonicTimestamp,
+    ) -> Result<Option<FrameDemand>, PlaybackError> {
+        self.commit_candidate(move |candidate| {
+            let Some(demand) = candidate.active_demand else {
+                return Ok(None);
+            };
+            if demand.kind != FrameDemandKind::PersistentStill {
+                return Ok(None);
+            }
+            candidate.accept_timestamp(now)?;
+            if !matches!(
+                candidate.state,
+                TransportState::Stopped | TransportState::Paused | TransportState::Ended
+            ) || demand.epoch != candidate.epoch
+                || demand.quality_revision != candidate.quality_revision
+                || demand.target != candidate.position
+            {
+                return Err(PlaybackError::InvalidStillFrameDemandRenewal);
+            }
+            candidate.refresh_untimed_frame_demand()?;
+            Ok(candidate.active_demand)
+        })
     }
 
     /// Reissue the exact current timed picture for one explicitly bounded recovery.

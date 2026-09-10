@@ -9,9 +9,12 @@ use super::*;
 use sha2::Digest;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Arbitrate the exact output for the Adapter's physical carrier. A GPU
+    /// carrier admits raster publication only after explicit CPU fallback.
     pub(crate) fn presentation(
         &self,
         request: PreviewFrameExecutionRequest<'_>,
+        carrier: PreviewPresentationCarrier,
     ) -> PreviewPresentationState<O> {
         if self.media_retry_pending.replace(false) {
             bump(&self.media_retry_acknowledgements);
@@ -20,6 +23,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let proxy_demands = request.proxy_demands();
         let transport = snapshot.transport();
         let running_without_demand = transport.is_playing() && transport.demand().is_none();
+        let raster_admitted = carrier == PreviewPresentationCarrier::CpuRaster
+            || self.viewer_cpu_fallback_active.get();
         bump(&self.metrics.render_requests);
         self.synchronize_visual_program_authoring_session(snapshot);
         self.synchronize_transport_intent(transport.intent());
@@ -179,10 +184,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         PreviewPresentationContent::Gpu(frame),
                         self.playback_presentation_ticket(snapshot),
                     ))
-                } else if let Some(frame) =
-                    matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
-                        .then(|| self.cached_viewer_frame(&output_key))
-                        .flatten()
+                } else if let Some(frame) = (raster_admitted
+                    && matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable))
+                .then(|| self.cached_viewer_frame(&output_key))
+                .flatten()
                 {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -206,7 +211,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             self.playback_presentation_ticket(snapshot),
                         ))
                     }
-                } else if transport.is_playing() || self.viewer_cpu_fallback_active.get() {
+                } else if !raster_admitted
+                    || transport.is_playing()
+                    || self.viewer_cpu_fallback_active.get()
+                {
+                    // An external GPU Adapter owns the presentation ticket even
+                    // while paused. A raster cache hit or inline CPU composite
+                    // must not consume it before that owner submits its output.
                     // Playback presentation is a read/projection seam on the
                     // UI thread. A cache miss must be executed by the GPU
                     // candidate path (or a future bounded fallback worker),

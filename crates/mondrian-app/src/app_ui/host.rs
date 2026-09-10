@@ -528,6 +528,22 @@ impl AppUiHost {
         apply_preview_viewer_gpu_resource_decision(runtime, &decision.preview.viewer_gpu);
     }
 
+    /// Bind a replacement Window to a fresh still ticket after retiring its old carrier.
+    pub(crate) fn renew_still_frame_demand_after_output_retirement(
+        &self,
+    ) -> Result<(), mondrian_playback::PlaybackError> {
+        if self
+            .app_state
+            .borrow_mut()
+            .renew_still_frame_demand_after_output_retirement()?
+            .is_some()
+        {
+            self.mark_window_preview_pending();
+            self.preview_dirty.set(true);
+        }
+        Ok(())
+    }
+
     /// Consume an already-expired current demand before the Window builds a
     /// Viewer candidate.
     pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
@@ -796,8 +812,10 @@ impl AppUiHost {
         }
         let presentation = {
             let state = self.app_state.borrow();
-            self.preview_service
-                .presentation(state.preview_frame_execution_request(Instant::now()))
+            self.preview_service.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
+            )
         };
         match presentation {
             PreviewPresentationState::Ready(candidate) => {
@@ -2858,6 +2876,31 @@ mod tests {
         assert!(matches!(
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Loading
+        ));
+    }
+
+    #[test]
+    fn paused_window_projection_cannot_consume_the_gpu_presentation_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind persistent picture");
+        let ticket = state.pending_playback_frame_demand_identity().expect("pending picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("paused-gpu-ticket"),
+        );
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(ticket),
+            "CPU model projection must not settle the picture before the Window GPU owner submits it",
+        );
+        assert!(host.preflight_pending_viewer_gpu_presentation());
+        assert!(!matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Ready(ViewerFrameContent::Raster(_)),
         ));
     }
 
