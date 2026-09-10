@@ -214,6 +214,11 @@ impl PersistentReferenceOutputPump {
     ) -> Result<PhysicalReferenceStartEvidence, PersistentReferenceOutputError> {
         self.require_state(ReferencePumpState::Prepared)?;
         self.validate_binding(app)?;
+        if device.provider == ReferenceOutputProvider::Simulated {
+            return Err(self.latch_fault(
+                "simulated Reference Output cannot admit a physical endurance pump".to_owned(),
+            ));
+        }
         app.open_reference_output(
             device,
             self.request.clone(),

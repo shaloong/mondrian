@@ -363,3 +363,10 @@ A journal receipt proves the actual closed writer contents, not that shutdown
 met a deadline. The existing phase owner applies its original shutdown deadline
 to the complete native close/join operation. A late close may retain this raw
 diagnostic inventory but the phase remains failed and cannot qualify.
+
+The persistent physical endurance pump rejects a `Simulated` device descriptor
+before opening a Session or scheduling any preroll bundle. Its consuming fault
+state remains latched. Native-provider evidence, live external lock and Running
+state are still checked after actual hardware startup; rejecting a known
+simulation early does not replace those independent checks. Software Adapter
+tests never produce `PhysicalReferenceStartEvidence`.

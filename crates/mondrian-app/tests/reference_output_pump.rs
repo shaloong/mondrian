@@ -52,7 +52,7 @@ fn request() -> ReferenceOutputOpenRequest {
             hdr: None,
             audio_layout: AudioChannelLayout::Stereo,
         },
-        reference_policy: ReferenceOutputReferencePolicy::FreeRunAllowed,
+        reference_policy: ReferenceOutputReferencePolicy::RequireExternalLock,
         ancillary_policy: ReferenceOutputAncillaryPolicy::Disabled,
         preroll_frames: 2,
         max_scheduled_frames: 3,
@@ -93,33 +93,8 @@ fn install_simulated_output(
         .remove(0)
 }
 
-fn settle_reference_output(app: &mut AppState) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match app.discover_reference_output_devices() {
-            Ok(_) => break,
-            Err(mondrian_app::app::AppReferenceOutputError::TeardownInProgress)
-                if std::time::Instant::now() < deadline =>
-            {
-                std::thread::yield_now();
-            }
-            Err(error) => panic!("Reference Output stop did not settle: {error}"),
-        }
-    }
-    assert_eq!(
-        app.reference_output_teardown_status(),
-        AppReferenceOutputTeardownStatus::Idle
-    );
-    assert_eq!(
-        app.reference_output_diagnostics()
-            .expect("terminal Reference diagnostics")
-            .state,
-        ReferenceOutputState::Stopped
-    );
-}
-
 #[test]
-fn persistent_pump_schedules_full_reference_preroll_and_contiguous_public_audio() {
+fn persistent_pump_rejects_simulated_physical_evidence_before_device_open() {
     let root = FixtureRoot::new();
     let mut app = create_app(&root);
     let request = request();
@@ -127,24 +102,27 @@ fn persistent_pump_schedules_full_reference_preroll_and_contiguous_public_audio(
     let mut pump = PersistentReferenceOutputPump::prepare(&app, request, 0)
         .expect("prepare persistent Reference pump");
 
-    pump.open_preroll_and_start(&mut app, &device)
-        .expect("open, preroll, and start");
-    assert_eq!(pump.scheduled_frames(), 2);
-    assert_eq!(pump.next_frame_index(), 2);
-    assert_eq!(
-        app.reference_output_diagnostics().expect("diagnostics").state,
-        ReferenceOutputState::Running
-    );
-
-    pump.pump_next(&mut app).expect("schedule contiguous running frame");
-    assert_eq!(pump.scheduled_frames(), 3);
-    assert_eq!(pump.next_frame_index(), 3);
-    let diagnostics = app.reference_output_diagnostics().expect("diagnostics");
-    assert_eq!(diagnostics.completed_frames, 2);
-    assert_eq!(diagnostics.scheduled_audio_frames, 5_760);
+    let error = pump
+        .open_preroll_and_start(&mut app, &device)
+        .expect_err("simulation cannot produce physical start evidence");
+    assert!(error.to_string().contains("simulated"), "{error}");
+    assert_eq!(pump.scheduled_frames(), 0);
+    assert_eq!(pump.next_frame_index(), 0);
+    assert!(app.reference_output_binding().is_none());
+    assert!(app
+        .reference_output_diagnostics()
+        .is_some_and(|diagnostics| diagnostics.device_id.is_none()
+            && diagnostics.scheduled_audio_frames == 0));
 
     pump.begin_close(&mut app).expect("begin Reference close");
-    settle_reference_output(&mut app);
+    assert_eq!(
+        app.reference_output_teardown_status(),
+        AppReferenceOutputTeardownStatus::Idle
+    );
+    assert_eq!(
+        app.reference_output_diagnostics().expect("unopened diagnostics").state,
+        ReferenceOutputState::Disabled
+    );
     app.close_project().expect("close project");
 }
 
