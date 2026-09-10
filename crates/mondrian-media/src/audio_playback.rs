@@ -1290,6 +1290,7 @@ pub struct AudioPlayback {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AudioPlaybackPollPreflight {
     authority: AudioSamplePosition,
+    activation_authority: Option<AudioSamplePosition>,
     chunk_frames: i64,
     elapsed_skip_frames: Option<usize>,
     admission_target_frames: usize,
@@ -2076,6 +2077,7 @@ impl AudioPlayback {
 
     fn validate_poll_arithmetic(
         &self,
+        mode: AudioPlaybackMode,
         authority: AudioSamplePosition,
     ) -> Result<AudioPlaybackPollPreflight, AudioPlaybackError> {
         self.validate_sample_anchor(authority)?;
@@ -2099,9 +2101,43 @@ impl AudioPlayback {
             .checked_add(maximum_sample_span)
             .ok_or(AudioPlaybackError::CoordinateOverflow)?;
         let output_snapshot = self.output.snapshot();
+        // The owner trims PCM to the predicted audible activation point, not
+        // the earlier wall-clock poll. The host delay names the callback tail;
+        // it is also the first-frame time of the next equal-sized callback.
+        let activation_authority = match output_snapshot {
+            Some(snapshot) if mode.permits_consumption() && !snapshot.active => {
+                match (
+                    snapshot.last_callback_playback_delay,
+                    snapshot.last_callback_age,
+                ) {
+                    (Some(delay), Some(age)) if snapshot.callback_count > 0 => {
+                        let lead_frames = delay
+                            .saturating_sub(age)
+                            .as_nanos()
+                            .checked_mul(u128::from(self.config.sample_rate))
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?
+                            .div_ceil(1_000_000_000);
+                        let lead_frames = i64::try_from(lead_frames)
+                            .map_err(|_| AudioPlaybackError::CoordinateOverflow)?;
+                        let sample = authority
+                            .sample()
+                            .checked_add(lead_frames)
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?;
+                        sample
+                            .checked_add(maximum_sample_span)
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?;
+                        Some(AudioSamplePosition::new(sample, authority.rate()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => Some(authority),
+        };
         let elapsed_skip_frames = if output_snapshot.is_some_and(|snapshot| !snapshot.active) {
             self.generation_render_anchor
-                .map(|render_anchor| authority.samples_since(render_anchor))
+                .map(|render_anchor| {
+                    activation_authority.unwrap_or(authority).samples_since(render_anchor)
+                })
                 .transpose()?
                 .and_then(|delta| usize::try_from(delta).ok())
         } else {
@@ -2130,6 +2166,7 @@ impl AudioPlayback {
             .min(capacity_frames);
         Ok(AudioPlaybackPollPreflight {
             authority,
+            activation_authority,
             chunk_frames,
             elapsed_skip_frames,
             admission_target_frames,
@@ -2233,7 +2270,7 @@ impl AudioPlayback {
         // This is the sole fallible part of a poll. It reserves every possible
         // generation rotation and the largest sample-cursor advance before an
         // output event, completion, queue entry, or callback state is consumed.
-        let preflight = self.validate_poll_arithmetic(authority)?;
+        let preflight = self.validate_poll_arithmetic(mode, authority)?;
         let mut elapsed_skip_frames = preflight.elapsed_skip_frames;
         let mut admission_target_frames = preflight.admission_target_frames;
         let mut generation_rotations = 0_u64;
@@ -2577,6 +2614,8 @@ impl AudioPlayback {
                 self.activation_preroll_satisfied = true;
                 self.consecutive_render_generation_failures = 0;
                 if mode.permits_consumption()
+                    && generation_rotations == 0
+                    && let Some(activation_authority) = preflight.activation_authority
                     && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
                 {
                     let skip_frames =
@@ -2585,9 +2624,9 @@ impl AudioPlayback {
                         self.quiescence_token.ok_or(AudioPlaybackError::MissingQuiescenceToken)?;
                     match self.output.activate_after_discard(token, skip_frames) {
                         Ok(()) => {
-                            self.media_anchor = Some(preflight.authority);
+                            self.media_anchor = Some(activation_authority);
                             self.stream_media_anchor =
-                                Some((token.stream_generation, preflight.authority));
+                                Some((token.stream_generation, activation_authority));
                             self.recovery_preroll = false;
                         }
                         Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
@@ -3631,11 +3670,11 @@ mod tests {
             callback_consumed_frames: 0,
             active_callback_consumed_frames: 0,
             active_duration: None,
-            callback_count: 0,
+            callback_count: 1,
             underrun_frames: 0,
             last_callback_frames: 10,
-            last_callback_playback_delay: Some(Duration::from_millis(10)),
-            last_callback_age: None,
+            last_callback_playback_delay: Some(Duration::ZERO),
+            last_callback_age: Some(Duration::ZERO),
             buffered_frames: 0,
             stream_failed: false,
             active: false,
@@ -5232,6 +5271,45 @@ mod tests {
     }
 
     #[test]
+    fn hidden_preroll_activation_includes_the_remaining_device_delay() {
+        let (output, state) = fake_output();
+        {
+            let mut output = state.lock();
+            let snapshot = output.snapshot.as_mut().expect("output snapshot");
+            snapshot.callback_count = 1;
+            snapshot.last_callback_playback_delay = Some(Duration::from_millis(20));
+            snapshot.last_callback_age = Some(Duration::from_millis(5));
+        }
+        let mut playback = AudioPlayback::with_output(test_config(), output)
+            .expect("production Audio Playback owner");
+        playback.generation_render_anchor = Some(sample_position(0));
+        let preflight = playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(5))
+            .expect("bounded activation preflight");
+        assert_eq!(
+            preflight.elapsed_skip_frames,
+            Some(20),
+            "the first audible sample must include the remaining 15 ms device delay"
+        );
+        assert_eq!(preflight.activation_authority, Some(sample_position(20)));
+        let frozen = playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(5))
+            .expect("frozen preroll");
+        assert_eq!(frozen.elapsed_skip_frames, Some(5));
+        assert_eq!(
+            playback
+                .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(i64::MAX)),
+            Err(AudioPlaybackError::CoordinateOverflow)
+        );
+        state.lock().snapshot.as_mut().expect("output snapshot").last_callback_age = None;
+        assert!(playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(5))
+            .expect("unknown timing may fill but not activate")
+            .activation_authority
+            .is_none());
+    }
+
+    #[test]
     fn hidden_preroll_catch_up_uses_physical_capacity_and_negative_delta_waits() {
         let (output, _) = fake_output();
         let mut playback =
@@ -5239,12 +5317,12 @@ mod tests {
         playback.generation_render_anchor = Some(sample_position(0));
 
         let exact_boundary = playback
-            .validate_poll_arithmetic(sample_position(1_980))
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(1_980))
             .expect("skip plus preroll exactly fits two-second queue");
         assert_eq!(exact_boundary.elapsed_skip_frames, Some(1_980));
         assert_eq!(exact_boundary.admission_target_frames, 2_000);
         assert_eq!(
-            playback.validate_poll_arithmetic(sample_position(1_981)),
+            playback.validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(1_981)),
             Err(AudioPlaybackError::HiddenPrerollExceedsOutputCapacity {
                 skip_frames: 1_981,
                 preroll_frames: 20,
@@ -5254,7 +5332,7 @@ mod tests {
 
         playback.generation_render_anchor = Some(sample_position(10));
         let waiting = playback
-            .validate_poll_arithmetic(sample_position(5))
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(5))
             .expect("authority before hidden interval waits without unsigned wrap");
         assert_eq!(waiting.elapsed_skip_frames, None);
     }

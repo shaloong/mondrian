@@ -31,6 +31,27 @@ enum RealtimeAudioOutputStream {
     },
 }
 
+// Native timestamps name the first frame; callback counters name the end.
+fn callback_tail_playback_delay(
+    first_frame_delay: Duration,
+    frames: usize,
+    sample_rate: u32,
+) -> Result<Duration, mondrian_core::AudioTimeError> {
+    use mondrian_core::AudioTimeError;
+    if sample_rate == 0 {
+        return Err(AudioTimeError::ZeroSampleRate);
+    }
+    let rate = u128::from(sample_rate);
+    let frames = frames as u128;
+    let seconds = u64::try_from(frames / rate).map_err(|_| AudioTimeError::PositionOverflow)?;
+    let nanos = u64::try_from(((frames % rate) * 1_000_000_000).div_ceil(rate))
+        .map_err(|_| AudioTimeError::PositionOverflow)?;
+    Duration::from_secs(seconds)
+        .checked_add(Duration::from_nanos(nanos))
+        .and_then(|span| first_frame_delay.checked_add(span))
+        .ok_or(AudioTimeError::PositionOverflow)
+}
+
 /// 原始 PCM 音频缓冲区（f32 交错格式）
 #[derive(Debug, Clone)]
 pub struct AudioBuffer {
@@ -258,7 +279,9 @@ pub struct RealtimeAudioOutputSnapshot {
     pub underrun_frames: u64,
     /// Frame count requested by the latest callback.
     pub last_callback_frames: u32,
-    /// Predicted callback-to-device playback delay reported by the audio host.
+    /// Predicted delay until the endpoint of the latest callback reaches the
+    /// device. Native first-frame timestamps include the callback's frame span
+    /// here so this delay and the consumed-frame counter name the same point.
     pub last_callback_playback_delay: Option<Duration>,
     /// Runtime age of the latest callback, or `None` before the first callback.
     pub last_callback_age: Option<Duration>,
@@ -1112,6 +1135,21 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn callback_delay_names_the_counter_endpoint_on_the_exact_sample_grid() {
+        use std::time::Duration;
+        assert_eq!(
+            super::callback_tail_playback_delay(Duration::from_millis(20), 512, 48_000),
+            Ok(Duration::from_nanos(30_666_667))
+        );
+        assert_eq!(
+            super::callback_tail_playback_delay(Duration::ZERO, 0, 48_000),
+            Ok(Duration::ZERO)
+        );
+        assert!(super::callback_tail_playback_delay(Duration::ZERO, 1, 0).is_err());
+        assert!(super::callback_tail_playback_delay(Duration::MAX, 1, 48_000).is_err());
+    }
+
     use super::*;
 
     fn output_contract(

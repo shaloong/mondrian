@@ -285,8 +285,11 @@ fn write_frames(
 ) -> Result<(), String> {
     let padding = unsafe { audio_client.GetCurrentPadding() }
         .map_err(|error| format!("failed to sample WASAPI playback padding: {error}"))?;
-    let queued_delay = Duration::from_secs_f64(f64::from(padding) / f64::from(context.sample_rate));
-    let playback_delay = stream_latency.saturating_add(queued_delay);
+    let queued_frames = usize::try_from(u64::from(padding) + u64::from(frames))
+        .map_err(|_| "WASAPI callback endpoint frame extent overflowed".to_owned())?;
+    let playback_delay =
+        super::callback_tail_playback_delay(stream_latency, queued_frames, context.sample_rate)
+            .map_err(|error| format!("invalid WASAPI callback endpoint delay: {error}"))?;
     let samples = usize::try_from(frames)
         .ok()
         .and_then(|frames| frames.checked_mul(context.channels))

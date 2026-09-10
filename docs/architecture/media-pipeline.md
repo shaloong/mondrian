@@ -3851,3 +3851,18 @@ topology: Any for one worker, NonPlayback for two, and the dedicated Still lane
 when present. The existing per-context CpuStill slot isolates static decoding
 from moving-source locality. Affinity never creates an unserviced Still queue
 on a two-worker CPU budget, and does not increase the thread or cache budget.
+
+Audio output adapters normalize native first-frame playback timestamps to the
+callback endpoint before publishing telemetry. The delay-corrected device point
+therefore subtracts a delay for the same endpoint as the raw callback counter;
+CPAL/ALSA and WASAPI apply the same exact sample-span conversion. The raw counter
+remains unmodified and its regression is still invalid.
+
+Before enabling an inactive output, the existing Audio Playback owner advances
+its PCM trim target by the observed remaining endpoint delay. For equal callback
+periods that endpoint is the first-frame time of the next callback. The actual
+trim and media anchor are committed together under the existing quiescence token.
+Untimed preroll retains its original source position. Missing callback timing
+permits PCM preparation but cannot activate consumption; a generation rotation
+requires a fresh poll before activation. Arithmetic and physical queue-capacity
+checks precede mutation, and clock uncertainty/phase-admission limits do not change.

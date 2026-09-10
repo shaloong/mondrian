@@ -147,11 +147,23 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels.max(1) as usize;
+    let sample_rate = config.sample_rate;
     device.build_output_stream(
         *config,
         move |data: &mut [T], info| {
             let frames = data.len() / channels;
-            let playback_delay = callback_playback_delay(info);
+            let playback_delay = match super::callback_tail_playback_delay(
+                callback_playback_delay(info),
+                frames,
+                sample_rate,
+            ) {
+                Ok(delay) => delay,
+                Err(_) => {
+                    data.fill(T::EQUILIBRIUM);
+                    telemetry.stream_failed.store(true, Ordering::Release);
+                    return;
+                }
+            };
             let active_block = callback_control.begin_callback_block(&telemetry);
             if !active_block {
                 data.fill(T::EQUILIBRIUM);
