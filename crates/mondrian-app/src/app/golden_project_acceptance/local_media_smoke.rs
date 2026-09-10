@@ -156,6 +156,27 @@ fn run_profile(
             "contract": format!("{:?}", audio.contract),
             "stream_opened": false,
         });
+        {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = pollster::block_on(
+                mondrian_renderer::request_adapter_with_native_video_preference(
+                    &instance,
+                    &wgpu::RequestAdapterOptions {
+                        compatible_surface: None,
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        force_fallback_adapter: false,
+                        ..wgpu::RequestAdapterOptions::default()
+                    },
+                ),
+            )
+            .context("production GPU adapter is unavailable before App admission")?;
+            report["gpu_adapter_admission"] = json!({
+                "adapter": format!("{:?}", adapter.get_info()),
+                "device_created": false,
+            });
+        }
         let memory = SystemPlatformService.product_process_tree_memory();
         ensure!(
             memory.inventory_complete && memory.private_memory_bytes.is_some(),

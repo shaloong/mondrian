@@ -18,6 +18,10 @@ campaign admission before creating an App or starting any phase. A missing or
 incompatible default device produces durable NotRun evidence. That preflight
 does not open a stream or prove callback timing: the persistent production
 Playback owner must still open and qualify the live device during execution.
+The local smoke also discovers its adapter through the production renderer
+selection entrypoint before App admission. Missing adapters produce NotRun;
+discovery creates no device and cannot substitute for later device creation,
+queue completion, or shutdown evidence from the persistent GPU owner.
 
 Machine-plan `verifier_tools.bmx` binds raw2bmx/mxf2raw executable hashes,
 version-output hashes and a complete optional DLL inventory. AS-11 pre-start
