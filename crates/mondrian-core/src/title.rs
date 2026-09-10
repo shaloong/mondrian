@@ -370,12 +370,18 @@ fn enum_options(keys: &[&str]) -> Vec<ParameterEnumOption> {
         .collect()
 }
 
-/// Default concrete font dependency for the Windows Alpha product.
+/// Default concrete font dependency for authored Basic Titles on this platform.
+///
+/// Linux uses a declared CJK family that covers the default Chinese title text.
+/// A missing family remains an explicit rasterization error, never an implicit
+/// system-font fallback.
 pub const fn default_basic_title_font_family() -> &'static str {
     if cfg!(target_os = "windows") {
         "Microsoft YaHei"
     } else if cfg!(target_os = "macos") {
         "Helvetica"
+    } else if cfg!(target_os = "linux") {
+        "Noto Sans CJK SC"
     } else {
         "DejaVu Sans"
     }

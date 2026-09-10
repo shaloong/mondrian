@@ -1171,6 +1171,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_default_title_renders_authored_chinese_without_undeclared_fallback() {
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let output = rasterizer
+            .rasterize(
+                &evaluated("标题"),
+                Resolution::FHD,
+                0.20,
+                Resolution::HD,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("the default title must use its declared font");
+        assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    }
+
+    #[test]
     fn title_raster_is_tightly_cropped_straight_alpha_working_color() {
         let mut rasterizer = BasicTitleRasterizer::new();
         let output = rasterizer

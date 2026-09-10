@@ -842,6 +842,12 @@ font, and alignment values remain static until the product defines an explicit
 discrete-edit workflow. Unknown, missing, removed, type-divergent, or
 out-of-contract properties are rejected before an author snapshot commits.
 
+New Linux Basic Titles explicitly author `Noto Sans CJK SC`, which covers the
+default Chinese title text. This is a concrete font dependency, not permission
+to substitute fonts: a missing family or undeclared glyph fallback still fails
+closed in the shared Preview/Export rasterizer. Existing projects retain their
+authored font family.
+
 The Sequence `title_safe_margin` is a total width/height fraction: `0.20`
 means 10% per edge. Both action/title safe margins must be finite and in
 `[0, 1)`, so persisted settings can never yield NaN layout or consume the
