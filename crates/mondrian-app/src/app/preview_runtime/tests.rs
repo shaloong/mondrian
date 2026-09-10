@@ -15832,3 +15832,194 @@ fn completed_ticketless_successor_media_wakes_its_exact_evaluation() {
     );
     service.shutdown();
 }
+
+#[test]
+fn transport_retirement_removes_waits_for_canceled_queued_producers() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let key = test_media_key(1988);
+    let generation = service.scheduler.begin_generation();
+    assert!(matches!(
+        service.scheduler.request_with_binding(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            None,
+            None,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+    let sequence = Sequence::new("retired successor producer");
+    let evaluation_key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 1,
+        width: 320,
+        height: 180,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    service.evaluation_working_set.borrow_mut().insert_waiting(
+        evaluation_key,
+        MediaPreviewRequestPriority::Prefetch,
+        Arc::from([EvaluationDependency::MediaProducer(key)]),
+    );
+    state.pause().expect("pause");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
+    assert!(
+        service
+            .evaluation_working_set
+            .borrow_mut()
+            .waiting_for(evaluation_key, MediaPreviewRequestPriority::Prefetch)
+            .is_none(),
+        "a canceled queued producer cannot publish a completion to release its old wait"
+    );
+    service.shutdown();
+}
+
+#[test]
+fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
+    let frame_bytes = test_media_frame(1).reserved_cpu_bytes();
+    let mut store = test_cpu_frame_store(2, frame_bytes * 2, 4);
+    let video_key = test_media_key(963);
+    let static_key = test_media_key(964);
+    for (key, value) in [(video_key.clone(), 1), (static_key.clone(), 2)] {
+        assert!(admit_test_media_frame(
+            &mut store,
+            key,
+            test_media_frame(value),
+            MediaPreviewRequestPriority::Prefetch
+        ));
+    }
+    let demand = test_media_work_demand(0);
+    let video = store
+        .protected_media_frame(&video_key, demand)
+        .expect("current grant")
+        .expect("video");
+    let still = store
+        .protected_media_frame(&static_key, demand)
+        .expect("current grant")
+        .expect("static");
+    let shared_static_owner = still.clone();
+    let sequence = Sequence::new("completed two-source GPU picture");
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 0,
+        width: 1,
+        height: 1,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let output = PreviewOutputKey::new(sequence.id, 1, 1, test_preview_semantic_identity(963));
+    let elements = [video, still]
+        .into_iter()
+        .map(|frame| ResolvedPreviewElement::Media {
+            frame,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
+            prepared_heterogeneous_route: None,
+            frame_seed: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut set = EvaluationWorkingSet::new();
+    set.insert(
+        key,
+        Arc::new(ResolvedFrameEvaluation {
+            key,
+            output_key: output.clone(),
+            elements: elements.into(),
+            color_context: test_color_context(ColorSpace::Srgb),
+            resolved_quality: ResolvedFrameQuality::Full,
+            reuse_policy: EvaluationReusePolicy::Reusable,
+            dependencies: Arc::from([]),
+            render_cache_identity: None,
+        }),
+        1,
+    );
+    let intent = crate::app::preview_execution::PreviewPlaybackIntent::new(
+        mondrian_playback::PlaybackEngine::default().snapshot().epoch,
+        0,
+        0,
+    );
+    set.bind_gpu_output(key, output.clone(), intent);
+    assert_eq!(
+        store.media_prefetch_headroom().bytes,
+        0,
+        "two retained Current inputs fill optional cache"
+    );
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    *service.frame_store.borrow_mut() = store;
+    *service.evaluation_working_set.borrow_mut() = set;
+    state.pause().expect("pause");
+    service.synchronize_transport_intent(state.preview_transport_intent());
+    let mut store = service.frame_store.borrow_mut();
+    assert_eq!(
+        store.media_prefetch_headroom().bytes,
+        frame_bytes,
+        "old video is reclaimable while the shared static frame remains retained"
+    );
+    assert!(
+        store.media_frame(&video_key).is_some(),
+        "completion does not clear Frame Store"
+    );
+    assert!(store.media_frame(&static_key).is_some());
+    drop(shared_static_owner);
+    assert_eq!(store.media_prefetch_headroom().bytes, frame_bytes * 2);
+    drop(store);
+    service.shutdown();
+}
+
+#[test]
+fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() {
+    let frame_bytes = test_media_frame(1).reserved_cpu_bytes();
+    let mut store = test_cpu_frame_store(1, frame_bytes, 1);
+    let key = test_media_key(1989);
+    assert!(admit_test_media_frame(
+        &mut store,
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    let frame = store.media_frame(&key).expect("speculative resident");
+    let elements = vec![ResolvedPreviewElement::Media {
+        frame,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity"),
+        prepared_heterogeneous_route: None,
+        frame_seed: 0,
+    }];
+    let gpu_guards = resolved_preview_media_residency(&elements);
+    drop(elements);
+    assert_eq!(
+        store.diagnostics().protected_media_entries,
+        0,
+        "speculation must never acquire a Current grant"
+    );
+    assert_eq!(
+        store.media_prefetch_headroom().bytes,
+        0,
+        "a ticketless GPU input remains physically charged after evaluation retirement"
+    );
+    drop(gpu_guards);
+    assert_eq!(store.media_prefetch_headroom().bytes, frame_bytes);
+    assert!(
+        store.media_frame(&key).is_some(),
+        "GPU completion does not clear cached media"
+    );
+}

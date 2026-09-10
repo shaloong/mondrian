@@ -28,7 +28,7 @@ use mondrian_timeline::sequence::ProgramColorContext;
 use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentityBuilder,
 };
-use super::preview_media_frame::MediaPreviewFrame;
+use super::preview_media_frame::{MediaPreviewFrame, PreviewMediaResidencyGuard};
 
 pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
@@ -71,19 +71,19 @@ pub(crate) enum ResolvedPreviewTransitionInput {
     },
 }
 
-/// Retain every Store protection needed by one current Viewer candidate.
-pub(crate) fn resolved_preview_media_protections(
+/// Retain physical Store leases and any Current protection for one Viewer candidate.
+pub(crate) fn resolved_preview_media_residency(
     elements: &[ResolvedPreviewElement],
-) -> Vec<mondrian_playback::MediaFrameProtectionLease> {
+) -> Vec<PreviewMediaResidencyGuard> {
     let mut protections = Vec::new();
     for element in elements {
         match element {
             ResolvedPreviewElement::Media { frame, .. } => {
-                protections.extend(frame.residency_protection());
+                protections.extend(frame.residency_guard());
             }
             ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
-                protections.extend(transition_input_protection(left));
-                protections.extend(transition_input_protection(right));
+                protections.extend(transition_input_residency(left));
+                protections.extend(transition_input_residency(right));
             }
             ResolvedPreviewElement::SolidColor(_)
             | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
@@ -93,11 +93,11 @@ pub(crate) fn resolved_preview_media_protections(
     protections
 }
 
-fn transition_input_protection(
+fn transition_input_residency(
     input: &ResolvedPreviewTransitionInput,
-) -> Option<mondrian_playback::MediaFrameProtectionLease> {
+) -> Option<PreviewMediaResidencyGuard> {
     match input {
-        ResolvedPreviewTransitionInput::Media { frame, .. } => frame.residency_protection(),
+        ResolvedPreviewTransitionInput::Media { frame, .. } => frame.residency_guard(),
         ResolvedPreviewTransitionInput::Transparent
         | ResolvedPreviewTransitionInput::SolidColor(_)
         | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => None,

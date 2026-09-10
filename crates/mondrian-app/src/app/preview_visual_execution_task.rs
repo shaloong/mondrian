@@ -23,8 +23,8 @@ use mondrian_playback::{
     FrameDemandIdentity, FrameExecutionCancellation, FrameExecutionCancellationEvidence,
     FrameExecutionId, FrameRequestBinding, FrameRequestCompletion, FrameRequestResolution,
     FrameWorkBroker, FrameWorkClass, FrameWorkDeadline, FrameWorkPriority, FrameWorkReceive,
-    FrameWorkRequest, FrameWorkSubmission, FrameWorkerLane, MediaFrameProtectionLease,
-    MonotonicRuntimeClock, MonotonicTimestamp, PlaybackEpoch,
+    FrameWorkRequest, FrameWorkSubmission, FrameWorkerLane, MonotonicRuntimeClock,
+    MonotonicTimestamp, PlaybackEpoch,
 };
 use mondrian_renderer::{
     HeterogeneousCpuPrefixBatchError, HeterogeneousCpuPrefixBatchExecutor,
@@ -32,6 +32,7 @@ use mondrian_renderer::{
     HeterogeneousGpuResourceGrant,
 };
 
+use super::preview_media_frame::PreviewMediaResidencyGuard;
 use super::preview_work_notification::PreviewWorkNotifier;
 use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
@@ -67,7 +68,7 @@ enum VisualExecutionWork {
     HeterogeneousCpuPrefixBatch {
         request: HeterogeneousCpuPrefixBatchRequest,
         gpu_grant: HeterogeneousGpuResourceGrant,
-        media_residency_protections: Vec<MediaFrameProtectionLease>,
+        media_residency_guards: Vec<PreviewMediaResidencyGuard>,
     },
 }
 
@@ -90,14 +91,14 @@ impl VisualExecutionTaskPayload {
         epoch: PlaybackEpoch,
         request: HeterogeneousCpuPrefixBatchRequest,
         gpu_grant: HeterogeneousGpuResourceGrant,
-        media_residency_protections: Vec<MediaFrameProtectionLease>,
+        media_residency_guards: Vec<PreviewMediaResidencyGuard>,
     ) -> Self {
         Self {
             epoch,
             work: VisualExecutionWork::HeterogeneousCpuPrefixBatch {
                 request,
                 gpu_grant,
-                media_residency_protections,
+                media_residency_guards,
             },
             #[cfg(test)]
             control: VisualExecutionTestControl::default(),
@@ -199,7 +200,7 @@ pub(crate) enum VisualExecutionTaskOutput {
     HeterogeneousCpuPrefixBatch {
         output: HeterogeneousCpuPrefixBatchOutput,
         gpu_grant: HeterogeneousGpuResourceGrant,
-        media_residency_protections: Vec<MediaFrameProtectionLease>,
+        media_residency_guards: Vec<PreviewMediaResidencyGuard>,
     },
 }
 
@@ -211,14 +212,12 @@ impl VisualExecutionTaskOutput {
     ) -> (
         HeterogeneousCpuPrefixBatchOutput,
         HeterogeneousGpuResourceGrant,
-        Vec<MediaFrameProtectionLease>,
+        Vec<PreviewMediaResidencyGuard>,
     ) {
         match self {
-            Self::HeterogeneousCpuPrefixBatch {
-                output,
-                gpu_grant,
-                media_residency_protections,
-            } => (output, gpu_grant, media_residency_protections),
+            Self::HeterogeneousCpuPrefixBatch { output, gpu_grant, media_residency_guards } => {
+                (output, gpu_grant, media_residency_guards)
+            }
         }
     }
 }
@@ -862,7 +861,7 @@ fn execute_visual_payload(
         VisualExecutionWork::HeterogeneousCpuPrefixBatch {
             request,
             gpu_grant,
-            media_residency_protections,
+            media_residency_guards,
         } => {
             let mut observed_cancellation = None;
             let output = executor.execute(request, identity.generation, || {
@@ -875,7 +874,7 @@ fn execute_visual_payload(
                 Ok(output) => Ok(VisualExecutionTaskOutput::HeterogeneousCpuPrefixBatch {
                     output,
                     gpu_grant,
-                    media_residency_protections,
+                    media_residency_guards,
                 }),
                 Err(HeterogeneousCpuPrefixBatchError::Stopped { .. }) => Err(observed_cancellation
                     .map_or(VisualExecutionTaskFailure::LeaseUnavailable, |evidence| {

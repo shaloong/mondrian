@@ -26,6 +26,23 @@ use mondrian_renderer::{
 
 use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIdentity};
 
+/// Existing Frame Store leases carried by lowered GPU or asynchronous CPU work.
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewMediaResidencyGuard {
+    _resource: Option<mondrian_playback::MediaFrameResourceLease>,
+    _protection: Option<mondrian_playback::MediaFrameProtectionLease>,
+}
+
+impl PreviewMediaResidencyGuard {
+    /// Carry existing leases without changing their admission class or charge.
+    pub(crate) fn from_leases(
+        resource: Option<mondrian_playback::MediaFrameResourceLease>,
+        protection: Option<mondrian_playback::MediaFrameProtectionLease>,
+    ) -> Self {
+        Self { _resource: resource, _protection: protection }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
@@ -168,6 +185,13 @@ impl MediaPreviewFrame {
         usize::from(matches!(self.payload, MediaPreviewPayload::Native(_)))
     }
 
+    /// Whether this clone retains a Store allocation or a native decoder owner.
+    pub(crate) fn retains_media_residency(&self) -> bool {
+        self.residency_resource.is_some()
+            || self.residency_protection.is_some()
+            || self.decoder_resource_units() != 0
+    }
+
     /// Attach the Store-owned physical allocation shared by every frame clone.
     pub(crate) fn with_residency_resource(
         mut self,
@@ -198,11 +222,15 @@ impl MediaPreviewFrame {
         self
     }
 
-    /// Clone the protection carried by this current-frame payload.
-    pub(crate) fn residency_protection(
-        &self,
-    ) -> Option<mondrian_playback::MediaFrameProtectionLease> {
-        self.residency_protection.clone()
+    /// Retain physical residency without granting speculation Current protection.
+    pub(crate) fn residency_guard(&self) -> Option<PreviewMediaResidencyGuard> {
+        if self.residency_resource.is_none() && self.residency_protection.is_none() {
+            return None;
+        }
+        Some(PreviewMediaResidencyGuard::from_leases(
+            self.residency_resource.clone(),
+            self.residency_protection.clone(),
+        ))
     }
 
     pub(crate) fn width(&self) -> u32 {

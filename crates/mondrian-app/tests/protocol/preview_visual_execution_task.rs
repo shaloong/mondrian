@@ -145,7 +145,7 @@ fn payload(addresses: &[u32]) -> VisualExecutionTaskPayload {
 
 fn payload_with_protections(
     addresses: &[u32],
-    media_residency_protections: Vec<MediaFrameProtectionLease>,
+    media_residency_protections: Vec<PreviewMediaResidencyGuard>,
 ) -> VisualExecutionTaskPayload {
     VisualExecutionTaskPayload::heterogeneous_cpu_prefix_batch(
         epoch(),
@@ -158,7 +158,7 @@ fn payload_with_protections(
     )
 }
 
-fn media_protection() -> MediaFrameProtectionLease {
+fn media_protection() -> PreviewMediaResidencyGuard {
     type Store = mondrian_playback::PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, ()>;
     let mut store = Store::new(mondrian_playback::PreviewFrameStoreConfig::default());
     let demand = mondrian_playback::MediaWorkDemandId::for_preview_generation(epoch(), 1, 0);
@@ -176,9 +176,8 @@ fn media_protection() -> MediaFrameProtectionLease {
         .protected_media_frame(&1, demand)
         .expect("test media protection admitted")
         .expect("test media frame resident");
-    drop(resource);
     drop(store);
-    protection
+    PreviewMediaResidencyGuard::from_leases(Some(resource), Some(protection))
 }
 
 fn admission(

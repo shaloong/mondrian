@@ -281,6 +281,19 @@ impl EvaluationWorkingSet {
         self.waiting.clear();
     }
 
+    /// Retire producer waits when their scheduling generation is replaced.
+    /// Ready semantic evaluations and independent in-flight owners remain valid.
+    pub(crate) fn retire_producer_waits(&mut self) {
+        self.waiting.clear();
+    }
+
+    /// Retire scheduling-owned media leases while preserving resource-free semantics.
+    pub(crate) fn retire_media_work(&mut self) {
+        self.retire_producer_waits();
+        self.entries
+            .retain(|entry| !entry.evaluation.elements.iter().any(element_retains_media_residency));
+    }
+
     /// Bind a final monitor/scopes output to the exact evaluation and transport intent.
     pub(crate) fn bind_gpu_output(
         &mut self,
@@ -455,6 +468,18 @@ impl EvaluationWorkingSet {
             })
         });
         self.waiting.len() != waiting_before
+    }
+}
+
+fn element_retains_media_residency(element: &ResolvedPreviewElement) -> bool {
+    match element {
+        ResolvedPreviewElement::Media { frame, .. } => frame.retains_media_residency(),
+        ResolvedPreviewElement::CrossDissolve { left, right, .. } => [left, right]
+            .into_iter()
+            .any(|input| matches!(input.as_ref(), ResolvedPreviewTransitionInput::Media { frame, .. } if frame.retains_media_residency())),
+        ResolvedPreviewElement::SolidColor(_)
+        | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+        | ResolvedPreviewElement::Adjustment(_) => false,
     }
 }
 

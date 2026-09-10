@@ -141,7 +141,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 adaptive_hints,
             )
         };
-        self.last_current_media_admission.set(Some(admission.as_str()));
+        if self.last_current_media_admission.replace(Some(admission.as_str()))
+            != Some(admission.as_str())
+        {
+            tracing::debug!(
+                asset_id = %key.asset_id,
+                source_sample = ?key.source_sample(),
+                admission = admission.as_str(),
+                frame_store = ?self.frame_store.borrow().diagnostics(),
+                "Preview media admission changed"
+            );
+        }
         if let Some(wait) = media_wait_for_admission(admission) {
             // An obsolete generation has no physical producer and must be
             // retried from a fresh execution snapshot. Other pending outcomes

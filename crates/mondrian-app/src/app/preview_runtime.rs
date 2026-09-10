@@ -112,7 +112,7 @@ use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved;
 use crate::app::preview_viewer_plan::viewer_preview_cache_key_for_resolved_plan;
 use crate::app::preview_viewer_plan::{
     gpu_layer_for_cached_working, prepare_gpu_composite_layers_with_heterogeneous_effects,
-    resolved_preview_decode_execution, resolved_preview_media_protections,
+    resolved_preview_decode_execution, resolved_preview_media_residency,
     resolved_preview_presentation_quality, PreparedPreviewViewerGpuLayers,
     PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
 };
@@ -1218,13 +1218,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.scheduler.prune_obsolete();
             return state;
         }
-        let mut media_residency_protections =
-            resolved_preview_media_protections(&resolved.elements);
+        let mut media_residency_guards = resolved_preview_media_residency(&resolved.elements);
         let cached_working = resolved
             .render_cache_identity
             .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
         if cached_working.is_some() {
-            media_residency_protections.clear();
+            media_residency_guards.clear();
         }
         let mut cache_key = resolved.cache_key.clone();
         let program_output_boundary =
@@ -1417,7 +1416,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             transport.epoch(),
                             cpu_prefix,
                             gpu_grant,
-                            std::mem::take(&mut media_residency_protections),
+                            std::mem::take(&mut media_residency_guards),
                         ),
                     );
                     let submission = task.submit(admission);
@@ -1475,9 +1474,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 };
 
                 let (output, lease) = ready.into_parts();
-                let (output, gpu_grant, async_media_residency_protections) =
+                let (output, gpu_grant, async_media_residency_guards) =
                     output.into_heterogeneous_cpu_prefix_batch();
-                media_residency_protections.extend(async_media_residency_protections);
+                media_residency_guards.extend(async_media_residency_guards);
                 let completions = output.into_completions().into_vec();
                 if completions.len() != continuations.len()
                     || completions.iter().zip(continuations.iter()).any(
@@ -1618,7 +1617,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.playback_presentation_ticket(snapshot),
             decode_execution,
             heterogeneous_execution,
-            media_residency_protections,
+            media_residency_guards,
         )))
     }
 
@@ -2304,6 +2303,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
         if matches!(binding, PreviewGenerationBinding::Rotated(_)) {
+            self.evaluation_working_set.borrow_mut().retire_producer_waits();
             self.decode_residency_waiting.set(None);
             self.media_aggregate_capacity_waiting.set(false);
             self.media_existing_work_waiters.borrow_mut().clear();
@@ -2321,6 +2321,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn invalidate_preview_generation(&self) {
+        self.evaluation_working_set.borrow_mut().retire_producer_waits();
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();

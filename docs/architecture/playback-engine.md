@@ -2357,3 +2357,23 @@ then asks the existing Engine to renew a persistent still ticket. Unchanged
 geometry does nothing; initial geometry does not renew a ticket, and timed
 Playback deadlines remain unchanged. A consumed paused ticket can therefore not
 strand a resized Viewer behind the preflight that it needs to replace.
+
+Preview scheduling-generation replacement retires cached producer waits together
+with queued work. A canceled job that never started cannot send a completion to
+invalidate its old evaluation wait. Keeping that wait across pause, seek, or
+representation replacement would strand a later ticketless successor behind a
+nonexistent producer. Ordinary generation changes retain Ready semantic
+evaluations; a surviving physical job is rebound through the same scheduler when
+the new generation resolves its dependencies. Full transport or device work
+retirement also drops evaluation reuse owners that actually retain media residency,
+including CPU evaluations carrying old Current protection leases. Resource-free
+semantic evaluations remain reusable. Decoded Frame Store entries remain reusable
+and independently held in-flight clones remain charged until their own completion.
+This prevents new Priming from waiting for capacity pinned only by retired work.
+
+Lowered Viewer GPU frames and asynchronous heterogeneous CPU work carry the
+existing media allocation leases as well as any Current protection already owned
+by their inputs. Ticketless successors keep their ordinary allocation charged
+through completion without acquiring Current protection. Retiring an evaluation
+or evicting a Frame Store entry therefore cannot make in-flight source bytes
+disappear from the physical ledger; completion drops the same shared leases.

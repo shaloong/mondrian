@@ -185,6 +185,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn retire_all_preview_work(&self) -> (u64, u64) {
+        // Resolved CPU evaluations also carry old Current protection leases.
+        // Retire this reuse owner with the transport/device work, otherwise
+        // the next Priming window can wait for capacity held only by an
+        // obsolete evaluation. Frame Store entries and in-flight clones keep
+        // their independent physical ownership.
+        self.evaluation_working_set.borrow_mut().retire_media_work();
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();
