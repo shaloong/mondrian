@@ -403,3 +403,13 @@ claim full AS-11 picture/audio or physical broadcast qualification.
 Resident D3D12 queue entry points compile with their Windows consumer. Portable
 Export still lowers through the same visual closure and delivery contracts; the
 unavailable native resident target cannot be admitted as a Linux qualification.
+
+### Cancel/retry route ownership coverage
+
+Queue lifecycle regression coverage exercises cancellation followed by both
+same-route and different-route retries. A still-active attempt reserves its
+normalized route; after its terminal release, a retry receives a fresh JobId,
+generation and cancellation token. Canceling the old terminal identity cannot
+cancel the retry. This queue-level executor test is not media-artifact or physical
+delivery qualification; create-only publication and independent full decode/hash
+verification remain separate production boundaries.

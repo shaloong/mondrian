@@ -649,6 +649,60 @@ fn queued_and_running_cancellation_preserve_execution_boundary_evidence() {
 }
 
 #[test]
+fn cancelled_attempts_release_routes_without_reusing_retry_identity_or_cancellation() {
+    for reuse_target in [true, false] {
+        let root = tempfile::tempdir().expect("isolated output parent");
+        let original_path = root.path().join("deliverable.mp4");
+        let retry_path = if reuse_target {
+            original_path.clone()
+        } else {
+            root.path().join("retry.mp4")
+        };
+        let backend = GateExecutor::new([GateOutcome::Complete]);
+        let queue = RenderQueue::new_with_executor(backend.clone());
+        let original = queue
+            .enqueue(RenderJob::new(dummy_config(&original_path)))
+            .expect("admit original");
+        backend.wait_started(1);
+        let original_generation = queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == original)
+            .expect("original snapshot")
+            .generation;
+        assert!(matches!(
+            queue.enqueue(RenderJob::new(dummy_config(&original_path))),
+            Err(ExportAdmissionError::OutputPathBusy { .. }),
+        ));
+        assert_eq!(queue.cancel(original), ExportCancelOutcome::Requested);
+        wait_diagnostics(&queue, |diagnostics| diagnostics.cancellations == 1);
+        let retry = queue
+            .enqueue(RenderJob::new(dummy_config(&retry_path)))
+            .expect("admit retry after exact terminal release");
+        backend.wait_started(2);
+        assert_ne!(retry, original);
+        let retry_snapshot = queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == retry)
+            .expect("retry snapshot");
+        assert!(retry_snapshot.generation > original_generation);
+        assert_eq!(retry_snapshot.output_path, retry_path);
+        assert_eq!(queue.cancel(original), ExportCancelOutcome::AlreadyTerminal);
+        backend.release(1);
+        let terminal = wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+        assert_eq!(terminal.cancellations, 1);
+        assert!(terminal
+            .jobs
+            .iter()
+            .any(|job| job.id == retry && matches!(job.status, JobStatus::Completed)));
+        assert!(queue
+            .shutdown_until(Instant::now() + Duration::from_secs(2))
+            .all_resources_released());
+    }
+}
+
+#[test]
 fn completed_publication_wins_over_a_late_cancellation_request() {
     let backend = GateExecutor::committed([GateOutcome::Complete]);
     let queue = RenderQueue::new_with_executor(backend.clone());
@@ -799,12 +853,19 @@ fn progress_rejects_phase_and_unit_regression() {
 }
 
 #[test]
-fn packaging_is_a_cooperative_cancellation_boundary_before_publication() {
+fn render_encode_package_and_validation_are_cancellable_before_publication() {
     let gate = ExportExecutionGate::always_open_for_test();
     let cancellation = ExecutionCancellationToken::new();
     cancellation.cancel();
 
-    assert!(!gate.wait_at_boundary(ExportProgressPhase::Packaging, &cancellation));
+    for phase in [
+        ExportProgressPhase::Rendering,
+        ExportProgressPhase::Encoding,
+        ExportProgressPhase::Packaging,
+        ExportProgressPhase::Validating,
+    ] {
+        assert!(!gate.wait_at_boundary(phase, &cancellation), "{phase:?}");
+    }
     assert!(gate.wait_at_boundary(ExportProgressPhase::Publishing, &cancellation));
 }
 

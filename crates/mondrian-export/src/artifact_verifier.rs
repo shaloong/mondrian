@@ -887,6 +887,28 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_during_final_snapshot_read_cannot_publish_a_hash_receipt() {
+        struct CancelAtEof(ExecutionCancellationToken);
+        impl Read for CancelAtEof {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                self.0.cancel();
+                Ok(0)
+            }
+        }
+        let cancellation = ExecutionCancellationToken::new();
+        assert!(matches!(
+            copy_and_hash_bounded(
+                CancelAtEof(cancellation.clone()),
+                std::io::sink(),
+                1024,
+                &cancellation,
+                None,
+            ),
+            Err(IndependentExportArtifactVerificationError::Cancelled),
+        ));
+    }
+
+    #[test]
     fn independent_invalid_media_retains_probe_native_and_snapshot_closure() {
         let root = tempfile::tempdir().expect("source root");
         let path = root.path().join("invalid.mp4");
