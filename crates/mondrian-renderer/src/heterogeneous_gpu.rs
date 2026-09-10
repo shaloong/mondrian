@@ -3573,18 +3573,40 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(dispatches.len(), 3);
-        assert!(matches!(
-            dispatches[0],
-            PreparedHeterogeneousGpuDispatch::PointChain { .. }
-        ));
-        assert!(matches!(
-            dispatches[1],
-            PreparedHeterogeneousGpuDispatch::MaskCombine { mask_op: MaskOp::Difference, .. }
-        ));
-        assert!(matches!(
-            dispatches[2],
-            PreparedHeterogeneousGpuDispatch::MatteMix { .. }
-        ));
+        // These branches are independent. Their authored node identities may
+        // choose either topological order; the join must consume both exact
+        // outputs and wait for both producer tokens in either case.
+        let (original, corrected, correction_signal) = dispatches[..2]
+            .iter()
+            .find_map(|dispatch| match dispatch {
+                PreparedHeterogeneousGpuDispatch::PointChain { input, output, signal, .. } => {
+                    Some((*input, *output, *signal))
+                }
+                _ => None,
+            })
+            .expect("one correction branch before the join");
+        let (combined_mask, mask_signal) = dispatches[..2]
+            .iter()
+            .find_map(|dispatch| match dispatch {
+                PreparedHeterogeneousGpuDispatch::MaskCombine {
+                    output,
+                    signal,
+                    mask_op: MaskOp::Difference,
+                    ..
+                } => Some((*output, *signal)),
+                _ => None,
+            })
+            .expect("one Difference mask branch before the join");
+        let PreparedHeterogeneousGpuDispatch::MatteMix { base, graded, matte, waits, .. } =
+            dispatches[2]
+        else {
+            panic!("both independent branches must precede MatteMix");
+        };
+        assert_eq!(*base, original);
+        assert_eq!(*graded, corrected);
+        assert_eq!(*matte, combined_mask);
+        assert!(waits.contains(&correction_signal));
+        assert!(waits.contains(&mask_signal));
 
         let frame_bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
         let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(

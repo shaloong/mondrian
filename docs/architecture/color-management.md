@@ -1954,3 +1954,9 @@ from interpolated UVs can place an identity edge below 0.5 on Vulkan and can
 select a preceding integer grain coordinate. The exact fragment position keeps
 source admission and procedural effects on the same pixel grid as the CPU
 contract, without edge epsilons or relaxed color tolerances.
+
+Power Window GPU validation checks the actual DAG dependencies: the correction
+and mask-combination branches may execute in either independent topological
+order, but MatteMix must consume their exact materializations and completion
+tokens. The same validation retains the exact upload/device resource counts and
+the undersized-grant rejection; it does not impose an unrelated branch order.
