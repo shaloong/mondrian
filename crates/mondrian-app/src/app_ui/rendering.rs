@@ -376,13 +376,14 @@ impl AppUiFrameRenderer {
     }
 
     /// Resolve text draw commands, upload pending glyphs, and present a frame.
+    /// The acquired texture owns the physical attachment extent; a newer native
+    /// window-size observation cannot resize attachments for an older surface frame.
     pub fn render_draw_commands(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface: &wgpu::Surface<'_>,
         config: &wgpu::SurfaceConfiguration,
-        screen_size: (u32, u32),
         commands: Vec<DrawCommand>,
     ) -> AppUiFrameResult {
         let frame_started = Instant::now();
@@ -397,63 +398,71 @@ impl AppUiFrameRenderer {
             mondrian_ui_renderer::GlyphUploadStats::default()
         };
 
-        match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(output) => {
-                let view = output.texture.create_view(&Default::default());
-                let render_stats = self.ui_renderer.render_resolved_commands(
-                    device,
-                    queue,
-                    &view,
-                    &commands,
-                    screen_size,
-                );
-                queue.present(output);
-                presented_result(
-                    frame_started,
-                    glyph_upload_stats.upload_bytes,
-                    uploaded_glyphs,
-                    text_stats.missing_glyphs,
-                    render_stats,
-                    None,
-                )
-            }
+        let (output, backend_event) = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(output) => (output, None),
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
-                let view = output.texture.create_view(&Default::default());
-                let render_stats = self.ui_renderer.render_resolved_commands(
-                    device,
-                    queue,
-                    &view,
-                    &commands,
-                    screen_size,
-                );
-                queue.present(output);
-                presented_result(
-                    frame_started,
-                    glyph_upload_stats.upload_bytes,
-                    uploaded_glyphs,
-                    text_stats.missing_glyphs,
-                    render_stats,
-                    Some(AppUiBackendEvent::SurfaceSuboptimal),
-                )
+                (output, Some(AppUiBackendEvent::SurfaceSuboptimal))
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
-                AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceTimeout }
+                return AppUiFrameResult::Skipped {
+                    backend_event: AppUiBackendEvent::SurfaceTimeout,
+                };
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
-                AppUiFrameResult::Skipped { backend_event: AppUiBackendEvent::SurfaceOccluded }
+                return AppUiFrameResult::Skipped {
+                    backend_event: AppUiBackendEvent::SurfaceOccluded,
+                };
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(device, config);
-                AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceOutdated }
+                return AppUiFrameResult::Reconfigured {
+                    backend_event: AppUiBackendEvent::SurfaceOutdated,
+                };
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(device, config);
-                AppUiFrameResult::Reconfigured { backend_event: AppUiBackendEvent::SurfaceLost }
+                return AppUiFrameResult::Reconfigured {
+                    backend_event: AppUiBackendEvent::SurfaceLost,
+                };
             }
-            _ => AppUiFrameResult::Skipped {
-                backend_event: AppUiBackendEvent::SurfaceUnavailable,
-            },
+            _ => {
+                return AppUiFrameResult::Skipped {
+                    backend_event: AppUiBackendEvent::SurfaceUnavailable,
+                }
+            }
+        };
+        let extent = output.texture.size();
+        if (extent.width, extent.height) != (config.width, config.height) {
+            tracing::debug!(
+                acquired_width = extent.width,
+                acquired_height = extent.height,
+                configured_width = config.width,
+                configured_height = config.height,
+                "discarding an outdated surface extent before recording UI attachments"
+            );
+            drop(output);
+            surface.configure(device, config);
+            return AppUiFrameResult::Reconfigured {
+                backend_event: AppUiBackendEvent::SurfaceOutdated,
+            };
         }
+        let view = output.texture.create_view(&Default::default());
+        let render_stats = self.ui_renderer.render_resolved_commands(
+            device,
+            queue,
+            &view,
+            &commands,
+            (extent.width, extent.height),
+        );
+        queue.present(output);
+        presented_result(
+            frame_started,
+            glyph_upload_stats.upload_bytes,
+            uploaded_glyphs,
+            text_stats.missing_glyphs,
+            render_stats,
+            backend_event,
+        )
     }
 }
 

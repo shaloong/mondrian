@@ -4054,13 +4054,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             session.last_cursor,
                             &session.router,
                         );
-                        let size = session.window.inner_size();
                         let frame_result = session.frame_renderer.render_draw_commands(
                             &device,
                             &queue,
                             &session.surface,
                             &session.config,
-                            (size.width, size.height),
                             encoder.finish(),
                         );
                         if let Some(diagnostics) =

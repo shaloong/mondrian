@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 TreeWalker::paint_clipped(&root, &mut enc, &theme, bounds);
                 let cmds = enc.finish();
                 if frame_renderer
-                    .render_draw_commands(&dev, &q, &surf, &cfg, (sz.width, sz.height), cmds)
+                    .render_draw_commands(&dev, &q, &surf, &cfg, cmds)
                     .needs_follow_up_redraw()
                 {
                     w.request_redraw();

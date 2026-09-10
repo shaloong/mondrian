@@ -1586,13 +1586,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
 
-                let size = window.inner_size();
                 let frame_result = frame_renderer.render_draw_commands(
                     &device,
                     &queue,
                     &surface,
                     &config,
-                    (size.width, size.height),
                     encoder.finish(),
                 );
                 if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)

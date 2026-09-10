@@ -1,5 +1,14 @@
 # UI System
 
+The acquired surface texture owns each UI frame's physical attachment extent.
+`AppUiFrameRenderer` uses that extent for MSAA, resolve, carrier targets, and
+viewport uniforms; callers cannot supply an independently sampled window size.
+On X11 a native resize can become observable before its resize event updates
+the configured surface. Combining that newer window size with the older acquired
+texture would create incompatible attachments. An acquired extent that disagrees
+with the configured surface is dropped before reconfiguration and returns the
+existing typed `SurfaceOutdated` follow-up instead of recording or presenting it.
+
 Preview's native wake Adapter installs its coalesced EventLoopProxy callback
 through the Work Watch registration owner. Failed admission returns the original
 reason and unaccepted callback to Window; it is not silently treated as a working
