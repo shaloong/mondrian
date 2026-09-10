@@ -328,6 +328,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 retained_cpu_bytes,
                                 priority = ?result.priority,
                                 owns_pending_playback_demand,
+                                frame_store = ?self.frame_store.borrow().diagnostics(),
                                 "decoded Preview result could not transfer its physical residency lease"
                             );
                             let reason = if residency_admission.is_none() {

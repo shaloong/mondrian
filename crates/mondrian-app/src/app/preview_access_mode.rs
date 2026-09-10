@@ -68,7 +68,9 @@ impl MediaPreviewKey {
     /// Residency is charged at the decode representation's own extent
     /// (source or proxy raster), never a consumer/output extent.
     pub(crate) const fn residency_resolution(&self) -> Resolution {
-        self.decode.representation().extent_for_source(self.source_resolution)
+        self.decode
+            .representation()
+            .extent_for_source(self.decode.source().source_extent())
     }
 
     /// Build one exact CPU-addressable key for App unit tests.

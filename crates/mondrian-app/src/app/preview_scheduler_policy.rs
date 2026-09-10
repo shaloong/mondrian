@@ -49,9 +49,10 @@ const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
 /// CPU bytes include both the retained source payload and the lazily
 /// materialized working float frame. A renderer-requested compact YUV source
 /// has no CPU working fallback, so its exact plane footprint is reserved
-/// without inventing a full RGBA float payload. A native-surface identity has
-/// no CPU payload or fallback under that same key; it reserves only one
-/// decoder-surface unit.
+/// without inventing a full RGBA float payload. A strict native request
+/// reserves only one decoder-surface unit. A preferred native request also
+/// reserves the source-plus-working CPU payload permitted by Media's bounded
+/// software recovery, before lookahead planning or producer admission.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaPreviewResidencyReservation {
     pub(crate) entries: usize,
@@ -60,10 +61,12 @@ pub(crate) struct MediaPreviewResidencyReservation {
 }
 
 impl MediaPreviewResidencyReservation {
-    fn for_key(key: &MediaPreviewKey, _hardware: PreviewHardwareDecodeRequest) -> Self {
+    fn for_key(key: &MediaPreviewKey, hardware: PreviewHardwareDecodeRequest) -> Self {
         let resolution = key.residency_resolution();
         let pixels = (resolution.width as usize).saturating_mul(resolution.height as usize);
-        let cpu_bytes = if key.decode.representation().is_native_surface() {
+        let cpu_bytes = if key.decode.representation().is_native_surface()
+            && hardware == PreviewHardwareDecodeRequest::RequireGpuResident
+        {
             0
         } else if key.decode.representation().is_compact_cpu_yuv() {
             key.decode.source().compact_cpu_yuv_hint().map_or_else(
@@ -642,11 +645,33 @@ mod tests {
     }
 
     #[test]
-    fn native_surface_reservation_charges_only_the_decoder_surface() {
+    fn preferred_native_reservation_covers_software_recovery_payload() {
         let key = four_k_native_surface_key();
         let reservation = media_preview_residency_reservation(
             &key,
             PreviewHardwareDecodeRequest::PreferGpuResident,
+        );
+        assert_eq!(reservation.cpu_bytes, 3840usize * 2160 * 32);
+        assert_eq!(reservation.decoder_resource_units, 1);
+    }
+
+    #[test]
+    fn native_reservation_uses_physical_source_instead_of_timeline_extent() {
+        let mut key = four_k_native_surface_key();
+        key.source_resolution = mondrian_core::Resolution { width: 640, height: 360 };
+        let reservation = media_preview_residency_reservation(
+            &key,
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+        );
+        assert_eq!(reservation.cpu_bytes, 3840usize * 2160 * 32);
+    }
+
+    #[test]
+    fn native_surface_reservation_charges_only_the_decoder_surface() {
+        let key = four_k_native_surface_key();
+        let reservation = media_preview_residency_reservation(
+            &key,
+            PreviewHardwareDecodeRequest::RequireGpuResident,
         );
         assert_eq!(reservation.entries, 1);
         assert_eq!(reservation.cpu_bytes, 0);

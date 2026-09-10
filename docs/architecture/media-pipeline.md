@@ -1211,9 +1211,19 @@ completion, external, and protected ownership remains charged, while
 Store-exclusive LRU ownership is treated as releasable. Each new key consumes a
 conservative source-plus-working/CPU-fallback reservation and, for native
 requests, one decoder-resource unit from the planning copy. Budget exhaustion
+is computed with CPU fallback bytes for `PreferGpuResident`: Linux hardware
+initialization may return a software float frame under that preference, so a
+zero-byte reservation would admit a prefix whose completed payloads cannot fit.
+Only `RequireGpuResident`, which rejects software recovery, reserves a native
+surface without CPU fallback bytes. Successful native completion releases the
+unused CPU reservation through the existing Frame Store lease commit. Exhaustion
 shortens the speculative prefix even when the temporal horizon and queue still
 have slots. Prefetch and preroll share this same near-to-far prepared-closure
-planner. It holds short-lived frame-allocation leases for accepted nearer
+planner. Reservation extents come from the frozen physical decode source,
+including a selected proxy artifact, before applying representation reduction.
+The original Asset's logical Timeline extent remains presentation geometry and
+cannot size a proxy allocation: a proxy may be either larger or smaller.
+The planner holds short-lived frame-allocation leases for accepted nearer
 resident keys while planning and admitting missing work, so the headroom
 projection cannot release those residents in favor of farther requests.
 Pending Broker keys retain their existing physical charge and are not counted
