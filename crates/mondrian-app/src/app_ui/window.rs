@@ -6671,6 +6671,10 @@ fn prepare_viewer_gpu_preview(
                         .promote_prepared_exact(&output_key);
                     let exact_output_available = promotion.exact_output_available();
                     if let Some(previous) = promotion.into_retired() {
+                        let _ = host.clear_external_viewer_frame_for_artifact(
+                            previous.output_key(),
+                            previous.artifact().as_str(),
+                        );
                         session.frame_renderer.unregister_external_texture(previous.artifact());
                         drop(previous);
                     }
@@ -6688,7 +6692,10 @@ fn prepare_viewer_gpu_preview(
             if physical_is_exact
                 && session.viewer_gpu_device_progress.generation_terminal().is_none()
             {
-                let _ = host.present_current_viewer_output(candidate);
+                let _ = host.present_current_viewer_output(
+                    candidate,
+                    crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
+                );
             } else {
                 let _ = retire_window_published_gpu_output(session, host);
                 host.clear_external_viewer_frame();

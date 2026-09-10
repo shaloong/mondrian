@@ -1764,6 +1764,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.execution.borrow().exact_current_output().map(|(key, _)| key.clone())
     }
 
+    /// Clone the exact active-generation artifact for Adapter presentation.
+    ///
+    /// This read-only observation neither reactivates stale output nor consumes
+    /// a frame demand. The Adapter must still validate its physical slot and
+    /// publish through the existing Playback ticket seam.
+    pub(crate) fn registered_exact_current_gpu_output_artifact(
+        &self,
+    ) -> Option<(PreviewOutputKey, O)> {
+        self.execution
+            .borrow()
+            .exact_current_output()
+            .map(|(key, output)| (key.clone(), output.clone()))
+    }
+
     /// Prepared GPU output identity still relevant to the current transport
     /// coordinate.
     ///

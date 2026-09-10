@@ -2382,3 +2382,13 @@ The standalone `preview_visual_protocol` test target compiles the same
 `preview_media_residency` lease carrier as App and its visual worker. The carrier
 is independent of decoded-frame/color adaptation, so protocol tests retain real
 Frame Store resource and protection leases without a substitute payload type.
+
+Window `Current` GPU presentation reads the exact active-generation artifact
+from the production Preview owner after validating the physical Window slot.
+It does not select pixels from the Widget's previous visible frame. Promoting a
+prepared physical output revokes the old Widget artifact before unregistering
+its texture, including when the replacement later loses ticket authority.
+CPU projection and GPU publication share the existing presentation-carrier
+discriminator and Playback commit seam. Already-visible timing is reusable
+only when the exact physical artifact was actually retained visibly; a new
+buffer observes the ordinary presentation deadline.

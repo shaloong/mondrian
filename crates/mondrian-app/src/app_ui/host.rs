@@ -33,8 +33,8 @@ use crate::app::preview_execution::{
 };
 use crate::app::preview_runtime::PreviewRuntimeShutdownEvidence;
 use crate::app::preview_runtime::{
-    PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationState,
-    PreviewVisualGpuCompletionDisposition,
+    PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationCarrier,
+    PreviewPresentationState, PreviewVisualGpuCompletionDisposition,
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
@@ -640,7 +640,10 @@ impl AppUiHost {
         disposition
     }
 
-    /// Complete a candidate that reuses the already published Window output.
+    /// Complete a current candidate using its production presentation carrier.
+    /// GPU candidates use Preview's exact active-generation artifact, not the
+    /// Widget's potentially retired previous frame. CPU reuse retains its
+    /// existing projection. Both commit through the same Playback ticket seam.
     ///
     /// The candidate carries the ticket captured when Preview proved that
     /// retained output exact for the new intent. A stale or missing ticket can
@@ -648,9 +651,12 @@ impl AppUiHost {
     pub(crate) fn present_current_viewer_output(
         &self,
         candidate: PreviewPresentationCandidate<()>,
+        carrier: PreviewPresentationCarrier,
     ) -> FramePresentationDisposition {
         let visible_changed = Cell::new(false);
-        let disposition = if let Some((next, changed)) = self.prepared_retained_window_preview() {
+        let disposition = if let Some((next, changed, artifact_was_visible)) =
+            self.prepared_current_window_preview(carrier)
+        {
             let clear_external_gpu = !window_preview_state_retains_external_gpu(&next);
             let publication = FramePresentationPublication::prepared(|| {
                 if clear_external_gpu {
@@ -660,6 +666,7 @@ impl AppUiHost {
                 visible_changed.set(changed);
             });
             if candidate.was_already_visible()
+                && artifact_was_visible
                 && let Some(already_visible_at) = self.last_playback_frame_advance_at.get()
             {
                 self.app_state.borrow_mut().finalize_already_visible_frame_presentation(
@@ -703,6 +710,37 @@ impl AppUiHost {
         );
         self.finish_window_presentation_disposition(disposition, visible_changed.get());
         disposition
+    }
+
+    fn prepared_current_window_preview(
+        &self,
+        carrier: PreviewPresentationCarrier,
+    ) -> Option<(ViewerPreviewState, bool, bool)> {
+        if carrier == PreviewPresentationCarrier::CpuRaster {
+            return self
+                .prepared_retained_window_preview()
+                .map(|(next, changed)| (next, changed, true));
+        }
+        let (_, output) = self.preview_service.registered_exact_current_gpu_output_artifact()?;
+        let visible = self.window_preview_state.borrow();
+        let artifact_was_visible = matches!(
+            &*visible,
+            ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(frame))
+                | ViewerPreviewState::Stale(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(frame))
+                if frame == &output
+        );
+        let changed = !matches!(
+            &*visible,
+            ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(frame))
+                if frame == &output
+        );
+        Some((
+            ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(
+                output,
+            )),
+            changed,
+            artifact_was_visible,
+        ))
     }
 
     fn prepared_retained_window_preview(&self) -> Option<(ViewerPreviewState, bool)> {
@@ -2877,6 +2915,183 @@ mod tests {
     }
 
     #[test]
+    fn promoted_gpu_current_replaces_the_retired_visible_artifact() {
+        let host = workspace_host_without_preview_workers("promoted-gpu-widget-artifact");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind still demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("current demand")
+        };
+        let intent = host.app_state.borrow().preview_transport_intent();
+        host.preview_service.synchronize_transport_intent(intent);
+        let key = crate::app::preview_execution::PreviewOutputKey::new(
+            mondrian_core::types::SequenceId::new(),
+            1,
+            1,
+            crate::app::preview_execution::PreviewSemanticIdentity::from_test_fingerprint([19; 32]),
+        );
+        let output = |name| {
+            ViewerExternalTextureFrame::new_spatial(
+                name,
+                ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
+            )
+            .expect("external texture")
+        };
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output("retired-frame-zero")),
+        ));
+        host.preview_service
+            .register_gpu_output(key.clone(), output("promoted-frame-one"));
+        assert_eq!(host.exact_current_viewer_gpu_output_key(), Some(key));
+        let (_, changed, was_visible) = host
+            .prepared_current_window_preview(PreviewPresentationCarrier::ExternalGpu)
+            .expect("exact prepared artifact");
+        assert!(changed);
+        assert!(
+            !was_visible,
+            "a distinct buffer cannot inherit old visibility timing"
+        );
+        let disposition = host.present_current_viewer_output(
+            PreviewPresentationCandidate::new((), Some(ticket)),
+            PreviewPresentationCarrier::ExternalGpu,
+        );
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert_eq!(
+            window_preview_state_external_texture_key(&host.window_preview_state.borrow()),
+            Some("promoted-frame-one"),
+            "the exact prepared artifact replaced the old physical slot; Widget cannot retain its retired key",
+        );
+        let (_, changed, was_visible) = host
+            .prepared_current_window_preview(PreviewPresentationCarrier::ExternalGpu)
+            .expect("same exact visible artifact");
+        assert!(!changed);
+        assert!(was_visible);
+        host.preview_dirty.set(false);
+        assert_eq!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::new((), None),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert_eq!(
+            window_preview_state_external_texture_key(&host.window_preview_state.borrow()),
+            Some("promoted-frame-one"),
+            "rejection cannot replace the admitted artifact",
+        );
+    }
+
+    #[test]
+    fn demand_free_current_gpu_output_does_not_self_schedule_preview_refresh() {
+        let host = workspace_host_without_preview_workers("demand-free-gpu-idempotence");
+        {
+            let mut state = host.app_state.borrow_mut();
+            if let Some(ticket) = state.playback_frame_presentation_ticket(
+                mondrian_playback::FramePresentationQuality::Ready,
+            ) {
+                assert!(state.complete_frame_presentation(ticket, Instant::now()).is_some());
+            }
+        }
+        host.preview_service
+            .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
+        seed_window_gpu_output(&host);
+        let (_, output) = host
+            .preview_service
+            .registered_exact_current_gpu_output_artifact()
+            .expect("exact registered output");
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output),
+        ));
+        host.preview_dirty.set(false);
+        for _ in 0..2 {
+            assert_eq!(
+                host.present_current_viewer_output(
+                    PreviewPresentationCandidate::new((), None),
+                    PreviewPresentationCarrier::ExternalGpu,
+                ),
+                FramePresentationDisposition::NoDemand
+            );
+            assert!(
+                !host.preview_dirty.get(),
+                "unchanged physical output must not self-schedule"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_current_without_exact_preview_artifact_cannot_publish_widget_history() {
+        let host = workspace_host_without_preview_workers("gpu-current-missing-artifact");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("ticket")
+        };
+        let old = ViewerExternalTextureFrame::new_spatial(
+            "old-widget-only",
+            ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
+        )
+        .expect("frame");
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(old),
+        ));
+        assert_eq!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::new((), Some(ticket)),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::OutputRejected
+        );
+    }
+
+    #[test]
+    fn retiring_old_widget_artifact_preserves_same_semantic_replacement() {
+        let host = workspace_host_without_preview_workers("gpu-promoted-artifact-retirement");
+        let key = crate::app::preview_execution::PreviewOutputKey::new(
+            mondrian_core::types::SequenceId::new(),
+            1,
+            1,
+            crate::app::preview_execution::PreviewSemanticIdentity::from_test_fingerprint([20; 32]),
+        );
+        let output = |name| {
+            ViewerExternalTextureFrame::new_spatial(
+                name,
+                ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
+            )
+            .expect("frame")
+        };
+        host.preview_service.register_gpu_output(key.clone(), output("replacement"));
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output("retired")),
+        ));
+        assert!(host.clear_external_viewer_frame_for_artifact(&key, "retired"));
+        assert!(host.has_external_viewer_frame_artifact(&key, "replacement"));
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Loading
+        ));
+        let (next, changed, was_visible) = host
+            .prepared_current_window_preview(PreviewPresentationCarrier::ExternalGpu)
+            .expect("the new exact artifact survives old physical retirement");
+        assert_eq!(
+            window_preview_state_external_texture_key(&next),
+            Some("replacement")
+        );
+        assert!(changed);
+        assert!(!was_visible);
+    }
+
+    #[test]
     fn exact_gpu_artifact_revocation_clears_its_visible_widget_projection() {
         let host = workspace_host_without_preview_workers("exact-gpu-artifact-revocation");
         let key = crate::app::preview_execution::PreviewOutputKey::new(
@@ -3028,8 +3243,10 @@ mod tests {
         seed_window_gpu_output(&host);
         host.window_preview_state.replace(test_window_raster("retained-current"));
 
-        let disposition =
-            host.present_current_viewer_output(PreviewPresentationCandidate::new((), Some(ticket)));
+        let disposition = host.present_current_viewer_output(
+            PreviewPresentationCandidate::new((), Some(ticket)),
+            PreviewPresentationCarrier::CpuRaster,
+        );
 
         assert!(matches!(
             disposition,
@@ -3099,8 +3316,10 @@ mod tests {
         };
         host.window_preview_state.replace(test_window_raster("candidate-a"));
 
-        let disposition = host
-            .present_current_viewer_output(PreviewPresentationCandidate::new((), Some(ticket_a)));
+        let disposition = host.present_current_viewer_output(
+            PreviewPresentationCandidate::new((), Some(ticket_a)),
+            PreviewPresentationCarrier::CpuRaster,
+        );
 
         assert_eq!(disposition, FramePresentationDisposition::LostAuthority);
         assert_eq!(
@@ -3174,8 +3393,10 @@ mod tests {
         host.preview_dirty.set(false);
 
         for _ in 0..2 {
-            let disposition =
-                host.present_current_viewer_output(PreviewPresentationCandidate::new((), None));
+            let disposition = host.present_current_viewer_output(
+                PreviewPresentationCandidate::new((), None),
+                PreviewPresentationCarrier::CpuRaster,
+            );
             assert_eq!(disposition, FramePresentationDisposition::NoDemand);
             assert!(
                 !host.preview_dirty.get(),
