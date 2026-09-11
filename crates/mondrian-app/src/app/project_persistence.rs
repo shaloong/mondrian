@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 
 pub(super) const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
@@ -536,7 +535,6 @@ pub struct ProjectPersistenceService {
     completion_rx: Receiver<ProjectPersistenceCompletion>,
     queued: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
-    #[cfg(any(test, feature = "validation"))]
     cumulative_worker_failures: Arc<AtomicU64>,
     worker_unexpected_exit_recorded: AtomicBool,
     session_admission: HashMap<AuthoringSessionId, SessionAdmission>,
@@ -596,7 +594,6 @@ impl ProjectPersistenceService {
             completion_rx,
             queued,
             pending,
-            #[cfg(any(test, feature = "validation"))]
             cumulative_worker_failures,
             worker_unexpected_exit_recorded: AtomicBool::new(false),
             session_admission: HashMap::new(),
@@ -972,7 +969,6 @@ impl ProjectPersistenceService {
         let _ = self.worker_tx.send(ProjectPersistenceWorkerMessage::Shutdown);
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(super) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,

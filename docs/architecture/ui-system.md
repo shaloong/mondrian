@@ -2369,3 +2369,14 @@ multiline layouts. Unknown spans and all non-whitespace glyphs still request
 atlas images, and rasterization/allocation failures remain missing-glyph
 diagnostics. Whitespace is neither a failed image nor a fabricated resolved
 image in the counters.
+
+### Ordinary Window consuming shutdown
+
+The ordinary Window entrypoint consumes the App owner after GPU publication and
+UI-service closure through the same `AppState::shutdown_for_endurance` implementation
+used by qualification. Those lifecycle seams are available without the validation
+feature. The existing 750 ms product deadline is shared without renewal. Audio,
+Export, Reference Output, media/background workers, Project persistence and cache
+receipts must all report closure; incomplete App closure returns an error from the
+Window entrypoint instead of accepting ordinary `Drop` as success. Validation may
+return the exact App owner to its caller for reuse and later consuming shutdown.

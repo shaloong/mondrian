@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
-#[cfg(any(test, feature = "validation"))]
 use std::time::Instant;
 
 use mondrian_assets::AssetRecord;
@@ -24,7 +23,6 @@ use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
 
 use self::backend::{MediaProxyGenerationBackend, ProxyGenerationBackend};
-#[cfg(any(test, feature = "validation"))]
 use self::state::clear_after_workers_terminated;
 use self::state::{
     bind_project_generation, cancel_for_shutdown, diagnostics_snapshot, preflight_request,
@@ -32,7 +30,6 @@ use self::state::{
     terminal_delta_snapshot, ProxyGenerationInner, ProxyGenerationKey, ProxyGenerationRequest,
     ProxyGenerationState, RunningResourceYieldScope,
 };
-#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
@@ -573,7 +570,6 @@ impl ProxyGenerationService {
         self.inner.available.notify_all();
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,

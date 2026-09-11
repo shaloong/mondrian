@@ -84,7 +84,6 @@ impl AppAudioPlayback {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn begin_endurance_shutdown(&mut self) {
         if let Self::Available(playback) = self {
             playback.begin_shutdown();
@@ -109,7 +108,6 @@ impl AppAudioPlayback {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn shutdown_until(
         &mut self,
         sample_rate: u32,
@@ -1445,12 +1443,10 @@ impl AppState {
         self.audio_playback.shutdown_and_wait(self.audio_sample_rate)
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn begin_audio_playback_endurance_shutdown(&mut self) {
         self.audio_playback.begin_endurance_shutdown();
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_audio_playback_until(
         &mut self,
         deadline: Instant,

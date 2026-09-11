@@ -55,7 +55,6 @@ use crate::app::viewer_gpu_submission::{
     ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll, ViewerGpuSubmissionQuarantine,
     ViewerGpuSubmissionQuarantineReason,
 };
-#[cfg(feature = "validation")]
 use crate::app::AppEnduranceShutdownEvidence;
 use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
@@ -363,6 +362,14 @@ struct AppUiValidationReturnedState {
 #[cfg(feature = "validation")]
 type AppUiValidationReturnSlot = Rc<RefCell<Option<AppUiValidationReturnedState>>>;
 
+#[derive(Debug, thiserror::Error)]
+enum AppUiProductShutdownError {
+    #[error("Window App owner did not close cleanly: {evidence:?}")]
+    IncompleteApp {
+        evidence: Box<AppEnduranceShutdownEvidence>,
+    },
+}
+
 struct AppUiHostSessionOwner {
     host: Option<AppUiHost>,
     #[cfg(feature = "validation")]
@@ -417,7 +424,13 @@ impl AppUiHostSessionOwner {
             return Ok(ui_shutdown);
         }
         let _ = gpu_shutdown;
-        drop(app_state);
+        let app_shutdown = app_state.shutdown_for_endurance(deadline);
+        if !app_shutdown.all_resources_released() {
+            return Err(AppUiProductShutdownError::IncompleteApp {
+                evidence: Box::new(app_shutdown),
+            }
+            .to_string());
+        }
         Ok(ui_shutdown)
     }
 }
@@ -8877,6 +8890,34 @@ mod tests {
         assert_eq!(transition, Err("injected retirement failure"));
         assert_eq!(active, "candidate-generation");
         assert_eq!(candidate, "old-generation");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_consumes_app_owner_with_product_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let mut owner = AppUiHostSessionOwner::new(host, None, None);
+        let deadline = Instant::now() + APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT;
+        let result = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(
+            result.as_ref().is_ok_and(|ui| ui.all_resources_released()),
+            "{result:?}"
+        );
+        assert!(owner.host.is_none());
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_reports_expired_app_owner_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let mut owner = AppUiHostSessionOwner::new(host, None, None);
+        let result = owner.shutdown_until(Instant::now(), clean_final_window_gpu_shutdown());
+        assert!(
+            result.is_err(),
+            "ordinary Window accepted an unclosed App owner: {result:?}"
+        );
     }
 
     #[cfg(feature = "validation")]

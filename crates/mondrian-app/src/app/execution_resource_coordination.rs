@@ -34,7 +34,6 @@ use mondrian_renderer::{
     ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
 };
 
-#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use parking_lot::Mutex;
 
@@ -497,7 +496,6 @@ struct NativeMemoryObservationInventory {
 }
 
 impl NativeMemoryObservationInventory {
-    #[cfg(any(test, feature = "validation"))]
     fn snapshot(&self) -> (usize, usize) {
         match self.ownership.load(Ordering::Acquire) {
             NATIVE_MEMORY_OWNER_QUEUED => (1, 0),
@@ -1022,7 +1020,6 @@ impl ExecutionResourceCoordinator {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn observe_native_memory_unexpected_exit(&self) {
         if self.native_memory_admission_closed.load(Ordering::Acquire) {
             return;
@@ -1047,7 +1044,6 @@ impl ExecutionResourceCoordinator {
         newly_recorded
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn finish_endurance_shutdown(
         &self,
         deadline: Instant,
@@ -1084,7 +1080,6 @@ impl ExecutionResourceCoordinator {
         .with_unexpected_worker_exits(unexpected_normal_exits)
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn begin_endurance_shutdown(&self) {
         self.observe_native_memory_unexpected_exit();
         self.native_memory_admission_closed.store(true, Ordering::Release);

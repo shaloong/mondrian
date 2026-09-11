@@ -7,7 +7,6 @@
 
 use mondrian_core::timeline_data::FieldOrder;
 use mondrian_core::types::{SequenceId, SequenceRevision};
-#[cfg(any(test, feature = "validation"))]
 use mondrian_reference_output::ReferenceOutputSessionShutdownReceipt;
 use mondrian_reference_output::{
     ReferenceOutputAdapter, ReferenceOutputBundle, ReferenceOutputDeviceDescriptor,
@@ -213,7 +212,6 @@ impl AppReferenceOutputService {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(super) fn begin_endurance_shutdown(&mut self) {
         self.binding = None;
         if let Some(output) = self.output.as_mut() {
@@ -223,7 +221,6 @@ impl AppReferenceOutputService {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(super) fn finish_endurance_shutdown(
         &mut self,
         deadline: std::time::Instant,

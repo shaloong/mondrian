@@ -136,12 +136,10 @@ pub mod endurance_recovery;
 pub mod endurance_reference_output;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_run_request;
-#[cfg(any(test, feature = "validation"))]
-mod endurance_shutdown;
+pub(crate) mod endurance_shutdown;
+pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(feature = "validation")]
-pub use endurance_shutdown::{
-    AppEnduranceShutdownEvidence, AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError,
-};
+pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_source_inventory;
 #[cfg(any(test, feature = "validation"))]

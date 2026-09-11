@@ -1,14 +1,12 @@
 //! Shared consuming-shutdown evidence for App-owned background workers.
 //!
-//! Ordinary product teardown remains bounded and best-effort. Qualification
-//! teardown uses the same cancellation seams, but retains exact join, panic,
-//! timeout, detach, and residual-work facts instead of equating `Drop` with
-//! worker closure.
+//! Ordinary Window teardown and qualification consume these same owners with
+//! one absolute deadline. Exact join, panic, timeout, detach, and residual-work
+//! facts are retained; neither path equates `Drop` with worker closure.
 
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[cfg(any(test, feature = "validation"))]
 use std::sync::Arc;
 
 #[cfg(any(test, feature = "validation"))]
@@ -16,18 +14,13 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 #[cfg(any(test, feature = "validation"))]
 use sha2::{Digest, Sha256};
 
-#[cfg(any(test, feature = "validation"))]
 use mondrian_export::ExportQueueShutdownEvidence;
-#[cfg(any(test, feature = "validation"))]
 use mondrian_media::{
     AudioPlaybackShutdownEvidence, AudioSourceCache, AudioSourceCacheShutdownEvidence,
 };
-#[cfg(any(test, feature = "validation"))]
 use mondrian_reference_output::ReferenceOutputModuleShutdownReceipt;
 
-#[cfg(any(test, feature = "validation"))]
 use super::project_lifecycle::ProjectClosePoll;
-#[cfg(any(test, feature = "validation"))]
 use super::AppState;
 
 /// Exact terminal inventory for one App-owned background worker domain.
@@ -227,7 +220,6 @@ impl AppBackgroundEnduranceSnapshot {
 }
 
 /// Project-authority and library lifetime facts after consuming one App phase.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppProjectShutdownEvidence {
     /// Whether shutdown began with an installed authoring Session.
@@ -246,7 +238,6 @@ pub struct AppProjectShutdownEvidence {
     pub lifecycle_failure: Option<String>,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl AppProjectShutdownEvidence {
     /// Whether Project, persistence handoff, library, and lease ownership closed.
     pub const fn all_resources_released(&self) -> bool {
@@ -259,7 +250,6 @@ impl AppProjectShutdownEvidence {
 }
 
 /// App-side ownership evidence around the consuming Audio Source Cache receipt.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppAudioSourceCacheShutdownEvidence {
     /// Strong references observed before the App relinquished its Cache Arc.
@@ -270,7 +260,6 @@ pub struct AppAudioSourceCacheShutdownEvidence {
     pub cache: Option<AudioSourceCacheShutdownEvidence>,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl AppAudioSourceCacheShutdownEvidence {
     /// Whether all Cache, decoder Session, child, and pump ownership closed.
     pub fn all_resources_released(&self) -> bool {
@@ -280,7 +269,6 @@ impl AppAudioSourceCacheShutdownEvidence {
 }
 
 /// Complete consuming receipt for every execution owner embedded in AppState.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppEnduranceShutdownEvidence {
     /// Whether the sole AppState owner itself was consumed after receipts were sealed.
@@ -325,7 +313,6 @@ impl Serialize for AppEnduranceShutdownEvidence {
     }
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl AppEnduranceShutdownEvidence {
     /// Whether non-worker App ownership closed, excluding realtime Audio.
     ///
@@ -360,6 +347,7 @@ impl AppEnduranceShutdownEvidence {
         self.audio.all_workers_terminated() && self.all_non_audio_resources_released()
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn background_terminal_snapshot(
         &self,
     ) -> Result<AppBackgroundEnduranceSnapshot, String> {
@@ -820,10 +808,10 @@ pub(crate) fn join_workers_until(
     }
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl AppState {
     /// Capture exact runtime gauges and monotonic failures for every auxiliary
     /// App-owned execution domain without changing admission or ownership.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn background_endurance_snapshot(
         &self,
     ) -> Result<AppBackgroundEnduranceSnapshot, String> {

@@ -23,7 +23,6 @@ use mondrian_core::{
 };
 use parking_lot::{Condvar, Mutex};
 
-#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
@@ -546,7 +545,6 @@ impl MediaAssetMutationExecution {
         self.inner.available.notify_all();
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,
