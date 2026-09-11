@@ -3,6 +3,15 @@ use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
+#[test]
+fn empty_timeline_projection_does_not_construct_an_app_owner() {
+    let before = crate::app::test_app_state_construction_count();
+    let model = TimelinePanelModel::empty();
+    assert_eq!(crate::app::test_app_state_construction_count(), before);
+    assert!(!model.enabled);
+    assert!(!model.edit_availability.expect("explicit unavailable edits").toggle_playback);
+}
+
 fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
     let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")

@@ -1210,7 +1210,7 @@ impl Default for TimelinePanelModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TimelineEditAvailability {
     cut: bool,
     copy: bool,
@@ -1474,7 +1474,7 @@ impl TimelinePanelModel {
             timeline_display: TimelineDisplayContract::default(),
             enabled: false,
             empty_message: Some("未载入序列\n打开项目或创建序列以开始编辑".into()),
-            edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
+            edit_availability: Some(TimelineEditAvailability::default()),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
             transition_refs: Vec::new(),

@@ -133,6 +133,17 @@ struct StatusBarModel {
     context: String,
 }
 
+impl Default for StatusBarModel {
+    fn default() -> Self {
+        Self {
+            message: "就绪".to_owned(),
+            is_error: false,
+            is_busy: false,
+            context: String::new(),
+        }
+    }
+}
+
 struct StatusBar {
     id: WidgetId,
     bounds: Rect,
@@ -814,7 +825,7 @@ impl AppUiAppRoot {
             AppUiPreferencesModel::default(),
             workspace_preset,
             None,
-            status_bar_model(&AppState::new()),
+            StatusBarModel::default(),
         )
     }
 
@@ -3865,6 +3876,17 @@ mod tests {
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
         assert_eq!(dialog.model().proxy_mode, "已启用");
+    }
+
+    #[test]
+    fn model_only_shell_does_not_construct_an_app_owner() {
+        let state = AppState::new();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let before = crate::app::test_app_state_construction_count();
+        let root = AppUiAppRoot::from_models(models);
+        assert_eq!(crate::app::test_app_state_construction_count(), before);
+        assert!(!root.status_bar.model.is_busy);
+        assert!(!root.status_bar.model.is_error);
     }
 
     #[test]

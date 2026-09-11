@@ -518,8 +518,21 @@ pub struct AppState {
     visual_tracking: visual_tracking::VisualTrackingService,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static APP_STATE_CONSTRUCTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Observe real constructor calls on this test thread without creating an owner.
+#[cfg(test)]
+pub(crate) fn test_app_state_construction_count() -> u64 {
+    APP_STATE_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
 impl AppState {
     pub fn new() -> Self {
+        #[cfg(test)]
+        APP_STATE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         let audio_sample_rate = 48_000;
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate));
         let playback_observation_instant_anchor = Instant::now();

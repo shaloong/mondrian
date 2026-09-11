@@ -1,5 +1,14 @@
 # UI System
 
+Empty and model-only UI construction must not create an `AppState`. A disabled
+empty Timeline has explicit unavailable edit flags, and a model-only shell has
+a plain status placeholder with no claimed Project context. Only the adapters
+receiving the existing `AppState` project live command availability, Project
+context and Export status. Constructing a temporary application merely to obtain
+default view data would start Audio workers and discard their owners outside
+the Host lifecycle. Regression tests count calls to the real App constructor on
+the test thread and require both UI factories to create none.
+
 The acquired surface texture owns each UI frame's physical attachment extent.
 `AppUiFrameRenderer` uses that extent for MSAA, resolve, carrier targets, and
 viewport uniforms; callers cannot supply an independently sampled window size.
