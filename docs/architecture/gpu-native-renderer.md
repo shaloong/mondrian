@@ -145,6 +145,12 @@ GPU owns frame -> display/export consume GPU result -> readback only at explicit
 
 ## RendererContext / GpuContext
 
+Linux executables establish the [graphics process startup policy](linux-graphics-process.md)
+before loading Vulkan. Driver code libraries have process lifetime to avoid the
+reproduced concurrent loader/ICD unload crash; this does not extend any GPU
+resource owner or grant shutdown/physical qualification. Embedded renderer
+consumers establish that policy in their own process entrypoint.
+
 `GpuContext` owns shared `wgpu::Device`, `Queue`, and `Adapter`. Higher renderer contexts should own:
 
 - pipeline caches

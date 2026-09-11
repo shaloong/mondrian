@@ -24,6 +24,7 @@ fn strict_utf8<'a>(argument: &'a OsStr, label: &str) -> anyhow::Result<&'a str> 
 }
 
 fn main() -> anyhow::Result<()> {
+    mondrian_platform::prepare_graphics_process()?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let (project_path, self_test_root, output_path, requests) =
         match arguments.as_slice() {

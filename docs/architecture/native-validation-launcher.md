@@ -1,5 +1,11 @@
 # Native validation launcher
 
+Linux product and native graphics validation executables share the
+[graphics process startup policy](linux-graphics-process.md). Its same-PID exec
+only establishes loader library lifetime; it is not a sealed launcher, source
+admission, native termination receipt or substitute for the Windows protocol
+described below. Media-only helper modes do not initiate graphics startup.
+
 `mondrian-validation-launcher` is a validation-only binary/library with no Media,
 FFmpeg, App or GPU dependency. The package also contains a clearly nonqualifying
 `native_bootstrap_probe` diagnostic executable for native owner tests.

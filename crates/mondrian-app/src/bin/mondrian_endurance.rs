@@ -171,6 +171,7 @@ fn main() -> anyhow::Result<()> {
     if mode.as_deref() == Some(OsStr::new(mondrian_media::MEDIA_PROBE_WORKER_ARGUMENT)) {
         return mondrian_media::run_media_probe_worker();
     }
+    mondrian_platform::prepare_graphics_process()?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
         [request] => run_campaign(strict_path(request, "run request")?),

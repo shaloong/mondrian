@@ -12,6 +12,7 @@ use mondrian_ui_renderer::UiRenderer;
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mondrian_platform::prepare_graphics_process()?;
     #[allow(deprecated)]
     let el = winit::event_loop::EventLoop::new()?;
     let w = Arc::new(

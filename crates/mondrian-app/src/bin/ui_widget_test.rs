@@ -74,6 +74,7 @@ impl Widget for RootFill {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mondrian_platform::prepare_graphics_process()?;
     let el = winit::event_loop::EventLoop::new()?;
     let w = Arc::new(
         el.create_window(

@@ -3,6 +3,7 @@ use anyhow::{ensure, Context};
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
+    mondrian_platform::prepare_graphics_process()?;
     let mut args = std::env::args_os().skip(1);
     let root =
         PathBuf::from(args.next().context("expected real fixture root and new output directory")?);

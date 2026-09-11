@@ -9,6 +9,7 @@ use std::process::Command;
 mod display;
 mod eyedropper;
 mod global_pointer;
+mod graphics_process;
 mod memory;
 mod playback_scheduling;
 mod process_memory;
@@ -42,6 +43,7 @@ pub use mondrian_platform_core::{
 pub struct SystemPlatformService;
 
 pub use eyedropper::{DesktopEyedropper, DesktopPoint, DesktopRgba8};
+pub use graphics_process::{prepare_graphics_process, GraphicsProcessBootstrapError};
 pub use playback_scheduling::{
     PlaybackThreadScheduling, PlaybackThreadSchedulingError, PlaybackThreadSchedulingStatus,
 };

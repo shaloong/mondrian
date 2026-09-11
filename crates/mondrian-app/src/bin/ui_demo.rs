@@ -1461,6 +1461,7 @@ fn route_demo_window_event(
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mondrian_platform::prepare_graphics_process()?;
     use winit::event_loop::EventLoop;
 
     let event_loop = EventLoop::new()?;

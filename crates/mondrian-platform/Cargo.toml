@@ -17,6 +17,7 @@ anyhow                 = { workspace = true }
 serde                  = { workspace = true }
 serde_json             = { workspace = true }
 sha2                   = { workspace = true }
+thiserror              = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc                    = "0.2"
@@ -30,3 +31,6 @@ libc                    = "0.2"
 wayland-client          = { version = "0.31.14", features = ["dlopen"] }
 wayland-protocols       = { version = "0.32.12", features = ["client", "staging", "unstable"] }
 x11rb                   = { version = "0.13.2", features = ["randr"] }
+
+[dev-dependencies]
+tempfile                = { workspace = true }
