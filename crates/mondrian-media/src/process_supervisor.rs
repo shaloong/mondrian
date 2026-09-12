@@ -139,6 +139,21 @@ pub enum SupervisedProcessError {
 }
 
 impl SupervisedProcessError {
+    /// Return whether native or worker closure failed independently of the primary cause.
+    ///
+    /// A cancellation or deadline may carry a successful cleanup receipt. Only
+    /// failed closure prevents the caller from treating it as an ordinary
+    /// cancellation or trying another execution route.
+    pub fn has_cleanup_failure(&self) -> bool {
+        match self {
+            Self::Cleanup { primary, cleanup } => {
+                !cleanup.all_resources_released() || primary.has_cleanup_failure()
+            }
+            Self::WorkerClosure { .. } | Self::WorkerPanicked { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Return whether this terminal outcome was caused by cancellation.
     pub fn is_canceled(&self) -> bool {
         matches!(self.primary(), Self::Canceled { .. })
@@ -1160,6 +1175,37 @@ pub(crate) fn join_worker_until<T>(handle: JoinHandle<T>, deadline: Instant) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleanup_failure_is_independent_of_cancellation_and_deadline() {
+        for canceled in [false, true] {
+            for failed in [false, true] {
+                let mut cleanup = super::SupervisedProcessCleanupReceipt::empty();
+                cleanup.native_exit_observed = !failed;
+                let primary = if canceled {
+                    super::SupervisedProcessError::Canceled {
+                        stage: super::SupervisedProcessStage::Wait,
+                    }
+                } else {
+                    super::SupervisedProcessError::DeadlineExceeded {
+                        stage: super::SupervisedProcessStage::Wait,
+                    }
+                };
+                let error = super::SupervisedProcessError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                };
+                assert_eq!(error.has_cleanup_failure(), failed);
+                assert_eq!(error.is_canceled(), canceled);
+                assert_eq!(error.is_deadline_exceeded(), !canceled);
+                let nested = super::SupervisedProcessError::Cleanup {
+                    primary: Box::new(error),
+                    cleanup: Box::new(super::SupervisedProcessCleanupReceipt::empty()),
+                };
+                assert_eq!(nested.has_cleanup_failure(), failed);
+            }
+        }
+    }
+
     use super::*;
     use std::env;
 

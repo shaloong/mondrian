@@ -107,6 +107,9 @@ fn resolve_video_encoder_with_probe(
     command: impl FnOnce() -> Result<Command, mondrian_media::FfmpegCommandError>,
     probe: impl FnOnce(&mut Command, ResolvedVideoEncoder) -> mondrian_core::Result<()>,
 ) -> mondrian_core::Result<ResolvedVideoEncoder> {
+    if cancellation.is_canceled() {
+        return Err(mondrian_core::MondrianError::Cancelled);
+    }
     let software = software_encoder(codec);
     if static_hdr_metadata {
         tracing::info!(
@@ -125,12 +128,18 @@ fn resolve_video_encoder_with_probe(
     let Some(candidate) = hardware_candidate(codec, adapter.vendor) else {
         return Ok(software);
     };
-    if cancellation.is_canceled() {
-        return Err(mondrian_core::MondrianError::Cancelled);
-    }
     // Failed identity admission is fatal, not evidence of an unsupported GPU.
     let mut command = command()?;
     match probe(&mut command, candidate) {
+        Err(error)
+            if mondrian_media::FfmpegCommandError::is_cause_of(&error)
+                || matches!(&error, mondrian_core::MondrianError::Other(source)
+                    if source.downcast_ref::<mondrian_media::SupervisedProcessError>()
+                        .is_some_and(|error| error.has_cleanup_failure())) =>
+        {
+            Err(error)
+        }
+        _ if cancellation.is_canceled() => Err(mondrian_core::MondrianError::Cancelled),
         Ok(()) => {
             tracing::info!(
                 encoder = candidate.ffmpeg_name(codec),
@@ -144,10 +153,8 @@ fn resolve_video_encoder_with_probe(
             );
             Ok(candidate)
         }
+        Err(error @ mondrian_core::MondrianError::Cancelled) => Err(error),
         Err(error) => {
-            if mondrian_media::FfmpegCommandError::is_cause_of(&error) {
-                return Err(error);
-            }
             tracing::warn!(
                 encoder = candidate.ffmpeg_name(codec),
                 fallback_encoder = software.ffmpeg_name(codec),
@@ -474,6 +481,76 @@ mod tests {
         )
         .expect("ordinary codec fallback remains legal");
         assert_eq!(selected, ResolvedVideoEncoder::Libx264);
+    }
+
+    #[test]
+    fn cancellation_during_probe_cannot_select_an_encoder() {
+        for successful_probe in [false, true] {
+            let cancellation = ExecutionCancellationToken::new();
+            let result = resolve_video_encoder_with_probe(
+                &h264(),
+                Some(&test_adapter()),
+                false,
+                &cancellation,
+                || Ok(Command::new("protocol-only-not-spawned")),
+                |_, _| {
+                    cancellation.cancel();
+                    if successful_probe {
+                        Ok(())
+                    } else {
+                        Err(mondrian_core::MondrianError::Cancelled)
+                    }
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(mondrian_core::MondrianError::Cancelled)
+            ));
+        }
+    }
+
+    #[test]
+    fn unclosed_probe_worker_cannot_select_software_fallback() {
+        let result = resolve_video_encoder_with_probe(
+            &h264(),
+            Some(&test_adapter()),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Ok(Command::new("protocol-only-not-spawned")),
+            |_, _| {
+                Err(mondrian_core::MondrianError::Other(anyhow::Error::new(
+                    mondrian_media::SupervisedProcessError::WorkerClosure {
+                        stage: mondrian_media::SupervisedProcessStage::StdoutDrain,
+                        detail: "worker remains active".to_owned(),
+                    },
+                )))
+            },
+        );
+        let error = result.expect_err("unclosed process resources are not codec unavailability");
+        let mondrian_core::MondrianError::Other(source) = error else {
+            panic!("retain the structured process failure");
+        };
+        assert!(source.is::<mondrian_media::SupervisedProcessError>());
+    }
+
+    #[test]
+    fn canceled_admission_never_selects_a_software_shortcut() {
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.cancel();
+        for metadata in [false, true] {
+            let result = resolve_video_encoder_with_probe(
+                &h264(),
+                None,
+                metadata,
+                &cancellation,
+                || panic!("canceled admission must not create a command"),
+                |_, _| panic!("canceled admission must not probe"),
+            );
+            assert!(matches!(
+                result,
+                Err(mondrian_core::MondrianError::Cancelled)
+            ));
+        }
     }
 
     #[test]

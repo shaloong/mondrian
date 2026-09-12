@@ -2427,6 +2427,9 @@ fn execute_ffmpeg_export_job(
     report(ExportProgress::validating(0.99));
     match validate_export_output_cancellable(staging.path(), &validation_expectations, cancel) {
         Ok(_) => {}
+        Err(error) if validation_failure_prevents_fallback(&error) => {
+            return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
+        }
         Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
         Err(error) => {
             return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
@@ -3594,7 +3597,9 @@ fn execute_audio_stems_export(
         );
         let encoded = match encoded {
             Ok(encoded) => encoded,
-            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+            Err(error) if cancel.is_canceled() && !error.has_cleanup_failure() => {
+                return JobExecutionResult::Cancelled;
+            }
             Err(error) => {
                 return JobExecutionResult::Failed(format!(
                     "audio-stem encoder process failed for {}: {error}",
@@ -4213,7 +4218,9 @@ fn execute_timeline_export(
                     cancel,
                 ) {
                     Ok(encoder) => Some(encoder),
-                    Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+                    Err(mondrian_core::MondrianError::Cancelled) => {
+                        return JobExecutionResult::Cancelled;
+                    }
                     Err(error) => return JobExecutionResult::Failed(error.to_string()),
                 }
             }
@@ -4792,7 +4799,9 @@ fn execute_resident_hevc_export(
                 "resident HEVC final stream-copy mux failed: {reason}"
             ))
         }
-        Err(error) if error.is_canceled() => ResidentExportAttemptOutcome::Cancelled,
+        Err(error) if error.is_canceled() && !error.has_cleanup_failure() => {
+            ResidentExportAttemptOutcome::Cancelled
+        }
         Err(error) => ResidentExportAttemptOutcome::Failed(format!(
             "resident HEVC final stream-copy mux failed: {error}"
         )),
@@ -4947,6 +4956,9 @@ fn try_execute_smart_render(
             );
             return Ok(None);
         }
+        Err(error) if error.has_cleanup_failure() => {
+            return Err(process_supervision_failure("Smart Render remux", error));
+        }
         Err(_) if cancel.is_canceled() => return Err(JobExecutionResult::Cancelled),
         Err(error) => {
             tracing::debug!(%error, "Smart Render remux supervision failed");
@@ -4997,13 +5009,26 @@ fn try_execute_smart_render(
     }))
 }
 
+fn validation_failure_prevents_fallback(error: &crate::validator::ExportValidationError) -> bool {
+    match error {
+        crate::validator::ExportValidationError::CommandAdmission(_) => true,
+        crate::validator::ExportValidationError::Process { source, .. } => {
+            source.has_cleanup_failure()
+        }
+        crate::validator::ExportValidationError::ProbeOutput { output, .. } => {
+            !output.cleanup.all_resources_released()
+        }
+        _ => false,
+    }
+}
+
 fn smart_render_validation_allows_completion(
     result: Result<crate::validator::ExportOutputProbe, crate::validator::ExportValidationError>,
     cancel: &ExecutionCancellationToken,
 ) -> Result<bool, JobExecutionResult> {
     match result {
         Ok(_) => Ok(true),
-        Err(error @ crate::validator::ExportValidationError::CommandAdmission(_)) => {
+        Err(error) if validation_failure_prevents_fallback(&error) => {
             Err(JobExecutionResult::Failed(error.to_string()))
         }
         Err(_) if cancel.is_canceled() => Err(JobExecutionResult::Cancelled),
@@ -6024,7 +6049,7 @@ fn process_supervision_failure(
     operation: &str,
     error: SupervisedProcessError,
 ) -> JobExecutionResult {
-    if error.is_canceled() {
+    if error.is_canceled() && !error.has_cleanup_failure() {
         JobExecutionResult::Cancelled
     } else {
         JobExecutionResult::Failed(format!("{operation}失败: {error}"))
@@ -10193,6 +10218,62 @@ pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smart_render_unclosed_probe_cannot_request_pixel_fallback() {
+        for canceled in [false, true] {
+            let cancellation = mondrian_core::ExecutionCancellationToken::new();
+            if canceled {
+                cancellation.cancel();
+            }
+            let error = crate::validator::ExportValidationError::Process {
+                operation: "artifact verification",
+                source: mondrian_media::SupervisedProcessError::WorkerClosure {
+                    stage: mondrian_media::SupervisedProcessStage::StdoutDrain,
+                    detail: "worker remains active".to_owned(),
+                },
+            };
+            assert!(matches!(
+                super::smart_render_validation_allows_completion(Err(error), &cancellation),
+                Err(super::JobExecutionResult::Failed(detail)) if detail.contains("worker remains active")
+            ));
+        }
+    }
+
+    #[test]
+    fn canceled_process_with_unclosed_resources_remains_failed() {
+        let error = mondrian_media::SupervisedProcessError::Cleanup {
+            primary: Box::new(mondrian_media::SupervisedProcessError::Canceled {
+                stage: mondrian_media::SupervisedProcessStage::Wait,
+            }),
+            cleanup: Box::new(mondrian_media::SupervisedProcessCleanupReceipt {
+                native_exit_observed: false,
+                kill_error: None,
+                wait_error: None,
+                deadline_exceeded: true,
+                stdin_error: None,
+                stdout_error: Some("worker remains active".to_owned()),
+                stderr_error: None,
+            }),
+        };
+        assert!(matches!(
+            super::process_supervision_failure("encoder", error),
+            super::JobExecutionResult::Failed(detail) if detail.contains("worker remains active")
+        ));
+    }
+
+    #[test]
+    fn canceled_process_with_consumed_resources_remains_cancelled() {
+        assert!(matches!(
+            super::process_supervision_failure(
+                "encoder",
+                mondrian_media::SupervisedProcessError::Canceled {
+                    stage: mondrian_media::SupervisedProcessStage::Wait,
+                },
+            ),
+            super::JobExecutionResult::Cancelled
+        ));
+    }
+
     fn ffmpeg_is_available_for_test() -> bool {
         let mut command = mondrian_media::ffmpeg_command().expect("admit test FFmpeg command");
         // Only the unqualified resolver emits this bare search-path name.

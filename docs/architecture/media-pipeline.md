@@ -853,6 +853,13 @@ stages. Every abnormal path performs kill → wait and joins all pipe/pump
 threads; dropping an unfinished supervised child has the same fail-safe
 ownership rule.
 
+`SupervisedProcessError::has_cleanup_failure` derives the independent closure
+failure from the existing cleanup receipt and worker terminal errors, including
+nested causes. A canceled or timed-out operation with fully consumed resources
+does not become a cleanup failure. Callers must preserve an incomplete cleanup
+before selecting cancellation or a retry route; the primary cause alone is not
+evidence that the child and pipe owners were consumed.
+
 Reusable Preview execution resources have an explicit worker-family owner:
 `PreviewDecodeWorkerResources`. A scheduler injects that owner through
 `PreviewDecodeSessionContextBootstrap`; no process-global seek-index or

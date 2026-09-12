@@ -461,13 +461,21 @@ argument lowering. FFmpeg registry presence is not capability evidence: the
 candidate must match the active Export renderer Adapter vendor and complete a
 bounded real one-frame encode using the exact codec profile and delivery pixel
 format. Qualified NVIDIA, Intel, and AMD adapters may select NVENC, QSV, or AMF;
-probe failure, cancellation-safe timeout, an unsupported vendor, or unavailable
+ordinary codec probe failure, a timeout with successful cleanup, an unsupported vendor, or unavailable
 GPU context selects the explicit libx264/libx265 fallback before Timeline frame
 streaming begins. Authored static HDR metadata remains on libx265 until another
 backend has an exact metadata lowering. The generic FFmpeg rawvideo pipe is a
 CPU boundary and therefore records one CPU-to-encoder upload per frame; generic
 hardware encoder selection alone is acceleration evidence, never a zero-copy
 claim.
+
+Cancellation observed during admission returns cancellation before selecting
+either encoder. Provider identity failures and independent process/worker
+cleanup failures remain fatal even when cancellation races them. The same
+Media-owned cleanup predicate prevents Smart Render verification from requesting
+a pixel-render retry with unclosed probe resources, and prevents encoder shutdown
+from disguising a failed cleanup receipt as ordinary cancellation. No fallback
+may erase the original structured process error.
 
 A separate `ResidentD3D12Hevc` route is admitted only before frame execution for
 an exact closed-GOP HEVC Main/Main10, YUV420, flattened-alpha contract with
