@@ -116,10 +116,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         true
     }
 
-    /// Release CPU evaluation reuse after the Adapter proves physical current completion.
+    /// Release evaluation reuse after the Adapter proves physical current completion.
     /// The caller must have finalized Presented/NoDemand for this exact GPU output.
     /// Registration alone does not authorize release. In-flight candidate clones,
-    /// unrelated evaluations, native owners and Frame Store entries remain intact.
+    /// unrelated evaluations and Frame Store entries retain their own physical leases.
     pub(crate) fn release_completed_gpu_evaluation(
         &self,
         output_key: &PreviewOutputKey,

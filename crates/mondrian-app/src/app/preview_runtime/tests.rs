@@ -655,6 +655,8 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         render_cache_identity: None,
     });
     let output = evaluation.output_key.clone();
+    let in_flight = Arc::clone(&evaluation);
+    let weak = Arc::downgrade(&evaluation);
     set.insert(key, evaluation, 1);
     assert!(set.get(key, 2).is_some());
 
@@ -665,9 +667,20 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
     );
     set.bind_gpu_output(key, output.clone(), intent);
     assert!(
-        !set.release_completed_gpu_evaluation(&output, intent),
-        "native decoder resources retain their existing retirement rule"
+        set.release_completed_gpu_evaluation(&output, intent),
+        "completed native evaluation must not starve bounded future admission"
     );
+    assert!(set.get(key, 3).is_none());
+    assert_eq!(
+        Arc::strong_count(&in_flight),
+        1,
+        "independent submitted owner survives"
+    );
+    assert!(weak.upgrade().is_some());
+    // Reinsert only to exercise the separate unsubmitted-preparation seam.
+    set.insert(key, Arc::clone(&in_flight), 3);
+    set.bind_gpu_output(key, output.clone(), intent);
+    drop(in_flight);
 
     assert!(
         set.release_abandoned_gpu_preparation(&output, intent),
@@ -676,6 +689,11 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
     assert!(
         set.get(key, 3).is_none(),
         "abandoned preparation cannot pin an otherwise bounded decoder surface"
+    );
+
+    assert!(
+        weak.upgrade().is_none(),
+        "last independent owner releases the native evaluation"
     );
 
     // Reinsert to retain coverage for explicit decoder-family teardown.

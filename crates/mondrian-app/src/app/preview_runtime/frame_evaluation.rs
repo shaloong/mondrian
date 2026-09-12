@@ -313,8 +313,9 @@ impl EvaluationWorkingSet {
         }
     }
 
-    /// Drop only the completed CPU evaluation's reuse owner after physical publication.
-    /// Native inputs retain their existing decoder-family retirement rules.
+    /// Drop the exact completed evaluation's reuse owner after physical publication.
+    /// Submitted frames and Frame Store entries retain independent physical leases;
+    /// native decoder inputs must not pin this optional reuse cache indefinitely.
     pub(crate) fn release_completed_gpu_evaluation(
         &mut self,
         output_key: &PreviewOutputKey,
@@ -325,7 +326,6 @@ impl EvaluationWorkingSet {
                 .gpu_output_binding
                 .as_ref()
                 .is_some_and(|(key, bound_intent)| key == output_key && *bound_intent == intent)
-                && !entry.evaluation.elements.iter().any(element_pins_decoder_resource)
         }) else {
             return false;
         };
