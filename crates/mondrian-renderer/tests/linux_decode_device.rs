@@ -65,8 +65,13 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
     let fixtures = std::env::var_os("MONDRIAN_CUDA_NATIVE_FIXTURES")
         .expect("explicit generated fixtures required");
     let context = pollster::block_on(GpuContext::new()).expect("real Vulkan context");
-    let mut runtime =
-        ViewerNativeVideoImportRuntime::new(&context.adapter, &context.device, &context.queue);
+    let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
+    let mut runtime = ViewerNativeVideoImportRuntime::new_with_resource_pool(
+        &context.adapter,
+        &context.device,
+        &context.queue,
+        Arc::clone(&pool),
+    );
     let support = runtime.support();
     assert_eq!(
         support.import_mode,
@@ -129,6 +134,7 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
                     &frame,
                 )
                 .expect("production color preparation");
+            let before_pool = pool.diagnostics();
             let output = runtime
                 .import(
                     &mut ids,
@@ -139,6 +145,11 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
                     &frame,
                 )
                 .expect("production CUDA YUV/OCIO import");
+            assert_eq!(
+                pool.diagnostics().releases,
+                before_pool.releases + 1,
+                "the submitted native RGB intermediate must return to the production pool"
+            );
             drop(frame);
             let plan = GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
                 .expect("full precision oracle readback");

@@ -1548,3 +1548,12 @@ a successful shutdown receipt. Fault-injected release-order tests cover failure
 at each step; normal real-device tests separately require zero retained owners.
 The synchronous CUDA driver completion call remains a foreign blocking boundary;
 these ordering tests do not establish a driver-hang timeout guarantee.
+
+Direct native import acquires its encoded RGB intermediate from the same
+exact-contract color-frame texture pool as CPU YUV and working/output stages.
+The intermediate returns only after successful production-queue submission;
+unsubmitted/error paths cannot publish it for reuse. This removes per-frame
+full-resolution float-texture allocation without changing color precision,
+materialization extent, pool budget, or native source completion ownership.
+The real CUDA import regression checks the pool return alongside GPU output
+readback and zero retained native owners.

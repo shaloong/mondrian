@@ -12,8 +12,8 @@ use std::time::Instant;
 use mondrian_media::PreviewNativeDecodedFrame;
 
 use crate::{
-    ColorFrameResidency, GpuColorFrameResource, GpuColorFrameWgpuResource,
-    GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
+    ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameResource,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportSupport, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, NativeVideoImportCpuTimings,
@@ -216,10 +216,11 @@ where
                 )
                 .map_err(|error| backend_rejected(error.to_string()))?,
         };
-        let (_, encoded_payload) =
-            GpuNativeYuvDecoder::allocate_output(&self.device, &yuv_plan).into_parts();
-        let encoded_resource =
-            GpuColorFrameResource::new(plan.encoded_source_frame.clone(), encoded_payload);
+        let resource_pool = self.color_runtime.resource_pool();
+        let encoded_resource = resource_pool.acquire(
+            &self.device,
+            &GpuColorFrameAllocationPlan::for_handle(plan.encoded_source_frame.clone()),
+        );
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.native-video.direct-import"),
         });
@@ -279,16 +280,13 @@ where
                 "color stage did not retain its working output".to_owned(),
             ));
         };
-        if self
-            .color_runtime
-            .frame_table_mut()
-            .remove(plan.encoded_source_frame.id())
-            .is_none()
-        {
+        let Some(encoded_resource) =
+            self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id())
+        else {
             return Err(backend_rejected(
                 "color stage lost its encoded input".to_owned(),
             ));
-        }
+        };
         let resource_extract_us = elapsed_us(resource_extract_started);
 
         let submit_started = Instant::now();
@@ -314,6 +312,10 @@ where
             self.retained_sources.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
+        // A shared-pool checkout may immediately record a successor. Publish
+        // this intermediate only after its previous read is ordered on the
+        // production queue; failed/unsubmitted imports drop it instead.
+        resource_pool.release(encoded_resource);
         let retained_sources = Arc::clone(&self.retained_sources);
         self.queue.on_submitted_work_done(move || {
             drop(retained_source);
