@@ -714,3 +714,15 @@ extent, exactly as Viewer recording does. The CUDA storage bridge continues to
 charge the full decoded extent; downscaling cannot reduce its charge. A 4K-to-1080p
 admission regression checks both surface formats, the exact grant boundary and
 one-byte-under rejection without increasing any grant.
+
+Linux process-memory inventories retain zombie/dead tasks for ancestry discovery
+but exclude their exited user address spaces from RSS aggregation. Such tasks
+legitimately omit RssAnon/VmRSS/VmHWM; missing counters on a live process remain
+an error. PID/start-time and before/after membership validation still reject
+races. This memory observation never claims child reap or shutdown completion;
+the process owner must still consume wait status independently. A real exited,
+unreaped child regression checks this distinction and then reaps its fixture.
+
+A terminal group leader is excluded only when its task count is one. A zombie
+leader with surviving sibling threads cannot prove an exited address space;
+missing counters remain unavailable rather than becoming an invented zero sample.

@@ -1,8 +1,11 @@
 //! Linux `/proc` process-memory Adapter.
 //!
 //! A product-tree sample is accepted only when two full PID/start-time
-//! inventories match. This rejects PID reuse, member exit, and newly visible
-//! descendants instead of silently undercounting them.
+//! inventories of live address spaces match. This rejects PID reuse, live-member
+//! exit, and newly visible descendants instead of silently undercounting them.
+//! Confirmed zombie/dead tasks have released their user address space; they stay
+//! in ancestry discovery but cannot supply RSS counters. This says nothing about
+//! whether the separate process owner has consumed their wait status.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -19,6 +22,7 @@ const PROCESS_TREE_MAX_ATTEMPTS: u32 = 4;
 struct ProcessIdentity {
     parent_pid: u32,
     start_ticks: u64,
+    address_space_exited: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,7 +185,9 @@ fn product_tree_inventory(root_pid: u32) -> Result<BTreeMap<u32, ProcessIdentity
     let mut result = BTreeMap::new();
     result.insert(root_pid, root);
     for pid in members {
-        if let Some(identity) = all.get(&pid) {
+        if let Some(identity) = all.get(&pid)
+            && !identity.address_space_exited
+        {
             result.insert(pid, *identity);
         }
     }
@@ -209,7 +215,19 @@ fn parse_stat_identity(contents: &str) -> Result<ProcessIdentity, String> {
         .ok_or_else(|| String::from("/proc stat has no start time"))?
         .parse::<u64>()
         .map_err(|error| format!("invalid process start time: {error}"))?;
-    Ok(ProcessIdentity { parent_pid, start_ticks })
+    let state = fields.first().ok_or_else(|| String::from("/proc stat has no state"))?;
+    let threads = fields
+        .get(17)
+        .ok_or_else(|| String::from("/proc stat has no thread count"))?
+        .parse::<u64>()
+        .map_err(|error| format!("invalid thread count: {error}"))?;
+    Ok(ProcessIdentity {
+        parent_pid,
+        start_ticks,
+        // A zombie group leader may still have live sibling threads. Missing
+        // counters in that case remain unknown, never an invented zero sample.
+        address_space_exited: matches!(*state, "Z" | "X" | "x") && threads == 1,
+    })
 }
 
 fn read_status(path: &Path) -> io::Result<ProcessCounters> {
@@ -248,6 +266,63 @@ fn status_kib(contents: &str, key: &str) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exited_unreaped_child_does_not_invalidate_live_memory_inventory() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("owned disposable child");
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let observed_zombie = loop {
+            let status =
+                fs::read_to_string(format!("/proc/{pid}/status")).expect("owned child status");
+            if status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("Z")
+            }) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let inventory = product_tree_inventory(std::process::id());
+        let sample = sample_tree_once(std::process::id());
+        child.wait().expect("reap child even if assertion fails");
+        assert!(
+            observed_zombie,
+            "fixture must really reach exited/unreaped state"
+        );
+        assert!(
+            sample.is_ok(),
+            "a confirmed exited address space has no RSS fields: {sample:?}"
+        );
+        assert!(
+            !inventory.expect("inventory").contains_key(&pid),
+            "memory inventory must count live address spaces, not unreaped PID ownership"
+        );
+    }
+
+    #[test]
+    fn zombie_group_leader_cannot_hide_live_thread_memory() {
+        let mut fields = ["0"; 20];
+        fields[0] = "Z";
+        fields[1] = "12";
+        fields[17] = "2"; // num_threads: the leader exited but another thread lives.
+        fields[19] = "991";
+        let identity = parse_stat_identity(&format!("42 (worker) {}", fields.join(" ")))
+            .expect("zombie leader stat");
+        assert!(
+            !identity.address_space_exited,
+            "task state alone cannot prove process memory exited"
+        );
+    }
 
     #[test]
     fn stat_parser_survives_spaces_and_parentheses_in_command_name() {
@@ -257,7 +332,11 @@ mod tests {
         let stat = format!("42 (render worker (copy)) {}", suffix.join(" "));
         assert_eq!(
             parse_stat_identity(&stat).expect("stat should parse"),
-            ProcessIdentity { parent_pid: 12, start_ticks: 991 }
+            ProcessIdentity {
+                parent_pid: 12,
+                start_ticks: 991,
+                address_space_exited: false
+            }
         );
     }
 
