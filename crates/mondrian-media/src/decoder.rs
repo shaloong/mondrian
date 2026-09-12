@@ -268,6 +268,12 @@ pub struct HwDeviceContextPoolDiagnostics {
     pub active_contexts: usize,
     /// Entries retained only as idle acceleration resources.
     pub idle_contexts: usize,
+    /// External device initialization still owned by an acquiring worker,
+    /// including a revoked generation waiting for its provider to return.
+    pub initializing_contexts: usize,
+    /// Detached pool references whose release has not returned. Independent
+    /// Session leases can retain retired roots beyond this pool-owned work.
+    pub retiring_contexts: usize,
     /// Most recently allocated device generation.
     pub latest_generation: u64,
     /// Acquisitions that reused one current generation.
@@ -307,6 +313,8 @@ struct HwDeviceContextPoolState {
     recency_clock: u64,
     entries: HashMap<HwAccelDeviceProbeKey, HwDeviceContextPoolEntry>,
     failures: HashMap<HwAccelDeviceProbeKey, HwDeviceContextFailureBackoff>,
+    initializing: Option<HwDeviceContextInitialization>,
+    retiring_contexts: usize,
     hits: u64,
     misses: u64,
     retirements: u64,
@@ -325,6 +333,8 @@ impl HwDeviceContextPoolState {
             recency_clock: 0,
             entries: HashMap::new(),
             failures: HashMap::new(),
+            initializing: None,
+            retiring_contexts: 0,
             hits: 0,
             misses: 0,
             retirements: 0,
@@ -353,7 +363,8 @@ impl HwDeviceContextPoolState {
             .count()
     }
 
-    fn trim_idle_to(&mut self, max_idle_contexts: usize) {
+    fn trim_idle_to(&mut self, max_idle_contexts: usize) -> Vec<HwDeviceContextPoolEntry> {
+        let mut retired = Vec::new();
         while self.idle_count() > max_idle_contexts {
             let Some(key) = self
                 .entries
@@ -364,9 +375,12 @@ impl HwDeviceContextPoolState {
             else {
                 break;
             };
-            self.entries.remove(&key);
+            if let Some(entry) = self.entries.remove(&key) {
+                retired.push(entry);
+            }
             self.evictions = self.evictions.saturating_add(1);
         }
+        retired
     }
 
     fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
@@ -377,6 +391,8 @@ impl HwDeviceContextPoolState {
             entries: self.entries.len(),
             active_contexts: self.entries.len().saturating_sub(idle_contexts),
             idle_contexts,
+            initializing_contexts: usize::from(self.initializing.is_some()),
+            retiring_contexts: self.retiring_contexts,
             latest_generation: self.next_generation.saturating_sub(1),
             hits: self.hits,
             misses: self.misses,
@@ -424,6 +440,51 @@ impl HwDeviceContextPoolState {
 
 struct HwDeviceContextPoolInner {
     state: Mutex<HwDeviceContextPoolState>,
+    // Serialize foreign creation without excluding state observation or
+    // acquisition of an already-published root. This gate owns no pool state.
+    creation: Mutex<()>,
+}
+
+struct HwDeviceContextInitialization {
+    key: HwAccelDeviceProbeKey,
+    generation: u64,
+    publishable: bool,
+}
+
+struct HwDeviceContextInitializationGuard {
+    pool: HwDeviceContextPool,
+    generation: u64,
+}
+
+impl Drop for HwDeviceContextInitializationGuard {
+    fn drop(&mut self) {
+        let mut state = self.pool.lock_state();
+        if state
+            .initializing
+            .as_ref()
+            .is_some_and(|value| value.generation == self.generation)
+        {
+            state.initializing = None;
+        }
+    }
+}
+
+struct HwDeviceContextRetirement {
+    pool: HwDeviceContextPool,
+    entries: Vec<HwDeviceContextPoolEntry>,
+}
+
+impl Drop for HwDeviceContextRetirement {
+    fn drop(&mut self) {
+        let count = self.entries.len();
+        if count == 0 {
+            return;
+        }
+        // Keep the accounting and this pool alive until every foreign final
+        // release has returned. No shared state lock spans those releases.
+        drop(std::mem::take(&mut self.entries));
+        self.pool.lock_state().retiring_contexts -= count;
+    }
 }
 
 /// Explicit worker-family owner of shared FFmpeg hardware device contexts.
@@ -452,6 +513,7 @@ impl HwDeviceContextPool {
         Self {
             inner: Arc::new(HwDeviceContextPoolInner {
                 state: Mutex::new(HwDeviceContextPoolState::new(policy)),
+                creation: Mutex::new(()),
             }),
         }
     }
@@ -464,12 +526,28 @@ impl HwDeviceContextPool {
         }
         state.policy = policy;
         state.policy_revision = state.policy_revision.saturating_add(1);
-        state.trim_idle_to(policy.max_idle_contexts);
+        let entries = state.trim_idle_to(policy.max_idle_contexts);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
     }
 
     /// Release every idle context while preserving all active Session leases.
     pub fn release_idle(&self) {
-        self.lock_state().trim_idle_to(0);
+        let mut state = self.lock_state();
+        let entries = state.trim_idle_to(0);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
+    }
+
+    fn own_retirement(
+        &self,
+        state: &mut HwDeviceContextPoolState,
+        entries: Vec<HwDeviceContextPoolEntry>,
+    ) -> HwDeviceContextRetirement {
+        state.retiring_contexts += entries.len();
+        HwDeviceContextRetirement { pool: self.clone(), entries }
     }
 
     /// Clear transient setup-failure delays, for example after an explicit
@@ -508,30 +586,35 @@ impl HwDeviceContextPool {
         let generation = state
             .allocate_generation()
             .ok_or(RendererHwAccelDeviceContextInstallError::GenerationExhausted)?;
+        if let Some(initializing) = state.initializing.as_mut().filter(|value| value.key == key) {
+            initializing.publishable = false;
+        }
         let recency = state.next_recency();
-        if state
-            .entries
-            .insert(
-                key,
-                HwDeviceContextPoolEntry {
-                    generation,
-                    last_used: recency,
-                    owner: context.owner,
-                },
-            )
-            .is_some()
-        {
+        let previous = state.entries.insert(
+            key,
+            HwDeviceContextPoolEntry {
+                generation,
+                last_used: recency,
+                owner: context.owner,
+            },
+        );
+        if previous.is_some() {
             state.retirements = state.retirements.saturating_add(1);
         }
         state.failures.remove(&key);
         state.misses = state.misses.saturating_add(1);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
         Ok(true)
     }
 
     /// Retire the renderer-qualified root currently offered for one selector.
     ///
     /// Active codec Sessions and native outputs retain independent `Arc`
-    /// leases; this removes only future acquisition authority.
+    /// leases; this removes only future acquisition authority. An in-progress
+    /// initialization for this selector is also revoked, but remains accounted
+    /// for until its provider returns and the acquiring worker consumes it.
     pub fn retire_renderer_device_context(&self, selector: HwAccelDeviceSelector) -> bool {
         let backend = match selector {
             HwAccelDeviceSelector::VaapiDrmRenderNode(_) => HwAccelBackend::Vaapi,
@@ -542,10 +625,22 @@ impl HwDeviceContextPool {
         let key = (backend, Some(selector));
         let mut state = self.lock_state();
         state.failures.remove(&key);
-        if state.entries.remove(&key).is_none() {
+        let initializing_revoked = state.initializing.as_mut().is_some_and(|value| {
+            if value.key == key && value.publishable {
+                value.publishable = false;
+                true
+            } else {
+                false
+            }
+        });
+        let previous = state.entries.remove(&key);
+        if previous.is_none() && !initializing_revoked {
             return false;
         }
         state.retirements = state.retirements.saturating_add(1);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
         true
     }
 
@@ -570,10 +665,15 @@ impl HwDeviceContextPool {
     fn retire(&self, key: HwAccelDeviceProbeKey, generation: u64) {
         let mut state = self.lock_state();
         let current_generation = state.entries.get(&key).map(|entry| entry.generation);
-        if current_generation == Some(generation) {
-            state.entries.remove(&key);
+        let previous = if current_generation == Some(generation) {
             state.retirements = state.retirements.saturating_add(1);
-        }
+            state.entries.remove(&key)
+        } else {
+            None
+        };
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
     }
 
     fn retire_after_setup_failure(
@@ -584,11 +684,17 @@ impl HwDeviceContextPool {
     ) {
         let mut state = self.lock_state();
         let current_generation = state.entries.get(&key).map(|entry| entry.generation);
-        if current_generation == Some(generation) {
-            state.entries.remove(&key);
-            state.retirements = state.retirements.saturating_add(1);
+        if current_generation != Some(generation) {
+            // The failing Session still owns its diagnostic and old root, but
+            // cannot revoke or defer acquisition of a replacement generation.
+            return;
         }
+        state.retirements = state.retirements.saturating_add(1);
+        let previous = state.entries.remove(&key);
         let _ = state.record_failure(key, probe, true);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
     }
 
     fn release(
@@ -608,17 +714,50 @@ impl HwDeviceContextPool {
         }
 
         let max_idle_contexts = state.policy.max_idle_contexts;
+        let mut entries = Vec::new();
         if state.idle_count() >= max_idle_contexts {
-            state.entries.remove(&key);
+            if let Some(entry) = state.entries.remove(&key) {
+                entries.push(entry);
+            }
             state.evictions = state.evictions.saturating_add(1);
         }
-        state.trim_idle_to(max_idle_contexts);
+        entries.extend(state.trim_idle_to(max_idle_contexts));
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
     }
 
     pub(crate) fn acquire(
         &self,
         backend: HwAccelBackend,
         selector: Option<HwAccelDeviceSelector>,
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        self.acquire_with_device_creation(backend, selector, |device_type, device_name| {
+            let mut device_context = ptr::null_mut();
+            // SAFETY: The out pointer is exclusive to this call; the returned
+            // AVBufferRef is transferred to the pool's creation owner or
+            // released on the partial-open path before publication.
+            let result = unsafe {
+                ffmpeg::ffi::av_hwdevice_ctx_create(
+                    &mut device_context,
+                    device_type,
+                    device_name.map_or(ptr::null(), |name| name.as_ptr()),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            (result, device_context)
+        })
+    }
+
+    fn acquire_with_device_creation(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+        create: impl FnOnce(
+            ffmpeg::ffi::AVHWDeviceType,
+            Option<&std::ffi::CStr>,
+        ) -> (i32, *mut ffmpeg::ffi::AVBufferRef),
     ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
         if let Some(selector) = selector.filter(|selector| !selector.selects_backend(backend)) {
             return Err(HwAccelDeviceContextProbe::unavailable(
@@ -655,8 +794,14 @@ impl HwDeviceContextPool {
             });
         }
 
-        let key = (backend, selector);
-        let mut state = self.lock_state();
+        self.acquire_available_device(backend, selector, device_type, create)
+    }
+
+    fn acquire_current_device(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        state: &mut HwDeviceContextPoolState,
+    ) -> std::result::Result<Option<HwAccelDeviceContext>, HwAccelDeviceContextProbe> {
         let now = Instant::now();
         if let Some(failure) = state.failures.get(&key) {
             if now < failure.retry_after {
@@ -682,15 +827,43 @@ impl HwDeviceContextPool {
             let owner = Arc::clone(&entry.owner);
             state.hits = state.hits.saturating_add(1);
             state.failures.remove(&key);
-            return Ok(HwAccelDeviceContext {
+            return Ok(Some(HwAccelDeviceContext {
                 owner,
                 pool: self.clone(),
                 key,
                 generation,
                 newly_created: false,
-            });
+            }));
         }
 
+        Ok(None)
+    }
+
+    fn acquire_available_device(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+        device_type: ffmpeg::ffi::AVHWDeviceType,
+        create: impl FnOnce(
+            ffmpeg::ffi::AVHWDeviceType,
+            Option<&std::ffi::CStr>,
+        ) -> (i32, *mut ffmpeg::ffi::AVBufferRef),
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        let ffmpeg_device_type_available = true;
+        let key = (backend, selector);
+        let mut state = self.lock_state();
+        if let Some(current) = self.acquire_current_device(key, &mut state)? {
+            return Ok(current);
+        }
+        drop(state);
+        let _creation = match self.inner.creation.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut state = self.lock_state();
+        if let Some(current) = self.acquire_current_device(key, &mut state)? {
+            return Ok(current);
+        }
         let Some(generation) = state.allocate_generation() else {
             return Err(HwAccelDeviceContextProbe {
                 backend,
@@ -702,18 +875,13 @@ impl HwDeviceContextPool {
                 reason: "hardware device generation space is exhausted".to_owned(),
             });
         };
-        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        state.initializing =
+            Some(HwDeviceContextInitialization { key, generation, publishable: true });
+        drop(state);
+        let _initialization = HwDeviceContextInitializationGuard { pool: self.clone(), generation };
         let device_name = selector.and_then(|selector| selector.device_name_for(backend));
-        let result = unsafe {
-            ffmpeg::ffi::av_hwdevice_ctx_create(
-                &mut device_context,
-                device_type,
-                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if result < 0 {
+        let (result, mut device_context) = create(device_type, device_name.as_deref());
+        let created = if result < 0 {
             if !device_context.is_null() {
                 // SAFETY: FFmpeg returned this partial AVBufferRef through the
                 // exclusive out pointer; no owner was published.
@@ -734,9 +902,13 @@ impl HwDeviceContextPool {
                     ffmpeg::Error::from(result)
                 ),
             };
-            return Err(state.record_failure(key, probe, false));
-        }
-        let Some(device_context) = NonNull::new(device_context) else {
+            Err(probe)
+        } else if let Some(device_context) = NonNull::new(device_context) {
+            Ok(Arc::new(SharedHwAccelDeviceContext {
+                backend,
+                ptr: device_context,
+            }))
+        } else {
             let probe = HwAccelDeviceContextProbe {
                 backend,
                 backend_maps_to_ffmpeg_device: true,
@@ -749,10 +921,37 @@ impl HwDeviceContextPool {
                     backend.as_str()
                 ),
             };
-            return Err(state.record_failure(key, probe, false));
+            Err(probe)
         };
-
-        let owner = Arc::new(SharedHwAccelDeviceContext { backend, ptr: device_context });
+        // A renderer generation may be installed or retired while the foreign
+        // call runs. Its later state change wins; a late result cannot reopen it.
+        // `created` precedes this guard so discarded foreign roots drop only
+        // after the state mutex is released, including all early-return paths.
+        let mut state = self.lock_state();
+        if !state
+            .initializing
+            .as_ref()
+            .is_some_and(|value| value.generation == generation && value.publishable)
+        {
+            if let Some(current) = self.acquire_current_device(key, &mut state)? {
+                return Ok(current);
+            }
+            let reason = "hardware device initialization was retired before publication";
+            let probe = match &created {
+                Ok(_) => HwAccelDeviceContextProbe::acquired(backend, true, reason),
+                Err(failure) => {
+                    let mut probe = failure.clone();
+                    probe.reason = format!("{reason}; {}", probe.reason);
+                    probe
+                }
+            };
+            return Err(probe);
+        }
+        let owner = match created {
+            Ok(owner) => owner,
+            Err(probe) => return Err(state.record_failure(key, probe, false)),
+        };
+        let recency = state.next_recency();
         state.entries.insert(
             key,
             HwDeviceContextPoolEntry {
@@ -764,7 +963,10 @@ impl HwDeviceContextPool {
         state.failures.remove(&key);
         state.misses = state.misses.saturating_add(1);
         let max_idle_contexts = state.policy.max_idle_contexts;
-        state.trim_idle_to(max_idle_contexts);
+        let entries = state.trim_idle_to(max_idle_contexts);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
         Ok(HwAccelDeviceContext {
             owner,
             pool: self.clone(),
@@ -2292,6 +2494,278 @@ mod tests {
         } else if probe.device_create_attempted {
             assert!(probe.device_create_error_code.is_some());
         }
+    }
+
+    #[test]
+    fn hardware_device_creation_does_not_hold_pool_state_lock() {
+        let pool = HwDeviceContextPool::default();
+        let mut invoked = false;
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            None,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| {
+                invoked = true;
+                assert!(
+                pool.inner.state.try_lock().is_ok(),
+                "foreign device initialization must not block pool diagnostics or resource policy"
+            );
+                assert_eq!(pool.diagnostics().initializing_contexts, 1);
+                pool.reconfigure(HwDeviceContextPoolPolicy::new(0));
+                (-1, ptr::null_mut())
+            },
+        );
+        assert!(
+            invoked,
+            "admitted device creation must reach the injected provider"
+        );
+        assert!(result.is_err());
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        assert_eq!(pool.diagnostics().policy.max_idle_contexts, 0);
+    }
+
+    // These are AVBuffer ownership tests, not fake physical device admission.
+    // The bytes are never attached to a codec or interpreted as AVHWDeviceContext.
+    fn ownership_test_device_root() -> Arc<SharedHwAccelDeviceContext> {
+        let ptr = unsafe { ffmpeg::ffi::av_buffer_alloc(1) };
+        Arc::new(SharedHwAccelDeviceContext {
+            backend: HwAccelBackend::Cuda,
+            ptr: NonNull::new(ptr).expect("ownership fixture allocation"),
+        })
+    }
+
+    fn observed_ownership_test_device_root(
+        pool: &HwDeviceContextPool,
+    ) -> (
+        Arc<SharedHwAccelDeviceContext>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        struct Observation {
+            pool: std::sync::Weak<HwDeviceContextPoolInner>,
+            result: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        unsafe extern "C" fn release(opaque: *mut std::ffi::c_void, data: *mut u8) {
+            // SAFETY: This test allocated both pointers and gives FFmpeg the
+            // unique final-release callback. No panic crosses the C boundary.
+            let observation = unsafe { Box::from_raw(opaque.cast::<Observation>()) };
+            let (unlocked, accounted) = observation.pool.upgrade().map_or((false, false), |pool| {
+                pool.state
+                    .try_lock()
+                    .map_or((false, false), |state| (true, state.retiring_contexts > 0))
+            });
+            observation.result.store(
+                1 | (usize::from(unlocked) << 1) | (usize::from(accounted) << 2),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            unsafe { ffmpeg::ffi::av_free(data.cast()) };
+        }
+        let result = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observation = Box::new(Observation {
+            pool: Arc::downgrade(&pool.inner),
+            result: Arc::clone(&result),
+        });
+        let data = unsafe { ffmpeg::ffi::av_malloc(1) }.cast::<u8>();
+        assert!(!data.is_null(), "test payload allocation");
+        let opaque = Box::into_raw(observation).cast();
+        let buffer = unsafe { ffmpeg::ffi::av_buffer_create(data, 1, Some(release), opaque, 0) };
+        if buffer.is_null() {
+            unsafe { release(opaque, data) };
+            panic!("test AVBuffer allocation");
+        }
+        (
+            Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::Cuda,
+                ptr: NonNull::new(buffer).expect("checked AVBuffer allocation"),
+            }),
+            result,
+        )
+    }
+
+    #[test]
+    fn hardware_device_retirement_does_not_hold_pool_state_lock() {
+        for operation in ["release_idle", "reconfigure", "retire", "replace", "create"] {
+            let pool = HwDeviceContextPool::new(HwDeviceContextPoolPolicy::new(
+                if operation == "create" { 0 } else { 2 },
+            ));
+            let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+            let (root, observed) = observed_ownership_test_device_root(&pool);
+            pool.install_renderer_device_context(
+                selector,
+                RendererHwAccelDeviceContext { owner: root },
+            )
+            .expect("install idle root");
+            match operation {
+                "release_idle" => pool.release_idle(),
+                "reconfigure" => pool.reconfigure(HwDeviceContextPoolPolicy::new(0)),
+                "retire" => {
+                    assert!(pool.retire_renderer_device_context(selector));
+                }
+                "replace" => {
+                    pool.install_renderer_device_context(
+                        selector,
+                        RendererHwAccelDeviceContext { owner: ownership_test_device_root() },
+                    )
+                    .expect("replace root");
+                }
+                "create" => {
+                    let root = ownership_test_device_root();
+                    let lease = pool
+                        .acquire_available_device(
+                            HwAccelBackend::Cuda,
+                            Some(HwAccelDeviceSelector::CudaDeviceOrdinal(1)),
+                            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                            |_, _| (0, unsafe { ffmpeg::ffi::av_buffer_ref(root.ptr.as_ptr()) }),
+                        )
+                        .expect("create another root and trim idle roots");
+                    drop(lease);
+                }
+                _ => unreachable!("fixed operation table"),
+            }
+            assert_eq!(
+                observed.load(std::sync::atomic::Ordering::SeqCst),
+                7,
+                "foreign root destruction during {operation} must be unlocked and still accounted"
+            );
+            assert_eq!(pool.diagnostics().retiring_contexts, 0);
+        }
+    }
+
+    #[test]
+    fn hardware_device_creation_cannot_replace_a_later_renderer_generation() {
+        for creation_succeeds in [false, true] {
+            let pool = HwDeviceContextPool::default();
+            let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+            let renderer = ownership_test_device_root();
+            let late = ownership_test_device_root();
+            let acquired = pool
+                .acquire_available_device(
+                    HwAccelBackend::Cuda,
+                    Some(selector),
+                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                    |_, _| {
+                        pool.install_renderer_device_context(
+                            selector,
+                            RendererHwAccelDeviceContext { owner: Arc::clone(&renderer) },
+                        )
+                        .expect("install superseding renderer generation");
+                        assert_eq!(pool.diagnostics().initializing_contexts, 1);
+                        if creation_succeeds {
+                            (0, unsafe { ffmpeg::ffi::av_buffer_ref(late.ptr.as_ptr()) })
+                        } else {
+                            (-1, ptr::null_mut())
+                        }
+                    },
+                )
+                .expect("acquire the newer installed renderer generation");
+            assert!(Arc::ptr_eq(&acquired.owner, &renderer));
+            assert_eq!(acquired.generation(), 2);
+            assert!(!acquired.newly_created);
+            assert_eq!(
+                unsafe { ffmpeg::ffi::av_buffer_get_ref_count(late.ptr.as_ptr()) },
+                1
+            );
+            let diagnostics = pool.diagnostics();
+            assert_eq!(diagnostics.initializing_contexts, 0);
+            assert_eq!(diagnostics.entries, 1);
+            assert_eq!(diagnostics.creation_failures, 0);
+            assert_eq!(diagnostics.failure_backoffs, 0);
+        }
+    }
+
+    #[test]
+    fn hardware_device_stale_failure_cannot_poison_renderer_replacement() {
+        let pool = HwDeviceContextPool::default();
+        let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+        pool.install_renderer_device_context(
+            selector,
+            RendererHwAccelDeviceContext { owner: ownership_test_device_root() },
+        )
+        .expect("install original root");
+        let old = pool
+            .acquire_available_device(
+                HwAccelBackend::Cuda,
+                Some(selector),
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("installed root must be reused"),
+            )
+            .expect("original lease");
+        let replacement = ownership_test_device_root();
+        pool.install_renderer_device_context(
+            selector,
+            RendererHwAccelDeviceContext { owner: Arc::clone(&replacement) },
+        )
+        .expect("install replacement root");
+        old.retire_after_runtime_failure("late failure from an old Session");
+        let current = pool
+            .acquire_available_device(
+                HwAccelBackend::Cuda,
+                Some(selector),
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("replacement root must be reused"),
+            )
+            .expect("old failure must not reject replacement");
+        assert!(Arc::ptr_eq(&current.owner, &replacement));
+        assert_eq!(pool.diagnostics().failure_backoffs, 0);
+    }
+
+    #[test]
+    fn hardware_device_creation_retirement_rejects_late_publication() {
+        let pool = HwDeviceContextPool::default();
+        let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+        let late = ownership_test_device_root();
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            Some(selector),
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| {
+                assert!(pool.retire_renderer_device_context(selector));
+                assert_eq!(
+                    pool.diagnostics().initializing_contexts,
+                    1,
+                    "revocation must not pretend the foreign owner has already returned"
+                );
+                (0, unsafe { ffmpeg::ffi::av_buffer_ref(late.ptr.as_ptr()) })
+            },
+        );
+        let rejected = result.err().expect("revoked generation must fail");
+        assert!(rejected.reason.contains("retired before publication"));
+        assert!(rejected.device_create_attempted);
+        assert!(
+            rejected.device_context_created,
+            "retirement must not erase the fact that the provider created a root"
+        );
+        assert!(rejected.ffmpeg_device_type_available);
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(late.ptr.as_ptr()) },
+            1
+        );
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        assert_eq!(pool.diagnostics().entries, 0);
+    }
+
+    #[test]
+    fn hardware_device_creation_panic_releases_initialization_reservation() {
+        let pool = HwDeviceContextPool::default();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.acquire_available_device(
+                HwAccelBackend::Cuda,
+                None,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("injected provider unwind"),
+            )
+        }));
+        assert!(panic.is_err());
+        assert!(!pool.inner.state.is_poisoned());
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            None,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| (-1, ptr::null_mut()),
+        );
+        assert!(result.is_err());
+        assert_eq!(pool.diagnostics().latest_generation, 2);
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
     }
 
     #[test]

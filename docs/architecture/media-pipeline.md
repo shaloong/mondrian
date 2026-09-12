@@ -882,6 +882,26 @@ probed without creating a device. Concrete device availability is proven only
 by an acquisition from this worker-family owner; it is never promoted into a
 process-wide success/failure memo.
 
+Device creation never holds the pool's state mutex across FFmpeg or driver
+initialization or partial-open cleanup. A separate serialization gate prevents
+duplicate concurrent foreign creation; it owns no cache or generation state.
+Existing roots remain acquirable while another root opens. The same pool state
+reserves the initializing generation, and publication rechecks that reservation
+after the provider returns. A renderer root installed meanwhile wins; retiring
+an initializing generation prevents its late result from becoming addressable.
+Likewise, an old Session's late setup/runtime failure cannot retire or back off
+a different current generation. The error remains with that Session; only a
+matching current pool generation may change future acquisition policy.
+Revocation does not pretend the foreign call has ended: diagnostics retain the
+initializing owner until its actual return or Rust unwind. The acquiring worker
+owns that call and its ordinary lifecycle; no detached initialization thread,
+second device authority, fallback promotion, or relaxed deadline is introduced.
+Idle eviction, renderer-root replacement and retirement detach references under
+that same state lock, then release them outside it. A move-only retirement owner
+keeps detached pool references accounted for until their release returns.
+Independent Session leases can still keep a retired root alive; removing it
+from lookup is never a claim that all native resources have been destroyed.
+
 Session destruction has one non-negotiable native-resource order. Every
 session-local retained `AVFrame`, decoded-surface window, playback-ring entry,
 and native output surface is released before its `AVCodecContext`, hardware

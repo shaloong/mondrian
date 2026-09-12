@@ -173,6 +173,8 @@ pub(crate) fn present_headless_preview_candidate_at(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     already_visible_at: Option<Instant>,
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
+    let observation_started = Instant::now();
+    let observed_frame = state.current_frame();
     let candidate = present_headless_preview_candidate_inner(
         preview,
         state,
@@ -180,6 +182,9 @@ pub(crate) fn present_headless_preview_candidate_at(
         gpu_completion_deadline,
         already_visible_at,
     );
+    let arbitration_us = observation_started.elapsed().as_micros();
+    let mut policy_us = 0;
+    let mut resource_apply_us = 0;
     // Resource coordination remains part of every successful Headless turn.
     // Run it after arbitration so an already-rendered successor can cross its
     // frame boundary before native-memory observation or unrelated domain
@@ -187,10 +192,25 @@ pub(crate) fn present_headless_preview_candidate_at(
     // no new GPU resource; a fresh submission still sees the previously
     // applied immutable decision, and an idle Adapter applies the new one now.
     if candidate.is_ok() {
+        let policy_started = Instant::now();
         let viewer_resource_decision = advance_headless_execution_resource_policy(preview, state);
+        policy_us = policy_started.elapsed().as_micros();
         if !gpu.has_submission_in_flight() {
+            let apply_started = Instant::now();
             gpu.apply_resource_decision(&viewer_resource_decision)?;
+            resource_apply_us = apply_started.elapsed().as_micros();
         }
+    }
+    let total_us = observation_started.elapsed().as_micros();
+    if total_us > 5_000 {
+        tracing::debug!(
+            observed_frame,
+            arbitration_us,
+            policy_us,
+            resource_apply_us,
+            total_us,
+            "slow Headless presentation boundary"
+        );
     }
     candidate
 }

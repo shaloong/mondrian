@@ -1,5 +1,12 @@
 # Playback Engine
 
+Headless candidate wall time includes presentation arbitration and the following
+resource-policy projection. Slow-boundary diagnostics attribute these separately
+from applying the Viewer GPU grant, with the observed frame attached. These are
+measurements only: they neither advance the clock nor alter presentation deadlines
+or qualification outcomes. A slow candidate is not, by itself, proof of slow GPU
+recording or decoding.
+
 After an Adapter proves exact physical GPU completion and finalizes Presented/NoDemand, `release_completed_gpu_evaluation(output_key, playback_intent)` may retire that CPU evaluation's reuse owner. The bounded evaluation set records the final monitor/scopes key together with epoch, frame and quality; equal pixels at a different transport intent cannot retire a successor. Pending evaluations, native decoder owners and Frame Store entries are untouched. In-flight candidate clones retain their independent leases. This lets ordinary cache pressure reclaim old CPU inputs after completed GPU output has become authoritative, without increasing the optional cache budget or granting speculative work Current capacity.
 
 Both immediate successor and farther lookahead requests are speculative media work. The shared media Adapter projects both ticketless purposes to Prefetch, never Current, including cache hits: they retain their physical payload lease without acquiring Current working-set protection. Optional capacity refusal therefore cannot reclaim an earlier Prefetch under a falsely promoted Current role. Physical immediate-successor GPU ownership remains a separate exact-intent contract.
