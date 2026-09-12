@@ -175,6 +175,7 @@ impl CudaPlaneAdapter {
             })
             .map_err(|_| rejected("CUDA transfer owner counter exhausted"))?;
         let mut owner = TransferOwner {
+            device: device.clone(),
             raw: self.raw.clone(),
             driver: Arc::clone(&self.driver),
             context: view.context,
@@ -391,6 +392,7 @@ impl CudaPlaneAdapter {
 }
 
 struct TransferOwner {
+    device: wgpu::Device,
     raw: ash::Device,
     driver: Arc<CudaDriver>,
     context: *mut c_void,
@@ -415,37 +417,34 @@ impl Drop for TransferOwner {
         let mut failed = false;
         match unsafe { self.driver.enter(self.context) } {
             Ok(guard) => {
-                let mut release = |name, code| {
-                    if code != 0 {
-                        failed = true;
-                        tracing::error!(operation = name, code, "CUDA bridge cleanup failed");
-                    }
-                };
-                unsafe {
-                    if !self.stream.is_null() {
-                        release("stream synchronize", (self.driver.stream_sync)(self.stream));
-                    }
-                    if !self.cuda_semaphore.is_null() {
-                        release(
+                if let Err(error) = run_cleanup_steps(|step| unsafe {
+                    let (name, code) = match step {
+                        0 if !self.stream.is_null() => {
+                            ("stream synchronize", (self.driver.stream_sync)(self.stream))
+                        }
+                        1 if !self.cuda_semaphore.is_null() => (
                             "semaphore destroy",
                             (self.driver.destroy_semaphore)(self.cuda_semaphore),
-                        );
-                    }
-                    if self.mapped != 0 {
-                        release("mapped buffer free", (self.driver.free)(self.mapped));
-                    }
-                    if !self.cuda_memory.is_null() {
-                        release(
+                        ),
+                        2 if self.mapped != 0 => {
+                            ("mapped buffer free", (self.driver.free)(self.mapped))
+                        }
+                        3 if !self.cuda_memory.is_null() => (
                             "external memory destroy",
                             (self.driver.destroy_memory)(self.cuda_memory),
-                        );
-                    }
-                    if !self.event.is_null() {
-                        release("event destroy", (self.driver.event_destroy)(self.event));
-                    }
-                    if !self.stream.is_null() {
-                        release("stream destroy", (self.driver.stream_destroy)(self.stream));
-                    }
+                        ),
+                        4 if !self.event.is_null() => {
+                            ("event destroy", (self.driver.event_destroy)(self.event))
+                        }
+                        5 if !self.stream.is_null() => {
+                            ("stream destroy", (self.driver.stream_destroy)(self.stream))
+                        }
+                        _ => return Ok(()),
+                    };
+                    cu::check(name, code)
+                }) {
+                    failed = true;
+                    tracing::error!(%error, "CUDA bridge cleanup failed");
                 }
                 if let Err(error) = guard.finish() {
                     failed = true;
@@ -456,6 +455,16 @@ impl Drop for TransferOwner {
                 failed = true;
                 tracing::error!(%error,"CUDA cleanup context unavailable");
             }
+        }
+        if failed {
+            // Foreign failure does not prove completion or destruction. Preserve
+            // the remaining raw handles and their parent lifetimes; the sticky
+            // owner count rejects a successful Renderer shutdown receipt. This
+            // exceptional quarantine intentionally cannot be recycled or retried.
+            std::mem::forget(self.device.clone());
+            std::mem::forget(Arc::clone(&self.driver));
+            std::mem::forget(self._source.clone());
+            return;
         }
         unsafe {
             if self.semaphore != vk::Semaphore::null() {
@@ -468,12 +477,19 @@ impl Drop for TransferOwner {
                 self.raw.free_memory(self.memory, None);
             }
         }
-        // Failed cleanup remains an unclosed owner in the runtime's closure evidence.
-        if !failed {
-            self.owners.fetch_sub(1, Ordering::AcqRel);
-        }
+        self.owners.fetch_sub(1, Ordering::AcqRel);
     }
 }
+// Native resources form a dependency chain: later releases require earlier proof.
+fn run_cleanup_steps(
+    mut step: impl FnMut(u8) -> Result<(), cu::CudaError>,
+) -> Result<(), cu::CudaError> {
+    for index in 0..6 {
+        step(index)?;
+    }
+    Ok(())
+}
+
 struct TransferSubmission {
     owner: Arc<TransferOwner>,
     family: u32,
@@ -557,6 +573,27 @@ impl Drop for PendingWait {
 #[cfg(test)]
 mod tests {
     use super::cuda_buffer_layout;
+
+    #[test]
+    fn cleanup_failure_cannot_release_dependent_native_resources() {
+        for fail_at in 0..6 {
+            let mut visited = Vec::new();
+            let result = super::run_cleanup_steps(|step| {
+                visited.push(step);
+                if step == fail_at {
+                    Err(super::cu::CudaError::Call { operation: "injected cleanup", code: 999 })
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                visited,
+                (0..=fail_at).collect::<Vec<_>>(),
+                "a failed native proof must stop dependent destruction"
+            );
+        }
+    }
 
     #[test]
     fn transfer_storage_charges_both_planes_and_alignment() {

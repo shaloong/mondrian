@@ -1539,3 +1539,12 @@ can borrow a presentation lease without detaching its ownership; the test keeps
 that lease until copy completion and consumes Renderer retirement afterward.
 Half-float output comparison permits one half-float ULP at unity; it does not
 qualify a display, original media, a different GPU provider, or sustained playback.
+
+CUDA teardown is dependency ordered. A synchronization or release failure stops
+all dependent destruction, retains the unproved native handles and their device,
+driver-library and source-context lifetimes, and leaves the runtime owner count
+unclosed. This exceptional quarantine is not reusable storage and cannot produce
+a successful shutdown receipt. Fault-injected release-order tests cover failure
+at each step; normal real-device tests separately require zero retained owners.
+The synchronous CUDA driver completion call remains a foreign blocking boundary;
+these ordering tests do not establish a driver-hang timeout guarantee.
