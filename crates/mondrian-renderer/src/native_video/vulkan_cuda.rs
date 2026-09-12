@@ -13,7 +13,7 @@ use mondrian_media::{
 use std::ffi::c_void;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -42,6 +42,35 @@ pub(crate) fn cuda_buffer_layout(
     Some((row, offset, capacity))
 }
 
+#[derive(Default)]
+struct CudaTransferLifecycle {
+    retained: AtomicUsize,
+    cleanup_failed: AtomicBool,
+}
+impl CudaTransferLifecycle {
+    fn admit(&self) -> Result<(), GpuNativeDecodedFrameImportError> {
+        if self.cleanup_failed.load(Ordering::Acquire) {
+            return Err(rejected(
+                "CUDA native import stopped after an unclosed cleanup failure",
+            ));
+        }
+        self.retained
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .map(|_| ())
+            .map_err(|_| rejected("CUDA transfer owner counter exhausted"))
+    }
+
+    fn complete(&self, failed: bool) {
+        if failed {
+            self.cleanup_failed.store(true, Ordering::Release);
+        } else {
+            self.retained.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 pub(super) struct CudaPlaneAdapter {
     pub support: GpuNativeDecodedFrameImportSupport,
     driver: Arc<CudaDriver>,
@@ -52,7 +81,7 @@ pub(super) struct CudaPlaneAdapter {
     family: u32,
     uuid: [u8; 16],
     dedicated: bool,
-    owners: Arc<AtomicUsize>,
+    lifecycle: Arc<CudaTransferLifecycle>,
 }
 impl CudaPlaneAdapter {
     pub fn new(device: &wgpu::Device) -> Result<Self, GpuNativeDecodedFrameImportError> {
@@ -131,11 +160,11 @@ impl CudaPlaneAdapter {
                 .external_memory_properties
                 .external_memory_features
                 .contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY),
-            owners: Arc::new(AtomicUsize::new(0)),
+            lifecycle: Arc::new(CudaTransferLifecycle::default()),
         })
     }
     pub fn retained_owners(&self) -> usize {
-        self.owners.load(Ordering::Acquire)
+        self.lifecycle.retained.load(Ordering::Acquire)
     }
 
     pub fn import(
@@ -169,11 +198,7 @@ impl CudaPlaneAdapter {
                 "CUDA buffer exceeds the active renderer's storage limits",
             ));
         }
-        self.owners
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .map_err(|_| rejected("CUDA transfer owner counter exhausted"))?;
+        self.lifecycle.admit()?;
         let mut owner = TransferOwner {
             device: device.clone(),
             raw: self.raw.clone(),
@@ -188,7 +213,7 @@ impl CudaPlaneAdapter {
             memory: vk::DeviceMemory::null(),
             semaphore: vk::Semaphore::null(),
             _source: native.handle.clone(),
-            owners: Arc::clone(&self.owners),
+            lifecycle: Arc::clone(&self.lifecycle),
         };
         let mut external = vk::ExternalMemoryBufferCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
@@ -405,7 +430,7 @@ struct TransferOwner {
     memory: vk::DeviceMemory,
     semaphore: vk::Semaphore,
     _source: PreviewNativeDecodedFrameHandle,
-    owners: Arc<AtomicUsize>,
+    lifecycle: Arc<CudaTransferLifecycle>,
 }
 // SAFETY: publication occurs only after immutable initialization. The final
 // owner enters its retained FFmpeg CUDA context on the dropping thread. Native
@@ -457,6 +482,7 @@ impl Drop for TransferOwner {
             }
         }
         if failed {
+            self.lifecycle.complete(true);
             // Foreign failure does not prove completion or destruction. Preserve
             // the remaining raw handles and their parent lifetimes; the sticky
             // owner count rejects a successful Renderer shutdown receipt. This
@@ -477,7 +503,7 @@ impl Drop for TransferOwner {
                 self.raw.free_memory(self.memory, None);
             }
         }
-        self.owners.fetch_sub(1, Ordering::AcqRel);
+        self.lifecycle.complete(false);
     }
 }
 // Native resources form a dependency chain: later releases require earlier proof.
@@ -573,6 +599,28 @@ impl Drop for PendingWait {
 #[cfg(test)]
 mod tests {
     use super::cuda_buffer_layout;
+
+    #[test]
+    fn quarantined_cleanup_rejects_future_transfer_admission() {
+        let lifecycle = super::CudaTransferLifecycle::default();
+        lifecycle.admit().expect("initial transfer");
+        let cleanup = super::run_cleanup_steps(|_| {
+            Err(super::cu::CudaError::Call {
+                operation: "injected stream completion failure",
+                code: 999,
+            })
+        });
+        lifecycle.complete(cleanup.is_err());
+        assert!(
+            lifecycle.admit().is_err(),
+            "failed cleanup must stop later resource acquisition"
+        );
+        assert_eq!(
+            lifecycle.retained.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "failed owner remains counted; rejected requests allocate no owner"
+        );
+    }
 
     #[test]
     fn cleanup_failure_cannot_release_dependent_native_resources() {

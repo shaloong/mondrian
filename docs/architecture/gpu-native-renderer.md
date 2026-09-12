@@ -1557,3 +1557,10 @@ full-resolution float-texture allocation without changing color precision,
 materialization extent, pool budget, or native source completion ownership.
 The real CUDA import regression checks the pool return alongside GPU output
 readback and zero retained native owners.
+
+A failed CUDA cleanup also poisons subsequent transfer admission in that
+adapter's existing lifecycle. Rejected requests acquire no additional native
+owner, while quarantined owners remain counted. This prevents repeated failed
+cleanups from growing unbounded quarantined residency. The fault-injected
+lifecycle regression checks both rejection and the retained owner count;
+normal GPU execution and zero-owner retirement are tested separately.
