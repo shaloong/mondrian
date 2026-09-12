@@ -1522,3 +1522,9 @@ or retain an unbounded auxiliary pool.
 CUDA import is reported as GpuBridgeCopy. Real device tests must separately prove
 native decoding, pixel correctness, seek and lifecycle closure; compilation and
 provider-only memory-transfer experiments do not establish product qualification.
+
+CUDA foreign acquisitions publish memory, mapped-buffer, semaphore, stream and
+event ownership only after the driver returns success. Failed calls cannot arm
+cleanup with an unspecified output parameter. The shared acquisition seam has
+fault-injection coverage for failed calls that modify both pointer and device
+address outputs; this proves error-path ownership, not physical device qualification.

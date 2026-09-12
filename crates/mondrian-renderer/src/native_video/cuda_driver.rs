@@ -22,6 +22,18 @@ pub(super) fn check(operation: &'static str, code: i32) -> Result<(), CudaError>
     }
 }
 
+// Publish foreign output ownership only under the acquisition result contract.
+pub(super) fn acquire<T: Default>(
+    operation: &'static str,
+    owned: &mut T,
+    call: impl FnOnce(*mut T) -> i32,
+) -> Result<(), CudaError> {
+    let mut pending = T::default();
+    check(operation, call(&mut pending))?;
+    *owned = pending;
+    Ok(())
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) union ExternalHandle {
@@ -195,6 +207,37 @@ impl Drop for ContextGuard<'_> {
 mod tests {
     use super::*;
     use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn acquisition_failure_does_not_publish_foreign_output() {
+        let mut mapped = 0usize;
+        let result = acquire("fault-injected map", &mut mapped, |output| {
+            // A failed foreign call provides no valid ownership of this value.
+            unsafe { *output = 0xdead };
+            999
+        });
+        assert!(matches!(result, Err(CudaError::Call { code: 999, .. })));
+        assert_eq!(
+            mapped, 0,
+            "failure must not arm cleanup with an unowned address"
+        );
+        let mut handle = std::ptr::null_mut::<c_void>();
+        assert!(acquire("fault-injected create", &mut handle, |output| {
+            unsafe { *output = std::ptr::dangling_mut() };
+            999
+        })
+        .is_err());
+        assert!(
+            handle.is_null(),
+            "failure must not arm a foreign destructor"
+        );
+        acquire("successful map", &mut mapped, |output| {
+            unsafe { *output = 42 };
+            0
+        })
+        .expect("successful ownership transfer");
+        assert_eq!(mapped, 42);
+    }
 
     #[test]
     fn driver_abi_matches_linux_64_bit_cuda_headers() {

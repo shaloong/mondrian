@@ -708,3 +708,9 @@ layout policy used by allocation; physical Vulkan memory requirements must fit
 that admitted capacity. Texture count remains two, and the existing byte grant
 is unchanged. CUDA storage cannot be hidden in Media's decoder-surface charge or
 in an unbounded transfer cache.
+
+Native-source encoded-RGB and working textures use the requested materialization
+extent, exactly as Viewer recording does. The CUDA storage bridge continues to
+charge the full decoded extent; downscaling cannot reduce its charge. A 4K-to-1080p
+admission regression checks both surface formats, the exact grant boundary and
+one-byte-under rejection without increasing any grant.

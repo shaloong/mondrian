@@ -671,8 +671,8 @@ fn estimate_source(
             }
 
             if let Some(source) = native_source {
-                let width = source.native_frame.width;
-                let height = source.native_frame.height;
+                let width = source.materialization_width;
+                let height = source.materialization_height;
                 let Some(_surface_descriptor) = source.native_frame.surface_format.descriptor()
                 else {
                     return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
@@ -716,11 +716,16 @@ fn estimate_source(
                             })
                         }
                     };
-                    let (_, _, capacity) =
-                        crate::native_video::cuda_buffer_layout(width, height, component_bytes)
-                            .ok_or(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
-                                reason: "CUDA bridge allocation overflow",
-                            })?;
+                    let (_, _, capacity) = crate::native_video::cuda_buffer_layout(
+                        source.native_frame.width,
+                        source.native_frame.height,
+                        component_bytes,
+                    )
+                    .ok_or(
+                        ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                            reason: "CUDA bridge allocation overflow",
+                        },
+                    )?;
                     bytes.checked_add(capacity).ok_or(
                         ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                             stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -1119,6 +1124,132 @@ fn checked_texture_bytes(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_materialization_charges_output_extent_and_full_cuda_storage() {
+        use mondrian_media::{
+            DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoMatrix,
+            DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+            PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
+            PreviewNativeDecodedFrameResource,
+        };
+        #[derive(Debug)]
+        struct EstimateOnlyResource(DecodedGpuFrameHandleKind);
+        impl PreviewNativeDecodedFrameResource for EstimateOnlyResource {
+            fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+                self.0
+            }
+            fn handle_id(&self) -> std::num::NonZeroU64 {
+                std::num::NonZeroU64::new(1).expect("test identity")
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let fixture = tempfile::tempdir().expect("diagnostic fixture");
+        let path = fixture.path().join("diagnostic.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("tiny CPU fixture");
+        let mut decoder = mondrian_media::PreviewDecodeSessionContext::new();
+        let mut request = mondrian_media::PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            mondrian_media::PreviewDecodeAccessMode::PlaybackCursor,
+            mondrian_media::PreviewSourceColorContract::automatic(
+                ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv;
+        let mondrian_media::PreviewDecodeOutcome::CpuYuvFrame(decoded) =
+            decoder.decode_cancellable(request, || false).expect("CPU diagnostics")
+        else {
+            panic!("CPU YUV fixture");
+        };
+        decoder.clear();
+        let (_, effect_plan) = identity_effect();
+        for kind in [
+            DecodedGpuFrameHandleKind::VaapiSurface,
+            DecodedGpuFrameHandleKind::CudaDeviceMemory,
+        ] {
+            for (surface, depth, cuda_bytes) in [
+                (DecodedVideoSurfaceFormat::Nv12, 8, 12_451_840u64),
+                (DecodedVideoSurfaceFormat::P010, 10, 24_903_680),
+            ] {
+                // Pure admission data, never presented as a physical GPU fixture.
+                let native_frame = Arc::new(
+                    PreviewNativeDecodedFrame::new(
+                        3840,
+                        2160,
+                        PreviewNativeDecodedFrameHandle::new(EstimateOnlyResource(kind)),
+                        surface,
+                        DecodedVideoSampling {
+                            matrix: DecodedVideoMatrix::Bt709,
+                            range: DecodedVideoRange::Limited,
+                            chroma_location: DecodedVideoChromaLocation::Left,
+                            bit_depth: depth,
+                        },
+                        decoded.diagnostics,
+                    )
+                    .expect("native contract"),
+                );
+                let layers = [ViewerGpuExecutionLayer::Source(Box::new(
+                    ViewerGpuSourceLayer::Media {
+                        frame: None,
+                        is_data_texture: false,
+                        gpu_source: None,
+                        cpu_yuv_source: None,
+                        heterogeneous_input: None,
+                        native_source: Some(crate::ViewerGpuNativeSource {
+                            source_color_space: ColorSpace::Rec709,
+                            input_transform: crate::RenderInputTransform::to_working_gpu(
+                                WorkingColorSpace::LinearRec709,
+                                true,
+                                ColorEngine::mondrian_standard(),
+                            ),
+                            materialization_width: 1920,
+                            materialization_height: 1080,
+                            native_frame,
+                        }),
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_plan: Arc::clone(&effect_plan),
+                        frame_seed: 0,
+                    },
+                ))];
+                with_request(1920, 1080, &layers, |request| {
+                    let estimate =
+                        estimate_viewer_gpu_active_working_set(request).expect("estimate");
+                    let extra = if kind == DecodedGpuFrameHandleKind::CudaDeviceMemory {
+                        cuda_bytes
+                    } else {
+                        0
+                    };
+                    let expected = 1920 * 1080 * 16 * 2 + extra;
+                    assert_eq!(
+                        estimate.source_preparation,
+                        ViewerGpuActiveTextureDemand { textures: 2, bytes: expected }
+                    );
+                    let grant = ViewerGpuExecutionResourceGrant::new(0, 0)
+                        .with_active_limits(estimate.total().bytes, estimate.total().textures);
+                    assert!(grant.admit_active_working_set(estimate).is_ok());
+                    assert!(matches!(
+                        grant
+                            .with_active_limits(
+                                estimate.total().bytes - 1,
+                                estimate.total().textures
+                            )
+                            .admit_active_working_set(estimate),
+                        Err(ViewerGpuActiveWorkingSetAdmissionError::GrantExceeded { .. })
+                    ));
+                });
+            }
+        }
+    }
+
     use super::*;
     use crate::{
         CpuColorFrame, GpuSignalMonitorRequest, RenderMonitorAdaptation, RenderOutputColorBoundary,

@@ -241,23 +241,29 @@ impl CudaPlaneAdapter {
             flags: u32::from(self.dedicated),
             reserved: [0; 16],
         };
-        cu::check("cuImportExternalMemory", unsafe {
-            (self.driver.import_memory)(&mut owner.cuda_memory, &descriptor)
-        })
+        cu::acquire(
+            "cuImportExternalMemory",
+            &mut owner.cuda_memory,
+            |output| unsafe { (self.driver.import_memory)(output, &descriptor) },
+        )
         .map_err(rejected)?;
         let _transferred_fd = fd.into_raw_fd(); // CUDA consumes the fd on success only.
-        cu::check("cuExternalMemoryGetMappedBuffer", unsafe {
-            (self.driver.map_buffer)(
-                &mut owner.mapped,
-                owner.cuda_memory,
-                &cu::BufferDesc {
-                    offset: 0,
-                    size: capacity,
-                    flags: 0,
-                    reserved: [0; 16],
-                },
-            )
-        })
+        cu::acquire(
+            "cuExternalMemoryGetMappedBuffer",
+            &mut owner.mapped,
+            |output| unsafe {
+                (self.driver.map_buffer)(
+                    output,
+                    owner.cuda_memory,
+                    &cu::BufferDesc {
+                        offset: 0,
+                        size: capacity,
+                        flags: 0,
+                        reserved: [0; 16],
+                    },
+                )
+            },
+        )
         .map_err(rejected)?;
         let mut export_sem = vk::ExportSemaphoreCreateInfo::default()
             .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
@@ -283,17 +289,19 @@ impl CudaPlaneAdapter {
             flags: 0,
             reserved: [0; 16],
         };
-        cu::check("cuImportExternalSemaphore", unsafe {
-            (self.driver.import_semaphore)(&mut owner.cuda_semaphore, &descriptor)
-        })
+        cu::acquire(
+            "cuImportExternalSemaphore",
+            &mut owner.cuda_semaphore,
+            |output| unsafe { (self.driver.import_semaphore)(output, &descriptor) },
+        )
         .map_err(rejected)?;
         let _transferred_fd = fd.into_raw_fd();
-        cu::check("cuStreamCreate", unsafe {
-            (self.driver.stream_create)(&mut owner.stream, 1)
+        cu::acquire("cuStreamCreate", &mut owner.stream, |output| unsafe {
+            (self.driver.stream_create)(output, 1)
         })
         .map_err(rejected)?;
-        cu::check("cuEventCreate", unsafe {
-            (self.driver.event_create)(&mut owner.event, 2)
+        cu::acquire("cuEventCreate", &mut owner.event, |output| unsafe {
+            (self.driver.event_create)(output, 2)
         })
         .map_err(rejected)?;
         cu::check("cuEventRecord", unsafe {
