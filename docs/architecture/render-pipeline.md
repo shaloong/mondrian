@@ -1,5 +1,11 @@
 # Render Pipeline
 
+At the App media boundary, an admitted GPU consumer can receive compact CPU
+YUV before native decoder discovery. P010 remains CPU-resident and enters the
+existing renderer upload path; this is not evidence of hardware decoding or
+native surface import. CPU-addressable consumers and unmapped RGB formats keep
+their existing RGBA representation contracts.
+
 Decoded CPU media enters the renderer through the `Source Frame Preparation`
 Module. The Module consumes Media's immutable RGBA frame contract, validates
 payload extent and encoded-versus-linear-versus-DataTexture identity, and

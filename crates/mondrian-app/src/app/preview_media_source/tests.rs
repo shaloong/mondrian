@@ -830,7 +830,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
 }
 
 #[test]
-fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
+fn undiscovered_decoder_keeps_compact_cpu_yuv_and_unmapped_rgb_keeps_rgba() {
     let root = unique_root("mondrian-preview-native-admission-evidence");
     let p010_path = root.join("p010.mp4");
     let rgb_path = root.join("rgb.mp4");
@@ -883,8 +883,10 @@ fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
     };
     assert_eq!(
         undiscovered.key.decode.representation(),
-        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+        mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv,
+        "a GPU consumer can upload CPU-decoded P010 before native decoder discovery"
     );
+    assert!(!undiscovered.key.decode.representation().is_native_surface());
 
     let PreviewMediaSourceOutcome::Ready(unmapped) = resolve(&rgb, gpu_admission()) else {
         panic!("RGB source should resolve through CPU geometry");
