@@ -699,3 +699,12 @@ Lower machine classes retain their smaller product grants and are not implied
 to satisfy the 8K qualification profile. Machine classification from system
 RAM also does not prove GPU capacity; the coordinated matrix records and
 checks the reference-machine GPU inventory and the real Renderer workload.
+
+### CUDA import storage within SourcePreparation
+
+The Viewer estimate charges the CUDA bridge's checked padded buffer capacity to
+SourcePreparation in addition to encoded and working textures. It calls the same
+layout policy used by allocation; physical Vulkan memory requirements must fit
+that admitted capacity. Texture count remains two, and the existing byte grant
+is unchanged. CUDA storage cannot be hidden in Media's decoder-surface charge or
+in an unbounded transfer cache.

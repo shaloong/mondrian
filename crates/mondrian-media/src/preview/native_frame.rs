@@ -265,6 +265,115 @@ impl FfmpegNativeDecodedFrameResource {
             .map_err(Clone::clone)
     }
 
+    /// Borrow CUDA device pointers and their exact FFmpeg context. The returned
+    /// view retains this resource's borrow; pointers must never be CPU-dereferenced.
+    #[cfg(target_os = "linux")]
+    pub fn cuda_frame(
+        &self,
+    ) -> Result<FfmpegCudaFrameView<'_>, FfmpegNativeDecodedFrameResourceError> {
+        let invalid = |reason: &str| FfmpegNativeDecodedFrameResourceError::InvalidCudaFrame {
+            reason: reason.to_owned(),
+        };
+        if self.pixel_format != ffmpeg::format::Pixel::CUDA {
+            return Err(invalid("frame is not AV_PIX_FMT_CUDA"));
+        }
+        // SAFETY: retained AVFrame and its ref-counted contexts remain live for
+        // this borrow. Validate buffer extents before reading each public ABI.
+        let frame = unsafe { self.frame.as_ref() };
+        let frames_ref =
+            NonNull::new(frame.hw_frames_ctx).ok_or_else(|| invalid("missing frames context"))?;
+        let frames_ref = unsafe { frames_ref.as_ref() };
+        if frames_ref.size < std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>()
+            || frames_ref.data.is_null()
+        {
+            return Err(invalid("truncated frames context"));
+        }
+        let frames = unsafe { &*frames_ref.data.cast::<ffmpeg::ffi::AVHWFramesContext>() };
+        let device_ref =
+            NonNull::new(frames.device_ref).ok_or_else(|| invalid("missing device reference"))?;
+        let device_ref = unsafe { device_ref.as_ref() };
+        if device_ref.size < std::mem::size_of::<ffmpeg::ffi::AVHWDeviceContext>()
+            || device_ref.data.is_null()
+        {
+            return Err(invalid("truncated device context"));
+        }
+        let device = unsafe { &*device_ref.data.cast::<ffmpeg::ffi::AVHWDeviceContext>() };
+        if device.type_ != ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
+            || device.hwctx.is_null()
+        {
+            return Err(invalid("frames device is not CUDA"));
+        }
+        // libavutil/hwcontext_cuda.h public AVCUDADeviceContext prefix. No CUDA
+        // SDK or driver is loaded by Media; the concrete Renderer Adapter uses it.
+        #[repr(C)]
+        struct CudaContextPrefix {
+            context: *mut c_void,
+            stream: *mut c_void,
+        }
+        let cuda = unsafe { &*device.hwctx.cast::<CudaContextPrefix>() };
+        if cuda.context.is_null() {
+            return Err(invalid("missing CUDA context"));
+        }
+        let (format, component_bytes) = match frames.sw_format {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 => {
+                (DecodedVideoSurfaceFormat::Nv12, 1usize)
+            }
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE => {
+                (DecodedVideoSurfaceFormat::P010, 2usize)
+            }
+            _ => return Err(invalid("CUDA surface is not NV12 or P010")),
+        };
+        if frame.width <= 0
+            || frame.height <= 0
+            || frame.width > frames.width
+            || frame.height > frames.height
+        {
+            return Err(invalid("visible extent exceeds the CUDA frames allocation"));
+        }
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let mut planes = [(0usize, 0usize); 2];
+        for (index, plane) in planes.iter_mut().enumerate() {
+            let columns = if index == 0 {
+                width
+            } else {
+                width.div_ceil(2) * 2
+            };
+            let rows = if index == 0 {
+                height
+            } else {
+                height.div_ceil(2)
+            };
+            let row_bytes = columns
+                .checked_mul(component_bytes)
+                .ok_or_else(|| invalid("row size overflow"))?;
+            let pitch = usize::try_from(frame.linesize[index])
+                .map_err(|_| invalid("negative CUDA pitch"))?;
+            let address = frame.data[index] as usize;
+            if address == 0 || pitch < row_bytes || pitch % component_bytes != 0 {
+                return Err(invalid("invalid CUDA plane address or pitch"));
+            }
+            address
+                .checked_add(
+                    pitch
+                        .checked_mul(rows - 1)
+                        .and_then(|v| v.checked_add(row_bytes))
+                        .ok_or_else(|| invalid("plane extent overflow"))?,
+                )
+                .ok_or_else(|| invalid("plane address overflow"))?;
+            *plane = (address, pitch);
+        }
+        Ok(FfmpegCudaFrameView {
+            context: cuda.context,
+            stream: cuda.stream,
+            planes,
+            width: frame.width as u32,
+            height: frame.height as u32,
+            format,
+            _owner: std::marker::PhantomData,
+        })
+    }
+
     /// Hardware pixel format retained by this frame.
     pub fn pixel_format(&self) -> ffmpeg::util::format::pixel::Pixel {
         self.pixel_format
@@ -354,9 +463,34 @@ impl FfmpegD3D11TextureView {
     }
 }
 
+/// Borrowed immutable FFmpeg CUDA surface ABI. The AVFrame owns all pointers.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+pub struct FfmpegCudaFrameView<'a> {
+    /// CUDA context that owns these device addresses; never a CPU pixel pointer.
+    pub context: *mut c_void,
+    /// FFmpeg's producer stream. Null denotes the CUDA default stream.
+    pub stream: *mut c_void,
+    /// Luma and interleaved chroma `(device_address, pitch_bytes)` pairs.
+    pub planes: [(usize, usize); 2],
+    /// Visible luma width.
+    pub width: u32,
+    /// Visible luma height.
+    pub height: u32,
+    /// Exact physical NV12/P010 storage interpretation.
+    pub format: DecodedVideoSurfaceFormat,
+    _owner: std::marker::PhantomData<&'a FfmpegNativeDecodedFrameResource>,
+}
+
 /// Error retaining or interpreting an FFmpeg native decoded frame.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum FfmpegNativeDecodedFrameResourceError {
+    /// CUDA frame/context or plane storage failed the native ABI contract.
+    #[error("invalid FFmpeg CUDA frame: {reason}")]
+    InvalidCudaFrame {
+        /// Concrete rejected context, format, extent or plane property.
+        reason: String,
+    },
     /// The frame is not backed by a supported FFmpeg hardware pixel format.
     #[error("FFmpeg pixel format {pixel_format:?} is not a supported native decode surface")]
     UnsupportedPixelFormat {

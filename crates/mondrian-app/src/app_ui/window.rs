@@ -2103,13 +2103,16 @@ struct AppUiSurfaceDeviceReopenTransition {
 
 fn request_app_ui_device(
     adapter: &wgpu::Adapter,
-) -> Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError> {
+) -> Result<(wgpu::Device, wgpu::Queue), mondrian_core::MondrianError> {
     let descriptor = wgpu::DeviceDescriptor {
         required_features: native_video_texture_device_features(adapter.features())
             | ocio_lut_filtering_device_features(adapter.features()),
         ..wgpu::DeviceDescriptor::default()
     };
-    pollster::block_on(adapter.request_device(&descriptor))
+    pollster::block_on(mondrian_renderer::request_device_with_native_video_support(
+        adapter,
+        &descriptor,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

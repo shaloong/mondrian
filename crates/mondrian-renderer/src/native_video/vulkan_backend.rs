@@ -1,4 +1,4 @@
-//! VA-API DRM PRIME to Vulkan native-video Adapter.
+//! VA-API DRM PRIME and CUDA storage-buffer Vulkan native-video Adapters.
 
 use std::sync::Arc;
 
@@ -8,7 +8,8 @@ use mondrian_media::{
 };
 
 use super::direct_backend::{
-    DirectNativeVideoImportBackend, DirectNativeYuvPlaneAdapter, DirectNativeYuvTextures,
+    DirectNativeVideoImportBackend, DirectNativeYuvInput, DirectNativeYuvPlaneAdapter,
+    DirectNativeYuvTextures,
 };
 use crate::{
     GpuColorFrameResource, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
@@ -25,11 +26,17 @@ const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     u32::from_le_bytes([a, b, c, d])
 }
 
-/// Failure to bind the VA-API Adapter to one wgpu Vulkan device.
+/// Failure to bind a native-video Adapter to one wgpu Vulkan device.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum VulkanNativeVideoImportBackendCreateError {
+    /// CUDA driver or Vulkan external-memory admission failed on the NVIDIA device.
+    #[error("CUDA Vulkan import is unavailable: {reason}")]
+    Cuda {
+        /// Exact driver, identity, or required-extension rejection.
+        reason: String,
+    },
     /// The selected renderer is not Vulkan.
-    #[error("native VA-API import requires the wgpu Vulkan backend, got {backend}")]
+    #[error("native video import requires the wgpu Vulkan backend, got {backend}")]
     WrongBackend {
         /// Actual wgpu backend.
         backend: String,
@@ -54,7 +61,7 @@ pub enum VulkanNativeVideoImportBackendCreateError {
     },
 }
 
-/// Production VA-API DRM PRIME native-video backend.
+/// Production VA-API DRM PRIME or NVIDIA CUDA native-video backend.
 pub struct VulkanNativeVideoImportBackend {
     inner: DirectNativeVideoImportBackend<VulkanNativeYuvPlaneAdapter>,
 }
@@ -71,6 +78,24 @@ impl VulkanNativeVideoImportBackend {
         if backend != wgpu::Backend::Vulkan {
             return Err(VulkanNativeVideoImportBackendCreateError::WrongBackend {
                 backend: format!("{backend:?}"),
+            });
+        }
+        if adapter.get_info().vendor == 0x10de {
+            let cuda = super::vulkan_cuda::CudaPlaneAdapter::new(device).map_err(|error| {
+                VulkanNativeVideoImportBackendCreateError::Cuda { reason: error.to_string() }
+            })?;
+            let plane_adapter =
+                VulkanNativeYuvPlaneAdapter { support: cuda.support.clone(), cuda: Some(cuda) };
+            return Ok(Self {
+                inner: DirectNativeVideoImportBackend::new(
+                    plane_adapter,
+                    device,
+                    queue,
+                    resource_pool,
+                )
+                .map_err(|error| {
+                    VulkanNativeVideoImportBackendCreateError::Direct { reason: error.to_string() }
+                })?,
             });
         }
         if !device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
@@ -91,7 +116,7 @@ impl VulkanNativeVideoImportBackend {
         )
         .with_renderer_backend_label("wgpu Vulkan VA-API DRM PRIME + OCIO")
         .with_hardware_decode_device_selector(selector);
-        let plane_adapter = VulkanNativeYuvPlaneAdapter { support };
+        let plane_adapter = VulkanNativeYuvPlaneAdapter { support, cuda: None };
         Ok(Self {
             inner: DirectNativeVideoImportBackend::new(plane_adapter, device, queue, resource_pool)
                 .map_err(|error| VulkanNativeVideoImportBackendCreateError::Direct {
@@ -195,10 +220,31 @@ fn renderer_drm_selector(
 }
 
 struct VulkanNativeYuvPlaneAdapter {
+    cuda: Option<super::vulkan_cuda::CudaPlaneAdapter>,
     support: GpuNativeDecodedFrameImportSupport,
 }
 
 impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
+    fn supports_buffer_source(&self) -> bool {
+        self.cuda.is_some()
+    }
+    fn retained_owner_count(&self) -> usize {
+        self.cuda.as_ref().map_or(0, |cuda| cuda.retained_owners())
+    }
+    fn import_input(
+        &mut self,
+        device: &wgpu::Device,
+        plan: &GpuNativeDecodedFrameImportPlan,
+        native_frame: &PreviewNativeDecodedFrame,
+    ) -> Result<DirectNativeYuvInput, GpuNativeDecodedFrameImportError> {
+        if let Some(cuda) = &self.cuda {
+            cuda.import(device, native_frame).map(DirectNativeYuvInput::Buffer)
+        } else {
+            self.import_textures(device, plan, native_frame)
+                .map(DirectNativeYuvInput::Textures)
+        }
+    }
+
     fn support(&self) -> &GpuNativeDecodedFrameImportSupport {
         &self.support
     }

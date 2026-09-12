@@ -393,8 +393,12 @@ impl PreviewHardwareDecodeRequest {
     }
 }
 
-fn preview_hardware_extra_frames(request: PreviewHardwareDecodeRequest) -> i32 {
-    if request.prefers_gpu_residency() {
+fn preview_hardware_extra_frames(
+    request: PreviewHardwareDecodeRequest,
+    backend: HwAccelBackend,
+) -> i32 {
+    // Safe NVDEC output owns independent CUDA allocations, not decoder surfaces.
+    if backend != HwAccelBackend::Cuda && request.prefers_gpu_residency() {
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     } else {
         0
@@ -470,7 +474,7 @@ pub enum PreviewNativeDecodeFallback {
 impl PreviewHardwareDecodeBlocker {
     fn from_probe(probe: &HwAccelProbe) -> Self {
         if probe.hardware_decode_active
-            && probe.zero_copy_active
+            && probe.frame_residency == DecodedFrameResidency::GpuTexture
             && probe.gpu_frame_handle_kind.is_some()
         {
             return Self::None;
@@ -1506,7 +1510,6 @@ impl PreviewDecodeDiagnostics {
         let native_handle = self.gpu_frame_handle_kind.filter(|_| {
             self.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
                 && self.hardware_decode_active
-                && self.zero_copy_active
                 && self.decoded_frame_residency == DecodedFrameResidency::GpuTexture
         });
         if let Some(handle_kind) = native_handle {
@@ -1963,3 +1966,6 @@ fn receive_decoded_video_frame(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "linux")]
+pub use native_frame::FfmpegCudaFrameView;

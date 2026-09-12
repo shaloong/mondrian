@@ -449,3 +449,5 @@ pub use basic_title::{
     BasicTitleRasterIdentity, BasicTitleRasterRequestIdentity, BasicTitleRasterizer,
     PreparedBasicTitleFontFace, PreparedBasicTitleFontSet,
 };
+
+pub use context::request_device_with_native_video_support;

@@ -11,7 +11,8 @@ use bytemuck::{Pod, Zeroable};
 use mondrian_core::ColorMatrixCoefficients;
 use wgpu::util::DeviceExt;
 
-const YUV_DECODE_SHADER: &str = r#"
+// Physical fetch differs; interpolation, range and color math stay shared.
+const YUV_DECODE_COMMON_SHADER: &str = r#"
 struct DecodeUniforms {
     extent: vec4<u32>,
     plane_layout: vec4<u32>,
@@ -20,9 +21,6 @@ struct DecodeUniforms {
     matrix1: vec4<f32>,
 };
 
-@group(0) @binding(0) var luma_texture: texture_2d<f32>;
-@group(0) @binding(1) var chroma_texture: texture_2d<f32>;
-@group(0) @binding(2) var chroma_v_texture: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> uniforms: DecodeUniforms;
 
 @vertex
@@ -32,27 +30,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
-fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
-    let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
-    if uniforms.plane_layout.x != 0u {
-        return vec2<f32>(
-            textureLoad(chroma_texture, clamped, 0).r,
-            textureLoad(chroma_v_texture, clamped, 0).r,
-        );
-    }
-    return textureLoad(chroma_texture, clamped, 0).rg;
-}
-
-fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
-    let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
-    return textureLoad(luma_texture, clamped, 0).r;
-}
-
 fn sample_luma(source_center: vec2<f32>) -> f32 {
     let sample_coordinate = source_center - vec2<f32>(0.5);
     let base = vec2<i32>(floor(sample_coordinate));
     let weight = fract(sample_coordinate);
-    let dimensions = vec2<i32>(textureDimensions(luma_texture));
+    let dimensions = vec2<i32>(luma_dimensions());
     let y00 = load_luma(base, dimensions);
     let y10 = load_luma(base + vec2<i32>(1, 0), dimensions);
     let y01 = load_luma(base + vec2<i32>(0, 1), dimensions);
@@ -66,7 +48,7 @@ fn sample_chroma(source_center: vec2<f32>) -> vec2<f32> {
         * vec2<f32>(1.0 / f32(uniforms.plane_layout.y), uniforms.matrix1.w);
     let base = vec2<i32>(floor(sample_coordinate));
     let weight = fract(sample_coordinate);
-    let dimensions = vec2<i32>(textureDimensions(chroma_texture));
+    let dimensions = vec2<i32>(chroma_dimensions());
     let c00 = load_chroma(base, dimensions);
     let c10 = load_chroma(base + vec2<i32>(1, 0), dimensions);
     let c01 = load_chroma(base + vec2<i32>(0, 1), dimensions);
@@ -92,6 +74,55 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         y + uniforms.matrix1.z * cb,
     );
     return vec4<f32>(rgb, 1.0);
+}
+"#;
+const YUV_TEXTURE_SOURCE: &str = r#"@group(0) @binding(0) var luma_texture: texture_2d<f32>;
+@group(0) @binding(1) var chroma_texture: texture_2d<f32>;
+@group(0) @binding(2) var chroma_v_texture: texture_2d<f32>;
+
+fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
+    let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
+    if uniforms.plane_layout.x != 0u {
+        return vec2<f32>(
+            textureLoad(chroma_texture, clamped, 0).r,
+            textureLoad(chroma_v_texture, clamped, 0).r,
+        );
+    }
+    return textureLoad(chroma_texture, clamped, 0).rg;
+}
+
+fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
+    let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
+    return textureLoad(luma_texture, clamped, 0).r;
+}
+
+fn luma_dimensions() -> vec2<u32> {
+    return min(textureDimensions(luma_texture), uniforms.extent.xy);
+}
+fn chroma_dimensions() -> vec2<u32> {
+    let visible = vec2<u32>(
+        (uniforms.extent.x + uniforms.plane_layout.y - 1u) / uniforms.plane_layout.y,
+        u32(ceil(f32(uniforms.extent.y) * uniforms.matrix1.w)));
+    return min(textureDimensions(chroma_texture), visible);
+}
+"#;
+const YUV_BUFFER_SOURCE: &str = r#"@group(0) @binding(0) var<storage, read> source_words: array<u32>;
+@group(0) @binding(4) var<uniform> storage_layout: vec4<u32>;
+fn luma_dimensions() -> vec2<u32> { return uniforms.extent.xy; }
+fn chroma_dimensions() -> vec2<u32> { return (uniforms.extent.xy + vec2<u32>(1u)) / 2u; }
+fn load_component(byte_offset: u32) -> f32 {
+    let value = source_words[byte_offset / 4u] >> ((byte_offset % 4u) * 8u);
+    if storage_layout.z == 2u { return f32(value & 65535u) / 65535.0; }
+    return f32(value & 255u) / 255.0;
+}
+fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
+    let c = vec2<u32>(clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1)));
+    return load_component(c.y * storage_layout.x + c.x * storage_layout.z);
+}
+fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
+    let c = vec2<u32>(clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1)));
+    let offset = storage_layout.y + c.y * storage_layout.x + c.x * 2u * storage_layout.z;
+    return vec2<f32>(load_component(offset), load_component(offset + storage_layout.z));
 }
 "#;
 
@@ -651,39 +682,67 @@ pub struct GpuNativeYuvPreparedPass {
     contract: GpuNativeYuvSamplingContract,
     bind_group: wgpu::BindGroup,
     _uniform_buffer: wgpu::Buffer,
+    buffer_source: bool,
 }
 
 /// Renderer runtime for native YUV to encoded-float RGB conversion.
-pub struct GpuNativeYuvDecoder {
+struct YuvPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+}
+
+/// Device-owned physical-source pipelines sharing one YUV interpretation.
+pub struct GpuNativeYuvDecoder {
+    texture: YuvPipeline,
+    buffer: Option<YuvPipeline>,
 }
 
 impl GpuNativeYuvDecoder {
     /// Create the device-owned shader pipeline. The pipeline is format-stable
     /// and can serve the complete qualified YCbCr plane matrix.
     pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            texture: Self::create_pipeline(device, false),
+            buffer: None,
+        }
+    }
+
+    pub(crate) fn enable_buffer_source(&mut self, device: &wgpu::Device) {
+        if self.buffer.is_none() {
+            self.buffer = Some(Self::create_pipeline(device, true));
+        }
+    }
+
+    fn create_pipeline(device: &wgpu::Device, buffer_source: bool) -> YuvPipeline {
+        let source = format!(
+            "{}\n{}",
+            YUV_DECODE_COMMON_SHADER,
+            if buffer_source {
+                YUV_BUFFER_SOURCE
+            } else {
+                YUV_TEXTURE_SOURCE
+            }
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian.native-video.yuv-decode.shader"),
-            source: wgpu::ShaderSource::Wgsl(YUV_DECODE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mondrian.native-video.yuv-decode.bindings"),
-            entries: &[
-                texture_binding(0),
-                texture_binding(1),
-                texture_binding(2),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &if buffer_source {
+                vec![
+                    buffer_binding(0, false),
+                    buffer_binding(3, true),
+                    buffer_binding(4, true),
+                ]
+            } else {
+                vec![
+                    texture_binding(0),
+                    texture_binding(1),
+                    texture_binding(2),
+                    buffer_binding(3, true),
+                ]
+            },
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mondrian.native-video.yuv-decode.layout"),
@@ -720,7 +779,7 @@ impl GpuNativeYuvDecoder {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_group_layout }
+        YuvPipeline { pipeline, bind_group_layout }
     }
 
     /// Allocate the encoded-float output resource declared by a plan.
@@ -750,7 +809,7 @@ impl GpuNativeYuvDecoder {
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mondrian.native-video.yuv-decode.bind-group"),
-            layout: &self.bind_group_layout,
+            layout: &self.texture.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -774,7 +833,79 @@ impl GpuNativeYuvDecoder {
             contract: plan.sampling_contract(),
             bind_group,
             _uniform_buffer: uniform_buffer,
+            buffer_source: false,
         }
+    }
+
+    pub(crate) fn prepare_buffer_pass(
+        &self,
+        device: &wgpu::Device,
+        plan: &GpuNativeYuvDecodePlan,
+        buffer: &wgpu::Buffer,
+        row_pitch: u32,
+        chroma_offset: u32,
+    ) -> Result<GpuNativeYuvPreparedPass, GpuNativeYuvDecodeRecordError> {
+        let pipeline = self
+            .buffer
+            .as_ref()
+            .ok_or(GpuNativeYuvDecodeRecordError::PreparedPassMismatch)?;
+        let uniforms = GpuNativeYuvDecodeUniforms::from_plan(plan);
+        let component_bytes = match plan.source_texture_format {
+            GpuNativeDecodedFrameTextureFormat::Nv12 => 1u32,
+            GpuNativeDecodedFrameTextureFormat::P010 => 2u32,
+            _ => return Err(GpuNativeYuvDecodeRecordError::BufferLayout),
+        };
+        let width = uniforms.extent[0];
+        let height = uniforms.extent[1];
+        let minimum_pitch = width
+            .div_ceil(2)
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(component_bytes))
+            .ok_or(GpuNativeYuvDecodeRecordError::BufferLayout)?;
+        let luma_end = u64::from(row_pitch) * u64::from(height);
+        let end = u64::from(chroma_offset) + u64::from(row_pitch) * u64::from(height.div_ceil(2));
+        if width == 0
+            || height == 0
+            || row_pitch < minimum_pitch
+            || !row_pitch.is_multiple_of(4)
+            || !chroma_offset.is_multiple_of(4)
+            || u64::from(chroma_offset) < luma_end
+            || end > buffer.size()
+            || end > u64::from(u32::MAX)
+        {
+            return Err(GpuNativeYuvDecodeRecordError::BufferLayout);
+        }
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.native-video.buffer-yuv.uniforms"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let storage_layout = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.native-video.buffer-yuv.layout"),
+            contents: bytemuck::cast_slice(&[row_pitch, chroma_offset, component_bytes, 0u32]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.native-video.buffer-yuv.bind-group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: storage_layout.as_entire_binding(),
+                },
+            ],
+        });
+        Ok(GpuNativeYuvPreparedPass {
+            contract: plan.sampling_contract(),
+            bind_group,
+            _uniform_buffer: uniform_buffer,
+            buffer_source: true,
+        })
     }
 
     /// Record one decode draw into the plan's encoded source resource.
@@ -816,7 +947,16 @@ impl GpuNativeYuvDecoder {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        let pipeline = if prepared.buffer_source {
+            &self
+                .buffer
+                .as_ref()
+                .ok_or(GpuNativeYuvDecodeRecordError::PreparedPassMismatch)?
+                .pipeline
+        } else {
+            &self.texture.pipeline
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &prepared.bind_group, &[]);
         pass.draw(0..4, 0..1);
         Ok(())
@@ -826,6 +966,9 @@ impl GpuNativeYuvDecoder {
 /// Error recording a prepared native YUV decode pass.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum GpuNativeYuvDecodeRecordError {
+    /// Packed GPU-buffer storage does not match the NV12/P010 plane contract.
+    #[error("native YUV buffer layout does not match the declared plane contract")]
+    BufferLayout,
     /// Prepared bindings came from another plan/surface contract.
     #[error("prepared native YUV pass does not match the decode plan")]
     PreparedPassMismatch,
@@ -845,6 +988,23 @@ pub enum GpuNativeYuvDecodeRecordError {
         /// Identity attached to the actual target resource.
         actual: crate::GpuColorFrameId,
     },
+}
+
+fn buffer_binding(binding: u32, uniform: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: if uniform {
+                wgpu::BufferBindingType::Uniform
+            } else {
+                wgpu::BufferBindingType::Storage { read_only: true }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }
 
 fn texture_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -1148,6 +1308,209 @@ mod tests {
             error,
             GpuNativeYuvDecodePlanError::InvalidOutputContract { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn buffer_yuv_matches_texture_fetch_for_padded_odd_nv12_and_p010() {
+        let policy =
+            crate::GpuColorQualificationExecutionPolicy::from_environment().expect("policy");
+        let Some(context) = policy
+            .admit_adapter("native-yuv-buffer-parity", crate::GpuContext::new().await)
+            .expect("admission")
+        else {
+            return;
+        };
+        let mut decoder = GpuNativeYuvDecoder::new(&context.device);
+        decoder.enable_buffer_source(&context.device);
+        for (format, bytes, depth, y_format, uv_format) in [
+            (
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                1usize,
+                8,
+                wgpu::TextureFormat::R8Unorm,
+                wgpu::TextureFormat::Rg8Unorm,
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::P010,
+                2,
+                10,
+                wgpu::TextureFormat::R16Unorm,
+                wgpu::TextureFormat::Rg16Unorm,
+            ),
+        ] {
+            let row = 32usize;
+            let offset = row * 3 + 16;
+            let mut storage = vec![0xa5u8; offset + row * 2];
+            let mut planes = Vec::new();
+            for (plane, width, height, components, texture_format) in
+                [(0, 6, 4, 1, y_format), (1, 3, 2, 2, uv_format)]
+            {
+                let mut data = Vec::new();
+                for index in 0..width * height * components {
+                    let code = ((index * 67 + plane * 109 + 3) % 256) as u16;
+                    if bytes == 1 {
+                        data.push(code as u8);
+                    } else {
+                        data.extend_from_slice(
+                            &((code * 4 + (index % 4) as u16) << 6).to_le_bytes(),
+                        );
+                    }
+                }
+                let pitch = width * components * bytes;
+                let visible_rows = if plane == 0 { 3 } else { height };
+                let visible_pitch = if plane == 0 { 5 * bytes } else { pitch };
+                for y in 0..visible_rows {
+                    let start = if plane == 0 { 0 } else { offset } + y * row;
+                    storage[start..start + visible_pitch]
+                        .copy_from_slice(&data[y * pitch..y * pitch + visible_pitch]);
+                }
+                let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("YUV parity physical plane"),
+                    size: wgpu::Extent3d {
+                        width: width as u32,
+                        height: height as u32,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: texture_format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                write_test_texture(
+                    &context.queue,
+                    &texture,
+                    width as u32,
+                    height as u32,
+                    pitch as u32,
+                    &data,
+                );
+                planes.push(texture);
+            }
+            let buffer = context.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("YUV parity padded storage"),
+                contents: &storage,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            for range in [GpuVideoRange::Limited, GpuVideoRange::Full] {
+                for chroma_location in
+                    [GpuVideoChromaLocation::Left, GpuVideoChromaLocation::Center]
+                {
+                    let handle = GpuColorFrameHandle::new(
+                        GpuColorFrameId::from_raw(900),
+                        ColorFrameDescriptor {
+                            width: 7,
+                            height: 5,
+                            color_space: ColorSpace::Rec709.into(),
+                            domain: ColorFrameDomain::Source,
+                            encoding: ColorFrameEncoding::EncodedFloat,
+                            residency: ColorFrameResidency::Gpu,
+                            alpha: crate::ColorFrameAlpha::Opaque,
+                        },
+                        product_gpu_working_texture_format(),
+                        "YUV parity output",
+                    )
+                    .expect("handle");
+                    let plan = GpuNativeYuvDecodePlan::new(
+                        format,
+                        GpuNativeVideoExtent { width: 5, height: 3 },
+                        GpuNativeVideoExtent { width: 7, height: 5 },
+                        GpuNativeVideoExtent { width: 6, height: 4 },
+                        GpuNativeDecodedFrameVideoSampling {
+                            range,
+                            matrix: ColorMatrixCoefficients::Bt709,
+                            transfer: ColorTransferCharacteristic::Bt709,
+                            bit_depth: depth,
+                            chroma_location,
+                        },
+                        handle,
+                    )
+                    .expect("plan");
+                    for (bad_row, bad_offset) in [
+                        (4, offset as u32),
+                        (row as u32, 4),
+                        (row as u32, storage.len() as u32),
+                    ] {
+                        assert!(matches!(
+                            decoder.prepare_buffer_pass(
+                                &context.device,
+                                &plan,
+                                &buffer,
+                                bad_row,
+                                bad_offset
+                            ),
+                            Err(GpuNativeYuvDecodeRecordError::BufferLayout)
+                        ));
+                    }
+                    let y = planes[0].create_view(&Default::default());
+                    let uv = planes[1].create_view(&Default::default());
+                    let texture_pass = decoder.prepare_pass(
+                        &context.device,
+                        &plan,
+                        GpuNativeYuvPlaneViews { luma: &y, chroma: &uv, chroma_v: &uv },
+                    );
+                    let buffer_pass = decoder
+                        .prepare_buffer_pass(
+                            &context.device,
+                            &plan,
+                            &buffer,
+                            row as u32,
+                            offset as u32,
+                        )
+                        .expect("buffer pass");
+                    let mut results = Vec::new();
+                    for pass in [texture_pass, buffer_pass] {
+                        let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+                        let mut encoder =
+                            context.device.create_command_encoder(&Default::default());
+                        decoder.record(&mut encoder, &plan, &pass, &output).expect("record");
+                        let read_plan = crate::GpuColorFrameReadbackPlan::encoded_rgba32float(
+                            output.handle().clone(),
+                        )
+                        .expect("read plan");
+                        let read = crate::GpuColorFrameReadback::record_copy(
+                            &context.device,
+                            &mut encoder,
+                            &read_plan,
+                            &output,
+                        )
+                        .expect("copy");
+                        let submission = context.queue.submit([encoder.finish()]);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                            let _ = tx.send(r);
+                        });
+                        context
+                            .device
+                            .poll(wgpu::PollType::Wait {
+                                submission_index: Some(submission),
+                                timeout: Some(std::time::Duration::from_secs(5)),
+                            })
+                            .expect("bounded GPU wait");
+                        rx.recv_timeout(std::time::Duration::from_secs(5))
+                            .expect("callback")
+                            .expect("mapped");
+                        let mapped = read.slice(..).get_mapped_range().expect("bytes");
+                        results.push(read_plan.unpack_mapped_rgba32float(&mapped).expect("pixels"));
+                        drop(mapped);
+                        read.unmap();
+                    }
+                    let max_error = results[0]
+                        .iter()
+                        .zip(&results[1])
+                        .map(|(a, b)| {
+                            assert!(a.is_finite() && b.is_finite());
+                            (a - b).abs()
+                        })
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        max_error < 0.000_01,
+                        "{format:?} {range:?} {chroma_location:?}: {max_error}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

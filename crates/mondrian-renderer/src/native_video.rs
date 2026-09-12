@@ -131,3 +131,10 @@ pub use windows_d3d12_zero_copy_backend::{
     D3D12NativeVideoImportBackend, D3D12NativeVideoImportBackendCreateError,
     D3D12NativeVideoImportBackendOptions,
 };
+
+#[cfg(target_os = "linux")]
+mod cuda_driver;
+#[cfg(target_os = "linux")]
+mod vulkan_cuda;
+#[cfg(target_os = "linux")]
+pub(crate) use vulkan_cuda::cuda_buffer_layout;

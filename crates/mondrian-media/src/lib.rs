@@ -171,3 +171,6 @@ pub use resident_encode::{
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,
 };
+
+#[cfg(target_os = "linux")]
+pub use preview::FfmpegCudaFrameView;

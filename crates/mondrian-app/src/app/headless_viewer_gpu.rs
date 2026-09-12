@@ -924,8 +924,13 @@ impl HeadlessViewerGpuAdapter {
                         | native_import_timing_features,
                     ..wgpu::DeviceDescriptor::default()
                 };
-                let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-                    .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
+                let (device, queue) = pollster::block_on(
+                    mondrian_renderer::request_device_with_native_video_support(
+                        &adapter,
+                        &descriptor,
+                    ),
+                )
+                .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
                 // CPU-only fallible state must precede progress/Renderer worker creation.
                 let native_import_gpu_timing =
                     HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;

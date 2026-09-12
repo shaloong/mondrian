@@ -28,10 +28,48 @@ pub(crate) struct DirectNativeYuvTextures {
     pub(crate) chroma: wgpu::Texture,
 }
 
+pub(crate) trait DirectNativeBufferSynchronization {
+    fn submit(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command: wgpu::CommandBuffer,
+    ) -> Result<(), GpuNativeDecodedFrameImportError>;
+}
+
+pub(crate) struct DirectNativeYuvBuffer {
+    pub buffer: wgpu::Buffer,
+    pub row_pitch: u32,
+    pub chroma_offset: u32,
+    pub synchronization: Box<dyn DirectNativeBufferSynchronization>,
+}
+
+pub(crate) enum DirectNativeYuvInput {
+    Textures(DirectNativeYuvTextures),
+    Buffer(DirectNativeYuvBuffer),
+}
+
 /// Platform Adapter for one native decoded-surface family.
 pub(crate) trait DirectNativeYuvPlaneAdapter {
     /// Exact support exposed by this concrete renderer/device pair.
     fn support(&self) -> &GpuNativeDecodedFrameImportSupport;
+
+    fn supports_buffer_source(&self) -> bool {
+        false
+    }
+    fn retained_owner_count(&self) -> usize {
+        0
+    }
+
+    fn import_input(
+        &mut self,
+        device: &wgpu::Device,
+        plan: &GpuNativeDecodedFrameImportPlan,
+        native_frame: &PreviewNativeDecodedFrame,
+    ) -> Result<DirectNativeYuvInput, GpuNativeDecodedFrameImportError> {
+        self.import_textures(device, plan, native_frame)
+            .map(DirectNativeYuvInput::Textures)
+    }
 
     /// Validate, synchronize, and wrap the two native planes.
     fn import_textures(
@@ -80,11 +118,15 @@ where
                     reason: error.to_string(),
                 },
             )?;
+        let mut yuv_decoder = GpuNativeYuvDecoder::new(device);
+        if adapter.supports_buffer_source() {
+            yuv_decoder.enable_buffer_source(device);
+        }
         Ok(Self {
             adapter,
             device: device.clone(),
             queue: queue.clone(),
-            yuv_decoder: GpuNativeYuvDecoder::new(device),
+            yuv_decoder,
             color_runtime,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
             retained_sources: Arc::new(AtomicUsize::new(0)),
@@ -123,7 +165,9 @@ where
     }
 
     pub(crate) fn retained_source_count(&self) -> usize {
-        self.retained_sources.load(Ordering::Acquire)
+        self.retained_sources
+            .load(Ordering::Acquire)
+            .saturating_add(self.adapter.retained_owner_count())
     }
 
     fn import_frame(
@@ -134,7 +178,7 @@ where
     {
         let total_started = Instant::now();
         let source_validation_started = Instant::now();
-        let textures = self.adapter.import_textures(&self.device, plan, native_frame)?;
+        let input = self.adapter.import_input(&self.device, plan, native_frame)?;
         let source_validation_us = elapsed_us(source_validation_started);
 
         let pipeline_prepare_started = Instant::now();
@@ -146,17 +190,32 @@ where
             },
         )
         .map_err(|error| backend_rejected(error.to_string()))?;
-        let luma_view = textures.luma.create_view(&wgpu::TextureViewDescriptor::default());
-        let chroma_view = textures.chroma.create_view(&wgpu::TextureViewDescriptor::default());
-        let prepared_yuv = self.yuv_decoder.prepare_pass(
-            &self.device,
-            &yuv_plan,
-            GpuNativeYuvPlaneViews {
-                luma: &luma_view,
-                chroma: &chroma_view,
-                chroma_v: &chroma_view,
-            },
-        );
+        let prepared_yuv = match &input {
+            DirectNativeYuvInput::Textures(textures) => {
+                let luma_view = textures.luma.create_view(&wgpu::TextureViewDescriptor::default());
+                let chroma_view =
+                    textures.chroma.create_view(&wgpu::TextureViewDescriptor::default());
+                self.yuv_decoder.prepare_pass(
+                    &self.device,
+                    &yuv_plan,
+                    GpuNativeYuvPlaneViews {
+                        luma: &luma_view,
+                        chroma: &chroma_view,
+                        chroma_v: &chroma_view,
+                    },
+                )
+            }
+            DirectNativeYuvInput::Buffer(source) => self
+                .yuv_decoder
+                .prepare_buffer_pass(
+                    &self.device,
+                    &yuv_plan,
+                    &source.buffer,
+                    source.row_pitch,
+                    source.chroma_offset,
+                )
+                .map_err(|error| backend_rejected(error.to_string()))?,
+        };
         let (_, encoded_payload) =
             GpuNativeYuvDecoder::allocate_output(&self.device, &yuv_plan).into_parts();
         let encoded_resource =
@@ -241,7 +300,20 @@ where
             .map_err(|_| {
                 backend_rejected("direct native-source residency counter exhausted".to_owned())
             })?;
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let command = encoder.finish();
+        let submitted = match &input {
+            DirectNativeYuvInput::Textures(_) => {
+                self.queue.submit([command]);
+                Ok(())
+            }
+            DirectNativeYuvInput::Buffer(source) => {
+                source.synchronization.submit(&self.device, &self.queue, command)
+            }
+        };
+        if let Err(error) = submitted {
+            self.retained_sources.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
         let retained_sources = Arc::clone(&self.retained_sources);
         self.queue.on_submitted_work_done(move || {
             drop(retained_source);

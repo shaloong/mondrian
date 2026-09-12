@@ -604,8 +604,11 @@ fn materialize_decoded_frame_inner(
             return Err(MondrianError::DecodeFailed {
                 asset_id: path.display().to_string(),
                 reason: format!(
-                    "required GPU-resident decode returned software frame {:?}",
-                    decoded.format()
+                    "required GPU-resident decode returned software frame {:?}; backend {:?}; codec: {}; device: {}",
+                    decoded.format(),
+                    hardware_decode_plan.probe.candidate_backend,
+                    hardware_decode_plan.ffmpeg_codec_config.reason,
+                    hardware_decode_plan.ffmpeg_device_context.reason
                 ),
             });
         } else {
@@ -637,7 +640,7 @@ fn materialize_native_decoded_frame(
 
     let is_hardware_pixel = matches!(
         decoded.format(),
-        Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI
+        Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI | Pixel::CUDA
     ) || {
         #[cfg(mondrian_ffmpeg_7_1)]
         {
@@ -677,8 +680,12 @@ fn materialize_native_decoded_frame(
         Pixel::VAAPI => {
             resource.drm_prime_frame()?;
         }
+        #[cfg(target_os = "linux")]
+        Pixel::CUDA => {
+            resource.cuda_frame()?;
+        }
         #[cfg(not(target_os = "linux"))]
-        Pixel::VAAPI => {
+        Pixel::VAAPI | Pixel::CUDA => {
             return Err(
                 PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
                     pixel_format: decoded.format(),

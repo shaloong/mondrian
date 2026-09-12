@@ -3,6 +3,89 @@
 use mondrian_core::Result;
 use std::sync::Arc;
 
+/// Create the production device, retaining wgpu's feature/limit validation.
+/// On NVIDIA Vulkan, add only enumerated external-memory/semaphore FD extensions
+/// needed by the CUDA Adapter. Every other platform uses ordinary wgpu creation.
+pub async fn request_device_with_native_video_support(
+    adapter: &wgpu::Adapter,
+    descriptor: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Device, wgpu::Queue)> {
+    #[cfg(target_os = "linux")]
+    if adapter.get_info().backend == wgpu::Backend::Vulkan
+        && adapter.get_info().vendor == 0x10de
+        && !descriptor.required_features.intersects(wgpu::Features::all_experimental_mask())
+        && adapter.features().contains(descriptor.required_features)
+        && descriptor.required_limits.check_limits(&adapter.limits())
+    {
+        let opened = {
+            // SAFETY: the HAL borrow belongs to this exact public adapter.
+            let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() };
+            if let Some(hal) = hal {
+                let instance = hal.shared_instance().raw_instance();
+                let extensions = unsafe {
+                    instance.enumerate_device_extension_properties(hal.raw_physical_device())
+                }
+                .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                    reason: error.to_string(),
+                })?;
+                let extra = [
+                    ash::khr::external_memory_fd::NAME,
+                    ash::khr::external_semaphore_fd::NAME,
+                ];
+                let supported = extra.iter().all(|name| {
+                    extensions.iter().any(|extension| {
+                        // Vulkan guarantees a null-terminated extension name.
+                        (unsafe { std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) })
+                            == *name
+                    })
+                });
+                if supported {
+                    // SAFETY: only physically enumerated extensions are added;
+                    // wgpu's requested features, limits and queues are preserved.
+                    Some(
+                        unsafe {
+                            hal.open_with_callback(
+                                descriptor.required_features,
+                                &descriptor.required_limits,
+                                &descriptor.memory_hints,
+                                Some(Box::new(move |args| {
+                                    for name in extra {
+                                        if !args.extensions.contains(&name) {
+                                            args.extensions.push(name);
+                                        }
+                                    }
+                                })),
+                            )
+                        }
+                        .map_err(|error| {
+                            mondrian_core::MondrianError::GpuInitFailed {
+                                reason: error.to_string(),
+                            }
+                        })?,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(opened) = opened {
+            // SAFETY: opened above from this exact adapter and descriptor.
+            return unsafe {
+                adapter.create_device_from_hal::<wgpu::hal::api::Vulkan>(opened, descriptor)
+            }
+            .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                reason: error.to_string(),
+            });
+        }
+    }
+    adapter
+        .request_device(descriptor)
+        .await
+        .map_err(|error| mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() })
+}
+
 #[cfg(test)]
 const TEST_GPU_CONTEXT_CAPACITY: usize = 2;
 
@@ -209,10 +292,8 @@ impl GpuContext {
                 | ocio_lut_filtering_device_features(adapter.features()),
             ..wgpu::DeviceDescriptor::default()
         };
-        let (device, queue) = adapter
-            .request_device(&device_descriptor)
-            .await
-            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed { reason: e.to_string() })?;
+        let (device, queue) =
+            request_device_with_native_video_support(&adapter, &device_descriptor).await?;
 
         Ok(Arc::new(Self {
             device: Arc::new(device),

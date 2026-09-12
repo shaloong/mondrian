@@ -80,21 +80,45 @@ fn synthetic_file_fingerprint(
 #[test]
 fn gpu_resident_decode_reserves_external_hardware_frame_leases() {
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferGpuResident),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            HwAccelBackend::Vaapi
+        ),
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::RequireGpuResident),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::RequireGpuResident,
+            HwAccelBackend::Vaapi
+        ),
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferHardwareDecode),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            HwAccelBackend::Vaapi
+        ),
         0
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto),
+        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto, HwAccelBackend::Vaapi),
         0
     );
+}
+
+#[test]
+fn safe_cuda_outputs_do_not_reserve_decoder_surface_leases() {
+    for request in [
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewHardwareDecodeRequest::RequireGpuResident,
+    ] {
+        assert_eq!(
+            preview_hardware_extra_frames(request, HwAccelBackend::Cuda),
+            0
+        );
+    }
 }
 
 #[test]
@@ -685,7 +709,9 @@ fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
             cfg!(target_os = "windows")
         }
         Some(crate::decoder::HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
-        Some(crate::decoder::HwAccelPixelFormat::Vaapi) => cfg!(target_os = "linux"),
+        Some(
+            crate::decoder::HwAccelPixelFormat::Vaapi | crate::decoder::HwAccelPixelFormat::Cuda,
+        ) => cfg!(target_os = "linux"),
         _ => false,
     };
     assert_eq!(

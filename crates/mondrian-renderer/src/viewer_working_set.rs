@@ -700,6 +700,35 @@ fn estimate_source(
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     },
                 )?;
+                // The CUDA bridge owns one padded storage allocation, separate
+                // from Media's retained decoder surface. Its exact fixed-capacity
+                // policy is checked against Vulkan requirements before allocation.
+                #[cfg(target_os = "linux")]
+                let bytes = if source.native_frame.handle_kind()
+                    == mondrian_media::DecodedGpuFrameHandleKind::CudaDeviceMemory
+                {
+                    let component_bytes = match source.native_frame.surface_format {
+                        mondrian_media::DecodedVideoSurfaceFormat::Nv12 => 1,
+                        mondrian_media::DecodedVideoSurfaceFormat::P010 => 2,
+                        _ => {
+                            return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                                reason: "unsupported CUDA bridge surface",
+                            })
+                        }
+                    };
+                    let (_, _, capacity) =
+                        crate::native_video::cuda_buffer_layout(width, height, component_bytes)
+                            .ok_or(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                                reason: "CUDA bridge allocation overflow",
+                            })?;
+                    bytes.checked_add(capacity).ok_or(
+                        ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                        },
+                    )?
+                } else {
+                    bytes
+                };
                 estimate.source_preparation.checked_add(
                     ViewerGpuActiveTextureDemand { textures: 2, bytes },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,

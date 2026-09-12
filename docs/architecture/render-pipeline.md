@@ -3291,3 +3291,15 @@ installed scripting host and signed Project/preset, and Premiere remains a
 UI-hosted capture with operator verification for color settings not exposed by
 its automation Interface. No vendor application is launched by the ordinary
 Renderer or App process.
+
+Linux CUDA input adds a physical storage-buffer fetch to the shared native YUV
+decoder. Texture and buffer sources share the same interpolation and color
+kernel, followed by the same OCIO input transform. A CUDA bridge copies only
+encoded YUV storage; it cannot infer range, transfer, primaries or quality from
+the chosen provider. Preview/Export color semantics remain unchanged.
+
+Native YUV interpolation clamps each luma/chroma fetch to the visible raster,
+with chroma dimensions derived from the admitted subsampling contract. Decoder
+allocation padding is never part of the image, including scaled edge pixels.
+NV12/P010 storage-buffer and texture fetch parity tests use distinct poisoned
+allocation padding, odd visible extents, full/limited range and chroma siting.

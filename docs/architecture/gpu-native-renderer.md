@@ -1479,3 +1479,46 @@ from the CPU nearest rule. `MONDRIAN_GPU_ALPHA_DIAGNOSTIC_OUTPUT` names a
 create-new JSON artifact; GPU absence and readback deadlines are errors, while
 observed pixel differences remain diagnostic facts with `qualified: false`.
 The test changes neither production quantization nor qualification tolerances.
+
+## Linux CUDA storage-buffer import
+
+The shared production device creation entry adds external-memory and external-
+semaphore FD extensions on NVIDIA Vulkan only when physically enumerated. It
+preserves wgpu's requested limits, features and sole renderer queue; ordinary
+unsupported devices retain explicit native admission failure. Window, Headless
+and standalone Renderer use this same creation entry.
+
+CUDA import matches the retained FFmpeg context UUID to the renderer UUID for
+every frame. A CUDA producer event orders the Adapter's own transfer stream,
+which clears allocation padding, copies the two visible NV12/P010 planes once,
+and signals an exported Vulkan semaphore. The production wgpu submission waits
+before acquiring the private buffer from external ownership and sampling it.
+The raw acquisition barrier has its own command buffer; wgpu 30 forbids mixing
+raw and wgpu encoding on one encoder. Both buffers use the same queue submission.
+FFmpeg safe output performs a separate GPU copy before this bridge; the one-copy
+claim applies to the bridge only. There is no CPU pixel download or
+buffer-to-texture copy. The YUV decoder selects
+a storage-buffer fetch implementation but shares interpolation, chroma location,
+code-range interpretation, matrix conversion and subsequent OCIO with texture
+inputs. P010 reads retain the existing MSB-aligned UNORM interpretation.
+
+The move-only native transfer owner retains the source AVFrame, CUDA context
+lease, stream/event, mapped external allocation, semaphore and Vulkan handles.
+Pending queue waits are revoked on abandonment; an already consumed wait keeps
+its semaphore owner through actual queue completion, including a concurrent
+submit or unwind. Partial-open cleanup consumes the transfer stream before its
+storage. Cleanup failure remains an unclosed owner, so Renderer retirement
+cannot issue a successful closure receipt for it. No detached transfer worker
+or second submission authority is introduced.
+
+Storage capacity follows an explicit 256-byte row / 64-KiB allocation policy.
+The active SourcePreparation byte estimate includes that capacity, in addition
+to the two encoded/working textures. The existing texture count stays exact;
+its byte budget also covers this native transfer storage. Vulkan requirements
+must fit the admitted capacity before memory allocation, and physical device
+storage limits remain admission constraints. This does not enlarge the grant
+or retain an unbounded auxiliary pool.
+
+CUDA import is reported as GpuBridgeCopy. Real device tests must separately prove
+native decoding, pixel correctness, seek and lifecycle closure; compilation and
+provider-only memory-transfer experiments do not establish product qualification.

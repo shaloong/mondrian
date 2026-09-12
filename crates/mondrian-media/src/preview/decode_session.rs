@@ -1452,7 +1452,13 @@ fn configure_preview_hardware_decode_context(
     // `get_format` callback. `extra_hw_frames` and `get_format` are plain
     // field writes through the valid context pointer.
     unsafe {
-        (*context.as_mut_ptr()).extra_hw_frames = preview_hardware_extra_frames(plan.request);
+        // NVDEC's default safe-output mode copies into independently owned CUDA
+        // allocations. App output leases therefore do not consume its decoder
+        // surface pool. Adding the generic external-lease headroom here creates
+        // more than 32 decode surfaces and fails cuvidCreateDecoder on NVIDIA.
+        // Keep FFmpeg's codec/DPB/thread sizing; do not enable UNSAFE_OUTPUT.
+        (*context.as_mut_ptr()).extra_hw_frames =
+            preview_hardware_extra_frames(plan.request, backend);
         (*context.as_mut_ptr()).opaque = (&mut *state) as *mut _ as *mut c_void;
         (*context.as_mut_ptr()).get_format = Some(preview_hardware_decode_get_format);
     }

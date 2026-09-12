@@ -2883,12 +2883,12 @@ decode bindings and removes decoder-resource Frame Store/evaluation entries,
 so a late result cannot re-enter the new device generation as cache-only data.
 The Renderer finally requires exact D3D12 device identity and adapter LUID for
 every decoded resource.
-GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
+Surface-retaining GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
 `avcodec_open2` because native frames remain leased after the receive call.
 This is requested decoder-pool headroom, not a portable guarantee of how many
 surfaces every codec/driver combination can make concurrently available and
-not application cache capacity; CPU-transfer
-decode leaves the setting at zero because it exports no hardware surfaces. The
+not application cache capacity. CUDA safe-output and CPU-transfer decode leave
+the setting at zero: their output leases do not retain decoder pool surfaces. The
 external-lease proof is deliberately conservative and bounded: eight queued
 App completions plus at most three worker-held publishers, eight Preview Frame
 Store resource units, four renderer-completion leases, and two
@@ -3917,10 +3917,13 @@ Linux hardware admission tries VA-API, CUDA/NVDEC, then legacy VDPAU, subject
 to the existing codec configuration and device-context probes. A typed
 `VaapiDrmRenderNode` or `CudaDeviceOrdinal` restricts selection to that backend;
 the existing worker-family device pool keys and retires these selectors just
-like Windows selectors. CUDA currently admits hardware decode with CPU download
-only: the lack of a CUDA native resource Adapter continues to exclude it from
-required/preferred GPU-resident admission. Backend enumeration never proves
-successful decoding or GPU residency.
+like Windows selectors. Linux CUDA NV12/P010 frames can retain their exact
+FFmpeg frame/context and device-address/pitch ABI for a renderer-qualified native
+consumer. The accessor validates the public context chain, format, visible
+extent, pitch and address arithmetic; it never CPU-dereferences device pointers.
+Required native requests cannot select a CPU download. Explicit hardware decode
+for CPU consumers keeps its separately reported download path. Backend enumeration
+never proves successful decoding, GPU residency, or renderer import.
 
 The Vulkan native-video Adapter obtains DRM identity from the exact renderer
 physical device using `VK_EXT_physical_device_drm`, validates the character
@@ -3940,3 +3943,26 @@ references, including vertical allocation alignment and inter-plane padding.
 Visible strided plane slices remain the upload contract but are not allocation
 size evidence. The existing Playback ring and Preview frame store consume this
 same byte count; an image exceeding the ring's unchanged budget is rejected.
+
+The NVIDIA Vulkan consumer publishes a CUDA ordinal only after matching CUDA and
+Vulkan device UUIDs and checking external-memory/semaphore support on the actual
+renderer device. It copies NV12/P010 planes to a Vulkan-owned storage buffer,
+then uses the existing YUV/OCIO interpretation. The retained AVFrame outlives
+producer completion, the CUDA bridge and GPU sampling. This route is one GPU
+bridge copy, not zero-copy, CPU download, a new Timeline or a second color engine.
+
+NVDEC uses FFmpeg's default safe-output contract: decoded output is copied by
+FFmpeg into an independently retained CUDA allocation. These external App leases
+do not occupy NVDEC decoder surfaces. CUDA therefore leaves `extra_hw_frames` at
+zero while preserving FFmpeg's codec DPB and thread requirements; the generic
+32-frame external-lease reservation remains for surface-retaining backends.
+Adding that reservation to NVDEC can request 49 decoder surfaces and fail device
+initialization. `AV_HWACCEL_FLAG_UNSAFE_OUTPUT` is not enabled. The renderer bridge
+adds one GPU plane copy after FFmpeg's safe-output copy; end-to-end this is not a
+single-copy decoder path. Neither copy traverses CPU memory.
+
+Native execution provenance is determined by observed hardware execution,
+GPU residency and the retained native handle, independently of zero-copy status.
+CUDA safe output reports `GpuResidentNative` with `zero_copy_active=false`.
+A GPU copy cannot turn a hardware-native frame into a software provenance result,
+and native handle existence cannot certify absence of GPU copies.

@@ -2399,3 +2399,10 @@ CPU projection and GPU publication share the existing presentation-carrier
 discriminator and Playback commit seam. Already-visible timing is reusable
 only when the exact physical artifact was actually retained visibly; a new
 buffer observes the ordinary presentation deadline.
+
+Linux NVIDIA native input uses the existing coherent Renderer admission snapshot
+and Media worker-family CUDA selector. The Window and Headless device creation
+entry enables enumerated interoperability extensions before publishing that
+snapshot. CUDA transfers do not advance Timeline or Playback time. Their frame
+owners retire only after GPU sampling, and failed native cleanup blocks the
+existing consuming Renderer closure rather than producing a successful receipt.

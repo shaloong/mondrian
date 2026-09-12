@@ -2644,6 +2644,7 @@ dependencies = [
  "half",
  "image",
  "libc",
+ "libloading",
  "lru",
  "mondrian-core",
  "mondrian-effects",
