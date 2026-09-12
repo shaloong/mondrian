@@ -85,7 +85,8 @@ impl ViewerGpuExecutionRetirement {
             }
             Err(error) => return Err(error),
         }
-        if self.native_video_import.retained_source_count() != 0 {
+        let native_release_closed = self.native_video_import.poll_native_release_retirement()?;
+        if !native_release_closed || self.native_video_import.retained_source_count() != 0 {
             return Ok(None);
         }
         let Some(cpu_yuv_upload) = upload else {

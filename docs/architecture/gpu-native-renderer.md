@@ -1508,8 +1508,10 @@ Pending queue waits are revoked on abandonment; an already consumed wait keeps
 its semaphore owner through actual queue completion, including a concurrent
 submit or unwind. Partial-open cleanup consumes the transfer stream before its
 storage. Cleanup failure remains an unclosed owner, so Renderer retirement
-cannot issue a successful closure receipt for it. No detached transfer worker
-or second submission authority is introduced.
+cannot issue a successful closure receipt for it. A session-owned release worker
+consumes foreign destructors outside wgpu resource/queue locks. It is joined by
+the existing Viewer retirement owner; it submits no GPU work and owns no
+Timeline, color, or playback decisions.
 
 Storage capacity follows an explicit 256-byte row / 64-KiB allocation policy.
 The active SourcePreparation byte estimate includes that capacity, in addition
@@ -1569,3 +1571,16 @@ owner, while quarantined owners remain counted. This prevents repeated failed
 cleanups from growing unbounded quarantined residency. The fault-injected
 lifecycle regression checks both rejection and the retained owner count;
 normal GPU execution and zero-owner retirement are tested separately.
+
+CUDA HAL callbacks release only a deferred owner. The final reference transfers
+the entire native allocation, including its retained FFmpeg source, to the
+release worker; partial-open and pending-wait abandonment use the same owner.
+The shared direct-input layer does not add a second queue-callback source retain
+for these buffers. Native transfer counts remain live through actual destruction.
+Admission rejects replacements with typed Backpressure while destruction is
+pending, so deferred release cannot create an additional allocation pool outside
+existing frame grants. Closing admission retains late release senders, drains
+all admitted owners and joins the worker before Viewer emits a receipt. A panic,
+failed release or abandoned retirement cannot establish successful closure.
+Moving destruction off the callback stack does not prove bounded foreign-driver
+execution or identify the cause of every observed playback stall.

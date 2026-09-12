@@ -450,6 +450,22 @@ impl ViewerNativeVideoImportRuntime {
         0
     }
 
+    /// Close native release admission and non-blockingly join its release worker.
+    ///
+    /// Standalone callers must keep driving GPU completion and retain this runtime
+    /// until this returns `true` and `retained_source_count()` is zero. Further
+    /// native imports are forbidden after retirement starts. Viewer execution
+    /// invokes this through its existing consuming retirement owner.
+    pub fn poll_native_release_retirement(
+        &mut self,
+    ) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        #[cfg(target_os = "linux")]
+        if let Some(backend) = self.backend.as_mut() {
+            return backend.poll_retirement();
+        }
+        Ok(true)
+    }
+
     /// Non-blockingly retire native decoder sources after renderer completion.
     pub fn retire_completed_source_residency(
         &mut self,

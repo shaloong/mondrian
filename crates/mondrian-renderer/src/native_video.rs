@@ -138,3 +138,6 @@ mod cuda_driver;
 mod vulkan_cuda;
 #[cfg(target_os = "linux")]
 pub(crate) use vulkan_cuda::cuda_buffer_layout;
+
+#[cfg(target_os = "linux")]
+mod native_release;

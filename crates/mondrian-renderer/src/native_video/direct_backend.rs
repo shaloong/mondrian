@@ -37,6 +37,8 @@ pub(crate) trait DirectNativeBufferSynchronization {
     ) -> Result<(), GpuNativeDecodedFrameImportError>;
 }
 
+/// Buffer and synchronization retain the decoder source through final GPU use;
+/// their native owner also accounts for release after the last HAL reference.
 pub(crate) struct DirectNativeYuvBuffer {
     pub buffer: wgpu::Buffer,
     pub row_pitch: u32,
@@ -56,6 +58,10 @@ pub(crate) trait DirectNativeYuvPlaneAdapter {
 
     fn supports_buffer_source(&self) -> bool {
         false
+    }
+    #[cfg(target_os = "linux")]
+    fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        Ok(true)
     }
     fn retained_owner_count(&self) -> usize {
         0
@@ -162,6 +168,11 @@ where
                     "source-to-working color backend preparation failed: {error:?}"
                 ))
             })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        self.adapter.poll_retirement()
     }
 
     pub(crate) fn retained_source_count(&self) -> usize {
@@ -290,14 +301,20 @@ where
         let resource_extract_us = elapsed_us(resource_extract_started);
 
         let submit_started = Instant::now();
-        let retained_source = native_frame.handle.clone();
-        self.retained_sources
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .map_err(|_| {
-                backend_rejected("direct native-source residency counter exhausted".to_owned())
-            })?;
+        // Buffer inputs retain their decoder source in the native allocation
+        // owner through final HAL release. Only direct textures need this extra
+        // queue-completion retain.
+        let retained_source = matches!(&input, DirectNativeYuvInput::Textures(_))
+            .then(|| native_frame.handle.clone());
+        if retained_source.is_some() {
+            self.retained_sources
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_add(1)
+                })
+                .map_err(|_| {
+                    backend_rejected("direct native-source residency counter exhausted".to_owned())
+                })?;
+        }
         let command = encoder.finish();
         let submitted = match &input {
             DirectNativeYuvInput::Textures(_) => {
@@ -309,19 +326,23 @@ where
             }
         };
         if let Err(error) = submitted {
-            self.retained_sources.fetch_sub(1, Ordering::AcqRel);
+            if retained_source.is_some() {
+                self.retained_sources.fetch_sub(1, Ordering::AcqRel);
+            }
             return Err(error);
         }
         // A shared-pool checkout may immediately record a successor. Publish
         // this intermediate only after its previous read is ordered on the
         // production queue; failed/unsubmitted imports drop it instead.
         resource_pool.release(encoded_resource);
-        let retained_sources = Arc::clone(&self.retained_sources);
-        self.queue.on_submitted_work_done(move || {
-            drop(retained_source);
-            let previous = retained_sources.fetch_sub(1, Ordering::AcqRel);
-            debug_assert!(previous > 0, "direct native-source residency underflow");
-        });
+        if let Some(retained_source) = retained_source {
+            let retained_sources = Arc::clone(&self.retained_sources);
+            self.queue.on_submitted_work_done(move || {
+                drop(retained_source);
+                let previous = retained_sources.fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "direct native-source residency underflow");
+            });
+        }
         let submit_us = elapsed_us(submit_started);
         self.frame_cpu_timings = NativeVideoImportCpuTimings {
             source_validation_us,

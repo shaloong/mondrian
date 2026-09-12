@@ -183,6 +183,13 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
             drop(mapped);
             buffer.unmap();
             drop(output);
+            while runtime.retained_source_count() != 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "native destruction did not finish within the frame deadline"
+                );
+                std::thread::yield_now();
+            }
             assert_eq!(
                 runtime.retained_source_count(),
                 0,
@@ -192,6 +199,14 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
         decoder.clear();
         assert_eq!(decoder.resident_session_count(), 0);
         assert!(decoder.native_outputs_released());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !runtime.poll_native_release_retirement().expect("native worker retirement") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native worker was not joined"
+        );
+        std::thread::yield_now();
     }
 }
 

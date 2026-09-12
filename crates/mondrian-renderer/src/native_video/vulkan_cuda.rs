@@ -1,6 +1,7 @@
 //! CUDA -> Vulkan storage-buffer bridge. One GPU pixel copy, no CPU pixels.
 use super::cuda_driver::{self as cu, CudaDriver};
 use super::direct_backend::{DirectNativeBufferSynchronization, DirectNativeYuvBuffer};
+use super::native_release::{DeferredNativeOwner, NativeReleaseOwner, ReleaseError};
 use crate::{
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
     GpuNativeDecodedFrameTextureFormat,
@@ -82,6 +83,7 @@ pub(super) struct CudaPlaneAdapter {
     uuid: [u8; 16],
     dedicated: bool,
     lifecycle: Arc<CudaTransferLifecycle>,
+    release: NativeReleaseOwner,
 }
 impl CudaPlaneAdapter {
     pub fn new(device: &wgpu::Device) -> Result<Self, GpuNativeDecodedFrameImportError> {
@@ -161,10 +163,18 @@ impl CudaPlaneAdapter {
                 .external_memory_features
                 .contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY),
             lifecycle: Arc::new(CudaTransferLifecycle::default()),
+            release: NativeReleaseOwner::new().map_err(rejected)?,
         })
     }
+    pub fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        self.release.poll_retirement().map_err(rejected)
+    }
+
     pub fn retained_owners(&self) -> usize {
-        self.lifecycle.retained.load(Ordering::Acquire)
+        self.lifecycle
+            .retained
+            .load(Ordering::Acquire)
+            .max(self.release.retained_owners())
     }
 
     pub fn import(
@@ -198,8 +208,14 @@ impl CudaPlaneAdapter {
                 "CUDA buffer exceeds the active renderer's storage limits",
             ));
         }
+        let release = self.release.admit().map_err(|error| match error {
+            ReleaseError::Pending => {
+                GpuNativeDecodedFrameImportError::Backpressure { reason: error.to_string() }
+            }
+            _ => rejected(error),
+        })?;
         self.lifecycle.admit()?;
-        let mut owner = TransferOwner {
+        let mut owner = release.retain(TransferAllocation {
             device: device.clone(),
             raw: self.raw.clone(),
             driver: Arc::clone(&self.driver),
@@ -214,7 +230,7 @@ impl CudaPlaneAdapter {
             semaphore: vk::Semaphore::null(),
             source: Some(native.handle.clone()),
             lifecycle: Arc::clone(&self.lifecycle),
-        };
+        });
         let mut external = vk::ExternalMemoryBufferCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
         let info = vk::BufferCreateInfo::default()
@@ -274,13 +290,14 @@ impl CudaPlaneAdapter {
         )
         .map_err(rejected)?;
         let _transferred_fd = fd.into_raw_fd(); // CUDA consumes the fd on success only.
+        let cuda_memory = owner.cuda_memory;
         cu::acquire(
             "cuExternalMemoryGetMappedBuffer",
             &mut owner.mapped,
             |output| unsafe {
                 (self.driver.map_buffer)(
                     output,
-                    owner.cuda_memory,
+                    cuda_memory,
                     &cu::BufferDesc {
                         offset: 0,
                         size: capacity,
@@ -393,7 +410,7 @@ impl CudaPlaneAdapter {
         let hal_buffer = unsafe {
             wgpu::hal::vulkan::Buffer::from_raw_externally_owned(
                 owner.buffer,
-                Box::new(move || drop(retained)),
+                native_buffer_drop_callback(retained),
             )
         };
         let buffer = unsafe {
@@ -416,7 +433,9 @@ impl CudaPlaneAdapter {
     }
 }
 
-struct TransferOwner {
+type TransferOwner = DeferredNativeOwner<TransferAllocation>;
+
+struct TransferAllocation {
     device: wgpu::Device,
     raw: ash::Device,
     driver: Arc<CudaDriver>,
@@ -435,9 +454,9 @@ struct TransferOwner {
 // SAFETY: publication occurs only after immutable initialization. The final
 // owner enters its retained FFmpeg CUDA context on the dropping thread. Native
 // work is stream-ordered and Vulkan use retains this owner through completion.
-unsafe impl Send for TransferOwner {}
-unsafe impl Sync for TransferOwner {}
-impl Drop for TransferOwner {
+unsafe impl Send for TransferAllocation {}
+unsafe impl Sync for TransferAllocation {}
+impl Drop for TransferAllocation {
     fn drop(&mut self) {
         let mut failed = false;
         match unsafe { self.driver.enter(self.context) } {
@@ -505,6 +524,10 @@ impl Drop for TransferOwner {
         }
         finish_successful_transfer(&self.lifecycle, &mut self.source);
     }
+}
+
+fn native_buffer_drop_callback<T: Send + Sync + 'static>(owner: T) -> wgpu::hal::DropCallback {
+    Box::new(move || drop(owner))
 }
 
 fn finish_successful_transfer<T>(lifecycle: &CudaTransferLifecycle, source: &mut Option<T>) {
@@ -606,6 +629,61 @@ impl Drop for PendingWait {
 #[cfg(test)]
 mod tests {
     use super::cuda_buffer_layout;
+
+    #[test]
+    fn external_buffer_callback_does_not_execute_foreign_drop_inline() {
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+
+        struct NativeOwner {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl Drop for NativeOwner {
+            fn drop(&mut self) {
+                self.entered.send(()).expect("destructor observation");
+                self.release
+                    .get_mut()
+                    .expect("release receiver")
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test always releases the foreign destructor");
+            }
+        }
+        let (entered, entry) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (returned, completion) = mpsc::channel();
+        let mut executor = super::NativeReleaseOwner::new().expect("release executor");
+        let callback = super::native_buffer_drop_callback(
+            executor
+                .admit()
+                .expect("admitted")
+                .retain(NativeOwner { entered, release: Mutex::new(released) }),
+        );
+        let caller = std::thread::spawn(move || {
+            callback();
+            returned.send(()).expect("callback completion observation");
+        });
+        let entered = entry.recv_timeout(Duration::from_secs(2));
+        let callback_returned = completion.recv_timeout(Duration::from_millis(100));
+        // Consume the actual test owner before asserting, including on failure.
+        assert!(matches!(
+            executor.admit(),
+            Err(super::ReleaseError::Pending)
+        ));
+        assert!(!executor.poll_retirement().expect("pending retirement"));
+        release.send(()).expect("release native destruction");
+        caller.join().expect("callback caller joined");
+        entered.expect("native destruction started");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !executor.poll_retirement().expect("release worker joined") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(
+            callback_returned.is_ok(),
+            "wgpu may hold its queue/resource locks while invoking this callback; foreign Drop must not run inline"
+        );
+    }
 
     #[test]
     fn source_destruction_precedes_zero_retained_transfer_receipt() {

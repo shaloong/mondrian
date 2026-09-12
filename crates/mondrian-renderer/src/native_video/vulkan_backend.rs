@@ -143,6 +143,11 @@ impl VulkanNativeVideoImportBackend {
     }
 
     /// Decoder surfaces retained until the import submission completes.
+    /// Close native release admission and consume its worker after all owners return.
+    pub fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        self.inner.poll_retirement()
+    }
+
     pub fn retained_source_count(&self) -> usize {
         self.inner.retained_source_count()
     }
@@ -227,6 +232,9 @@ struct VulkanNativeYuvPlaneAdapter {
 impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
     fn supports_buffer_source(&self) -> bool {
         self.cuda.is_some()
+    }
+    fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
+        self.cuda.as_mut().map_or(Ok(true), |cuda| cuda.poll_retirement())
     }
     fn retained_owner_count(&self) -> usize {
         self.cuda.as_ref().map_or(0, |cuda| cuda.retained_owners())
