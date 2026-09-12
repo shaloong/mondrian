@@ -1440,6 +1440,7 @@ impl HeadlessViewerGpuAdapter {
             started_at: started,
             completion_started_at: completion_started,
         };
+        let owner_prepare_us = elapsed_us(completion_started);
         let queue = &self.queue;
         // The completion deadline is a frame-level safety bound, not the
         // caller's overall observation deadline. A lost work-done callback
@@ -1449,6 +1450,7 @@ impl HeadlessViewerGpuAdapter {
         // the recovery instead of racing the slot release.
         let completion_deadline =
             deadline.instant().min(Instant::now() + HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE);
+        let callback_registration_started = Instant::now();
         reservation.commit(
             owner,
             completion_deadline,
@@ -1459,7 +1461,10 @@ impl HeadlessViewerGpuAdapter {
                 completion_signal.mark_observed();
             },
         );
+        let callback_registration_us = elapsed_us(callback_registration_started);
+        let progress_commit_started = Instant::now();
         progress_permit.commit(submission_id, submission);
+        let progress_commit_us = elapsed_us(progress_commit_started);
         if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
             && let Err(error) = ring.after_submit(token)
         {
@@ -1475,6 +1480,16 @@ impl HeadlessViewerGpuAdapter {
             // valid; disable this optional ring for later frames.
             self.timestamp_ring = None;
             tracing::warn!("{reason}");
+        }
+        if elapsed_us(completion_started) >= 5_000 {
+            tracing::debug!(
+                submission_id = submission_id.get(),
+                owner_prepare_us,
+                callback_registration_us,
+                progress_commit_us,
+                total_us = elapsed_us(completion_started),
+                "slow Headless post-submit ownership registration"
+            );
         }
         Ok(HeadlessViewerGpuSubmittedCandidate { submission_id, heterogeneous })
     }

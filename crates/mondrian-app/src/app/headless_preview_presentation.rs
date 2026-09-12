@@ -550,6 +550,7 @@ pub(crate) fn prepare_headless_preview_successor(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     publish_preroll_readiness: bool,
 ) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
+    let successor_started = Instant::now();
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
         return Ok(None);
     };
@@ -569,6 +570,7 @@ pub(crate) fn prepare_headless_preview_successor(
     let candidate = staged
         .map(PreviewGpuFrameState::Ready)
         .unwrap_or_else(|| preview.gpu_preview_frame(request));
+    let candidate_elapsed = successor_started.elapsed();
     match candidate {
         PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
         PreviewGpuFrameState::Ready(frame) => {
@@ -581,14 +583,17 @@ pub(crate) fn prepare_headless_preview_successor(
                     .context("prewarm staged Headless successor uploads")?;
                 return Ok(Some(playback_intent));
             }
+            let submit_started = Instant::now();
             let submitted = match gpu.submit(*frame, gpu_completion_deadline) {
                 Ok(submitted) => submitted,
                 Err(HeadlessViewerGpuError::Backpressure(_)) => return Ok(None),
                 Err(error) => return Err(error).context("submit Headless successor candidate"),
             };
+            let submit_elapsed = submit_started.elapsed();
             if submitted.heterogeneous {
                 return Ok(Some(playback_intent));
             }
+            let retain_started = Instant::now();
             gpu.retain_ordinary_successor(submitted.submission_id, |frame, output| {
                 preview.register_prepared_gpu_successor(
                     frame.playback_intent(),
@@ -596,6 +601,16 @@ pub(crate) fn prepare_headless_preview_successor(
                     output.clone(),
                 );
             })?;
+            if successor_started.elapsed().as_millis() >= 5 {
+                tracing::debug!(
+                    successor_frame,
+                    candidate_us = candidate_elapsed.as_micros(),
+                    submit_us = submit_elapsed.as_micros(),
+                    retain_us = retain_started.elapsed().as_micros(),
+                    total_us = successor_started.elapsed().as_micros(),
+                    "slow Headless successor preparation"
+                );
+            }
             if publish_preroll_readiness {
                 observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
             }

@@ -2406,3 +2406,10 @@ entry enables enumerated interoperability extensions before publishing that
 snapshot. CUDA transfers do not advance Timeline or Playback time. Their frame
 owners retire only after GPU sampling, and failed native cleanup blocks the
 existing consuming Renderer closure rather than producing a successful receipt.
+
+Headless successor diagnostics separate candidate acquisition, the complete GPU
+submit call, and prepared-output retention. Post-submit diagnostics separately
+measure owner snapshot construction, callback registration, and progress-command
+publication. These wall-time observations carry no deadline, readiness, or
+qualification authority: a later successful run cannot clear a prior non-unit
+frame advance, and a slow stage alone does not identify its blocking cause.
