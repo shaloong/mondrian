@@ -1549,6 +1549,11 @@ at each step; normal real-device tests separately require zero retained owners.
 The synchronous CUDA driver completion call remains a foreign blocking boundary;
 these ordering tests do not establish a driver-hang timeout guarantee.
 
+CUDA transfer retirement consumes the retained FFmpeg source before publishing
+zero retained transfers. Rust field destruction after the destructor body is
+not sufficient ordering for this counter: the source can still execute native
+release work. Other Viewer and Media owner counts remain independent barriers.
+
 Direct native import acquires its encoded RGB intermediate from the same
 exact-contract color-frame texture pool as CPU YUV and working/output stages.
 The intermediate returns only after successful production-queue submission;

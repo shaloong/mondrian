@@ -212,7 +212,7 @@ impl CudaPlaneAdapter {
             buffer: vk::Buffer::null(),
             memory: vk::DeviceMemory::null(),
             semaphore: vk::Semaphore::null(),
-            _source: native.handle.clone(),
+            source: Some(native.handle.clone()),
             lifecycle: Arc::clone(&self.lifecycle),
         };
         let mut external = vk::ExternalMemoryBufferCreateInfo::default()
@@ -429,7 +429,7 @@ struct TransferOwner {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     semaphore: vk::Semaphore,
-    _source: PreviewNativeDecodedFrameHandle,
+    source: Option<PreviewNativeDecodedFrameHandle>,
     lifecycle: Arc<CudaTransferLifecycle>,
 }
 // SAFETY: publication occurs only after immutable initialization. The final
@@ -489,7 +489,7 @@ impl Drop for TransferOwner {
             // exceptional quarantine intentionally cannot be recycled or retried.
             std::mem::forget(self.device.clone());
             std::mem::forget(Arc::clone(&self.driver));
-            std::mem::forget(self._source.clone());
+            std::mem::forget(self.source.clone());
             return;
         }
         unsafe {
@@ -503,8 +503,15 @@ impl Drop for TransferOwner {
                 self.raw.free_memory(self.memory, None);
             }
         }
-        self.lifecycle.complete(false);
+        finish_successful_transfer(&self.lifecycle, &mut self.source);
     }
+}
+
+fn finish_successful_transfer<T>(lifecycle: &CudaTransferLifecycle, source: &mut Option<T>) {
+    // FFmpeg source destruction can itself enter the native driver. Keep this
+    // transfer counted until that retained source has actually been consumed.
+    drop(source.take());
+    lifecycle.complete(false);
 }
 // Native resources form a dependency chain: later releases require earlier proof.
 fn run_cleanup_steps(
@@ -599,6 +606,40 @@ impl Drop for PendingWait {
 #[cfg(test)]
 mod tests {
     use super::cuda_buffer_layout;
+
+    #[test]
+    fn source_destruction_precedes_zero_retained_transfer_receipt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct Source {
+            lifecycle: Arc<super::CudaTransferLifecycle>,
+            observed: Arc<AtomicUsize>,
+        }
+        impl Drop for Source {
+            fn drop(&mut self) {
+                self.observed.store(
+                    self.lifecycle.retained.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+        }
+        let lifecycle = Arc::new(super::CudaTransferLifecycle::default());
+        lifecycle.admit().expect("transfer admission");
+        let observed = Arc::new(AtomicUsize::new(usize::MAX));
+        let mut source = Some(Source {
+            lifecycle: Arc::clone(&lifecycle),
+            observed: Arc::clone(&observed),
+        });
+        super::finish_successful_transfer(&lifecycle, &mut source);
+        // Mirrors the remaining field destruction after TransferOwner::drop.
+        drop(source);
+        assert_eq!(
+            observed.load(Ordering::Acquire),
+            1,
+            "the source's native destructor must finish before the owner reports zero"
+        );
+        assert_eq!(lifecycle.retained.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn quarantined_cleanup_rejects_future_transfer_admission() {
