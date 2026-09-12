@@ -333,7 +333,7 @@ impl PreviewDecodeSessionContext {
         )
     }
 
-    /// Create an observed production bootstrap that isolates exact-still
+    /// Create an observed production bootstrap that isolates this context's
     /// container I/O in the packaged Mondrian executable.
     ///
     /// The executable must dispatch `--internal-demux-worker-v2` before

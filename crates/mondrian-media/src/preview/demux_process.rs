@@ -492,10 +492,13 @@ fn message_command_id(message: &DemuxProtocolMessage) -> Option<u64> {
 }
 
 fn read_protocol_stream(
-    mut stdout: impl Read,
+    stdout: impl Read,
     nonce: [u8; 16],
     messages: SyncSender<io::Result<DemuxProtocolMessage>>,
 ) {
+    // Bound read-ahead to one small transport buffer. The command/reply owner
+    // still admits exactly one packet; scalar fields do not each cause a syscall.
+    let mut stdout = io::BufReader::with_capacity(64 * 1024, stdout);
     if let Err(error) = read_protocol_preamble(&mut stdout, nonce) {
         let _ = messages.send(Err(error));
         return;
@@ -566,6 +569,50 @@ fn launch_nonce() -> [u8; 16] {
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+    #[test]
+    fn protocol_reader_batches_small_fields_without_changing_failure_contract() {
+        use super::super::demux_protocol::{write_error_message, write_protocol_preamble};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        struct CountedReader {
+            data: io::Cursor<Vec<u8>>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl Read for CountedReader {
+            fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.data.read(destination)
+            }
+        }
+        let nonce = [7; 16];
+        let mut wire = Vec::new();
+        write_protocol_preamble(&mut wire, nonce).expect("actual protocol preamble");
+        write_error_message(&mut wire, 0, "provider open failed").expect("actual terminal reply");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::sync_channel(IPC_QUEUE_CAPACITY);
+        read_protocol_stream(
+            CountedReader {
+                data: io::Cursor::new(wire),
+                calls: Arc::clone(&calls),
+            },
+            nonce,
+            tx,
+        );
+        assert!(
+            matches!(rx.recv().expect("terminal reply").expect("valid protocol"),
+            DemuxProtocolMessage::Error { command_id: 0, message } if message == "provider open failed")
+        );
+        assert!(
+            rx.recv().is_err(),
+            "terminal failure closes the exact reader"
+        );
+        assert!(
+            calls.load(Ordering::Relaxed) <= 2,
+            "one available protocol burst must not issue one OS read per scalar: {} reads",
+            calls.load(Ordering::Relaxed)
+        );
+    }
+
     #[test]
     fn demux_cleanup_preserves_both_pipe_failures_and_original_deadline() {
         let child = crate::ffmpeg_command::spawn_native_helper(

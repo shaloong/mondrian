@@ -3966,3 +3966,9 @@ GPU residency and the retained native handle, independently of zero-copy status.
 CUDA safe output reports `GpuResidentNative` with `zero_copy_active=false`.
 A GPU copy cannot turn a hardware-native frame into a software provenance result,
 and native handle existence cannot certify absence of GPU copies.
+
+The parent isolated-demux protocol reader uses a bounded 64 KiB transport buffer,
+matching the worker's buffered transport. Version, nonce, stream contract, packet
+limits and terminal-error validation still use the same parser. Buffering removes
+one pipe syscall per scalar field without issuing extra Read commands, admitting
+another media frame, changing cancellation polling, or transferring child ownership.
