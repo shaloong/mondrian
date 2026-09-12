@@ -40,6 +40,12 @@ pub enum VulkanNativeVideoImportBackendCreateError {
     /// wgpu did not expose its underlying Vulkan device.
     #[error("wgpu did not expose the active Vulkan device")]
     MissingHalDevice,
+    /// The driver cannot bind this Vulkan device to a DRM render node.
+    #[error("Vulkan device has no usable DRM render-node identity: {reason}")]
+    DrmIdentity {
+        /// Concrete missing extension, node, or mismatched identity.
+        reason: String,
+    },
     /// Shared color execution could not be created.
     #[error("could not create shared native-video execution: {reason}")]
     Direct {
@@ -70,11 +76,7 @@ impl VulkanNativeVideoImportBackend {
         if !device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
             return Err(VulkanNativeVideoImportBackendCreateError::MissingDmaBufFeature);
         }
-        // SAFETY: The guard is used only to prove this exact device exposes its
-        // Vulkan HAL implementation; no raw handle escapes.
-        if unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }.is_none() {
-            return Err(VulkanNativeVideoImportBackendCreateError::MissingHalDevice);
-        }
+        let selector = renderer_drm_selector(device)?;
 
         let mut formats = vec![GpuNativeDecodedFrameTextureFormat::Nv12];
         if device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
@@ -87,7 +89,8 @@ impl VulkanNativeVideoImportBackend {
             vec![DecodedGpuFrameHandleKind::VaapiSurface],
             formats,
         )
-        .with_renderer_backend_label("wgpu Vulkan VA-API DRM PRIME + OCIO");
+        .with_renderer_backend_label("wgpu Vulkan VA-API DRM PRIME + OCIO")
+        .with_hardware_decode_device_selector(selector);
         let plane_adapter = VulkanNativeYuvPlaneAdapter { support };
         Ok(Self {
             inner: DirectNativeVideoImportBackend::new(plane_adapter, device, queue, resource_pool)
@@ -135,6 +138,60 @@ impl GpuNativeDecodedFrameImportBackend for VulkanNativeVideoImportBackend {
     ) -> Result<GpuColorFrameResource<Self::Resource>, GpuNativeDecodedFrameImportError> {
         self.inner.import_native_decoded_frame(plan, native_frame)
     }
+}
+
+fn renderer_drm_selector(
+    device: &wgpu::Device,
+) -> Result<mondrian_media::HwAccelDeviceSelector, VulkanNativeVideoImportBackendCreateError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let unavailable =
+        |reason: String| VulkanNativeVideoImportBackendCreateError::DrmIdentity { reason };
+    // SAFETY: The guard retains the exact renderer device; only immutable
+    // physical-device properties are queried and no native handle escapes.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }
+        .ok_or(VulkanNativeVideoImportBackendCreateError::MissingHalDevice)?;
+    let instance = hal.shared_instance().raw_instance();
+    let physical = hal.raw_physical_device();
+    // SAFETY: physical belongs to this live instance. Vulkan permits these
+    // read-only capability queries independently of queue submissions.
+    let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
+        .map_err(|error| unavailable(format!("device extension query failed: {error:?}")))?;
+    let drm_supported = extensions.iter().any(|extension| {
+        // SAFETY: Vulkan extensionName is a NUL-terminated fixed-size string.
+        (unsafe { std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) })
+            == ash::ext::physical_device_drm::NAME
+    });
+    if !drm_supported {
+        return Err(unavailable(
+            "VK_EXT_physical_device_drm is unavailable".to_owned(),
+        ));
+    }
+    let mut drm = ash::vk::PhysicalDeviceDrmPropertiesEXT::default();
+    let mut properties = ash::vk::PhysicalDeviceProperties2::default().push_next(&mut drm);
+    // SAFETY: The extension was advertised, the output chain is correctly
+    // typed, and both output structures remain live for the entire query.
+    unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    let minor = u32::try_from(drm.render_minor).ok().filter(|minor| *minor >= 128);
+    let Some(minor) = minor.filter(|_| drm.has_render != 0 && drm.render_major == 226) else {
+        return Err(unavailable(format!(
+            "no supported DRM render node: present={}, major={}, minor={}",
+            drm.has_render, drm.render_major, drm.render_minor,
+        )));
+    };
+    let path = format!("/dev/dri/renderD{minor}");
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| unavailable(format!("cannot inspect {path}: {error}")))?;
+    if !metadata.file_type().is_char_device()
+        || libc::major(metadata.rdev()) != 226
+        || libc::minor(metadata.rdev()) != minor
+    {
+        return Err(unavailable(format!(
+            "{path} does not match the renderer DRM identity"
+        )));
+    }
+    Ok(mondrian_media::HwAccelDeviceSelector::VaapiDrmRenderNode(
+        minor,
+    ))
 }
 
 struct VulkanNativeYuvPlaneAdapter {

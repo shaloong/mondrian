@@ -49,6 +49,14 @@ pub enum HwAccelBackend {
 /// resulting native frame's physical adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelDeviceSelector {
+    /// DRM render-node minor number bound to the active Linux Vulkan device.
+    ///
+    /// The renderer verifies the node's character-device identity before admission.
+    VaapiDrmRenderNode(u32),
+    /// CUDA device ordinal passed only to FFmpeg's CUDA device creator.
+    ///
+    /// This selects decoding but does not prove Vulkan interoperability.
+    CudaDeviceOrdinal(u16),
     /// DXGI adapter index passed only to FFmpeg's D3D12VA device creator.
     D3D12VaAdapterIndex(u32),
     /// DXGI adapter index passed only to FFmpeg's D3D11VA device creator.
@@ -58,6 +66,12 @@ pub enum HwAccelDeviceSelector {
 impl HwAccelDeviceSelector {
     fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
         match (self, backend) {
+            (Self::VaapiDrmRenderNode(minor), HwAccelBackend::Vaapi) => {
+                CString::new(format!("/dev/dri/renderD{minor}")).ok()
+            }
+            (Self::CudaDeviceOrdinal(index), HwAccelBackend::Cuda) => {
+                CString::new(index.to_string()).ok()
+            }
             (Self::D3D12VaAdapterIndex(index), HwAccelBackend::D3D12VA)
             | (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
                 CString::new(index.to_string()).ok()
@@ -69,7 +83,9 @@ impl HwAccelDeviceSelector {
     pub(crate) fn selects_backend(self, backend: HwAccelBackend) -> bool {
         matches!(
             (self, backend),
-            (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
+            (Self::VaapiDrmRenderNode(_), HwAccelBackend::Vaapi)
+                | (Self::CudaDeviceOrdinal(_), HwAccelBackend::Cuda)
+                | (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
                 | (Self::D3D11VaAdapterIndex(_), HwAccelBackend::D3D11VA)
         )
     }
@@ -518,6 +534,8 @@ impl HwDeviceContextPool {
     /// leases; this removes only future acquisition authority.
     pub fn retire_renderer_device_context(&self, selector: HwAccelDeviceSelector) -> bool {
         let backend = match selector {
+            HwAccelDeviceSelector::VaapiDrmRenderNode(_) => HwAccelBackend::Vaapi,
+            HwAccelDeviceSelector::CudaDeviceOrdinal(_) => HwAccelBackend::Cuda,
             HwAccelDeviceSelector::D3D12VaAdapterIndex(_) => HwAccelBackend::D3D12VA,
             HwAccelDeviceSelector::D3D11VaAdapterIndex(_) => HwAccelBackend::D3D11VA,
         };
@@ -1683,7 +1701,7 @@ impl HwAccelBackend {
         }
         #[cfg(target_os = "linux")]
         {
-            vec![Self::Vaapi, Self::Vdpau]
+            vec![Self::Vaapi, Self::Cuda, Self::Vdpau]
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
@@ -2561,6 +2579,41 @@ mod tests {
     }
 
     #[test]
+    fn linux_device_selectors_never_cross_backend_families() {
+        let vaapi = HwAccelDeviceSelector::VaapiDrmRenderNode(129);
+        let cuda = HwAccelDeviceSelector::CudaDeviceOrdinal(1);
+        assert_eq!(
+            vaapi.device_name_for(HwAccelBackend::Vaapi).as_deref(),
+            Some(c"/dev/dri/renderD129")
+        );
+        assert_eq!(
+            cuda.device_name_for(HwAccelBackend::Cuda).as_deref(),
+            Some(c"1")
+        );
+        for backend in [
+            HwAccelBackend::Vaapi,
+            HwAccelBackend::Cuda,
+            HwAccelBackend::Vdpau,
+            HwAccelBackend::D3D12VA,
+        ] {
+            assert_eq!(
+                vaapi.selects_backend(backend),
+                backend == HwAccelBackend::Vaapi
+            );
+            assert_eq!(
+                cuda.selects_backend(backend),
+                backend == HwAccelBackend::Cuda
+            );
+            if backend != HwAccelBackend::Vaapi {
+                assert!(vaapi.device_name_for(backend).is_none());
+            }
+            if backend != HwAccelBackend::Cuda {
+                assert!(cuda.device_name_for(backend).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn platform_hardware_backend_candidates_are_ordered_by_expected_native_path() {
         let candidates = HwAccelBackend::platform_candidates();
         #[cfg(target_os = "windows")]
@@ -2577,7 +2630,11 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(
             candidates,
-            vec![HwAccelBackend::Vaapi, HwAccelBackend::Vdpau]
+            vec![
+                HwAccelBackend::Vaapi,
+                HwAccelBackend::Cuda,
+                HwAccelBackend::Vdpau
+            ]
         );
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         assert!(candidates.is_empty());

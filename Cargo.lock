@@ -2634,6 +2634,7 @@ name = "mondrian-renderer"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "ash",
  "async-trait",
  "bytemuck",
  "cosmic-text",
@@ -2642,6 +2643,7 @@ dependencies = [
  "glam",
  "half",
  "image",
+ "libc",
  "lru",
  "mondrian-core",
  "mondrian-effects",

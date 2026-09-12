@@ -6,12 +6,13 @@ use super::frame_contract::{
 use super::native_frame::PreviewDecodeSessionOutputLease;
 use super::{
     duration_us, preview_create_rgba_scaler, preview_hardware_frame_format, preview_trace,
-    CpuYuvChromaSubsampling, CpuYuvFrame, CpuYuvSampleFormat, DecodedRgbaFrameContract,
-    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
-    PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeRepresentation,
-    PreviewDecodeStageDurations, PreviewDecodedFramePayload, PreviewHardwareDecodePlan,
-    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
-    PreviewNativeDecodedFrameHandle, PreviewSourceColorContract, RgbaFrame,
+    CpuYuvChromaPlaneLayout, CpuYuvChromaSubsampling, CpuYuvFrame, CpuYuvSampleFormat,
+    DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
+    FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame, PreviewDecodeDiagnostics,
+    PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeStageDurations,
+    PreviewDecodedFramePayload, PreviewHardwareDecodePlan, PreviewNativeDecodeFallback,
+    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+    PreviewSourceColorContract, RgbaFrame,
 };
 use crate::decoder::{DecodedVideoChromaLocation, DecodedVideoSurfaceFormat};
 use ffmpeg_next as ffmpeg;
@@ -20,19 +21,52 @@ use std::path::Path;
 use std::ptr::NonNull;
 use std::time::Instant;
 
+fn compact_yuv_layout(
+    pixel: ffmpeg::util::format::pixel::Pixel,
+) -> Option<(
+    CpuYuvChromaSubsampling,
+    CpuYuvSampleFormat,
+    CpuYuvChromaPlaneLayout,
+)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    Some(match pixel {
+        Pixel::YUV420P => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P10LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P10LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::NV12 => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        Pixel::P010LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Msb10,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        _ => return None,
+    })
+}
+
 fn convert_decoded_to_compact_yuv(
     decoded: &ffmpeg::util::frame::video::Video,
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<Option<CpuYuvFrame>> {
-    use ffmpeg::util::format::pixel::Pixel;
-
-    let (subsampling, sample_format) = match decoded.format() {
-        Pixel::YUV422P10LE => (
-            CpuYuvChromaSubsampling::Cs422,
-            CpuYuvSampleFormat::Unorm16Lsb10,
-        ),
-        _ => return Ok(None),
+    let Some((subsampling, sample_format, plane_layout)) = compact_yuv_layout(decoded.format())
+    else {
+        return Ok(None);
     };
     let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
     let mut video_sampling = decoded_video_sampling_from_frame(decoded);
@@ -67,13 +101,14 @@ fn convert_decoded_to_compact_yuv(
     // av_frame_free exactly once for the owned pointer.
     let retained = unsafe { ffmpeg::util::frame::video::Video::wrap(retained) };
     Ok(Some(
-        CpuYuvFrame::new_planar_ffmpeg(
+        CpuYuvFrame::new_ffmpeg(
             width,
             height,
             chroma_width,
             chroma_height,
             subsampling,
             sample_format,
+            plane_layout,
             source_color,
             video_sampling,
             retained,
@@ -97,7 +132,7 @@ fn materialize_decoded_to_compact_yuv(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<Option<CpuYuvFrame>> {
-    if decoded.format() != ffmpeg::util::format::pixel::Pixel::YUV422P10LE {
+    if compact_yuv_layout(decoded.format()).is_none() {
         return Ok(None);
     }
     if decoded.width() == target_width && decoded.height() == target_height {
@@ -727,8 +762,13 @@ fn materialize_decoded_to_cpu(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<PreviewDecodedFramePayload> {
+    let compact_fallback = representation.is_native_surface()
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture();
     if !preview_hardware_frame_format(decoded.format()) {
-        if representation.is_compact_cpu_yuv() {
+        if representation.is_compact_cpu_yuv()
+            || (compact_fallback && compact_yuv_layout(decoded.format()).is_some())
+        {
             return materialize_decoded_to_compact_yuv(
                 decoded,
                 scaler,
@@ -743,7 +783,7 @@ fn materialize_decoded_to_cpu(
                     Err(MondrianError::DecodeFailed {
                         asset_id: path.display().to_string(),
                         reason: format!(
-                            "compact CPU YUV representation expected YUV422P10LE, decoder returned {:?}",
+                            "compact CPU YUV representation expected supported compact YUV, decoder returned {:?}",
                             decoded.format()
                         ),
                     })
@@ -807,7 +847,9 @@ fn materialize_decoded_to_cpu(
         ffmpeg::ffi::av_frame_copy_props(transferred.as_mut_ptr(), decoded.as_ptr());
     }
     hardware_decode_plan.mark_hardware_cpu_transfer_observed();
-    if representation.is_compact_cpu_yuv() {
+    if representation.is_compact_cpu_yuv()
+        || (compact_fallback && compact_yuv_layout(transferred.format()).is_some())
+    {
         return materialize_decoded_to_compact_yuv(
             &transferred,
             scaler,
@@ -822,7 +864,7 @@ fn materialize_decoded_to_cpu(
                 Err(MondrianError::DecodeFailed {
                     asset_id: path.display().to_string(),
                     reason: format!(
-                        "compact CPU YUV representation expected transferred YUV422P10LE, decoder returned {:?}",
+                        "compact CPU YUV representation expected transferred supported compact YUV, decoder returned {:?}",
                         transferred.format()
                     ),
                 })

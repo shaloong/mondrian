@@ -3541,20 +3541,26 @@ zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
 sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
 encoded and working textures.
 
-An exact probed `Yuv422p10le` source may instead resolve to the explicit
+An exact probed `Yuv420p`, `Yuv420p10le`, `Nv12`, `P010`, or `Yuv422p10le`
+source may instead resolve to the explicit
 `CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU
 materialization. Media retains an independently reference-counted immutable
-FFmpeg `AVFrame` with its native 16-bit luma, Cb, and Cr planes and explicit row
-strides. It does not repack or interleave roughly 33 MiB for every UHD frame.
-The reservation includes conservative FFmpeg row alignment, while actual Frame
-Store accounting uses the retained plane allocations.
+FFmpeg `AVFrame` with its native luma/chroma planes and explicit row strides.
+Planar samples retain separate Cb/Cr planes; NV12/P010 retain their interleaved
+plane. P010 preserves most-significant-bit alignment, while planar ten-bit
+samples remain least-significant-bit aligned. Both use the existing Renderer
+YUV sampling and OCIO input transform, with no parallel color interpretation. It does not repack or interleave roughly 33 MiB for every UHD frame.
+The reservation includes conservative FFmpeg row alignment and rounded-up
+4:2:0 chroma extents, while actual Frame Store accounting uses retained plane
+allocations. Semiplanar admission reserves the conservative planar bound so
+hardware download and software decode cannot under-reserve aligned chroma rows.
 Half/Quarter recovery resolves to `ReducedCompactCpuYuv`, scales the planes to
 the representation extent, and retains that scaled AVFrame under the same exact
 YUV sampling contract without a second plane copy.
 The representation is part of the decode key but not the compressed-stream
 decoder Session identity, so
 Frame Store admission reserves the physical plane footprint and zero native
-decoder-surface units. A returned layout other than `YUV422P10LE` fails the
+decoder-surface units. Unsupported returned layouts fail the
 request; it cannot silently publish an RGBA allocation under the compact
 identity. CPU-addressable analysis, thumbnails, scene-linear sources, and
 reduced representations without a compact source contract continue through
@@ -3884,3 +3890,27 @@ Untimed preroll retains its original source position. Missing callback timing
 permits PCM preparation but cannot activate consumption; a generation rotation
 requires a fresh poll before activation. Arithmetic and physical queue-capacity
 checks precede mutation, and clock uncertainty/phase-admission limits do not change.
+
+### Linux decode device binding and compact fallback
+
+Linux hardware admission tries VA-API, CUDA/NVDEC, then legacy VDPAU, subject
+to the existing codec configuration and device-context probes. A typed
+`VaapiDrmRenderNode` or `CudaDeviceOrdinal` restricts selection to that backend;
+the existing worker-family device pool keys and retires these selectors just
+like Windows selectors. CUDA currently admits hardware decode with CPU download
+only: the lack of a CUDA native resource Adapter continues to exclude it from
+required/preferred GPU-resident admission. Backend enumeration never proves
+successful decoding or GPU residency.
+
+The Vulkan native-video Adapter obtains DRM identity from the exact renderer
+physical device using `VK_EXT_physical_device_drm`, validates the character
+render node, and publishes the selector through the existing coherent renderer
+admission observation. Missing or mismatched identity rejects native import
+admission instead of allowing FFmpeg to open an unrelated default GPU.
+
+A preferred native representation that receives supported software YUV or a
+hardware download can retain compact CPU planes for the same GPU consumer.
+Its diagnostics still report CPU residency and the actual decode execution.
+Required native requests fail before this fallback; CPU-addressable requests
+continue to receive their typed RGBA/float payload. This reduces pixel
+materialization without altering quality, deadlines, or cache budgets.

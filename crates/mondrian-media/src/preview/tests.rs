@@ -2458,6 +2458,108 @@ fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
 }
 
 #[test]
+fn compact_cpu_yuv_420_retains_samples_and_owner_at_odd_extents() {
+    use crate::CpuYuvSampleFormat;
+    use ffmpeg::util::format::pixel::Pixel;
+    for (pixel, sample_format) in [
+        (Pixel::YUV420P, CpuYuvSampleFormat::Unorm8),
+        (Pixel::YUV420P10LE, CpuYuvSampleFormat::Unorm16Lsb10),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..3 {
+            decoded.data_mut(plane).fill(16 + plane as u8);
+        }
+        let luma_address = decoded.data(0).as_ptr();
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            5,
+            3,
+            Path::new("synthetic-compact-420"),
+            test_source_color(),
+        )
+        .expect("supported 420 must not expand to RGBA");
+        let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+            panic!("expected compact planes");
+        };
+        assert_eq!(frame.luma_plane().data().as_ptr(), luma_address);
+        drop(decoded);
+        assert_eq!((frame.chroma_width, frame.chroma_height), (3, 2));
+        assert_eq!(frame.sample_format, sample_format);
+        assert_eq!(frame.luma_plane().data()[0], 16);
+        let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+            panic!("expected separate chroma planes");
+        };
+        assert_eq!(cb.data()[0], 17);
+        assert_eq!(cr.data()[0], 18);
+        assert!(cb.data().len() >= cb.bytes_per_row() as usize * 2);
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+        assert_eq!(frame.diagnostics.stage_durations.swscale_us, 0);
+    }
+}
+
+#[test]
+fn compact_cpu_yuv_semiplanar_retains_interleaved_chroma() {
+    use ffmpeg::util::format::pixel::Pixel;
+    for pixel in [Pixel::NV12, Pixel::P010LE] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 6, 4);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        decoded.data_mut(0).fill(64);
+        decoded.data_mut(1).fill(128);
+        let chroma_address = decoded.data(1).as_ptr();
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            6,
+            4,
+            Path::new("synthetic-compact-semiplanar"),
+            test_source_color(),
+        )
+        .expect("hardware download layouts must retain compact planes");
+        let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+            panic!("expected compact planes");
+        };
+        drop(decoded);
+        let CpuYuvChromaPlanes::Interleaved(chroma) = frame.chroma_planes() else {
+            panic!("NV12/P010 must retain interleaved chroma");
+        };
+        assert_eq!(chroma.data().as_ptr(), chroma_address);
+        assert_eq!(chroma.data()[0], 128);
+        assert_eq!((frame.chroma_width, frame.chroma_height), (3, 2));
+        assert_eq!(
+            frame.chroma_plane_layout(),
+            CpuYuvChromaPlaneLayout::Interleaved
+        );
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+    }
+}
+
+#[test]
 fn compact_cpu_yuv_representation_is_exact_and_fail_closed() {
     let mut decoded = ffmpeg::util::frame::video::Video::new(
         ffmpeg::util::format::pixel::Pixel::YUV422P10LE,
@@ -2546,7 +2648,7 @@ fn compact_cpu_yuv_representation_is_exact_and_fail_closed() {
         test_source_color(),
     )
     .expect_err("compact representation must reject a decoder layout mismatch");
-    assert!(error.to_string().contains("expected YUV422P10LE"));
+    assert!(error.to_string().contains("expected supported compact YUV"));
 }
 
 #[test]
@@ -2762,6 +2864,61 @@ fn float_preview_resize_preserves_extended_range() {
     ];
     let resized = super::resize_float_rgba(&source, 2, 2, 1, 1);
     assert_eq!(resized, vec![2.0, 3.0, 4.0, 1.0]);
+}
+
+#[test]
+fn preferred_native_software_fallback_keeps_supported_yuv_compact() {
+    let mut decoded = ffmpeg::util::frame::video::Video::new(
+        ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
+        4,
+        2,
+    );
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::HEVC,
+        None,
+    );
+    plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-native-fallback"),
+        test_source_color(),
+    )
+    .expect("preferred native permits a CPU fallback");
+    assert!(
+        matches!(payload, PreviewDecodedFramePayload::CpuYuv(_)),
+        "GPU consumers must not pay for an unnecessary CPU float expansion"
+    );
+    assert!(!plan.probe.hardware_decode_active);
+    assert!(!plan.probe.zero_copy_active);
+    plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
+    assert!(
+        materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeSurface,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            4,
+            2,
+            Path::new("synthetic-native-required"),
+            test_source_color(),
+        )
+        .is_err(),
+        "required native must never pass with compact CPU planes"
+    );
 }
 
 #[test]

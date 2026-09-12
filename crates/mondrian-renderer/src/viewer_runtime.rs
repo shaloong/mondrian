@@ -2484,7 +2484,8 @@ impl ViewerGpuNativeVideoFacts {
     fn from_cpu_yuv_source(source: &crate::ViewerGpuCpuYuvSource) -> Self {
         let source_texture_format = Some(match source.frame.sample_format {
             mondrian_media::CpuYuvSampleFormat::Unorm8 => GpuNativeDecodedFrameTextureFormat::Nv12,
-            mondrian_media::CpuYuvSampleFormat::Unorm16Lsb10 => {
+            mondrian_media::CpuYuvSampleFormat::Unorm16Lsb10
+            | mondrian_media::CpuYuvSampleFormat::Unorm16Msb10 => {
                 GpuNativeDecodedFrameTextureFormat::P010
             }
         });

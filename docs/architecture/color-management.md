@@ -1960,3 +1960,14 @@ and mask-combination branches may execute in either independent topological
 order, but MatteMix must consume their exact materializations and completion
 tokens. The same validation retains the exact upload/device resource counts and
 the undersized-grant rejection; it does not impose an unrelated branch order.
+
+### Compact decoded YUV input
+
+Linux and portable CPU decode may retain planar 4:2:0 eight/ten-bit, planar
+4:2:2 ten-bit, or semiplanar NV12/P010 samples for GPU consumers. The existing
+Renderer YUV input stage consumes the exact matrix, range, chroma geometry and
+sample alignment before the shared OCIO input transform. P010 uses
+most-significant alignment; planar ten-bit uses least-significant alignment.
+This avoids CPU RGB expansion without changing the working domain, alpha
+contract, output transform, or CPU-addressable consumer requirements. A compact
+CPU payload still requires upload and is never evidence of GPU-resident decode.

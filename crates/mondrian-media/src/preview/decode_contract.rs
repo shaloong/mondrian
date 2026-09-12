@@ -118,14 +118,27 @@ pub enum PreviewNativeSurfaceHint {
 /// different surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreviewCompactCpuYuvHint {
+    /// Eight-bit 4:2:0 with interleaved CbCr samples.
+    Nv12,
+    /// Ten-bit 4:2:0 with interleaved CbCr and left-aligned component words.
+    P010,
+    /// Planar eight-bit 4:2:0 retained as immutable Y, Cb, and Cr planes.
+    Yuv420p,
+    /// Planar little-endian ten-bit 4:2:0 with right-aligned component samples.
+    Yuv420p10le,
     /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
     Yuv422p10le,
 }
 
 impl PreviewCompactCpuYuvHint {
-    /// Tightly packed retained bytes per luma pixel.
+    /// Upper bound on tightly packed bytes per luma pixel for even extents.
+    ///
+    /// Fractional ratios round up. Use `retained_bytes_for_extent` for physical
+    /// admission, including odd chroma extents and aligned row strides.
     pub const fn retained_bytes_per_pixel(self) -> usize {
         match self {
+            Self::Yuv420p | Self::Nv12 => 2,
+            Self::Yuv420p10le | Self::P010 => 3,
             Self::Yuv422p10le => 4,
         }
     }
@@ -138,6 +151,23 @@ impl PreviewCompactCpuYuvHint {
     /// merely to make the allocation tightly packed.
     pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
         match self {
+            Self::Yuv420p | Self::Yuv420p10le | Self::Nv12 | Self::P010 => {
+                let component_bytes = match self {
+                    Self::Yuv420p | Self::Nv12 => 1,
+                    _ => 2,
+                };
+                let luma_row = align_up_saturating(
+                    (extent.width as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                let chroma_row = align_up_saturating(
+                    (extent.width.div_ceil(2) as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                luma_row.saturating_mul(extent.height as usize).saturating_add(
+                    chroma_row.saturating_mul(2).saturating_mul(extent.height.div_ceil(2) as usize),
+                )
+            }
             Self::Yuv422p10le => {
                 let luma_row = align_up_saturating((extent.width as usize).saturating_mul(2), 256);
                 let chroma_row =
@@ -278,9 +308,9 @@ impl PreviewDecodeSource {
             native_surface_hint,
             match manifest.encoding {
                 ProxyEncodingProfile::DnxHrHqx10 => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
-                ProxyEncodingProfile::H264High8
-                | ProxyEncodingProfile::H265Main10
-                | ProxyEncodingProfile::DnxHrSq8 => None,
+                ProxyEncodingProfile::H264High8 => Some(PreviewCompactCpuYuvHint::Yuv420p),
+                ProxyEncodingProfile::H265Main10 => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+                ProxyEncodingProfile::DnxHrSq8 => None,
             },
             source_extent,
         )?;
@@ -974,6 +1004,10 @@ const fn compact_cpu_yuv_hint_from_pixel_format(
     pixel_format: PixelFormat,
 ) -> Option<PreviewCompactCpuYuvHint> {
     match pixel_format {
+        PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
+        PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
+        PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
+        PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
         PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
         _ => None,
     }
@@ -1179,6 +1213,52 @@ mod tests {
         )
         .expect("ProRes remains a valid CPU-decodable source");
         assert_eq!(source.native_surface_hint(), None);
+    }
+
+    #[test]
+    fn compact_420_admission_uses_aligned_chroma_extent_and_preserves_cpu_requirement() {
+        for pixel in [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv420p10le,
+            PixelFormat::Nv12,
+            PixelFormat::P010,
+        ] {
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/420.mp4"),
+                exact_fingerprint(19),
+                &video_stream(0, pixel, true),
+            )
+            .expect("proven 420 source");
+            let hint = source.compact_cpu_yuv_hint().expect("compact 420 admission");
+            assert_eq!(
+                hint.retained_bytes_for_extent(Resolution { width: 5, height: 3 }),
+                1792
+            );
+            for requirement in [
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+            ] {
+                let actual = PreviewDecodeRepresentation::canonical(
+                    &source,
+                    requirement,
+                    PreviewHardwareDecodeRequest::Auto,
+                    PreviewRepresentationQuality::Full,
+                    PreviewSourceColorContract::automatic(
+                        ColorSpace::Rec709,
+                        DecodedVideoRange::Limited,
+                    ),
+                )
+                .expect("valid representation");
+                assert_eq!(
+                    actual,
+                    if requirement == PreviewDecodePayloadRequirement::NativeAllowed {
+                        PreviewDecodeRepresentation::CompactCpuYuv
+                    } else {
+                        PreviewDecodeRepresentation::NativeCpu
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -1533,8 +1613,10 @@ mod tests {
                 },
                 source_color(),
             )
-            .expect("reduced CPU representation"),
-            PreviewDecodeRepresentation::Reduced { divisor: NonZeroU32::new(2).expect("divisor") }
+            .expect("reduced compact CPU representation"),
+            PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                divisor: NonZeroU32::new(2).expect("divisor")
+            }
         );
         assert_eq!(
             PreviewDecodeRepresentation::canonical(

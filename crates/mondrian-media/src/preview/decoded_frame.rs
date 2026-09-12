@@ -60,6 +60,8 @@ pub enum CpuYuvSampleFormat {
     /// the original code values. Keeping FFmpeg's native alignment makes plane
     /// publication a bounded copy instead of a full-frame sample rewrite.
     Unorm16Lsb10,
+    /// Ten-bit code values retained left-aligned in P010 component words.
+    Unorm16Msb10,
 }
 
 impl CpuYuvSampleFormat {
@@ -67,7 +69,7 @@ impl CpuYuvSampleFormat {
     pub const fn bytes_per_component(self) -> usize {
         match self {
             Self::Unorm8 => 1,
-            Self::Unorm16Lsb10 => 2,
+            Self::Unorm16Lsb10 | Self::Unorm16Msb10 => 2,
         }
     }
 
@@ -75,7 +77,7 @@ impl CpuYuvSampleFormat {
     pub const fn bit_depth(self) -> u8 {
         match self {
             Self::Unorm8 => 8,
-            Self::Unorm16Lsb10 => 10,
+            Self::Unorm16Lsb10 | Self::Unorm16Msb10 => 10,
         }
     }
 }
@@ -85,9 +87,9 @@ impl CpuYuvSampleFormat {
 ///
 /// FFmpeg's immutable luma, Cb, and Cr plane allocations are retained with
 /// explicit row strides so the renderer can upload them without an RGBA
-/// expansion, chroma interleave, or full-frame CPU copy. Ten-bit samples retain
-/// FFmpeg's least-significant-bit alignment in a little-endian `u16`; the
-/// renderer owns normalized-texture recovery.
+/// expansion, chroma interleave, or full-frame CPU copy. Ten-bit planar samples
+/// retain least-significant alignment; P010 retains most-significant alignment
+/// in little-endian component words. The renderer owns normalized-texture recovery.
 #[derive(Clone)]
 pub struct CpuYuvFrame {
     /// Visible source width in pixels.
@@ -111,6 +113,7 @@ pub struct CpuYuvFrame {
     /// Frame-local execution provenance retained across every cache layer.
     pub decode_execution: PreviewDecodeExecutionPath,
     frame: Arc<ffmpeg::util::frame::video::Video>,
+    chroma_plane_layout: CpuYuvChromaPlaneLayout,
 }
 
 /// Physical chroma-plane layout retained by a compact CPU YUV frame.
@@ -548,13 +551,14 @@ impl FloatRgbaFrame {
 
 impl CpuYuvFrame {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_planar_ffmpeg(
+    pub(super) fn new_ffmpeg(
         width: u32,
         height: u32,
         chroma_width: u32,
         chroma_height: u32,
         chroma_subsampling: CpuYuvChromaSubsampling,
         sample_format: CpuYuvSampleFormat,
+        chroma_plane_layout: CpuYuvChromaPlaneLayout,
         source_color: PreviewSourceColorContract,
         video_sampling: DecodedVideoSampling,
         frame: ffmpeg::util::frame::video::Video,
@@ -578,6 +582,7 @@ impl CpuYuvFrame {
             diagnostics,
             decode_execution: PreviewDecodeExecutionPath::SoftwareCpu,
             frame: Arc::new(frame),
+            chroma_plane_layout,
         }
     }
 
@@ -591,6 +596,12 @@ impl CpuYuvFrame {
 
     /// Borrow the retained chroma planes and their physical row strides.
     pub fn chroma_planes(&self) -> CpuYuvChromaPlanes<'_> {
+        if self.chroma_plane_layout == CpuYuvChromaPlaneLayout::Interleaved {
+            return CpuYuvChromaPlanes::Interleaved(CpuYuvPlane {
+                bytes: self.frame.data(1),
+                bytes_per_row: self.frame.stride(1).min(u32::MAX as usize) as u32,
+            });
+        }
         CpuYuvChromaPlanes::Planar {
             cb: CpuYuvPlane {
                 bytes: self.frame.data(1),
@@ -605,7 +616,7 @@ impl CpuYuvFrame {
 
     /// Physical chroma storage layout.
     pub const fn chroma_plane_layout(&self) -> CpuYuvChromaPlaneLayout {
-        CpuYuvChromaPlaneLayout::Planar
+        self.chroma_plane_layout
     }
 
     /// Retained CPU bytes across both compact planes.
