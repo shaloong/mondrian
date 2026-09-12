@@ -619,15 +619,20 @@ impl CpuYuvFrame {
         self.chroma_plane_layout
     }
 
-    /// Retained CPU bytes across both compact planes.
+    /// Retained FFmpeg image-buffer bytes, including allocation padding.
+    ///
+    /// Visible plane slices omit vertically aligned rows and inter-plane
+    /// padding that remain owned by the retained frame. Charge the buffer
+    /// references themselves so cache admission cannot hide those bytes.
     pub fn retained_bytes(&self) -> usize {
-        let luma = self.luma_plane().data().len();
-        match self.chroma_planes() {
-            CpuYuvChromaPlanes::Interleaved(chroma) => luma.saturating_add(chroma.data().len()),
-            CpuYuvChromaPlanes::Planar { cb, cr } => {
-                luma.saturating_add(cb.data().len()).saturating_add(cr.data().len())
-            }
-        }
+        // SAFETY: the immutable Arc-owned Video retains this AVFrame and every
+        // populated image AVBufferRef for the complete borrow. Supported video
+        // layouts use at most three planes; extended_buf is audio-only.
+        let frame = unsafe { &*self.frame.as_ptr() };
+        frame.buf.iter().filter(|buffer| !buffer.is_null()).fold(0, |bytes, buffer| {
+            // SAFETY: each non-null buffer reference is retained by frame.
+            bytes.saturating_add(unsafe { (**buffer).size })
+        })
     }
 
     pub(super) fn with_elapsed(mut self, elapsed: Duration) -> Self {

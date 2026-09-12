@@ -3914,3 +3914,9 @@ Its diagnostics still report CPU residency and the actual decode execution.
 Required native requests fail before this fallback; CPU-addressable requests
 continue to receive their typed RGBA/float payload. This reduces pixel
 materialization without altering quality, deadlines, or cache budgets.
+
+Compact CPU payload accounting charges the retained FFmpeg image buffer
+references, including vertical allocation alignment and inter-plane padding.
+Visible strided plane slices remain the upload contract but are not allocation
+size evidence. The existing Playback ring and Preview frame store consume this
+same byte count; an image exceeding the ring's unchanged budget is rejected.

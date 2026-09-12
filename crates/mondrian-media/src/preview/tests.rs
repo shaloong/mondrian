@@ -2472,6 +2472,16 @@ fn compact_cpu_yuv_420_retains_samples_and_owner_at_odd_extents() {
             decoded.data_mut(plane).fill(16 + plane as u8);
         }
         let luma_address = decoded.data(0).as_ptr();
+        // AVFrame owns aligned allocations beyond the visible plane slices.
+        // SAFETY: decoded owns this live AVFrame and its populated buffer refs.
+        let allocation_bytes = unsafe {
+            (*decoded.as_ptr())
+                .buf
+                .iter()
+                .filter(|buffer| !buffer.is_null())
+                .map(|buffer| (**buffer).size)
+                .sum::<usize>()
+        };
         let mut plan = PreviewHardwareDecodePlan::resolve(
             PreviewHardwareDecodeRequest::Auto,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -2496,6 +2506,10 @@ fn compact_cpu_yuv_420_retains_samples_and_owner_at_odd_extents() {
             panic!("expected compact planes");
         };
         assert_eq!(frame.luma_plane().data().as_ptr(), luma_address);
+        assert_eq!(frame.retained_bytes(), allocation_bytes);
+        let mut ring = PreviewPlaybackRing::new(2, allocation_bytes - 1);
+        assert!(!ring.put(DecodedTemporalExtent::from_duration(0, 1), frame.clone()));
+        assert_eq!(ring.reserved_bytes(), 0);
         drop(decoded);
         assert_eq!((frame.chroma_width, frame.chroma_height), (3, 2));
         assert_eq!(frame.sample_format, sample_format);
