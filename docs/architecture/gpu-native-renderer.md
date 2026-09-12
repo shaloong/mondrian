@@ -1528,3 +1528,14 @@ event ownership only after the driver returns success. Failed calls cannot arm
 cleanup with an unspecified output parameter. The shared acquisition seam has
 fault-injection coverage for failed calls that modify both pointer and device
 address outputs; this proves error-path ownership, not physical device qualification.
+
+### Linux decoded-pixel agreement
+
+The opt-in `linux_decode_pixel_parity` integration test feeds explicit 30 fps SDR
+fixtures through the production isolated demux and both compact CPU YUV and CUDA
+decode. Both routes use the same Viewer input, Program Output, and monitor stages
+at seek targets across GOP boundaries. The existing typed readback implementation
+can borrow a presentation lease without detaching its ownership; the test keeps
+that lease until copy completion and consumes Renderer retirement afterward.
+Half-float output comparison permits one half-float ULP at unity; it does not
+qualify a display, original media, a different GPU provider, or sustained playback.

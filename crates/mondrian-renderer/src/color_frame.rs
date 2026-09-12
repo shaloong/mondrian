@@ -3066,6 +3066,19 @@ impl GpuColorFrameReadbackPlan {
 pub struct GpuColorFrameReadback;
 
 impl GpuColorFrameReadback {
+    /// Record a readback of the exact output held by a presentation lease.
+    ///
+    /// Uses the same handle and format validation as ordinary frame readback.
+    /// The caller must keep the lease alive until the submitted copy completes.
+    pub fn record_presentation_copy(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &GpuColorFrameReadbackPlan,
+        output: &ViewerGpuPresentationOutputLease,
+    ) -> Result<wgpu::Buffer, GpuColorFrameReadbackError> {
+        Self::record_copy(device, encoder, plan, output.resource())
+    }
+
     /// Create a MAP_READ buffer and record a texture-to-buffer copy into the encoder.
     pub fn record_copy(
         device: &wgpu::Device,
