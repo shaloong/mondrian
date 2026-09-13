@@ -2440,3 +2440,12 @@ background CPU fallback requires admission of the complete estimate against
 the current Preview CPU grant; background requests carry that same grant to the
 worker. Thus large GPU pictures are not rejected for CPU buffers they never
 allocate, while CPU selection cannot bypass nested-output or scratch limits.
+
+
+Explicit project close/cancel and full idle-media release publish a full decoder
+retirement through the existing residency coordinator and wake the existing
+worker queue. Clearing Frame Store entries alone cannot close a still-active
+interactive demux Session. Each worker retires both families on its own thread;
+native output leases retain deferred destruction, so acknowledgement alone is
+not proof of reaping. A rapid transport-family change preserves any unobserved
+full retirement. Ordinary paused-frame reuse does not request this full trim.

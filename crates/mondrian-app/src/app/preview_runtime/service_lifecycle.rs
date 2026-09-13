@@ -87,6 +87,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return false;
         }
         self.clear_media_preview_residency();
+        self.retire_all_decoder_sessions();
         true
     }
 
@@ -160,6 +161,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.transport_epoch.set(None);
         self.retire_obsolete_transport_work();
         self.clear_all_preview_residency();
+        self.retire_all_decoder_sessions();
+    }
+
+    fn retire_all_decoder_sessions(&self) {
+        self.decode_residency.retire_all();
+        self.jobs.interrupt_workers_for_lifecycle();
     }
 
     fn retire_obsolete_transport_work(&self) {

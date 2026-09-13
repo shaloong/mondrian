@@ -26,9 +26,14 @@ pub(crate) struct PreviewDecodeResidencyDirective {
     revision: u64,
     retire_context: bool,
     retired_family: Option<PreviewDecodeResidencyFamily>,
+    retire_all_contexts: bool,
 }
 
 impl PreviewDecodeResidencyDirective {
+    pub(crate) const fn retire_all_contexts(self) -> bool {
+        self.retire_all_contexts
+    }
+
     pub(crate) const fn revision(self) -> u64 {
         self.revision
     }
@@ -47,6 +52,7 @@ struct PreviewDecodeResidencyState {
     revision: u64,
     actionable_retry_revision: u64,
     active_family: Option<PreviewDecodeResidencyFamily>,
+    retire_all_contexts: bool,
     worker_mask: u8,
     required_ack_mask: u8,
     acknowledged_mask: u8,
@@ -82,6 +88,7 @@ impl PreviewDecodeResidencyCoordinator {
                 revision: 0,
                 actionable_retry_revision: 0,
                 active_family: None,
+                retire_all_contexts: false,
                 worker_mask: 0,
                 required_ack_mask: 0,
                 acknowledged_mask: 0,
@@ -126,6 +133,8 @@ impl PreviewDecodeResidencyCoordinator {
         }
         state.revision = state.revision.saturating_add(1);
         state.transitions = state.transitions.saturating_add(1);
+        // A rapid reopen cannot erase a full retirement missed by a worker.
+        state.retire_all_contexts &= retirement_barrier_blocked(&state);
         state.active_family = Some(family);
         // Every worker can own either family: the NonPlayback lane may own a
         // cold Playback Session and the Playback lane may have an exceptional
@@ -134,6 +143,17 @@ impl PreviewDecodeResidencyCoordinator {
         state.required_ack_mask = state.worker_mask;
         state.acknowledged_mask = 0;
         true
+    }
+
+    /// Retire both worker-owned families without changing transport authority.
+    /// Admission resumes only after every worker observes this revision; native
+    /// output leases retain their existing deferred destruction contract.
+    pub(crate) fn retire_all(&self) {
+        let mut state = lock_state(&self.state);
+        state.revision = state.revision.saturating_add(1);
+        state.retire_all_contexts = true;
+        state.required_ack_mask = state.worker_mask;
+        state.acknowledged_mask = 0;
     }
 
     /// Current coordination revision for a newly started worker loop.
@@ -162,6 +182,7 @@ impl PreviewDecodeResidencyCoordinator {
             revision: state.revision,
             retire_context: state.required_ack_mask & worker_lane_bit(lane) != 0,
             retired_family: state.active_family.map(opposite_residency_family),
+            retire_all_contexts: state.retire_all_contexts,
         })
     }
 
@@ -261,6 +282,32 @@ fn residency_state_admits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_retirement_survives_reactivation_until_every_worker_observes_it() {
+        let coordinator = PreviewDecodeResidencyCoordinator::new();
+        let lane = MediaPreviewWorkerLane::NonPlayback;
+        coordinator.register_worker(lane);
+        coordinator.activate(PreviewDecodeResidencyFamily::Interactive);
+        coordinator.acknowledge_retirement(lane, coordinator.revision());
+        let observed = coordinator.revision();
+        coordinator.retire_all();
+        assert!(!coordinator.admission_ready(PreviewDecodeAccessMode::ScrubCursor));
+        assert!(!coordinator.activate(PreviewDecodeResidencyFamily::Interactive));
+        coordinator.activate(PreviewDecodeResidencyFamily::Playback);
+        let directive = coordinator.worker_directive(lane, observed).expect("retirement");
+        assert!(directive.retire_context());
+        assert!(directive.retire_all_contexts());
+        coordinator.acknowledge_retirement(lane, observed);
+        assert!(!coordinator.admission_ready(PreviewDecodeAccessMode::PlaybackCursor));
+        coordinator.acknowledge_retirement(lane, directive.revision());
+        assert!(coordinator.admission_ready(PreviewDecodeAccessMode::PlaybackCursor));
+        coordinator.activate(PreviewDecodeResidencyFamily::Interactive);
+        assert!(!coordinator
+            .worker_directive(lane, directive.revision())
+            .expect("next transition")
+            .retire_all_contexts());
+    }
 
     #[test]
     fn interactive_admission_waits_for_playback_owner_retirement() {

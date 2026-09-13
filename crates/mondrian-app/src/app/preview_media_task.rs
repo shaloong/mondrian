@@ -378,19 +378,28 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     loop {
         pending_native_retire.clear_released(&mut decode_context);
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
-            if directive.retire_context()
-                && let Some(retired_family) = directive.retired_family()
-            {
-                pending_native_retire
-                    .remove(opposite_preview_decode_session_family(retired_family));
-                if decode_context.family_native_outputs_released(retired_family) {
-                    decode_context.clear_family(retired_family);
-                    pending_native_retire.remove(retired_family);
-                    residency.acknowledge_retirement(lane, directive.revision());
+            if directive.retire_context() {
+                let families = if directive.retire_all_contexts() {
+                    [
+                        Some(PreviewDecodeSessionFamily::Playback),
+                        Some(PreviewDecodeSessionFamily::Interactive),
+                    ]
                 } else {
-                    residency.acknowledge_retirement(lane, directive.revision());
-                    pending_native_retire.insert(retired_family);
+                    if let Some(family) = directive.retired_family() {
+                        pending_native_retire
+                            .remove(opposite_preview_decode_session_family(family));
+                    }
+                    [directive.retired_family(), None]
+                };
+                for family in families.into_iter().flatten() {
+                    if decode_context.family_native_outputs_released(family) {
+                        decode_context.clear_family(family);
+                        pending_native_retire.remove(family);
+                    } else {
+                        pending_native_retire.insert(family);
+                    }
                 }
+                residency.acknowledge_retirement(lane, directive.revision());
             }
             residency_revision = directive.revision();
         }
