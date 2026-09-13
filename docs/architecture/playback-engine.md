@@ -11,6 +11,16 @@ After an Adapter proves exact physical GPU completion and finalizes Presented/No
 
 Both immediate successor and farther lookahead requests are speculative media work. The shared media Adapter projects both ticketless purposes to Prefetch, never Current, including cache hits: they retain their physical payload lease without acquiring Current working-set protection. Optional capacity refusal therefore cannot reclaim an earlier Prefetch under a falsely promoted Current role. Physical immediate-successor GPU ownership remains a separate exact-intent contract.
 
+A CPU-complete speculative GPU frame may acquire the current Frame Presentation
+Ticket only after the Preview Runtime resolves the current snapshot through the
+same `ViewerPreviewGenerationKey` construction used by ordinary production.
+The open Authoring Session, Project/Sequence revisions, playback epoch, output
+extent, display-output identity, and resolved monitor color space must still
+match the generation that prepared the frame. A changed Viewer display policy
+therefore rejects the staged artifact before synchronizing the current demand;
+the ordinary production path then rotates the sole Preview generation and
+rebuilds monitor adaptation from the new contract.
+
 Priming also proves the next distinct physical source inside the bounded cold-open horizon before it releases the clock anchor. The shared preroll seam may overlap that future decode with GPU presentation only after the complete current-frame media closure is physically resident; a partial multi-input closure retains absolute admission priority. Distinct-source discovery uses the renderer's canonical inclusive range closure and a monotonic prefix binary search for the first Asset outside the current media set. The App then lowers and validates the exact returned frame before admission. The visible current owner admits the activation against the original preroll deadline and reports its residency as a separate Playback observation; the deadline is never renewed. Once Playing begins, current turns only replenish the same bounded window, while speculative successor and farther-lookahead turns cannot recursively scan it.
 
 Cold-activation GPU-object preparation has its own ticketless execution purpose. Its resolved evaluation lives only for that prewarm call and does not enter the ordinary four-entry evaluation LRU; dropping the frame releases its transient media protection after renderer backend objects are ready. This keeps the far activation coordinate outside the ordinary realtime evaluation set while the bounded staging owners protect the near horizon. The cold frame still uses the same Timeline resolver, exact media keys, GPU input preparation, deadlines, and cancellation policy.

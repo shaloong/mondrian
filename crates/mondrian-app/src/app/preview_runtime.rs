@@ -825,24 +825,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return unavailable_gpu_candidate(reason);
         }
         let frame = transport.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
-        let display_snapshot = self.display_snapshot.borrow();
-        let display_color_space = match preview_display_color_space(
-            sequence,
-            authoring.color_environment().engine(),
-            snapshot.viewer_display(),
-            display_snapshot.as_ref(),
-        ) {
-            Ok(color_space) => color_space,
-            Err(blocker) => {
-                self.record_preview_gpu_output_blocker(&blocker);
-                self.scheduler.prune_obsolete();
-                return unavailable_gpu_candidate(PreviewUnavailability::blocked(
-                    PreviewOutputStage::DisplayContract,
-                    blocker.description(),
-                ));
-            }
-        };
+        let (generation_key, width, height, display_color_space) =
+            match self.resolve_preview_generation_contract(snapshot, authoring, sequence) {
+                Ok(contract) => contract,
+                Err(blocker) => {
+                    self.record_preview_gpu_output_blocker(&blocker);
+                    self.scheduler.prune_obsolete();
+                    return unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                        PreviewOutputStage::DisplayContract,
+                        blocker.description(),
+                    ));
+                }
+            };
         let color_context =
             match sequence.settings.root_program_color_context(authoring.color_environment()) {
                 Ok(context) => context,
@@ -898,16 +892,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         observation.next("candidate-generation");
-        let generation_binding =
-            self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
-                snapshot,
-                sequence,
-                frame,
-                width,
-                height,
-                display_color_space,
-                self.display_snapshot_identity.get(),
-            ));
+        let generation_binding = self.activate_preview_generation(generation_key);
         let generation = match generation_binding {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
@@ -1658,17 +1643,57 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         mut frame: Box<PreviewGpuFrame>,
         snapshot: &PreviewExecutionSnapshot<'_>,
     ) -> Option<Box<PreviewGpuFrame>> {
+        if self.visual_program_authoring_session.get() != snapshot.authoring_session_id() {
+            return None;
+        }
+        let authoring = snapshot.authoring()?;
+        let sequence = authoring.active_sequence()?;
+        let (generation_key, _, _, _) =
+            self.resolve_preview_generation_contract(snapshot, authoring, sequence).ok()?;
         let intent = snapshot.transport().playback_intent();
-        if frame.generation() != self.execution.borrow().generation()
+        let execution = self.execution.borrow();
+        if !execution.is_current_generation_key(&generation_key)
+            || frame.generation() != execution.generation()
             || frame.playback_intent() != intent
             || frame.has_heterogeneous_gpu_execution()
         {
             return None;
         }
+        drop(execution);
         let ticket = snapshot.presentation_ticket(frame.presentation_quality())?;
         self.scheduler.synchronize_playback_current_demand(ticket.identity());
         frame.bind_current_presentation(ticket);
         Some(frame)
+    }
+
+    fn resolve_preview_generation_contract(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        authoring: &PreviewAuthoringSnapshot<'_>,
+        sequence: &Sequence,
+    ) -> std::result::Result<
+        (ViewerPreviewGenerationKey, u32, u32, ColorSpace),
+        PreviewGpuOutputBlocker,
+    > {
+        let frame = snapshot.transport().current_frame().max(0);
+        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let display_snapshot = self.display_snapshot.borrow();
+        let display_color_space = preview_display_color_space(
+            sequence,
+            authoring.color_environment().engine(),
+            snapshot.viewer_display(),
+            display_snapshot.as_ref(),
+        )?;
+        let key = ViewerPreviewGenerationKey::from_snapshot(
+            snapshot,
+            sequence,
+            frame,
+            width,
+            height,
+            display_color_space,
+            self.display_snapshot_identity.get(),
+        );
+        Ok((key, width, height, display_color_space))
     }
 
     /// Build the exact ticket that a Presentation Adapter may complete only

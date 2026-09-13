@@ -2149,6 +2149,65 @@ fn exact_staged_gpu_candidate_acquires_only_the_current_demand_ticket() {
 }
 
 #[test]
+fn staged_gpu_candidate_rejects_a_changed_monitor_contract_before_rebinding() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let current = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected priming current candidate"),
+    };
+    let current_ticket = current.presentation_ticket().expect("priming current ticket");
+    state
+        .complete_frame_presentation(current_ticket, Instant::now())
+        .expect("present priming current");
+    assert!(state.observe_video_preroll(0, 0));
+    let request = state
+        .preview_lookahead_execution_request(Instant::now(), 2)
+        .expect("lookahead request");
+    let staged_intent = request.snapshot().transport().playback_intent();
+    let staged = match service.gpu_preview_frame(request) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected CPU-complete speculative candidate"),
+    };
+    assert!(staged.is_successor_preparation());
+    assert!(staged.presentation_ticket().is_none());
+
+    assert_ne!(
+        staged.monitor_adaptation.monitor_color_space(),
+        ColorSpace::DisplayP3
+    );
+    assert!(state.set_viewer_display_management(
+        mondrian_core::DisplayManagementPolicy::default()
+            .with_monitor_output(mondrian_core::MonitorOutputIntent::ColorSpace(
+                ColorSpace::DisplayP3,
+            ))
+            .expect("P3 monitor contract"),
+    ));
+
+    let mut tick_at = Instant::now();
+    for _ in 0..4 {
+        if state.current_frame() == staged_intent.frame {
+            break;
+        }
+        tick_at += Duration::from_millis(45);
+        state.advance_playback_clock_at(tick_at);
+    }
+    let identity = state.pending_playback_frame_demand_identity().expect("current demand");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(snapshot.transport().playback_intent(), staged_intent);
+    assert!(
+        service.bind_staged_gpu_frame_for_current(staged, &snapshot).is_none(),
+        "old monitor adaptation must not acquire a fresh current-frame ticket"
+    );
+    assert_eq!(
+        state.pending_playback_frame_demand_identity(),
+        Some(identity),
+        "rejecting speculative work must preserve the current demand"
+    );
+}
+
+#[test]
 fn cold_activation_prewarm_does_not_evict_the_immediate_successor_evaluation() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
