@@ -399,9 +399,20 @@ impl fmt::Debug for FfmpegNativeDecodedFrameResource {
 impl Drop for FfmpegNativeDecodedFrameResource {
     fn drop(&mut self) {
         let mut frame = self.frame.as_ptr();
+        let started = std::time::Instant::now();
         // SAFETY: retain obtained sole ownership of this AVFrame allocation from
         // av_frame_clone. Drop runs exactly once and av_frame_free accepts &mut.
         unsafe { ffmpeg::ffi::av_frame_free(&mut frame) };
+        let elapsed_us = started.elapsed().as_micros();
+        if elapsed_us >= 5_000 {
+            tracing::debug!(
+                kind = ?self.kind,
+                resource_id = self.id.get(),
+                elapsed_us,
+                thread = ?std::thread::current().id(),
+                "slow native FFmpeg frame release"
+            );
+        }
     }
 }
 

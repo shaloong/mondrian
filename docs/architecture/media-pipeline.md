@@ -3979,3 +3979,9 @@ matching the worker's buffered transport. Version, nonce, stream contract, packe
 limits and terminal-error validation still use the same parser. Buffering removes
 one pipe syscall per scalar field without issuing extra Read commands, admitting
 another media frame, changing cancellation polling, or transferring child ownership.
+
+Native FFmpeg frame-release diagnostics time `av_frame_free` on the actual
+dropping thread. Slow-release logs include the existing native resource identity
+and handle kind. They observe the foreign boundary without moving destruction,
+changing the output lease, adding a resource owner, or treating a duration as
+proof of a particular driver fault.

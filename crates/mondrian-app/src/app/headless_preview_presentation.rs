@@ -215,6 +215,18 @@ pub(crate) fn present_headless_preview_candidate_at(
     candidate
 }
 
+// Diagnostics observe the existing call boundaries; they do not renew a ticket,
+// change admission, or retain any frame/resource beyond the wrapped call.
+fn observe_presentation_step<T>(step: &'static str, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    let elapsed_us = started.elapsed().as_micros();
+    if elapsed_us >= 5_000 {
+        tracing::debug!(step, elapsed_us, "slow Headless arbitration step");
+    }
+    result
+}
+
 fn present_headless_preview_candidate_inner(
     preview: &HeadlessPreviewRuntime,
     state: &mut AppState,
@@ -241,7 +253,9 @@ fn present_headless_preview_candidate_inner(
     // retiring the submitted owner is maintenance, while consuming the fresh
     // Frame Demand is deadline-bound presentation work.
     if !exact_prepared_current
-        && let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)?
+        && let Some(candidate) = observe_presentation_step("retire-submission", || {
+            drive_headless_gpu_submission(preview, state, gpu)
+        })?
     {
         return Ok(candidate);
     }
@@ -252,11 +266,13 @@ fn present_headless_preview_candidate_inner(
         current_playback_intent,
         immediate_successor_intent,
     );
-    if let Some((output_key, output)) =
-        gpu.retire_stale_prepared_physical_output(expected_prepared_output.as_ref())
-    {
-        clear_revoked_headless_gpu_output(preview, &output_key, &output);
-    }
+    observe_presentation_step("retire-stale-output", || {
+        if let Some((output_key, output)) =
+            gpu.retire_stale_prepared_physical_output(expected_prepared_output.as_ref())
+        {
+            clear_revoked_headless_gpu_output(preview, &output_key, &output);
+        }
+    });
     // The transport reached its natural end: no next frame demand will ever
     // promote a prepared successor, so release its retained capacity-one
     // physical lease. Otherwise it reports as a second live presentation
@@ -273,7 +289,9 @@ fn present_headless_preview_candidate_inner(
     if state.pending_playback_frame_demand_identity().is_none()
         && let Some(output_key) = preview.registered_exact_current_gpu_output_key()
     {
-        gpu.promote_prepared_successor(&output_key);
+        observe_presentation_step("promote-physical-output", || {
+            gpu.promote_prepared_successor(&output_key)
+        });
         if headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
             return Ok(HeadlessPreviewCandidate::Ready {
                 output: HeadlessPresentedOutput::CurrentGpu,
@@ -299,15 +317,16 @@ fn present_headless_preview_candidate_inner(
     // physical publication. Fresh Ready and distinct prepared-current
     // candidates still preflight below before any GPU recording or promotion.
     let current_request = state.preview_frame_execution_request(Instant::now());
-    let candidate = gpu
-        .take_staged_successor_for_intent(current_playback_intent)
-        .and_then(|frame| {
-            preview.bind_staged_gpu_frame_for_current(frame, current_request.snapshot())
-        })
-        .map_or_else(
-            || preview.gpu_preview_frame(current_request),
-            PreviewGpuFrameState::Ready,
-        );
+    let candidate = observe_presentation_step("acquire-current-candidate", || {
+        gpu.take_staged_successor_for_intent(current_playback_intent)
+            .and_then(|frame| {
+                preview.bind_staged_gpu_frame_for_current(frame, current_request.snapshot())
+            })
+            .map_or_else(
+                || preview.gpu_preview_frame(current_request),
+                PreviewGpuFrameState::Ready,
+            )
+    });
     match candidate {
         PreviewGpuFrameState::Ready(frame) => {
             let exact_visible_at =
@@ -327,12 +346,15 @@ fn present_headless_preview_candidate_inner(
                     visible_at,
                     FramePresentationPublication::prepared(|| {}),
                 );
-                let Some(completed_demand) =
-                    headless_published_demand_completion(preview, presentation)?
+                let Some(completed_demand) = observe_presentation_step("complete-demand", || {
+                    headless_published_demand_completion(preview, presentation)
+                })?
                 else {
                     return Ok(HeadlessPreviewCandidate::DroppedLate);
                 };
-                observe_playback_video_preroll(state, preview);
+                observe_presentation_step("observe-video-preroll", || {
+                    observe_playback_video_preroll(state, preview)
+                });
                 return Ok(HeadlessPreviewCandidate::Ready {
                     output: HeadlessPresentedOutput::CurrentGpu,
                     completed_demand,
@@ -409,9 +431,13 @@ fn present_headless_preview_candidate_inner(
                     // capacity-one physical lease stays in the prepared slot
                     // and reports as a second live presentation output that
                     // rejects every later ordinary record.
-                    gpu.promote_prepared_successor(&submitted_output_key);
+                    observe_presentation_step("promote-physical-output", || {
+                        gpu.promote_prepared_successor(&submitted_output_key)
+                    });
                     preview.try_release_settled_transport_media_residency();
-                    observe_playback_video_preroll(state, preview);
+                    observe_presentation_step("observe-video-preroll", || {
+                        observe_playback_video_preroll(state, preview)
+                    });
                     Ok(HeadlessPreviewCandidate::Ready {
                         output: HeadlessPresentedOutput::QueuedGpu,
                         completed_demand,
@@ -462,7 +488,9 @@ fn present_headless_preview_candidate_inner(
                     }
                 }
             }
-            gpu.promote_prepared_successor(&output_key);
+            observe_presentation_step("promote-physical-output", || {
+                gpu.promote_prepared_successor(&output_key)
+            });
             if !headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
                 clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
                 gpu.clear_physical_outputs();
@@ -480,12 +508,15 @@ fn present_headless_preview_candidate_inner(
                     FramePresentationPublication::prepared(|| {}),
                 )
             };
-            let Some(completed_demand) =
-                headless_published_demand_completion(preview, presentation)?
+            let Some(completed_demand) = observe_presentation_step("complete-demand", || {
+                headless_published_demand_completion(preview, presentation)
+            })?
             else {
                 return Ok(HeadlessPreviewCandidate::DroppedLate);
             };
-            observe_playback_video_preroll(state, preview);
+            observe_presentation_step("observe-video-preroll", || {
+                observe_playback_video_preroll(state, preview)
+            });
             Ok(HeadlessPreviewCandidate::Ready {
                 output: HeadlessPresentedOutput::CurrentGpu,
                 completed_demand,
@@ -500,12 +531,15 @@ fn present_headless_preview_candidate_inner(
                     preview.clear_external_viewer_frame();
                 }),
             );
-            let Some(completed_demand) =
-                headless_published_demand_completion(preview, presentation)?
+            let Some(completed_demand) = observe_presentation_step("complete-demand", || {
+                headless_published_demand_completion(preview, presentation)
+            })?
             else {
                 return Ok(HeadlessPreviewCandidate::DroppedLate);
             };
-            observe_playback_video_preroll(state, preview);
+            observe_presentation_step("observe-video-preroll", || {
+                observe_playback_video_preroll(state, preview)
+            });
             Ok(HeadlessPreviewCandidate::Ready {
                 output: HeadlessPresentedOutput::Transparent,
                 completed_demand,
@@ -1154,7 +1188,9 @@ pub(crate) fn drive_headless_gpu_submission(
                             )
                         })?;
                     let Some(completed_demand) =
-                        headless_published_demand_completion(preview, presentation)?
+                        observe_presentation_step("complete-demand", || {
+                            headless_published_demand_completion(preview, presentation)
+                        })?
                     else {
                         return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
                             execution: Box::new(completed.execution),
@@ -1171,7 +1207,9 @@ pub(crate) fn drive_headless_gpu_submission(
                         ),
                         "heterogeneous Headless publication committed semantic metadata without its physical output lease"
                     );
-                    observe_playback_video_preroll(state, preview);
+                    observe_presentation_step("observe-video-preroll", || {
+                        observe_playback_video_preroll(state, preview)
+                    });
                     Ok(Some(HeadlessPreviewCandidate::Ready {
                         output: HeadlessPresentedOutput::Gpu {
                             execution: Box::new(completed.execution),
@@ -1281,11 +1319,15 @@ pub(crate) fn present_headless_preview_output(
                                 }),
                             );
                             let Some(completed_demand) =
-                                headless_published_demand_completion(preview, presentation)?
+                                observe_presentation_step("complete-demand", || {
+                                    headless_published_demand_completion(preview, presentation)
+                                })?
                             else {
                                 return Ok(HeadlessPreviewCandidate::DroppedLate);
                             };
-                            observe_playback_video_preroll(state, preview);
+                            observe_presentation_step("observe-video-preroll", || {
+                                observe_playback_video_preroll(state, preview)
+                            });
                             Ok(HeadlessPreviewCandidate::Ready {
                                 output: HeadlessPresentedOutput::Raster(frame),
                                 completed_demand,
@@ -1304,11 +1346,15 @@ pub(crate) fn present_headless_preview_output(
                                 FramePresentationPublication::prepared(|| {}),
                             );
                             let Some(completed_demand) =
-                                headless_published_demand_completion(preview, presentation)?
+                                observe_presentation_step("complete-demand", || {
+                                    headless_published_demand_completion(preview, presentation)
+                                })?
                             else {
                                 return Ok(HeadlessPreviewCandidate::DroppedLate);
                             };
-                            observe_playback_video_preroll(state, preview);
+                            observe_presentation_step("observe-video-preroll", || {
+                                observe_playback_video_preroll(state, preview)
+                            });
                             Ok(HeadlessPreviewCandidate::Ready {
                                 output: HeadlessPresentedOutput::CurrentGpu,
                                 completed_demand,
@@ -1325,11 +1371,15 @@ pub(crate) fn present_headless_preview_output(
                         }),
                     );
                     let Some(completed_demand) =
-                        headless_published_demand_completion(preview, presentation)?
+                        observe_presentation_step("complete-demand", || {
+                            headless_published_demand_completion(preview, presentation)
+                        })?
                     else {
                         return Ok(HeadlessPreviewCandidate::DroppedLate);
                     };
-                    observe_playback_video_preroll(state, preview);
+                    observe_presentation_step("observe-video-preroll", || {
+                        observe_playback_video_preroll(state, preview)
+                    });
                     Ok(HeadlessPreviewCandidate::Ready {
                         output: HeadlessPresentedOutput::Transparent,
                         completed_demand,

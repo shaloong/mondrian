@@ -752,6 +752,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         request: PreviewFrameExecutionRequest<'_>,
     ) -> PreviewGpuFrameState {
         let candidate_started = Instant::now();
+        let mut observation = PreviewWorkObservation::new(
+            request.snapshot().transport().current_frame(),
+            "candidate-preamble",
+        );
         // Candidate evaluation is the acknowledgement boundary for retained
         // retry authority. Polling alone must never consume this request.
         if self.media_retry_pending.replace(false) {
@@ -783,6 +787,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .flatten(),
         );
         let preamble_us = app_duration_us(candidate_started.elapsed());
+        observation.next("candidate-color-contract");
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(authoring) = snapshot.authoring() else {
@@ -877,6 +882,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
+        observation.next("candidate-generation");
         let generation_binding =
             self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
                 snapshot,
@@ -891,6 +897,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
+        observation.next("candidate-promotion");
         let playback_intent = transport.playback_intent();
         if transport.is_successor_preparation()
             && self.execution.borrow().has_prepared_successor_for_intent(playback_intent)
@@ -911,7 +918,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             // media responsibility after speculative candidates were narrowed
             // to their exact frame; otherwise a cold source transition is not
             // discovered until its immediate-successor turn at the cut.
+            observation.next("current-prefetch");
             self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
+            observation.next("current-prune");
             self.scheduler.prune_obsolete();
             return match prepared {
                 PreviewPreparedPromotion::Gpu { already_visible, .. } => {
@@ -2982,6 +2991,39 @@ fn bump(counter: &Cell<u64>) {
 
 fn add_cell(counter: &Cell<u64>, delta: u64) {
     counter.set(counter.get().saturating_add(delta));
+}
+
+// Stack-local timings only: no retained media, scheduling decisions or receipts.
+struct PreviewWorkObservation {
+    frame: i64,
+    step: &'static str,
+    started: Instant,
+}
+impl PreviewWorkObservation {
+    fn new(frame: i64, step: &'static str) -> Self {
+        Self { frame, step, started: Instant::now() }
+    }
+    fn next(&mut self, step: &'static str) {
+        self.observe();
+        self.step = step;
+        self.started = Instant::now();
+    }
+    fn observe(&self) {
+        let elapsed_us = app_duration_us(self.started.elapsed());
+        if elapsed_us >= 5_000 {
+            tracing::debug!(
+                frame = self.frame,
+                step = self.step,
+                elapsed_us,
+                "slow Preview work step"
+            );
+        }
+    }
+}
+impl Drop for PreviewWorkObservation {
+    fn drop(&mut self) {
+        self.observe();
+    }
 }
 
 fn app_duration_us(duration: Duration) -> u64 {

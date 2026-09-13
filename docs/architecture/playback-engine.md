@@ -2413,3 +2413,10 @@ measure owner snapshot construction, callback registration, and progress-command
 publication. These wall-time observations carry no deadline, readiness, or
 qualification authority: a later successful run cannot clear a prior non-unit
 frame advance, and a slow stage alone does not identify its blocking cause.
+
+Headless presentation diagnostics also time candidate acquisition, submission
+retirement, stale-output retirement, physical promotion, demand completion and
+preroll observation at their existing call boundaries. Slow-call logs distinguish
+maintenance from the authoritative presentation commit without retaining another
+snapshot, renewing a deadline, changing publication order, or asserting a cause
+from elapsed time alone.

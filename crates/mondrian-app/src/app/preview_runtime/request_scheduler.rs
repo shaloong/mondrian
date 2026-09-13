@@ -796,6 +796,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_height: u32,
         allow_resident_priming_current: bool,
     ) -> FutureMediaPrefetchReadiness {
+        let mut observation = PreviewWorkObservation::new(frame, "prefetch-admission");
         self.synchronize_visual_program_authoring_session(snapshot);
         let transport = snapshot.transport();
         if !transport.is_playing() {
@@ -931,6 +932,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         // Playback worker ahead of the next presentation frame. Priming keeps
         // the atomic cold-activation-first rule after the exact current
         // closure is owned because its clock has not started yet.
+        observation.next("prefetch-discovery");
         let distinct_activation_frame = match cached_cold_activation {
             Some(activation_frame) => activation_frame,
             None if prefetch_slots_available > 0
@@ -955,6 +957,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             None => None,
         };
+        observation.next("prefetch-immediate");
         let mut bounded_cold_activation_ready = true;
         let mut bounded_cold_activation_frame = distinct_activation_frame;
         let mut remaining_prefetch_jobs = prefetch_slots_available;
@@ -981,6 +984,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             );
             remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(immediate_scheduled);
         }
+        observation.next("prefetch-cold");
         if let Some(activation_frame) = distinct_activation_frame {
             let mut activation_plan = self.plan_future_media_prefix(
                 snapshot,
@@ -1051,6 +1055,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         } else {
             remaining_prefetch_jobs
         };
+        observation.next("prefetch-window");
         let steady_plan = self.plan_future_media_prefix(
             snapshot,
             proxy_demands,
