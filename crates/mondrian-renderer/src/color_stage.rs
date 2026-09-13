@@ -4868,7 +4868,7 @@ impl<'a> RenderColorStagePlanner<'a> {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
-            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            alpha: input.alpha,
         };
         RenderColorStagePlan {
             stages: vec![RenderColorStage::CpuInputTransform {
@@ -4901,7 +4901,7 @@ impl<'a> RenderColorStagePlanner<'a> {
             domain: transform.output_domain,
             encoding,
             residency: ColorFrameResidency::Cpu,
-            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            alpha: input.alpha,
         };
         RenderColorStagePlan {
             stages: vec![RenderColorStage::CpuOutputTransform {

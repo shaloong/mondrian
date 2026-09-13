@@ -126,12 +126,57 @@ impl RendererHwAccelDeviceContext {
     /// The returned reference is independently owned and must be released with
     /// `av_buffer_unref`. It remains crate-private so platform clients cannot
     /// manufacture an unqualified FFmpeg device interpretation.
-    #[cfg(all(target_os = "windows", mondrian_ffmpeg_7_1))]
+    #[cfg(any(target_os = "linux", all(target_os = "windows", mondrian_ffmpeg_7_1)))]
     pub(crate) fn retain_ffmpeg_device_ref(
         &self,
     ) -> Result<NonNull<ffmpeg::ffi::AVBufferRef>, RendererHwAccelDeviceContextCreateError> {
         let retained = unsafe { ffmpeg::ffi::av_buffer_ref(self.owner.ptr.as_ptr()) };
         NonNull::new(retained).ok_or(RendererHwAccelDeviceContextCreateError::AllocationFailed)
+    }
+
+    /// Create an FFmpeg CUDA device root for a renderer-qualified device ordinal.
+    ///
+    /// The renderer must first match its Vulkan physical-device UUID to this
+    /// CUDA ordinal. Media deliberately accepts no implicit default device, so
+    /// multi-GPU systems cannot silently encode on a different adapter.
+    #[cfg(target_os = "linux")]
+    pub fn from_cuda_device_ordinal(
+        ordinal: u16,
+    ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
+        ffmpeg::init().map_err(|error| {
+            RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                backend: HwAccelBackend::Cuda,
+                reason: error.to_string(),
+            }
+        })?;
+        let device_name = CString::new(ordinal.to_string())
+            .map_err(|_| RendererHwAccelDeviceContextCreateError::InvalidDeviceSelector)?;
+        let mut device_context = ptr::null_mut();
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                device_name.as_ptr(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(
+                RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                    backend: HwAccelBackend::Cuda,
+                    reason: ffmpeg::Error::from(result).to_string(),
+                },
+            );
+        }
+        let device_context = NonNull::new(device_context)
+            .ok_or(RendererHwAccelDeviceContextCreateError::AllocationFailed)?;
+        Ok(Self {
+            owner: Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::Cuda,
+                ptr: device_context,
+            }),
+        })
     }
 
     /// Create an FFmpeg D3D12VA device root over the exact renderer device.
@@ -173,12 +218,17 @@ pub enum RendererHwAccelDeviceContextCreateError {
     /// FFmpeg could not allocate the requested device context.
     #[error("FFmpeg could not allocate a renderer-qualified hardware device context")]
     AllocationFailed,
+    /// A renderer-selected native device identifier could not be represented.
+    #[error("renderer-qualified hardware device selector is invalid")]
+    InvalidDeviceSelector,
     /// FFmpeg returned an incomplete generic device-context allocation.
     #[error("FFmpeg returned an incomplete D3D12VA device-context allocation")]
     InvalidAllocation,
     /// FFmpeg rejected the supplied renderer device.
-    #[error("FFmpeg could not initialize the renderer-owned D3D12VA device context: {reason}")]
+    #[error("FFmpeg could not initialize the renderer-owned {backend:?} device context: {reason}")]
     InitializationFailed {
+        /// Hardware backend whose exact device could not be initialized.
+        backend: HwAccelBackend,
         /// Stable FFmpeg error text.
         reason: String,
     },
@@ -225,6 +275,7 @@ fn initialize_ffmpeg_d3d12_device_context(
     if result < 0 {
         return Err(
             RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                backend: HwAccelBackend::D3D12VA,
                 reason: ffmpeg::Error::from(result).to_string(),
             },
         );

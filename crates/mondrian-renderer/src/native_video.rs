@@ -133,7 +133,7 @@ pub use windows_d3d12_zero_copy_backend::{
 };
 
 #[cfg(target_os = "linux")]
-mod cuda_driver;
+pub(crate) mod cuda_driver;
 #[cfg(target_os = "linux")]
 mod vulkan_cuda;
 #[cfg(target_os = "linux")]

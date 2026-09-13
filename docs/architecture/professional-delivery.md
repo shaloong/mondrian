@@ -400,9 +400,17 @@ artifact directory. Raw native command cleanup, immutable tool hashes and the
 consuming runtime receipt accompany the MXF files. This ANC-only test does not
 claim full AS-11 picture/audio or physical broadcast qualification.
 
-Resident D3D12 queue entry points compile with their Windows consumer. Portable
-Export still lowers through the same visual closure and delivery contracts; the
-unavailable native resident target cannot be admitted as a Linux qualification.
+Resident queue entry points compile with their native consumer. Windows uses
+D3D12 Video Process plus `hevc_d3d12va`; Linux NVIDIA uses an exact UUID-matched
+Vulkan/CUDA bridge plus FFmpeg CUDA surfaces and `hevc_nvenc`. Both consume the
+same visual closure and delivery contracts. A resident attempt requires that
+closure to stay GPU-native even when opportunistic acceleration is disabled;
+otherwise admission ends before the first encoded frame rather than inserting a
+CPU composite/upload. The Linux conversion and HEVC stream
+agree on explicit left-sited 4:2:0 chroma, and the final stream-copy publication
+is independently probed for that metadata. Neither route is physical SDI
+or broadcast-wire qualification. Other Linux GPU vendors remain explicit
+resident-route NotRun until an exact-device native encoder Adapter is present.
 
 ### Cancel/retry route ownership coverage
 

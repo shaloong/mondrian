@@ -463,7 +463,7 @@ pub(crate) fn record_cpu_yuv_frame(
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::StraightCoverage,
+            alpha: ColorFrameAlpha::Opaque,
         },
         product_gpu_working_texture_format(),
         "viewer-cpu-yuv-working",

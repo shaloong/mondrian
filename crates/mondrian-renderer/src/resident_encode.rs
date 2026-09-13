@@ -7,16 +7,27 @@
 #[cfg(target_os = "windows")]
 use mondrian_media::{D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame};
 use mondrian_media::{
-    RendererHwAccelDeviceContext, ResidentEncodeBitDepth, ResidentEncodeColorimetry,
+    RendererHwAccelDeviceContext, ResidentEncodeBitDepth, ResidentEncodeChromaLocation,
+    ResidentEncodeColorimetry,
 };
 
-use crate::GpuColorFrameTextureFormat;
 #[cfg(target_os = "windows")]
 use crate::GpuResidentEncoderInputLease;
+use crate::{
+    ColorFrameAlpha, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace,
+    GpuColorFrameContract, GpuColorFrameTextureFormat,
+};
+
+#[cfg(target_os = "linux")]
+mod vulkan_cuda_encode;
+#[cfg(target_os = "linux")]
+pub use vulkan_cuda_encode::{
+    VulkanCudaResidentEncodeAdapter, VulkanCudaResidentEncodeAdapterDiagnostics,
+};
 
 /// Exact resident RGB-to-encoder-surface conversion contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct D3D12ResidentEncodeAdapterContract {
+pub struct ResidentEncodeAdapterContract {
     /// Coded width; 4:2:0 requires an even, non-zero value.
     pub width: u32,
     /// Coded height; 4:2:0 requires an even, non-zero value.
@@ -31,11 +42,13 @@ pub struct D3D12ResidentEncodeAdapterContract {
     pub colorimetry: ResidentEncodeColorimetry,
     /// YCbCr range requested by the delivery contract.
     pub full_range: bool,
-    /// Maximum native Video Process command submissions in flight.
+    /// Spatial location of each authored 4:2:0 chroma sample.
+    pub chroma_location: ResidentEncodeChromaLocation,
+    /// Maximum native conversion or encoder-surface submissions in flight.
     pub max_frames_in_flight: usize,
 }
 
-impl D3D12ResidentEncodeAdapterContract {
+impl ResidentEncodeAdapterContract {
     /// Renderer output texture format required by this conversion.
     pub const fn source_texture_format(self) -> GpuColorFrameTextureFormat {
         match self.bit_depth {
@@ -46,6 +59,32 @@ impl D3D12ResidentEncodeAdapterContract {
 
     /// Validate platform-independent dimensions, cadence, and signal identity.
     pub fn validate_static(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+        self.validate_common()?;
+        if self.colorimetry == ResidentEncodeColorimetry::Rec2100Hlg {
+            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+                reason: "D3D12 Video Process exposes no exact RGB HLG color-space identity",
+            });
+        }
+        if self.full_range && self.colorimetry == ResidentEncodeColorimetry::Rec2100Pq {
+            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+                reason: "D3D12 Video Process exposes no exact full-range PQ YCbCr identity",
+            });
+        }
+        if self.chroma_location != ResidentEncodeChromaLocation::Left {
+            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+                reason: "D3D12 Video Process resident 4:2:0 output is left-sited",
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate dimensions, cadence, and signal identity for Vulkan/CUDA conversion.
+    #[cfg(target_os = "linux")]
+    pub fn validate_vulkan_cuda(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+        self.validate_common()
+    }
+
+    fn validate_common(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
         if self.width == 0
             || self.height == 0
             || !self.width.is_multiple_of(2)
@@ -65,18 +104,50 @@ impl D3D12ResidentEncodeAdapterContract {
         if self.max_frames_in_flight == 0 {
             return Err(D3D12ResidentEncodeAdapterCreateError::ZeroInFlightLimit);
         }
-        if self.colorimetry == ResidentEncodeColorimetry::Rec2100Hlg {
-            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
-                reason: "D3D12 Video Process exposes no exact RGB HLG color-space identity",
-            });
-        }
-        if self.full_range && self.colorimetry == ResidentEncodeColorimetry::Rec2100Pq {
-            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
-                reason: "D3D12 Video Process exposes no exact full-range PQ YCbCr identity",
-            });
-        }
         Ok(())
     }
+}
+
+/// Backward-compatible name for the single resident conversion contract.
+pub type D3D12ResidentEncodeAdapterContract = ResidentEncodeAdapterContract;
+
+fn validate_resident_source_contract(
+    contract: ResidentEncodeAdapterContract,
+    actual: GpuColorFrameContract,
+) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    let expected_space = match contract.colorimetry {
+        ResidentEncodeColorimetry::Rec709 => mondrian_core::types::ColorSpace::Rec709,
+        ResidentEncodeColorimetry::Rec2100Pq => mondrian_core::types::ColorSpace::Rec2100Pq,
+        ResidentEncodeColorimetry::Rec2100Hlg => mondrian_core::types::ColorSpace::Rec2100Hlg,
+    };
+    let expected_encoding = match contract.bit_depth {
+        ResidentEncodeBitDepth::Eight => ColorFrameEncoding::EncodedRgba8,
+        ResidentEncodeBitDepth::Ten => ColorFrameEncoding::EncodedFloat,
+    };
+    let descriptor = actual.descriptor;
+    if descriptor.width != contract.width
+        || descriptor.height != contract.height
+        || descriptor.color_space != ColorFrameSpace::Color(expected_space)
+        || descriptor.domain != ColorFrameDomain::Export
+        || descriptor.encoding != expected_encoding
+        || descriptor.residency != ColorFrameResidency::Gpu
+        || descriptor.alpha != ColorFrameAlpha::Opaque
+        || actual.texture_format != contract.source_texture_format()
+    {
+        return Err(D3D12ResidentEncodeSubmissionError::SourceContract {
+            reason: format!(
+                "expected {}x{} {:?}/{:?}/{:?}/GPU/opaque/{:?}, got {:?}",
+                contract.width,
+                contract.height,
+                expected_space,
+                ColorFrameDomain::Export,
+                expected_encoding,
+                contract.source_texture_format(),
+                actual,
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Failure to create an exact-device resident encoder Adapter.
@@ -85,6 +156,12 @@ pub enum D3D12ResidentEncodeAdapterCreateError {
     /// The active wgpu objects are not D3D12 objects.
     #[error("resident encode requires a wgpu DX12 {object}")]
     WrongBackend { object: &'static str },
+    /// The active renderer uses a different native backend.
+    #[error("resident encode requires {required} {object}")]
+    WrongPlatformBackend {
+        required: &'static str,
+        object: &'static str,
+    },
     /// 4:2:0 surfaces require non-zero even dimensions.
     #[error("resident encode requires non-zero even dimensions, got {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
@@ -103,6 +180,13 @@ pub enum D3D12ResidentEncodeAdapterCreateError {
     /// Native object construction failed.
     #[error("resident encode D3D12 stage {stage} failed: {reason}")]
     D3D12 { stage: &'static str, reason: String },
+    /// Native Linux interop construction failed.
+    #[error("resident encode {backend} stage {stage} failed: {reason}")]
+    Native {
+        backend: &'static str,
+        stage: &'static str,
+        reason: String,
+    },
     /// Media could not adopt the exact renderer device.
     #[error("resident encode could not create the FFmpeg device root: {reason}")]
     MediaDeviceRoot { reason: String },
@@ -123,6 +207,13 @@ pub enum D3D12ResidentEncodeSubmissionError {
     /// Native queue recording or synchronization failed.
     #[error("resident encode D3D12 stage {stage} failed: {reason}")]
     D3D12 { stage: &'static str, reason: String },
+    /// Native Linux conversion, synchronization, or copy failed.
+    #[error("resident encode {backend} stage {stage} failed: {reason}")]
+    Native {
+        backend: &'static str,
+        stage: &'static str,
+        reason: String,
+    },
 }
 
 /// Cumulative no-host-pixel-boundary evidence from one Adapter.
@@ -564,23 +655,7 @@ mod windows_impl {
         source: &GpuResidentEncoderInputLease,
         destination: &D3D12ResidentEncodeInputFrame,
     ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
-        let actual = source.contract();
-        if actual.descriptor.width != contract.width
-            || actual.descriptor.height != contract.height
-            || actual.texture_format != contract.source_texture_format()
-        {
-            return Err(D3D12ResidentEncodeSubmissionError::SourceContract {
-                reason: format!(
-                    "expected {}x{} {:?}, got {}x{} {:?}",
-                    contract.width,
-                    contract.height,
-                    contract.source_texture_format(),
-                    actual.descriptor.width,
-                    actual.descriptor.height,
-                    actual.texture_format
-                ),
-            });
-        }
+        validate_resident_source_contract(contract, source.contract())?;
         if destination.bit_depth() != contract.bit_depth {
             return Err(D3D12ResidentEncodeSubmissionError::DestinationContract);
         }
@@ -789,5 +864,81 @@ mod windows_impl {
         error: windows::core::Error,
     ) -> D3D12ResidentEncodeSubmissionError {
         D3D12ResidentEncodeSubmissionError::D3D12 { stage, reason: error.to_string() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contract() -> ResidentEncodeAdapterContract {
+        ResidentEncodeAdapterContract {
+            width: 1920,
+            height: 1080,
+            frame_rate_num: 30_000,
+            frame_rate_den: 1_001,
+            bit_depth: ResidentEncodeBitDepth::Eight,
+            colorimetry: ResidentEncodeColorimetry::Rec709,
+            full_range: false,
+            chroma_location: ResidentEncodeChromaLocation::Left,
+            max_frames_in_flight: 3,
+        }
+    }
+
+    fn source() -> GpuColorFrameContract {
+        GpuColorFrameContract {
+            descriptor: crate::ColorFrameDescriptor {
+                width: 1920,
+                height: 1080,
+                color_space: ColorFrameSpace::Color(mondrian_core::types::ColorSpace::Rec709),
+                domain: ColorFrameDomain::Export,
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::Opaque,
+            },
+            texture_format: GpuColorFrameTextureFormat::Rgba8Unorm,
+        }
+    }
+
+    #[test]
+    fn resident_source_admission_requires_the_complete_export_signal_contract() {
+        assert!(validate_resident_source_contract(contract(), source()).is_ok());
+        let mut invalid = Vec::new();
+
+        let mut value = source();
+        value.descriptor.color_space =
+            ColorFrameSpace::Working(mondrian_core::WorkingColorSpace::LinearRec709);
+        invalid.push(value);
+        let mut value = source();
+        value.descriptor.domain = ColorFrameDomain::Display;
+        invalid.push(value);
+        let mut value = source();
+        value.descriptor.encoding = ColorFrameEncoding::LinearFloat;
+        invalid.push(value);
+        let mut value = source();
+        value.descriptor.residency = ColorFrameResidency::Cpu;
+        invalid.push(value);
+        let mut value = source();
+        value.descriptor.alpha = ColorFrameAlpha::PremultipliedCoverage;
+        invalid.push(value);
+
+        for actual in invalid {
+            assert!(matches!(
+                validate_resident_source_contract(contract(), actual),
+                Err(D3D12ResidentEncodeSubmissionError::SourceContract { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn d3d12_admission_rejects_chroma_siting_it_cannot_produce() {
+        assert!(matches!(
+            ResidentEncodeAdapterContract {
+                chroma_location: ResidentEncodeChromaLocation::Center,
+                ..contract()
+            }
+            .validate_static(),
+            Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal { .. })
+        ));
     }
 }

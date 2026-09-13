@@ -163,10 +163,16 @@ pub use qualified_ffmpeg::{
     QualifiedFfmpegToolExpectation, QualifiedFfmpegToolKind, QualifiedFfmpegToolReceipt,
     QualifiedFfmpegToolchainError,
 };
+#[cfg(target_os = "linux")]
+pub use resident_encode::{
+    CudaResidentEncodeInputFrame, CudaResidentEncodeReadyFrame, CudaResidentEncodeSurfaceView,
+    CudaResidentHevcEncoderSession, CudaResidentHevcEncoderSessionDiagnostics,
+};
 pub use resident_encode::{
     D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,
-    D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth, ResidentEncodeColorimetry,
-    ResidentEncodeError, ResidentHevcEncoderConfig,
+    D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth,
+    ResidentEncodeChromaLocation, ResidentEncodeColorimetry, ResidentEncodeError,
+    ResidentHevcEncoderConfig,
 };
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,

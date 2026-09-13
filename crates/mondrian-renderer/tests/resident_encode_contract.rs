@@ -14,6 +14,7 @@ fn contract_rejects_unrepresentable_signal_before_device_access() {
         bit_depth: ResidentEncodeBitDepth::Ten,
         colorimetry: ResidentEncodeColorimetry::Rec2100Pq,
         full_range: false,
+        chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
         max_frames_in_flight: 4,
     };
     assert_eq!(

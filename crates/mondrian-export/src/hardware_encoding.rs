@@ -3,9 +3,9 @@
 //! FFmpeg's encoder registry only proves that an implementation was compiled
 //! in. Mondrian admits a hardware backend only after it matches the active
 //! renderer adapter vendor and completes a bounded real encode using the exact
-//! codec profile and output pixel format. Export currently feeds a CPU rawvideo
+//! codec profile and output pixel format. Generic Export feeds a CPU rawvideo
 //! pipe, so a selected hardware backend still performs one CPU-to-encoder
-//! upload; this module intentionally makes no zero-copy claim.
+//! upload. Platform resident routes publish separate same-device diagnostics.
 
 use crate::preset::{H264Profile, HevcProfile, VideoCodecConfig, VideoRateControl};
 use crate::video_encoding::ResolvedVideoCodingStructure;
@@ -352,6 +352,22 @@ pub(crate) fn resident_hevc_d3d12_diagnostics(
         frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
         hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
         hardware_candidate: Some(ExportVideoEncoderImplementation::HevcD3d12Va),
+        renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
+        renderer_adapter_device: adapter.map(|adapter| adapter.device),
+        renderer_adapter_backend: adapter.map(renderer_backend),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn resident_hevc_cuda_diagnostics(
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+) -> ExportVideoEncoderDiagnostics {
+    ExportVideoEncoderDiagnostics {
+        selected_encoder: ExportVideoEncoderImplementation::NvidiaNvenc,
+        hardware_selected: true,
+        frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
+        hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
+        hardware_candidate: Some(ExportVideoEncoderImplementation::NvidiaNvenc),
         renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
         renderer_adapter_device: adapter.map(|adapter| adapter.device),
         renderer_adapter_backend: adapter.map(renderer_backend),

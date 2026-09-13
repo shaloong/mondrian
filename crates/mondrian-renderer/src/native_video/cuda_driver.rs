@@ -6,7 +6,7 @@ use std::sync::Arc;
 type Handle = *mut c_void;
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum CudaError {
+pub(crate) enum CudaError {
     #[error("CUDA driver library/symbol unavailable: {0}")]
     Library(#[from] libloading::Error),
     #[error("CUDA {operation} failed with code {code}")]
@@ -14,7 +14,7 @@ pub(super) enum CudaError {
     #[error("CUDA has no device with the renderer's exact UUID")]
     DeviceIdentity,
 }
-pub(super) fn check(operation: &'static str, code: i32) -> Result<(), CudaError> {
+pub(crate) fn check(operation: &'static str, code: i32) -> Result<(), CudaError> {
     if code == 0 {
         Ok(())
     } else {
@@ -23,7 +23,7 @@ pub(super) fn check(operation: &'static str, code: i32) -> Result<(), CudaError>
 }
 
 // Publish foreign output ownership only under the acquisition result contract.
-pub(super) fn acquire<T: Default>(
+pub(crate) fn acquire<T: Default>(
     operation: &'static str,
     owned: &mut T,
     call: impl FnOnce(*mut T) -> i32,
@@ -36,12 +36,12 @@ pub(super) fn acquire<T: Default>(
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(super) union ExternalHandle {
+pub(crate) union ExternalHandle {
     pub fd: i32,
     _abi: [usize; 2],
 }
 #[repr(C)]
-pub(super) struct MemoryHandle {
+pub(crate) struct MemoryHandle {
     pub kind: i32,
     pub handle: ExternalHandle,
     pub size: u64,
@@ -49,14 +49,14 @@ pub(super) struct MemoryHandle {
     pub reserved: [u32; 16],
 }
 #[repr(C)]
-pub(super) struct BufferDesc {
+pub(crate) struct BufferDesc {
     pub offset: u64,
     pub size: u64,
     pub flags: u32,
     pub reserved: [u32; 16],
 }
 #[repr(C)]
-pub(super) struct SemaphoreHandle {
+pub(crate) struct SemaphoreHandle {
     pub kind: i32,
     pub handle: ExternalHandle,
     pub flags: u32,
@@ -64,14 +64,14 @@ pub(super) struct SemaphoreHandle {
 }
 #[repr(C)]
 #[derive(Default)]
-pub(super) struct SignalParams {
+pub(crate) struct SignalParams {
     pub value: u64,
     pub inner_reserved: [u32; 16],
     pub flags: u32,
     pub reserved: [u32; 16],
 }
 #[repr(C)]
-pub(super) struct Copy2d {
+pub(crate) struct Copy2d {
     pub src_x: usize,
     pub src_y: usize,
     pub src_kind: i32,
@@ -92,7 +92,7 @@ pub(super) struct Copy2d {
 
 macro_rules! driver {
     ($($field:ident : $name:literal ($($arg:ty),*) ),* $(,)?) => {
-        pub(super) struct CudaDriver {
+        pub(crate) struct CudaDriver {
             $(pub $field: unsafe extern "C" fn($($arg),*) -> i32,)*
             _library: libloading::Library,
         }
@@ -180,7 +180,7 @@ impl CudaDriver {
         }
     }
 }
-pub(super) struct ContextGuard<'a>(Option<&'a CudaDriver>);
+pub(crate) struct ContextGuard<'a>(Option<&'a CudaDriver>);
 impl ContextGuard<'_> {
     pub fn finish(mut self) -> Result<(), CudaError> {
         if let Some(api) = self.0.take() {

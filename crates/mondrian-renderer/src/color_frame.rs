@@ -1331,7 +1331,7 @@ impl GpuResidentEncoderInputLease {
     }
 
     /// Borrow the source texture inside the renderer-owned platform Adapter.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn texture(&self) -> &wgpu::Texture {
         &self.resource().resource().texture
     }
@@ -2466,7 +2466,7 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::StraightCoverage,
+            alpha: encoded_source_descriptor.alpha,
         };
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
@@ -3263,6 +3263,10 @@ impl CpuColorFrame {
         self.descriptor
     }
 
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
+    }
+
     /// Borrow the underlying linear-light frame.
     pub fn rgba_f32(&self) -> &WorkingRgbaF32Frame {
         self.frame.as_ref()
@@ -3357,6 +3361,10 @@ impl CpuEncodedFloatColorFrame {
         self.descriptor
     }
 
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
+    }
+
     /// Borrow the underlying encoded floating-point samples.
     pub fn rgba_f32(&self) -> &EncodedRgbaF32Frame {
         self.frame.as_ref()
@@ -3444,6 +3452,10 @@ impl CpuEncodedColorFrame {
     /// Return the frame metadata contract.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         self.descriptor
+    }
+
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
     }
 
     /// Borrow RGBA8 pixels.
@@ -4323,7 +4335,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
-                alpha: ColorFrameAlpha::StraightCoverage,
+                alpha: ColorFrameAlpha::Opaque,
             }
         );
         assert_eq!(

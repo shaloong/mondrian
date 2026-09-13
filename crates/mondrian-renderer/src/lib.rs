@@ -353,7 +353,11 @@ pub use reference_output::{ReferenceOutputProgram, ReferenceOutputProgramError};
 pub use resident_encode::{
     D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
     D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
-    D3D12ResidentEncodeSubmissionError,
+    D3D12ResidentEncodeSubmissionError, ResidentEncodeAdapterContract,
+};
+#[cfg(target_os = "linux")]
+pub use resident_encode::{
+    VulkanCudaResidentEncodeAdapter, VulkanCudaResidentEncodeAdapterDiagnostics,
 };
 pub use resolved_visual_identity::{resolved_visual_frame_identity, ResolvedVisualIdentityError};
 pub use shot_match::{

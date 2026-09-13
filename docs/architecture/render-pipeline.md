@@ -486,16 +486,34 @@ a pixel-render retry with unclosed probe resources, and prevents encoder shutdow
 from disguising a failed cleanup receipt as ordinary cancellation. No fallback
 may erase the original structured process error.
 
-A separate `ResidentD3D12Hevc` route is admitted only before frame execution for
+Separate native resident HEVC routes are admitted only before frame execution for
 an exact closed-GOP HEVC Main/Main10, YUV420, flattened-alpha contract with
 Legalizer off, no authored static HDR metadata, and no VBV/maxrate/bufsize
 constraint. It accepts Rec.709 and limited-range Rec.2100 PQ; HLG and full-range
-PQ fail closed until their exact DXGI color-space lowering is qualified. The
-Renderer converts the GPU-resident root RGBA texture into an FFmpeg-owned
-NV12/P010 D3D12 surface, and Media submits that ready surface to in-process
-`hevc_d3d12va`. Export then stream-copies the validated video-only artifact into
-the final mux while rendering or encoding audio normally. Diagnostics prove
-zero host readbacks, rawvideo writes, and CPU-to-encoder uploads. If the resident
+PQ remain outside Export admission. Windows uses D3D12 Video Process and
+in-process `hevc_d3d12va`. Linux NVIDIA matches the active Vulkan physical-device
+UUID to one CUDA ordinal, compiles the same Program Output into the resident RGB
+texture, converts once to NV12/P010 in Vulkan compute, and copies the two planes
+device-to-device into FFmpeg-owned CUDA surfaces consumed by `hevc_nvenc`.
+Once this resident route is admitted, its prepared visual closure is required
+to execute on the GPU even when ordinary opportunistic GPU acceleration is
+disabled. An unsupported closure or unavailable GPU visual runtime rejects the
+route before its first encoder submission; it cannot insert a CPU composite and
+full-frame upload into a route reported as resident.
+The 4:2:0 conversion contract is explicit: production HEVC uses left-sited
+chroma, with a horizontal `[1,2,1]/4` and vertical `[1,1]/2` low-pass kernel,
+and writes the same location into the codec and frame metadata. This prevents
+the encoder's platform default from disagreeing with the pixels.
+The Vulkan completion wait names the exact conversion submission; CUDA copy
+completion is proved before Media can promote the move-only destination to a
+submit-ready frame. No process-global pending semaphore can be consumed by an
+unrelated concurrent Viewer submission.
+
+Media writes cadence, CICP, range, chroma location and sample aspect ratio into
+the native encoder context. Export's final video stream-copy mux adds no `scale`, `setsar`, or
+`pix_fmt` filter; doing so would both invalidate `-c:v copy` and create a second
+pixel interpretation after encoding. Diagnostics prove zero host readbacks,
+rawvideo writes, and CPU-to-encoder uploads. If the resident
 session cannot start, Export may rerun the complete generic route; after the
 first resident submission, any failure is terminal and no mixed-residency file
 is produced. The existing post-encode probe remains authoritative for

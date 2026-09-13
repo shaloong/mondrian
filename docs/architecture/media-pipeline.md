@@ -2716,10 +2716,10 @@ Vulkan device's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature. On Windows the same
 rule binds D3D12 resource import to the active DX12 device. CPU-transfer hardware
 decode still reports CPU RGBA residency on every platform.
 
-The Windows resident HEVC export boundary follows the same exact-device rule in
-the opposite direction. `ResidentHevcEncoderSession` owns the in-process
-FFmpeg `hevc_d3d12va` codec, muxer, D3D12 hardware-device reference, and bounded
-NV12/P010 hardware-frame pool. An acquired
+The resident HEVC export boundary follows the same exact-device rule in the
+opposite direction. On Windows, `D3D12ResidentHevcEncoderSession` owns the
+in-process FFmpeg `hevc_d3d12va` codec, muxer, D3D12 hardware-device reference,
+and bounded NV12/P010 hardware-frame pool. An acquired
 `D3D12ResidentEncodeInputFrame` is not submit-ready: only the Renderer production
 Adapter may turn it into `D3D12ResidentEncodeReadyFrame` after enqueueing the
 producer fence signal. Media waits on that fence through FFmpeg's hardware-frame
@@ -2727,9 +2727,34 @@ contract and never maps the surface or stages raw pixels through host memory.
 The hand-written FFmpeg 7.1 D3D12 ABI declarations are target-gated and guarded
 by compile-time size and offset assertions.
 
+On Linux NVIDIA, the Renderer constructs `RendererHwAccelDeviceContext` only
+after its Vulkan UUID maps to an exact CUDA ordinal. Media retains that FFmpeg
+CUDA root, opens `hevc_nvenc` with `AV_PIX_FMT_CUDA`, and owns the CUDA hardware
+frame pool. `CudaResidentEncodeInputFrame` exposes borrowed device addresses and
+pitch only to the Renderer Adapter; it becomes `CudaResidentEncodeReadyFrame`
+only after the same-device copy completes. Main10 still depends on the physical
+NVENC generation: an unsupported profile fails during admission and cannot
+inherit a Main8 or generic encoder probe result.
+
+The Renderer compositor is the sole authority for opaque working-frame
+evidence. A full-canvas, identity, opaque solid base proves `Opaque`; partial or
+transformed bases remain `StraightCoverage`. OCIO input, output, and intermediate
+color transforms preserve that alpha contract because they transform RGB while
+leaving coverage unchanged. The resident Adapter accepts only an opaque Export
+descriptor, so label loss or a missing flatten operation fails before native
+conversion.
+
+The FFmpeg hardware-frame context is held by an RAII owner as soon as allocation
+succeeds. Every later output, codec, or header-open failure therefore releases
+the frame pool and its retained device reference instead of leaving a partial
+CUDA/D3D12 Session alive. Resident 4:2:0 explicitly carries its chroma location;
+the production kernel generates left-sited samples with a separable low-pass
+filter and both the codec context and each submitted frame carry `Left`.
+
 Packet submission and drain distinguish EAGAIN, EOF, and real errors; flush
 must reach EOF, and any send failure waits for the producer fence before the
-surface can be released. The session writes a video-only mux artifact because
+surface can be released. Each session writes cadence, range, CICP, chroma location and sample
+aspect ratio into its encoder context and produces a video-only mux artifact because
 the final Export process may still need to combine normal audio. That final
 process uses video stream copy, not rawvideo input, so it is not an
 encoder-upload boundary. Resident route diagnostics count surfaces, packets,

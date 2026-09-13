@@ -59,9 +59,15 @@ use mondrian_effects::{
     EffectFrameExtent, EffectFrameTileF32, EffectProcessingBackend, EffectTemporalSourceIdentity,
     EffectWorkingPrecision, PreparedTemporalFrameSet,
 };
+#[cfg(target_os = "linux")]
+use mondrian_media::CudaResidentHevcEncoderSession;
+#[cfg(target_os = "windows")]
+use mondrian_media::D3D12ResidentHevcEncoderSession;
 use mondrian_media::FfmpegCommand as Command;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use mondrian_media::ResidentHevcEncoderConfig;
 use mondrian_media::{
     run_supervised_command, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
@@ -70,8 +76,6 @@ use mondrian_media::{
     SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheShutdownEvidence};
-#[cfg(target_os = "windows")]
-use mondrian_media::{D3D12ResidentHevcEncoderSession, ResidentHevcEncoderConfig};
 use mondrian_renderer::{
     color::{
         GpuColorBackendContext, GpuColorExecutionSession, GpuProgramInput, GpuProgramOutputError,
@@ -686,7 +690,7 @@ impl ExportGpuExecutionRuntime {
     #[cfg(target_os = "windows")]
     fn create_resident_encode_adapter(
         &mut self,
-        contract: mondrian_renderer::D3D12ResidentEncodeAdapterContract,
+        contract: mondrian_renderer::ResidentEncodeAdapterContract,
     ) -> Result<mondrian_renderer::D3D12ResidentEncodeAdapter, String> {
         self.ensure_ready()
             .map_err(|reason| format!("export GPU runtime unavailable: {reason:?}"))?;
@@ -694,6 +698,24 @@ impl ExportGpuExecutionRuntime {
             return Err("export GPU runtime unavailable".to_owned());
         };
         mondrian_renderer::D3D12ResidentEncodeAdapter::new(
+            &backend.context.device,
+            &backend.context.queue,
+            contract,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_resident_encode_adapter(
+        &mut self,
+        contract: mondrian_renderer::ResidentEncodeAdapterContract,
+    ) -> Result<mondrian_renderer::VulkanCudaResidentEncodeAdapter, String> {
+        self.ensure_ready()
+            .map_err(|reason| format!("export GPU runtime unavailable: {reason:?}"))?;
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &self.state else {
+            return Err("export GPU runtime unavailable".to_owned());
+        };
+        mondrian_renderer::VulkanCudaResidentEncodeAdapter::new(
             &backend.context.device,
             &backend.context.queue,
             contract,
@@ -1245,13 +1267,13 @@ pub struct ExportJobVisualDiagnostics {
     /// Most recent bounded completion summary. Exact upload tokens remain in
     /// the renderer-owned completion for the live attempt.
     pub last_heterogeneous_completion: Option<ExportHeterogeneousCompletionEvidence>,
-    /// Resident D3D12 HEVC admission attempts.
+    /// Same-device resident HEVC admission attempts.
     pub resident_encode_admission_attempts: u64,
     /// Resident in-process HEVC Sessions that passed exact-device qualification.
     pub resident_encode_sessions: u64,
     /// Frames submitted without a host pixel boundary.
     pub resident_encode_frames: u64,
-    /// D3D12 Video Process RGB-to-YCbCr conversions.
+    /// Native GPU RGB-to-YCbCr conversions (D3D12 Video Process or Vulkan compute).
     pub resident_encode_video_process_submissions: u64,
     /// Encoded packets written to the video-only temporary artifact.
     pub resident_encode_packets: u64,
@@ -1280,7 +1302,7 @@ pub enum ExportResidentEncodeBlocker {
     AlphaPreservation,
     /// The CPU-only legalizer has no resident lowering.
     Legalizer,
-    /// The authored signal cannot be represented exactly by D3D12 Video Process.
+    /// The authored signal cannot be represented exactly by the native conversion Adapter.
     Signal,
     /// Static HDR metadata has no exact in-process lowering.
     StaticHdrMetadata,
@@ -4217,7 +4239,7 @@ fn execute_timeline_export(
         };
         match resident_qualification {
             Ok(plan) => {
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 match execute_resident_hevc_export(
                     timeline,
                     &delivery,
@@ -4239,7 +4261,8 @@ fn execute_timeline_export(
                         *validation_contract_out = Some(validation_contract);
                         return JobExecutionResult::ReversibleWorkCompleted;
                     }
-                    ResidentExportAttemptOutcome::NotStarted => {
+                    ResidentExportAttemptOutcome::NotStarted(reason) => {
+                        tracing::debug!(%reason, "resident HEVC route did not start");
                         visual_session.visual_diagnostics.resident_encode_blocker =
                             Some(ExportResidentEncodeBlocker::BackendUnavailable);
                     }
@@ -4250,7 +4273,7 @@ fn execute_timeline_export(
                         return JobExecutionResult::Failed(reason);
                     }
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
                 {
                     let _ = plan;
                     visual_session.visual_diagnostics.resident_encode_blocker =
@@ -4552,15 +4575,16 @@ fn execute_timeline_export(
     result
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Debug)]
 enum ResidentExportAttemptOutcome {
     Completed,
-    NotStarted,
+    NotStarted(String),
     Cancelled,
     Failed(String),
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[allow(clippy::too_many_arguments)]
 fn execute_resident_hevc_export(
     timeline: &TimelineExportSnapshot,
@@ -4581,13 +4605,21 @@ fn execute_resident_hevc_export(
     let height = delivery.resolution.height;
     let frame_rate_num = match u32::try_from(delivery.frame_rate.num) {
         Ok(value) if value > 0 => value,
-        _ => return ResidentExportAttemptOutcome::NotStarted,
+        _ => {
+            return ResidentExportAttemptOutcome::NotStarted(
+                "resident HEVC frame-rate numerator is invalid".to_owned(),
+            );
+        }
     };
     let frame_rate_den = match u32::try_from(delivery.frame_rate.den) {
         Ok(value) if value > 0 => value,
-        _ => return ResidentExportAttemptOutcome::NotStarted,
+        _ => {
+            return ResidentExportAttemptOutcome::NotStarted(
+                "resident HEVC frame-rate denominator is invalid".to_owned(),
+            );
+        }
     };
-    let adapter_contract = mondrian_renderer::D3D12ResidentEncodeAdapterContract {
+    let adapter_contract = mondrian_renderer::ResidentEncodeAdapterContract {
         width,
         height,
         frame_rate_num,
@@ -4595,6 +4627,7 @@ fn execute_resident_hevc_export(
         bit_depth: plan.bit_depth,
         colorimetry: plan.colorimetry,
         full_range: plan.full_range,
+        chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
         max_frames_in_flight: usize::try_from(plan.surface_pool_size).unwrap_or(usize::MAX),
     };
     let mut adapter =
@@ -4602,14 +4635,14 @@ fn execute_resident_hevc_export(
             Ok(adapter) => adapter,
             Err(error) => {
                 tracing::debug!(%error, "resident HEVC Adapter qualification rejected");
-                return ResidentExportAttemptOutcome::NotStarted;
+                return ResidentExportAttemptOutcome::NotStarted(error.to_string());
             }
         };
     let temp_dir = match tempfile::Builder::new().prefix("mondrian-resident-hevc-").tempdir() {
         Ok(directory) => directory,
         Err(error) => {
             tracing::debug!(%error, "resident HEVC temporary directory unavailable");
-            return ResidentExportAttemptOutcome::NotStarted;
+            return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
     let resident_video_path = temp_dir.path().join("resident-video.mkv");
@@ -4619,26 +4652,38 @@ fn execute_resident_hevc_export(
         height,
         frame_rate_num,
         frame_rate_den,
+        sample_aspect_ratio_num: delivery.sample_aspect_ratio.numerator(),
+        sample_aspect_ratio_den: delivery.sample_aspect_ratio.denominator(),
         bit_depth: plan.bit_depth,
         colorimetry: plan.colorimetry,
         full_range: plan.full_range,
+        chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
         keyframe_interval_frames: plan.keyframe_interval_frames,
         max_b_frames: plan.max_b_frames,
         quantizer: plan.quantizer,
         surface_pool_size: plan.surface_pool_size,
     };
-    let mut encoder =
-        match D3D12ResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config) {
-            Ok(encoder) => encoder,
-            Err(error) => {
-                tracing::debug!(%error, "resident HEVC encoder Session rejected");
-                return ResidentExportAttemptOutcome::NotStarted;
-            }
-        };
-    visual_session.visual_diagnostics.video_encoder =
-        Some(crate::hardware_encoding::resident_hevc_d3d12_diagnostics(
-            renderer_adapter_identity.as_ref(),
-        ));
+    #[cfg(target_os = "windows")]
+    let encoder_open =
+        D3D12ResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
+    #[cfg(target_os = "linux")]
+    let encoder_open = CudaResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
+    let mut encoder = match encoder_open {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            tracing::debug!(%error, "resident HEVC encoder Session rejected");
+            return ResidentExportAttemptOutcome::NotStarted(error.to_string());
+        }
+    };
+    #[cfg(target_os = "windows")]
+    let encoder_diagnostics = crate::hardware_encoding::resident_hevc_d3d12_diagnostics(
+        renderer_adapter_identity.as_ref(),
+    );
+    #[cfg(target_os = "linux")]
+    let encoder_diagnostics = crate::hardware_encoding::resident_hevc_cuda_diagnostics(
+        renderer_adapter_identity.as_ref(),
+    );
+    visual_session.visual_diagnostics.video_encoder = Some(encoder_diagnostics);
     visual_session.visual_diagnostics.resident_encode_sessions =
         visual_session.visual_diagnostics.resident_encode_sessions.saturating_add(1);
     let root_color_context = match resolved_export_color_context(timeline, delivery) {
@@ -4686,7 +4731,7 @@ fn execute_resident_hevc_export(
             }
             Err(error) if submitted == 0 => {
                 tracing::debug!(%error, "resident HEVC first frame rejected before submission");
-                return ResidentExportAttemptOutcome::NotStarted;
+                return ResidentExportAttemptOutcome::NotStarted(error);
             }
             Err(error) => {
                 return ResidentExportAttemptOutcome::Failed(format!(
@@ -4698,7 +4743,7 @@ fn execute_resident_hevc_export(
             Ok(frame) => frame,
             Err(error) if submitted == 0 => {
                 tracing::debug!(%error, "resident HEVC first input surface unavailable");
-                return ResidentExportAttemptOutcome::NotStarted;
+                return ResidentExportAttemptOutcome::NotStarted(error.to_string());
             }
             Err(error) => {
                 return ResidentExportAttemptOutcome::Failed(format!(
@@ -4709,12 +4754,12 @@ fn execute_resident_hevc_export(
         let ready = match adapter.process(source, destination) {
             Ok(ready) => ready,
             Err(error) if submitted == 0 => {
-                tracing::debug!(%error, "resident HEVC first Video Process submission rejected");
-                return ResidentExportAttemptOutcome::NotStarted;
+                tracing::debug!(%error, "resident HEVC first native conversion submission rejected");
+                return ResidentExportAttemptOutcome::NotStarted(error.to_string());
             }
             Err(error) => {
                 return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC Video Process failed after {submitted} frames: {error}"
+                    "resident HEVC native conversion failed after {submitted} frames: {error}"
                 ));
             }
         };
@@ -4730,8 +4775,16 @@ fn execute_resident_hevc_export(
             frame_composite_diagnostics,
         );
         visual_session.visual_diagnostics.resident_encode_frames = submitted;
-        visual_session.visual_diagnostics.resident_encode_video_process_submissions =
-            adapter.diagnostics().video_process_submissions;
+        #[cfg(target_os = "windows")]
+        {
+            visual_session.visual_diagnostics.resident_encode_video_process_submissions =
+                adapter.diagnostics().video_process_submissions;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            visual_session.visual_diagnostics.resident_encode_video_process_submissions =
+                adapter.diagnostics().color_conversion_submissions;
+        }
         diagnostics.visual = visual_session.visual_diagnostics();
         report_diagnostics(diagnostics.clone());
         let ratio = submitted as f32 / total as f32;
@@ -4832,7 +4885,10 @@ fn execute_resident_hevc_export(
             command.arg("-an");
         }
     }
-    apply_export_video_signal_args(&mut command, &timeline.sequence.settings, delivery);
+    // The resident encoder already wrote pixel format, range, CICP, cadence,
+    // field order, and sample aspect ratio into the coded stream. Adding the
+    // generic pre-encode `scale`, `setsar`, or `pix_fmt` arguments here would
+    // require a decode/filter/re-encode and is invalid with `-c:v copy`.
     command.arg("-f").arg(container_format(container)).arg(output_path);
     report(ExportProgress::encoding(0.98));
     let output = mondrian_media::run_supervised_command(
@@ -6832,7 +6888,7 @@ fn render_timeline_sample_into_with_session_cancellable(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn render_timeline_frame_resident_with_session_cancellable(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
@@ -6879,10 +6935,10 @@ enum SequenceRenderTarget<'a> {
     Working(&'a mut Option<CpuColorFrame>),
     Deliverable(&'a mut Vec<u8>),
     #[cfg_attr(
-        not(target_os = "windows"),
+        not(any(target_os = "windows", target_os = "linux")),
         expect(
             dead_code,
-            reason = "Resident encode admission requires the Windows native adapter."
+            reason = "Resident encode admission requires a native same-device adapter."
         )
     )]
     Resident(&'a mut Option<GpuResidentEncoderInputLease>),
@@ -7728,7 +7784,7 @@ impl TimelineVisualExecutionIntent {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", target_os = "linux"))]
 fn render_sequence_frame_into(
     timeline: &TimelineExportSnapshot,
     context: &mut ExportFrameRenderContext<'_>,
@@ -7781,6 +7837,7 @@ fn render_sequence_sample_into(
         .map_err(|error| {
             format!("export visual closure exceeds its CPU working-set grant: {error}")
         })?;
+    let resident_required = matches!(&target, SequenceRenderTarget::Resident(_));
     let deliverable_or_resident = matches!(
         &target,
         SequenceRenderTarget::Deliverable(_) | SequenceRenderTarget::Resident(_)
@@ -7791,10 +7848,19 @@ fn render_sequence_sample_into(
             &mut context.visual_session.composite_scratch,
         );
     let cpu_float_supported = prepared_export_visual_closure_supports_cpu_float(&closure);
+    if resident_required && !gpu_supported {
+        return Err(
+            "resident export requires a fully GPU-native prepared visual closure".to_owned(),
+        );
+    }
     let use_gpu = gpu_supported
-        && (context.visual_session.resource_policy.opportunistic_gpu_acceleration
+        && (resident_required
+            || context.visual_session.resource_policy.opportunistic_gpu_acceleration
             || !cpu_float_supported)
         && context.visual_session.gpu_output.begin_visual_frame().is_ok();
+    if resident_required && !use_gpu {
+        return Err("resident export GPU visual runtime is unavailable".to_owned());
+    }
     let mode = if use_gpu {
         ExportPreparedVisualMode::Gpu
     } else {
@@ -8224,6 +8290,14 @@ fn render_prepared_visual_node_gpu(
         },
         context.cancellation,
     )?;
+    if flatten_black
+        && record.output.descriptor().alpha != mondrian_renderer::ColorFrameAlpha::Opaque
+    {
+        return Err(format!(
+            "GPU visual flatten-black output did not prove opaque alpha: {:?}",
+            record.output.descriptor().alpha
+        ));
+    }
     match context.visual_session.visual_diagnostics.gpu_visual_working_float_decision {
         Some(existing) if existing != record.working_float_decision => {
             return Err("Export GPU visual nodes disagreed on working-float policy".to_owned());
@@ -12175,6 +12249,136 @@ mod tests {
             Err(ExportResidentEncodeBlocker::ResourceGrant),
             "an opportunistic resident route yields to realtime GPU priority"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
+    fn production_export_queue_runs_same_device_cuda_resident_hevc() {
+        let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=600).contains(value))
+            .unwrap_or(3);
+        let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
+        let mut sequence = Sequence::new("Linux CUDA resident Export");
+        sequence.settings.resolution = Resolution { width: 320, height: 180 };
+        sequence.settings.frame_rate = Rational::new(30_000, 1_001);
+        sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
+        sequence.settings.color.program_output.color_space = ColorSpace::Rec709;
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(48, 132, 224, 255),
+                    tt(0, time_base),
+                    tt(clip_frames, time_base),
+                )
+                .expect("bounded solid clip"),
+            )
+            .expect("place solid clip");
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::SequenceInOut,
+        };
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mkv,
+            video: VideoCodecConfig::Hevc {
+                profile: HevcProfile::Main,
+                rate_control: VideoRateControl::constant_quality(18),
+            },
+            audio: AudioCodecConfig::Disabled,
+        };
+        delivery.resolution = crate::preset::Resolution { width: 320, height: 180 };
+        delivery.frame_rate = Rational::new(30_000, 1_001);
+        delivery.video_coding = crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+            keyframe_interval_frames: 30,
+            max_b_frames: 0,
+            closed_gop: true,
+            scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+        };
+        let policy = service::ExportExecutionResourcePolicy::default();
+        let plan = qualify_resident_hevc_export(
+            &timeline,
+            &delivery,
+            ExportAlphaMode::FlattenBlack,
+            policy,
+        )
+        .expect("resident route admission");
+        let range = compute_timeline_render_range_for_delivery(&timeline, &delivery)
+            .expect("bounded render range");
+        assert_eq!(range.total_frames, frame_count);
+        let directory = tempfile::tempdir().expect("temporary Export directory");
+        let output = directory.path().join("resident-queue.mkv");
+        let cancellation = ExecutionCancellationToken::new();
+        let mut latest = ExportJobDiagnostics::default();
+        let outcome = execute_resident_hevc_export(
+            &timeline,
+            &delivery,
+            range,
+            &TimelineAudioInput::Disabled,
+            &output,
+            &cancellation,
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |diagnostics| latest = diagnostics,
+            &mut visual_session,
+            ExportRenderInitialDiagnostics {
+                asset_issue_summary: VideoColorDiagnosticIssueAggregate::default(),
+                audio_analysis: None,
+            },
+            plan,
+        );
+        assert!(
+            matches!(outcome, ResidentExportAttemptOutcome::Completed),
+            "resident queue outcome: {outcome:?}"
+        );
+        assert_eq!(latest.visual.resident_encode_frames, frame_count);
+        assert_eq!(latest.color.stage_diagnostics.upload_stages, 0);
+        assert_eq!(latest.color.stage_diagnostics.readback_stages, 0);
+        assert_eq!(
+            latest.visual.resident_encode_video_process_submissions,
+            frame_count
+        );
+        assert_eq!(latest.visual.resident_encode_cpu_pixel_readbacks, 0);
+        assert_eq!(latest.visual.resident_encode_rawvideo_pipe_bytes, 0);
+        assert_eq!(latest.visual.resident_encode_cpu_pixel_uploads, 0);
+        assert_eq!(latest.visual.resident_encode_video_stream_copy_muxes, 1);
+        let probe = mondrian_media::probe_media_info(&output).expect("final queue artifact probe");
+        assert!(probe.has_video);
+        let mut chroma_probe = mondrian_media::ffprobe_command().expect("qualified ffprobe");
+        let chroma_probe = chroma_probe
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=chroma_location",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&output)
+            .output()
+            .expect("probe final queue chroma location");
+        assert!(chroma_probe.status.success());
+        assert_eq!(String::from_utf8_lossy(&chroma_probe.stdout).trim(), "left");
+        let packets = mondrian_media::capture_video_packet_identity(&output, None)
+            .expect("independent final packet identity");
+        assert_eq!(packets.packet_count, frame_count);
     }
 
     #[test]
