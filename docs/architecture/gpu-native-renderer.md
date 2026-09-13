@@ -414,14 +414,25 @@ device. The concrete import runtime created from that active Adapter/Device/Queu
 is the sole capability authority. Any copy step must be reported from actual
 execution evidence rather than a preflight label.
 Media may report a platform-preferred hardware decode candidate such as
-D3D12VA, D3D11VA, VideoToolbox, or VA-API plus its backend-specific surface
+D3D12VA, D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC plus its backend-specific surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
-VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
+VA-API, CUDA/NVDEC, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
 to the next backend. Windows support becomes ready only after
 `D3D12NativeVideoImportBackend` binds the active adapter/device/queue and
-publishes its renderer-qualified FFmpeg device root; unimplemented platform
-backends remain unavailable.
+publishes its renderer-qualified FFmpeg device root. Linux Vulkan support is
+ready only after the active non-NVIDIA renderer exposes and matches its DRM
+render node for VA-API DMA-BUF import, or the active NVIDIA renderer UUID
+matches a CUDA ordinal with external-memory and semaphore support. Missing
+device identity or native interop remains unavailable.
+
+Linux direct-import CPU attribution records physical-handle validation,
+synchronization, adoption, and any CUDA device-to-device plane copy in
+`bridge_acquire_us`. Shared plan/source validation completed before entry into
+the platform backend is not relabeled as bridge-free work. The manual production
+latency diagnostic separates the first preroll candidate from warm frames,
+waits for GPU completion and native-owner release, and can enforce an explicit
+p95 deadline. Generated fixtures establish only local software execution.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
 `native_video_texture_device_features` contract. P010 is admitted only when

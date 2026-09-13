@@ -188,9 +188,9 @@ where
     ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuNativeDecodedFrameImportError>
     {
         let total_started = Instant::now();
-        let source_validation_started = Instant::now();
+        let bridge_acquire_started = Instant::now();
         let input = self.adapter.import_input(&self.device, plan, native_frame)?;
-        let source_validation_us = elapsed_us(source_validation_started);
+        let bridge_acquire_us = elapsed_us(bridge_acquire_started);
 
         let pipeline_prepare_started = Instant::now();
         let yuv_plan = GpuNativeYuvDecodePlan::from_import_plan(
@@ -345,8 +345,12 @@ where
         }
         let submit_us = elapsed_us(submit_started);
         self.frame_cpu_timings = NativeVideoImportCpuTimings {
-            source_validation_us,
-            bridge_acquire_us: 0,
+            // The shared executor validated the immutable plan and native
+            // source descriptor before entering this backend. The platform
+            // Adapter then validates physical handles while adopting them, so
+            // that inseparable work belongs to the bridge-acquire stage.
+            source_validation_us: 0,
+            bridge_acquire_us,
             pipeline_prepare_us,
             yuv_record_us,
             color_stage_us,

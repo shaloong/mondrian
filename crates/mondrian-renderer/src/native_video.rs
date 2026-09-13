@@ -18,10 +18,11 @@ pub use gpu_timing::{
 /// adoption, and command recording. They are not GPU execution timings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct NativeVideoImportCpuTimings {
-    /// Native payload validation and immutable contract construction.
+    /// Native payload validation performed inside the platform backend.
+    /// Shared executor validation completed before backend timing is zero here.
     pub source_validation_us: u64,
-    /// Native-surface synchronization/adoption, including a bridge copy only
-    /// when the reported import mode explicitly requires one.
+    /// Native-surface physical-handle validation, synchronization, and adoption,
+    /// including a bridge copy only when the reported import mode requires one.
     pub bridge_acquire_us: u64,
     /// Cached YUV pass preparation, intermediate acquisition, and encoder creation.
     pub pipeline_prepare_us: u64,

@@ -4028,3 +4028,13 @@ dropping thread. Slow-release logs include the existing native resource identity
 and handle kind. They observe the foreign boundary without moving destruction,
 changing the output lease, adding a resource owner, or treating a duration as
 proof of a particular driver fault.
+
+The Linux CUDA production latency diagnostic uses the packaged isolated-demux
+worker, required same-device NVDEC output, the Vulkan bridge, the shared
+YUV-to-RGB/OCIO input stage, GPU completion, and final native-owner release. It
+reports the first preroll candidate separately from warm frames and may enforce
+an explicit p95 deadline. Its `bridge_acquire_us` attribution includes physical
+CUDA handle validation, Vulkan allocation/adoption, and the device-to-device
+plane copy; this work must not be recorded as source-contract validation or as
+a zero-cost bridge. A generated fixture proves this software route and timing
+only, not original-native-media qualification.
