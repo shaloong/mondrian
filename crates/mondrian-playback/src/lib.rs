@@ -961,13 +961,13 @@ impl PlaybackEngine {
         let phase_ns = if was_running {
             self.clock_phase_reference_ns(now)?
         } else {
-            timeline_position_ns_floor(position)?
+            timeline_frame_boundary_ns(position)?
         };
         self.accept_timestamp(now)?;
         self.apply_timeline_binding(binding);
         let bounded_phase_ns = phase_ns.clamp(
             0,
-            timeline_position_ns_floor(FramePosition::new(self.end_frame, position.time_base))?,
+            timeline_frame_boundary_ns(FramePosition::new(self.end_frame, position.time_base))?,
         );
         self.position = FramePosition::new(
             timeline_frame_at_ns(bounded_phase_ns, position.time_base)?.min(self.end_frame),
@@ -2004,7 +2004,7 @@ impl PlaybackEngine {
         } else {
             self.synthetic_phase_ns_at(now)?
         };
-        let terminal_phase_ns = timeline_position_ns_floor(FramePosition::new(
+        let terminal_phase_ns = timeline_frame_boundary_ns(FramePosition::new(
             self.end_frame,
             self.position.time_base,
         ))?;
@@ -2038,7 +2038,7 @@ impl PlaybackEngine {
             }
             return self.synthetic_phase_ns_at(now);
         }
-        timeline_position_ns_floor(self.position)
+        timeline_frame_boundary_ns(self.position)
     }
 
     fn playback_clock_phase_observation_at(
@@ -2166,7 +2166,7 @@ impl PlaybackEngine {
     }
 
     fn reanchor(&mut self, now: MonotonicTimestamp) -> Result<(), PlaybackError> {
-        let phase_ns = timeline_position_ns_floor(self.position)?;
+        let phase_ns = timeline_frame_boundary_ns(self.position)?;
         self.reanchor_at_phase(now, phase_ns);
         Ok(())
     }
@@ -2184,7 +2184,7 @@ impl PlaybackEngine {
             let phase_ns = if self.clock_master == Some(ClockMaster::AudioDevice) {
                 self.audio_phase_ns_at(now)?.ok_or(PlaybackError::InvalidAudioClockPosition)?
             } else {
-                timeline_position_ns_floor(self.position)?
+                timeline_frame_boundary_ns(self.position)?
             };
             self.position.frame =
                 timeline_frame_at_ns(phase_ns, self.position.time_base)?.min(self.end_frame);
@@ -2708,6 +2708,8 @@ pub(crate) fn timeline_position_ns_floor(value: FramePosition) -> Result<i128, P
     Ok(numerator.div_euclid(i128::from(value.time_base.den)))
 }
 
+// The first integral nanosecond belonging to this authored frame. Using floor
+// here and then lowering back to frame coordinates can select the predecessor.
 fn timeline_frame_boundary_ns(value: FramePosition) -> Result<i128, PlaybackError> {
     validate_time_base(value.time_base)?;
     if value.frame < 0 {

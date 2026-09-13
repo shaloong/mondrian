@@ -312,6 +312,59 @@ fn audio_clock_advance_refreshes_the_published_frame_demand() {
 }
 
 #[test]
+fn fractional_nanosecond_seek_anchor_does_not_regress_on_first_tick() {
+    for time_base in [
+        Rational::new(1, 30),
+        Rational::new(1001, 30000),
+        Rational::new(1001, 60000),
+    ] {
+        let mut engine = PlaybackEngine::new(time_base, PlaybackPolicy::default()).expect("engine");
+        engine.seek(FramePosition::new(1, time_base), ts(0)).expect("seek");
+        engine.play(100, ts(0)).expect("play");
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+        assert_eq!(
+            engine.tick(ts(0)).expect("first tick").position.frame,
+            1,
+            "{time_base:?}"
+        );
+    }
+}
+
+#[test]
+fn fractional_nanosecond_terminal_boundary_preserves_the_last_frame() {
+    for time_base in [
+        Rational::new(1, 30),
+        Rational::new(1001, 30000),
+        Rational::new(1001, 60000),
+        Rational::new(1, 25),
+    ] {
+        for last in [47, 6_479_999] {
+            let mut engine =
+                PlaybackEngine::new(time_base, PlaybackPolicy::default()).expect("engine");
+            engine.play(last, ts(0)).expect("play");
+            engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+            let boundary =
+                timeline_frame_boundary_ns(FramePosition::new(last, time_base)).expect("boundary");
+            let before =
+                MonotonicTimestamp::from_duration(Duration::from_nanos((boundary - 1) as u64));
+            let snapshot = engine.tick(before).expect("before boundary");
+            assert_ne!(
+                snapshot.state,
+                TransportState::Ended,
+                "{time_base:?} {last}"
+            );
+            let at = MonotonicTimestamp::from_duration(Duration::from_nanos(boundary as u64));
+            let ended = engine.tick(at).expect("at boundary");
+            assert_eq!(ended.state, TransportState::Ended);
+            assert_eq!(ended.position.frame, last, "{time_base:?}");
+            let demand = engine.pending_frame_demand().expect("final still");
+            assert_eq!(demand.target.frame, last);
+            assert_eq!(demand.deadline, None);
+        }
+    }
+}
+
+#[test]
 fn audio_clock_natural_end_publishes_an_untimed_final_demand() {
     let mut engine = engine();
     engine.play(1, ts(0)).unwrap();

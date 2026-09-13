@@ -2449,3 +2449,13 @@ interactive demux Session. Each worker retires both families on its own thread;
 native output leases retain deferred destruction, so acknowledgement alone is
 not proof of reaping. A rapid transport-family change preserves any unobserved
 full retirement. Ordinary paused-frame reuse does not request this full trim.
+
+
+Authored frame anchors and the final forward frame boundary lower to the first
+integral nanosecond inside that frame (ceiling), using the same checked boundary
+function as demand scheduling. A floor-then-frame round trip selects the previous
+frame at fractional-nanosecond rates such as 30, 29.97 and 59.94 fps. Seek/shuttle
+anchors, stopped synthetic handoff and natural-end clamping preserve authored
+frame identity this way. Reverse frame exit and conservative presentation phase
+error retain their distinct floor policy; measured audio device phase is not
+replaced by an authored-frame estimate.
