@@ -1173,15 +1173,22 @@ mod tests {
     fn shared_deadline_reports_normal_panic_and_detach_exactly() {
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let blocked_release = std::sync::Arc::clone(&release);
-        let mut handles = vec![
-            std::thread::spawn(|| {}),
-            std::thread::spawn(|| panic!("injected worker panic")),
-            std::thread::spawn(move || {
-                while !blocked_release.load(std::sync::atomic::Ordering::Acquire) {
-                    std::thread::yield_now();
-                }
-            }),
-        ];
+        let normal = std::thread::spawn(|| {});
+        let panicked = std::thread::spawn(|| panic!("injected worker panic"));
+        let blocked = std::thread::spawn(move || {
+            while !blocked_release.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        let setup_deadline = Instant::now() + Duration::from_secs(5);
+        while !normal.is_finished() || !panicked.is_finished() {
+            assert!(
+                Instant::now() < setup_deadline,
+                "pre-deadline worker outcomes did not settle"
+            );
+            std::thread::yield_now();
+        }
+        let mut handles = vec![normal, panicked, blocked];
         let outcome = join_workers_until(&mut handles, Instant::now() + Duration::from_millis(50));
         release.store(true, std::sync::atomic::Ordering::Release);
         let evidence = EnduranceWorkerShutdownEvidence::from_join(3, true, outcome, 0, 0, 1, 0);

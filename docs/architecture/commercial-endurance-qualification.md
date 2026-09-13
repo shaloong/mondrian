@@ -387,6 +387,11 @@ after an earlier owner used the budget. The final receipt records configured and
 started workers, normal returns, panics, timeouts/detaches, residual queue/work
 and resource ownership, cumulative failures, Project Session/library/runtime
 lease release, and whether the sole `AppState` owner itself was consumed.
+Tests that require a predetermined mix of normal, panicked, and detached
+workers settle the intended pre-deadline outcomes before starting this absolute
+deadline. A worker that the operating system does not schedule before the
+deadline is correctly recorded as detached rather than retroactively promoted
+to a panic.
 It synchronously retires the same PCM/device workers pumped by Playback before
 transferring the complete GPU device-generation retirement envelope to the
 existing progress worker. GPU closure is bounded by the same terminal budget
