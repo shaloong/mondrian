@@ -2840,7 +2840,7 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
     let settled_native_import_sources = if gpu_adapter.has_submission_in_flight() {
         None
     } else {
-        Some(gpu_adapter.retire_released_native_import_sources()?)
+        Some(gpu_adapter.retire_released_native_import_sources(gpu_completion_deadline)?)
     };
     match candidate {
         HeadlessPreviewCandidate::Ready { output, completed_demand } => {

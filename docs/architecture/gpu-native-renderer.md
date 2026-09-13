@@ -1628,6 +1628,16 @@ failed release or abandoned retirement cannot establish successful closure.
 Moving destruction off the callback stack does not prove bounded foreign-driver
 execution or identify the cause of every observed playback stall.
 
+Ordinary Headless completion keeps native import admission open, but it does not
+equate wgpu submission completion with platform-owner destruction. After the
+completed candidate is dropped, the production runtime waits on the release
+worker's condition notification and the direct-texture queue callback, using the
+same absolute GPU completion deadline. A nonzero owner count at that deadline is
+returned as `NativeReleaseDeadlineExceeded`; it cannot be serialized as a zero
+residency receipt. This applies to the CUDA buffer bridge and Linux direct-texture
+adapters such as VA-API. Full Viewer retirement remains the separate consuming
+operation that closes admission and joins the worker.
+
 
 ### CPU materialization admission follows executed nodes
 

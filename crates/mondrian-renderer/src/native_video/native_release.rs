@@ -2,8 +2,9 @@
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ReleaseError {
@@ -17,6 +18,8 @@ pub(super) enum ReleaseError {
     Failed,
     #[error("native release owner counter exhausted")]
     Exhausted,
+    #[error("native release did not consume {remaining} owner(s) before the caller deadline")]
+    DeadlineExceeded { remaining: usize },
 }
 
 #[derive(Default)]
@@ -24,6 +27,16 @@ struct State {
     live: AtomicUsize,
     pending: AtomicUsize,
     failed: AtomicBool,
+    changed: Condvar,
+    change_lock: Mutex<()>,
+}
+
+impl State {
+    fn mark_failed(&self) {
+        let _change = self.change_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.failed.store(true, Ordering::Release);
+        self.changed.notify_all();
+    }
 }
 
 type Payload = Box<dyn Send + 'static>;
@@ -46,10 +59,15 @@ impl NativeReleaseOwner {
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
                         .is_err()
                     {
-                        observed.failed.store(true, Ordering::Release);
+                        observed.mark_failed();
                     } else {
+                        let _change = observed
+                            .change_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         observed.pending.fetch_sub(1, Ordering::AcqRel);
                         observed.live.fetch_sub(1, Ordering::AcqRel);
+                        observed.changed.notify_all();
                     }
                 }
             })
@@ -85,6 +103,33 @@ impl NativeReleaseOwner {
 
     pub(super) fn retained_owners(&self) -> usize {
         self.state.live.load(Ordering::Acquire)
+    }
+
+    /// Wait for already released native owners without closing new admission.
+    pub(super) fn wait_for_idle_until(&self, deadline: Instant) -> Result<(), ReleaseError> {
+        let mut change = self.state.change_lock.lock().map_err(|_| ReleaseError::Failed)?;
+        loop {
+            if self.state.failed.load(Ordering::Acquire) {
+                return Err(ReleaseError::Failed);
+            }
+            let remaining = self.state.live.load(Ordering::Acquire);
+            if remaining == 0 {
+                return Ok(());
+            }
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
+                return Err(ReleaseError::DeadlineExceeded { remaining });
+            }
+            let (next, wait) = self
+                .state
+                .changed
+                .wait_timeout(change, timeout)
+                .map_err(|_| ReleaseError::Failed)?;
+            change = next;
+            if wait.timed_out() {
+                continue;
+            }
+        }
     }
 
     pub(super) fn poll_retirement(&mut self) -> Result<bool, ReleaseError> {
@@ -140,7 +185,10 @@ impl ReleaseAdmission {
 impl Drop for ReleaseAdmission {
     fn drop(&mut self) {
         if !self.transferred {
+            let _change =
+                self.state.change_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             self.state.live.fetch_sub(1, Ordering::AcqRel);
+            self.state.changed.notify_all();
         }
     }
 }
@@ -168,7 +216,7 @@ impl<T: Send + 'static> Drop for DeferredNativeOwner<T> {
             // prevents automatic foreign destruction on the callback stack.
             let payload = unsafe { ManuallyDrop::take(&mut self.payload) };
             if let Err(error) = admission.sender.send(Box::new(payload)) {
-                admission.state.failed.store(true, Ordering::Release);
+                admission.state.mark_failed();
                 // A dead executor gives no native release proof. Preserve the
                 // payload and its parents rather than destroy under caller locks.
                 std::mem::forget(error.0);
@@ -230,9 +278,52 @@ mod tests {
         }
         let mut owner = NativeReleaseOwner::new().expect("worker");
         drop(owner.admit().expect("admission").retain(Panics));
+        assert!(matches!(
+            owner.wait_for_idle_until(Instant::now() + Duration::from_secs(2)),
+            Err(ReleaseError::Failed)
+        ));
         assert!(matches!(finish(&mut owner), Err(ReleaseError::Failed)));
         assert!(owner.worker.is_none(), "failed worker must still be joined");
         assert!(matches!(owner.admit(), Err(ReleaseError::Failed)));
         assert_eq!(owner.state.live.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn operational_wait_observes_delayed_release_without_closing_admission() {
+        struct DelayedDrop {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl Drop for DelayedDrop {
+            fn drop(&mut self) {
+                let _ = self.started.send(());
+                let _ = self.release.recv();
+            }
+        }
+
+        let owner = NativeReleaseOwner::new().expect("worker");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        drop(
+            owner
+                .admit()
+                .expect("admission")
+                .retain(DelayedDrop { started: started_tx, release: release_rx }),
+        );
+        started_rx.recv().expect("destructor started");
+        let error = owner
+            .wait_for_idle_until(Instant::now() + Duration::from_millis(10))
+            .expect_err("blocked destructor cannot establish idle");
+        assert!(matches!(
+            error,
+            ReleaseError::DeadlineExceeded { remaining: 1 }
+        ));
+
+        release_tx.send(()).expect("release destructor");
+        owner
+            .wait_for_idle_until(Instant::now() + Duration::from_secs(2))
+            .expect("release worker became idle");
+        drop(owner.admit().expect("admission remains open"));
+        assert_eq!(owner.retained_owners(), 0);
     }
 }

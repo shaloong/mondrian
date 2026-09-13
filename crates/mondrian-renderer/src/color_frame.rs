@@ -2787,6 +2787,13 @@ pub enum GpuNativeDecodedFrameImportError {
         /// Stable native-device diagnostic.
         reason: String,
     },
+    /// GPU completion was observed, but the platform release worker did not
+    /// consume every corresponding native owner before the caller deadline.
+    #[error("native decoded frame release retained {remaining} owner(s) at the caller deadline")]
+    NativeReleaseDeadlineExceeded {
+        /// Exact native owner count still live at the deadline.
+        remaining: usize,
+    },
     /// The native payload does not match the import contract.
     #[error("native decoded frame payload does not match the import contract")]
     NativeFrameContractMismatch {

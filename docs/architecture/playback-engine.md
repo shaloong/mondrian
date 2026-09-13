@@ -2108,6 +2108,11 @@ authority without releasing the submitted owner; the capacity-one lifecycle
 quarantines it until the exact late callback retires its frame and
 media-protection leases. Headless Preview state retains only cloneable semantic
 output metadata; the Adapter alone owns the move-only presentation lease.
+Before a Headless completed-candidate receipt records zero native decoder
+residency, the Adapter also consumes the already-released platform owner under
+that same absolute completion deadline. This wait does not close native import
+admission. Timeout reports the remaining owner count and fails the candidate;
+only consuming Viewer retirement closes admission and joins the release worker.
 Successful ordinary publication moves that lease synchronously from the
 submission owner to the shared current physical slot, while heterogeneous publication
 moves it only after callback/Broker validation. `Current` and queued-Ready reuse

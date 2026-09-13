@@ -477,6 +477,19 @@ impl ViewerNativeVideoImportRuntime {
         Ok(0)
     }
 
+    /// Wait for native owners already released by completed GPU work without
+    /// closing this runtime to subsequent decoded-frame admission.
+    pub fn wait_for_released_source_residency_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        #[cfg(target_os = "linux")]
+        if let Some(backend) = self.backend.as_mut() {
+            return backend.wait_for_released_sources_until(deadline);
+        }
+        self.retire_completed_source_residency()
+    }
+
     /// Prepare contract-specific native input color objects without adopting
     /// the decoder surface, allocating frame textures, or submitting GPU work.
     pub fn prepare_import_backend_objects(

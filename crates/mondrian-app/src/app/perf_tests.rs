@@ -5479,8 +5479,10 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
                 &mut gpu_summary,
                 Duration::from_secs(30),
             )?;
+            let native_release_deadline =
+                HeadlessGpuCompletionDeadline::after(Instant::now(), Duration::from_secs(30))?;
             let native_import_sources_after_release =
-                gpu_adapter.retire_released_native_import_sources()?;
+                gpu_adapter.retire_released_native_import_sources(native_release_deadline)?;
             let diagnostics = preview_service.diagnostics();
             let frame_store = diagnostics.frame_store;
             let only_current_protection_remains = frame_store.media_aggregate_entries

@@ -151,6 +151,15 @@ impl VulkanNativeVideoImportBackend {
     pub fn retained_source_count(&self) -> usize {
         self.inner.retained_source_count()
     }
+
+    /// Wait until already released Linux native owners are consumed, without
+    /// closing this runtime to subsequent frame admission.
+    pub fn wait_for_released_sources_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        self.inner.wait_for_released_sources_until(deadline)
+    }
 }
 
 impl GpuNativeDecodedFrameImportBackend for VulkanNativeVideoImportBackend {
@@ -238,6 +247,14 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
     }
     fn retained_owner_count(&self) -> usize {
         self.cuda.as_ref().map_or(0, |cuda| cuda.retained_owners())
+    }
+    fn wait_for_released_owners_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.cuda
+            .as_ref()
+            .map_or(Ok(()), |cuda| cuda.wait_for_released_owners_until(deadline))
     }
     fn import_input(
         &mut self,

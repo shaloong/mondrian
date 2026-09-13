@@ -17,6 +17,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::time::Instant;
 
 fn rejected(reason: impl ToString) -> GpuNativeDecodedFrameImportError {
     GpuNativeDecodedFrameImportError::BackendRejected { reason: reason.to_string() }
@@ -175,6 +176,20 @@ impl CudaPlaneAdapter {
             .retained
             .load(Ordering::Acquire)
             .max(self.release.retained_owners())
+    }
+
+    /// Wait for the release worker to consume already released transfers while
+    /// leaving this adapter open for later frame admission.
+    pub fn wait_for_released_owners_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.release.wait_for_idle_until(deadline).map_err(|error| match error {
+            super::native_release::ReleaseError::DeadlineExceeded { remaining } => {
+                GpuNativeDecodedFrameImportError::NativeReleaseDeadlineExceeded { remaining }
+            }
+            error => rejected(error),
+        })
     }
 
     pub fn import(

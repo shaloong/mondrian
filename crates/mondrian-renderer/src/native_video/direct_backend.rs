@@ -6,7 +6,7 @@
 //! working color execution path, so Metal and Vulkan cannot fork color math.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use mondrian_media::PreviewNativeDecodedFrame;
@@ -51,6 +51,72 @@ pub(crate) enum DirectNativeYuvInput {
     Buffer(DirectNativeYuvBuffer),
 }
 
+#[derive(Default)]
+struct DirectRetainedSourceState {
+    count: AtomicUsize,
+    changed: Condvar,
+    change_lock: Mutex<()>,
+}
+
+impl DirectRetainedSourceState {
+    fn increment(&self) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                backend_rejected("direct native-source residency counter exhausted".to_owned())
+            })
+    }
+
+    fn decrement(&self) {
+        let _change = self.change_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = self.count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "direct native-source residency underflow");
+        self.changed.notify_all();
+    }
+
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    fn wait_for_idle_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        let mut change = self.change_lock.lock().map_err(|_| {
+            backend_rejected("direct native-source release synchronization failed".to_owned())
+        })?;
+        loop {
+            let remaining = self.count();
+            if remaining == 0 {
+                return Ok(());
+            }
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
+                return Err(
+                    GpuNativeDecodedFrameImportError::NativeReleaseDeadlineExceeded { remaining },
+                );
+            }
+            let (next, wait) = self.changed.wait_timeout(change, timeout).map_err(|_| {
+                backend_rejected("direct native-source release synchronization failed".to_owned())
+            })?;
+            change = next;
+            if wait.timed_out() {
+                let remaining = self.count();
+                if remaining != 0 {
+                    return Err(
+                        GpuNativeDecodedFrameImportError::NativeReleaseDeadlineExceeded {
+                            remaining,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Platform Adapter for one native decoded-surface family.
 pub(crate) trait DirectNativeYuvPlaneAdapter {
     /// Exact support exposed by this concrete renderer/device pair.
@@ -62,6 +128,13 @@ pub(crate) trait DirectNativeYuvPlaneAdapter {
     #[cfg(target_os = "linux")]
     fn poll_retirement(&mut self) -> Result<bool, GpuNativeDecodedFrameImportError> {
         Ok(true)
+    }
+    #[cfg(target_os = "linux")]
+    fn wait_for_released_owners_until(
+        &self,
+        _deadline: Instant,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        Ok(())
     }
     fn retained_owner_count(&self) -> usize {
         0
@@ -105,7 +178,7 @@ pub(crate) struct DirectNativeVideoImportBackend<A> {
     yuv_decoder: GpuNativeYuvDecoder,
     color_runtime: RenderGpuOutputBoundaryRuntime,
     frame_cpu_timings: NativeVideoImportCpuTimings,
-    retained_sources: Arc<AtomicUsize>,
+    retained_sources: Arc<DirectRetainedSourceState>,
 }
 
 impl<A> DirectNativeVideoImportBackend<A>
@@ -135,7 +208,7 @@ where
             yuv_decoder,
             color_runtime,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
-            retained_sources: Arc::new(AtomicUsize::new(0)),
+            retained_sources: Arc::new(DirectRetainedSourceState::default()),
         })
     }
 
@@ -175,9 +248,19 @@ where
         self.adapter.poll_retirement()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wait_for_released_sources_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        self.adapter.wait_for_released_owners_until(deadline)?;
+        self.retained_sources.wait_for_idle_until(deadline)?;
+        Ok(self.retained_source_count())
+    }
+
     pub(crate) fn retained_source_count(&self) -> usize {
         self.retained_sources
-            .load(Ordering::Acquire)
+            .count()
             .saturating_add(self.adapter.retained_owner_count())
     }
 
@@ -307,13 +390,7 @@ where
         let retained_source = matches!(&input, DirectNativeYuvInput::Textures(_))
             .then(|| native_frame.handle.clone());
         if retained_source.is_some() {
-            self.retained_sources
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                    count.checked_add(1)
-                })
-                .map_err(|_| {
-                    backend_rejected("direct native-source residency counter exhausted".to_owned())
-                })?;
+            self.retained_sources.increment()?;
         }
         let command = encoder.finish();
         let submitted = match &input {
@@ -327,7 +404,7 @@ where
         };
         if let Err(error) = submitted {
             if retained_source.is_some() {
-                self.retained_sources.fetch_sub(1, Ordering::AcqRel);
+                self.retained_sources.decrement();
             }
             return Err(error);
         }
@@ -339,8 +416,7 @@ where
             let retained_sources = Arc::clone(&self.retained_sources);
             self.queue.on_submitted_work_done(move || {
                 drop(retained_source);
-                let previous = retained_sources.fetch_sub(1, Ordering::AcqRel);
-                debug_assert!(previous > 0, "direct native-source residency underflow");
+                retained_sources.decrement();
             });
         }
         let submit_us = elapsed_us(submit_started);
@@ -388,4 +464,31 @@ fn backend_rejected(reason: String) -> GpuNativeDecodedFrameImportError {
 
 fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn direct_source_wait_fails_closed_then_observes_callback_release() {
+        let state = Arc::new(DirectRetainedSourceState::default());
+        state.increment().expect("source admission");
+        let error = state
+            .wait_for_idle_until(Instant::now() + Duration::from_millis(1))
+            .expect_err("live source cannot establish release");
+        assert!(matches!(
+            error,
+            GpuNativeDecodedFrameImportError::NativeReleaseDeadlineExceeded { remaining: 1 }
+        ));
+
+        let callback_state = Arc::clone(&state);
+        let callback = std::thread::spawn(move || callback_state.decrement());
+        state
+            .wait_for_idle_until(Instant::now() + Duration::from_secs(2))
+            .expect("callback release observed");
+        callback.join().expect("callback joined");
+        assert_eq!(state.count(), 0);
+    }
 }

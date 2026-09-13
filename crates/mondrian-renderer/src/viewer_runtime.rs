@@ -541,6 +541,15 @@ impl ViewerGpuExecutionRuntime {
         self.native_video_import.retire_completed_source_residency()
     }
 
+    /// Wait for native owners already released by completed GPU work without
+    /// closing native import admission for later Viewer frames.
+    pub fn wait_for_released_native_import_sources_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        self.native_video_import.wait_for_released_source_residency_until(deadline)
+    }
+
     /// Aggregate output-stage diagnostics without exposing the resource table.
     pub fn color_output_diagnostics(&self) -> crate::RenderGpuOutputBoundaryRuntimeDiagnostics {
         self.color_output.diagnostics()

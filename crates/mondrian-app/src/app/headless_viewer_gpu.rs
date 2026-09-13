@@ -89,7 +89,7 @@ impl HeadlessGpuCompletionDeadline {
             .ok_or(HeadlessViewerGpuError::DeadlineExceeded)
     }
 
-    const fn instant(self) -> Instant {
+    pub(crate) const fn instant(self) -> Instant {
         self.0
     }
 }
@@ -1115,13 +1115,15 @@ impl HeadlessViewerGpuAdapter {
     /// Retire renderer source records after their completed candidate owner was consumed.
     ///
     /// Completion polling must first return and drop the `PreviewGpuFrame` that
-    /// held the decoder source. This second, nonblocking pass then observes the
-    /// released strong reference and returns the exact remaining source count.
+    /// held the decoder source. This second pass waits only for the already
+    /// released platform owner, bounded by the same GPU completion deadline.
+    /// Native import admission remains open for subsequent frames.
     pub(crate) fn retire_released_native_import_sources(
         &mut self,
+        deadline: HeadlessGpuCompletionDeadline,
     ) -> Result<usize, HeadlessViewerGpuError> {
         self.runtime.retire_completed_native_import_sources()?;
-        Ok(self.runtime.native_import_retained_source_count())
+        Ok(self.runtime.wait_for_released_native_import_sources_until(deadline.instant())?)
     }
 
     /// Exact App session qualifying renderer-local native-import tokens.
