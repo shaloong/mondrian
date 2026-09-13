@@ -645,6 +645,7 @@ mod tests {
 
     #[test]
     fn timestamp_ring_discards_when_full_and_collects_after_one_final_wait() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) =
@@ -714,6 +715,7 @@ mod tests {
 
     #[test]
     fn timestamp_ring_abandon_releases_recording_slot_without_waiting() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) =

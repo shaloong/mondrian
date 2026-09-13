@@ -1272,6 +1272,7 @@ mod tests {
 
     #[test]
     fn activated_runtime_reports_scheduled_samples_bounded_drop_and_failed_scope_tokens() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance = wgpu::Instance::default();
         let Ok(adapter) =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))

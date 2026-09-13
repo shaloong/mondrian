@@ -124,6 +124,17 @@ planner nor a second submission lifecycle. Pipeline preparation stays ordered
 with generation startup; it is not dispatched beside the active device-poll
 worker because driver pipeline creation and wgpu polling can contend on Linux.
 
+Renderer unit tests that create independent native devices share one bounded
+process admission, including timestamp tests that request a device directly
+instead of constructing `GpuContext`. This prevents the parallel Rust test
+harness from bypassing the bound through helper-specific device creation and
+overwhelming a platform driver before an assertion can be reported. Linux uses
+one exclusive test-device owner because repeated Vulkan device destruction and
+creation can overlap below wgpu; other platforms admit two owners. A single
+test may still validate multiple devices under that one owner. These bounds
+change only test provisioning; production generation admission and retirement
+evidence remain authoritative for the application.
+
 Program Output, monitor/presentation carriers, encoded native-video sources,
 Export pipe formats, RGBA32F LUTs, typed DataTextures/AlphaMasks, and the
 lossless Render Cache have separate storage contracts. They do not inherit the
