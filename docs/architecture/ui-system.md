@@ -1995,6 +1995,13 @@ Viewer code values are decoded before alpha blending and re-encoded only in the
 final pass. Encoded Viewer scaling performs manual four-tap interpolation after
 per-tap transfer decoding, avoiding nonlinear PQ/HLG/P3 code-space filtering.
 
+Offscreen renderer tests execute this same `UiRenderer` against a real wgpu
+device. Their harness owns one physical device lifetime at a time because the
+product UI owns one renderer device; parallel test-only device construction and
+destruction is neither production topology nor portable across Vulkan drivers.
+The owner guard is released only after the harness texture, renderer, queue, and
+device have been dropped.
+
 ICC calibration remains a distinct opaque device-code contract. It is admitted
 only on a direct sRGB native carrier, uses code-space filtering followed by an
 sRGB round-trip carrier decode, and fails closed if combined with a P3/HDR

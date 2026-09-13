@@ -2109,6 +2109,8 @@ mod tests {
         assert_eq!(stats.upload_bytes, 8);
     }
 
+    static OFFSCREEN_GPU_TEST_OWNER: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     struct OffscreenHarness {
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -2116,6 +2118,9 @@ mod tests {
         texture: wgpu::Texture,
         size: (u32, u32),
         last_stats: Option<UiRenderFrameStats>,
+        // Keep this last so the physical test device and all of its resources
+        // are dropped before another offscreen harness can acquire the GPU.
+        _gpu_test_owner: parking_lot::MutexGuard<'static, ()>,
     }
 
     impl OffscreenHarness {
@@ -2142,6 +2147,7 @@ mod tests {
             format: wgpu::TextureFormat,
             color_space: Option<wgpu::SurfaceColorSpace>,
         ) -> Option<Self> {
+            let gpu_test_owner = OFFSCREEN_GPU_TEST_OWNER.lock();
             let instance = wgpu::Instance::new(
                 wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
             );
@@ -2180,6 +2186,7 @@ mod tests {
                 texture,
                 size: (width, height),
                 last_stats: None,
+                _gpu_test_owner: gpu_test_owner,
             })
         }
 
