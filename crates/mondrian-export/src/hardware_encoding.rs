@@ -19,6 +19,107 @@ const INTEL_VENDOR_ID: u32 = 0x8086;
 const AMD_VENDOR_ID: u32 = 0x1002;
 const ENCODER_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How rendered pictures cross into the selected video encoder.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportVideoEncoderFrameTransport {
+    /// Renderer output is read back and written to FFmpeg as CPU rawvideo.
+    CpuRawvideoPipe,
+    /// Renderer and encoder exchange exact-device GPU surfaces without host pixels.
+    SameDeviceGpuSurface,
+}
+
+/// Result of hardware-encoder admission for one immutable export attempt.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportHardwareEncoderAdmission {
+    /// The selected codec has no applicable opportunistic hardware candidate.
+    NotApplicable,
+    /// Exact authored HDR metadata requires the proven software lowering.
+    BypassedForExactStaticHdrMetadata,
+    /// No active renderer adapter identity was available to bind a candidate.
+    NoActiveRendererAdapter,
+    /// The active renderer adapter vendor has no candidate for this codec.
+    NoCandidateForAdapter,
+    /// The candidate completed the bounded real encode probe.
+    ProbePassed,
+    /// The candidate failed its bounded real encode probe and software won.
+    ProbeFailed,
+    /// A same-device resident encoder session opened on the renderer device.
+    SameDeviceSessionOpened,
+}
+
+/// Stable encoder implementation recorded without reconstructing FFmpeg policy.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportVideoEncoderImplementation {
+    /// FFmpeg libx264 software encoder.
+    Libx264,
+    /// FFmpeg libx265 software encoder.
+    Libx265,
+    /// FFmpeg libaom AV1 software encoder.
+    LibaomAv1,
+    /// FFmpeg prores_ks software encoder.
+    ProResKs,
+    /// FFmpeg GIF encoder.
+    Gif,
+    /// Qualified professional mezzanine adapter.
+    Professional,
+    /// NVIDIA NVENC.
+    NvidiaNvenc,
+    /// Intel Quick Sync Video.
+    IntelQsv,
+    /// AMD Advanced Media Framework.
+    AmdAmf,
+    /// In-process FFmpeg D3D12VA HEVC encoder.
+    HevcD3d12Va,
+}
+
+/// Stable renderer backend bound to hardware-encoder candidate admission.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportVideoEncoderRendererBackend {
+    /// Vulkan renderer backend.
+    Vulkan,
+    /// Direct3D 12 renderer backend.
+    Dx12,
+    /// Metal renderer backend.
+    Metal,
+    /// OpenGL renderer backend.
+    Gl,
+    /// Browser WebGPU backend.
+    BrowserWebGpu,
+    /// Backend outside the stable set known to this schema.
+    Other,
+}
+
+/// Encoder selection and physical frame-boundary evidence for one export attempt.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExportVideoEncoderDiagnostics {
+    /// Exact FFmpeg encoder implementation selected for the final command.
+    pub selected_encoder: ExportVideoEncoderImplementation,
+    /// Whether the selected implementation executes on a hardware video engine.
+    pub hardware_selected: bool,
+    /// How every rendered picture crosses into the selected encoder.
+    pub frame_transport: ExportVideoEncoderFrameTransport,
+    /// Admission disposition for the hardware candidate.
+    pub hardware_admission: ExportHardwareEncoderAdmission,
+    /// Candidate implementation that was actually probed, when one existed.
+    pub hardware_candidate: Option<ExportVideoEncoderImplementation>,
+    /// PCI vendor identifier of the bound renderer adapter.
+    pub renderer_adapter_vendor: Option<u32>,
+    /// PCI device identifier of the bound renderer adapter.
+    pub renderer_adapter_device: Option<u32>,
+    /// Renderer backend used by the bound adapter.
+    pub renderer_adapter_backend: Option<ExportVideoEncoderRendererBackend>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedVideoEncoderSelection {
+    pub(crate) encoder: ResolvedVideoEncoder,
+    pub(crate) diagnostics: ExportVideoEncoderDiagnostics,
+}
+
 /// Concrete encoder selected for one immutable export attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolvedVideoEncoder {
@@ -37,6 +138,20 @@ impl ResolvedVideoEncoder {
     /// Return whether encoded frames execute on a hardware video engine.
     pub(crate) const fn is_hardware(self) -> bool {
         matches!(self, Self::NvidiaNvenc | Self::IntelQsv | Self::AmdAmf)
+    }
+
+    const fn diagnostic_implementation(self) -> ExportVideoEncoderImplementation {
+        match self {
+            Self::Libx264 => ExportVideoEncoderImplementation::Libx264,
+            Self::Libx265 => ExportVideoEncoderImplementation::Libx265,
+            Self::LibaomAv1 => ExportVideoEncoderImplementation::LibaomAv1,
+            Self::ProResKs => ExportVideoEncoderImplementation::ProResKs,
+            Self::Gif => ExportVideoEncoderImplementation::Gif,
+            Self::Professional(_) => ExportVideoEncoderImplementation::Professional,
+            Self::NvidiaNvenc => ExportVideoEncoderImplementation::NvidiaNvenc,
+            Self::IntelQsv => ExportVideoEncoderImplementation::IntelQsv,
+            Self::AmdAmf => ExportVideoEncoderImplementation::AmdAmf,
+        }
     }
 
     pub(crate) const fn ffmpeg_name(self, codec: &VideoCodecConfig) -> &'static str {
@@ -86,7 +201,7 @@ pub(crate) fn resolve_video_encoder(
     adapter: Option<&ActiveGraphicsAdapterIdentity>,
     static_hdr_metadata: bool,
     cancellation: &ExecutionCancellationToken,
-) -> mondrian_core::Result<ResolvedVideoEncoder> {
+) -> mondrian_core::Result<ResolvedVideoEncoderSelection> {
     resolve_video_encoder_with_probe(
         codec,
         adapter,
@@ -106,7 +221,7 @@ fn resolve_video_encoder_with_probe(
     cancellation: &ExecutionCancellationToken,
     command: impl FnOnce() -> Result<Command, mondrian_media::FfmpegCommandError>,
     probe: impl FnOnce(&mut Command, ResolvedVideoEncoder) -> mondrian_core::Result<()>,
-) -> mondrian_core::Result<ResolvedVideoEncoder> {
+) -> mondrian_core::Result<ResolvedVideoEncoderSelection> {
     if cancellation.is_canceled() {
         return Err(mondrian_core::MondrianError::Cancelled);
     }
@@ -116,17 +231,35 @@ fn resolve_video_encoder_with_probe(
             encoder = software.ffmpeg_name(codec),
             "hardware encoder bypassed because authored static HDR metadata has an exact libx265 lowering only"
         );
-        return Ok(software);
+        return Ok(selection(
+            software,
+            adapter,
+            None,
+            ExportHardwareEncoderAdmission::BypassedForExactStaticHdrMetadata,
+        ));
     }
     let Some(adapter) = adapter else {
         tracing::info!(
             encoder = software.ffmpeg_name(codec),
             "hardware encoder unavailable because no active renderer adapter evidence was acquired"
         );
-        return Ok(software);
+        return Ok(selection(
+            software,
+            None,
+            None,
+            ExportHardwareEncoderAdmission::NoActiveRendererAdapter,
+        ));
     };
     let Some(candidate) = hardware_candidate(codec, adapter.vendor) else {
-        return Ok(software);
+        let admission = if matches!(
+            codec,
+            VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. }
+        ) {
+            ExportHardwareEncoderAdmission::NoCandidateForAdapter
+        } else {
+            ExportHardwareEncoderAdmission::NotApplicable
+        };
+        return Ok(selection(software, Some(adapter), None, admission));
     };
     // Failed identity admission is fatal, not evidence of an unsupported GPU.
     let mut command = command()?;
@@ -151,7 +284,12 @@ fn resolve_video_encoder_with_probe(
                 cpu_to_encoder_uploads_per_frame = 1,
                 "admitted hardware export encoder after bounded real encode probe"
             );
-            Ok(candidate)
+            Ok(selection(
+                candidate,
+                Some(adapter),
+                Some(candidate),
+                ExportHardwareEncoderAdmission::ProbePassed,
+            ))
         }
         Err(error @ mondrian_core::MondrianError::Cancelled) => Err(error),
         Err(error) => {
@@ -162,8 +300,61 @@ fn resolve_video_encoder_with_probe(
                 reason = %error,
                 "hardware encoder probe failed; using proven software fallback"
             );
-            Ok(software)
+            Ok(selection(
+                software,
+                Some(adapter),
+                Some(candidate),
+                ExportHardwareEncoderAdmission::ProbeFailed,
+            ))
         }
+    }
+}
+
+fn selection(
+    selected: ResolvedVideoEncoder,
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+    candidate: Option<ResolvedVideoEncoder>,
+    hardware_admission: ExportHardwareEncoderAdmission,
+) -> ResolvedVideoEncoderSelection {
+    ResolvedVideoEncoderSelection {
+        encoder: selected,
+        diagnostics: ExportVideoEncoderDiagnostics {
+            selected_encoder: selected.diagnostic_implementation(),
+            hardware_selected: selected.is_hardware(),
+            frame_transport: ExportVideoEncoderFrameTransport::CpuRawvideoPipe,
+            hardware_admission,
+            hardware_candidate: candidate.map(ResolvedVideoEncoder::diagnostic_implementation),
+            renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
+            renderer_adapter_device: adapter.map(|adapter| adapter.device),
+            renderer_adapter_backend: adapter.map(renderer_backend),
+        },
+    }
+}
+
+fn renderer_backend(adapter: &ActiveGraphicsAdapterIdentity) -> ExportVideoEncoderRendererBackend {
+    match adapter.backend.as_str() {
+        "Vulkan" => ExportVideoEncoderRendererBackend::Vulkan,
+        "Dx12" => ExportVideoEncoderRendererBackend::Dx12,
+        "Metal" => ExportVideoEncoderRendererBackend::Metal,
+        "Gl" => ExportVideoEncoderRendererBackend::Gl,
+        "BrowserWebGpu" => ExportVideoEncoderRendererBackend::BrowserWebGpu,
+        _ => ExportVideoEncoderRendererBackend::Other,
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn resident_hevc_d3d12_diagnostics(
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+) -> ExportVideoEncoderDiagnostics {
+    ExportVideoEncoderDiagnostics {
+        selected_encoder: ExportVideoEncoderImplementation::HevcD3d12Va,
+        hardware_selected: true,
+        frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
+        hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
+        hardware_candidate: Some(ExportVideoEncoderImplementation::HevcD3d12Va),
+        renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
+        renderer_adapter_device: adapter.map(|adapter| adapter.device),
+        renderer_adapter_backend: adapter.map(renderer_backend),
     }
 }
 
@@ -480,7 +671,53 @@ mod tests {
             },
         )
         .expect("ordinary codec fallback remains legal");
-        assert_eq!(selected, ResolvedVideoEncoder::Libx264);
+        assert_eq!(selected.encoder, ResolvedVideoEncoder::Libx264);
+        assert_eq!(
+            selected.diagnostics.hardware_admission,
+            ExportHardwareEncoderAdmission::ProbeFailed
+        );
+        assert_eq!(
+            selected.diagnostics.hardware_candidate,
+            Some(ExportVideoEncoderImplementation::NvidiaNvenc)
+        );
+        assert_eq!(
+            selected.diagnostics.selected_encoder,
+            ExportVideoEncoderImplementation::Libx264
+        );
+        assert_eq!(
+            selected.diagnostics.frame_transport,
+            ExportVideoEncoderFrameTransport::CpuRawvideoPipe
+        );
+    }
+
+    #[test]
+    fn successful_hardware_probe_retains_adapter_selection_and_cpu_transport() {
+        let selected = resolve_video_encoder_with_probe(
+            &h264(),
+            Some(&test_adapter()),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Ok(Command::new("protocol-only-not-spawned")),
+            |_, candidate| {
+                assert_eq!(candidate, ResolvedVideoEncoder::NvidiaNvenc);
+                Ok(())
+            },
+        )
+        .expect("successful probe");
+        assert_eq!(selected.encoder, ResolvedVideoEncoder::NvidiaNvenc);
+        assert_eq!(
+            selected.diagnostics,
+            ExportVideoEncoderDiagnostics {
+                selected_encoder: ExportVideoEncoderImplementation::NvidiaNvenc,
+                hardware_selected: true,
+                frame_transport: ExportVideoEncoderFrameTransport::CpuRawvideoPipe,
+                hardware_admission: ExportHardwareEncoderAdmission::ProbePassed,
+                hardware_candidate: Some(ExportVideoEncoderImplementation::NvidiaNvenc),
+                renderer_adapter_vendor: Some(NVIDIA_VENDOR_ID),
+                renderer_adapter_device: Some(0),
+                renderer_adapter_backend: Some(ExportVideoEncoderRendererBackend::Other),
+            }
+        );
     }
 
     #[test]
@@ -616,11 +853,11 @@ mod tests {
         eprintln!("adapter={adapter:?} expected={expected:?} selected={selected:?}");
         if let Some(expected) = expected {
             assert_eq!(
-                selected, expected,
+                selected.encoder, expected,
                 "known GPU vendor must pass its real encoder probe"
             );
         } else {
-            assert_eq!(selected, ResolvedVideoEncoder::Libx264);
+            assert_eq!(selected.encoder, ResolvedVideoEncoder::Libx264);
         }
     }
 }

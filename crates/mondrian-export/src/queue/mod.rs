@@ -322,12 +322,19 @@ enum ExportGpuExecutionRuntimeState {
     },
 }
 
+enum ExportGpuAdapterEvidenceState {
+    Cold,
+    Ready(crate::hardware_encoding::ActiveGraphicsAdapterIdentity),
+    Unavailable,
+}
+
 struct ExportGpuExecutionRuntime {
     attempt_generation: u64,
     next_device_generation: u64,
     resource_pool_options: GpuColorFrameWgpuResourcePoolOptions,
     visual_active_grant: GpuVisualFrameExecutionResourceGrant,
     active_output_grant: RenderGpuOutputExecutionResourceGrant,
+    adapter_evidence: ExportGpuAdapterEvidenceState,
     state: ExportGpuExecutionRuntimeState,
 }
 
@@ -345,6 +352,7 @@ impl Default for ExportGpuExecutionRuntime {
                 128,
             ),
             active_output_grant: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
+            adapter_evidence: ExportGpuAdapterEvidenceState::Cold,
             state: ExportGpuExecutionRuntimeState::Cold,
         }
     }
@@ -396,6 +404,11 @@ impl ExportGpuExecutionRuntime {
         let device_generation = self.next_device_generation;
         match build_export_gpu_output_runtime(self.resource_pool_options) {
             Ok(backend) => {
+                self.adapter_evidence = ExportGpuAdapterEvidenceState::Ready(
+                    crate::hardware_encoding::ActiveGraphicsAdapterIdentity::from(
+                        &backend.context.adapter.get_info(),
+                    ),
+                );
                 self.next_device_generation = next_device_generation;
                 self.state = ExportGpuExecutionRuntimeState::Ready { device_generation, backend };
                 Ok(())
@@ -411,16 +424,35 @@ impl ExportGpuExecutionRuntime {
 
     fn active_adapter_identity(
         &mut self,
+        execution_context_allowed: bool,
     ) -> Option<crate::hardware_encoding::ActiveGraphicsAdapterIdentity> {
-        self.ensure_ready().ok()?;
-        match &self.state {
-            ExportGpuExecutionRuntimeState::Ready { backend, .. } => Some(
-                crate::hardware_encoding::ActiveGraphicsAdapterIdentity::from(
-                    &backend.context.adapter.get_info(),
+        if execution_context_allowed {
+            self.ensure_ready().ok()?;
+            return match &self.state {
+                ExportGpuExecutionRuntimeState::Ready { backend, .. } => Some(
+                    crate::hardware_encoding::ActiveGraphicsAdapterIdentity::from(
+                        &backend.context.adapter.get_info(),
+                    ),
                 ),
-            ),
-            ExportGpuExecutionRuntimeState::Cold
-            | ExportGpuExecutionRuntimeState::Backoff { .. } => None,
+                ExportGpuExecutionRuntimeState::Cold
+                | ExportGpuExecutionRuntimeState::Backoff { .. } => None,
+            };
+        }
+        match &self.adapter_evidence {
+            ExportGpuAdapterEvidenceState::Ready(adapter) => return Some(adapter.clone()),
+            ExportGpuAdapterEvidenceState::Unavailable => return None,
+            ExportGpuAdapterEvidenceState::Cold => {}
+        }
+        match discover_export_gpu_adapter_identity() {
+            Ok(adapter) => {
+                self.adapter_evidence = ExportGpuAdapterEvidenceState::Ready(adapter.clone());
+                Some(adapter)
+            }
+            Err(error) => {
+                tracing::warn!(reason = %error, "Export hardware encoder adapter admission unavailable");
+                self.adapter_evidence = ExportGpuAdapterEvidenceState::Unavailable;
+                None
+            }
         }
     }
 
@@ -731,6 +763,30 @@ fn build_export_gpu_output_runtime(
             .map_err(|err| format!("create GPU output runtime failed: {err}"))?,
         heterogeneous_runtime,
     }))
+}
+
+fn discover_export_gpu_adapter_identity(
+) -> Result<crate::hardware_encoding::ActiveGraphicsAdapterIdentity, String> {
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("build adapter-admission runtime failed: {error}"))?;
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = runtime
+        .block_on(
+            mondrian_renderer::request_adapter_with_native_video_preference(
+                &instance,
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                    apply_limit_buckets: false,
+                },
+            ),
+        )
+        .map_err(|error| format!("request adapter evidence failed: {error}"))?;
+    Ok(crate::hardware_encoding::ActiveGraphicsAdapterIdentity::from(&adapter.get_info()))
 }
 
 struct ExportGpuReadbackMapLease<'a> {
@@ -1209,6 +1265,9 @@ pub struct ExportJobVisualDiagnostics {
     pub resident_encode_video_stream_copy_muxes: u64,
     /// Most recent pre-start resident route blocker, if rawvideo fallback won.
     pub resident_encode_blocker: Option<ExportResidentEncodeBlocker>,
+    /// Exact generic video-encoder selection and renderer-to-encoder boundary.
+    #[serde(default)]
+    pub video_encoder: Option<crate::ExportVideoEncoderDiagnostics>,
 }
 
 /// Stable pre-start blocker for the narrow qualified resident HEVC route.
@@ -4217,7 +4276,11 @@ fn execute_timeline_export(
                         .writes_authored_metadata(),
                     cancel,
                 ) {
-                    Ok(encoder) => Some(encoder),
+                    Ok(selection) => {
+                        visual_session.visual_diagnostics.video_encoder =
+                            Some(selection.diagnostics);
+                        Some(selection.encoder)
+                    }
                     Err(mondrian_core::MondrianError::Cancelled) => {
                         return JobExecutionResult::Cancelled;
                     }
@@ -4513,6 +4576,7 @@ fn execute_resident_hevc_export(
     initial_diagnostics: ExportRenderInitialDiagnostics,
     plan: ResidentHevcExportPlan,
 ) -> ResidentExportAttemptOutcome {
+    let renderer_adapter_identity = visual_session.active_adapter_identity();
     let width = delivery.resolution.width;
     let height = delivery.resolution.height;
     let frame_rate_num = match u32::try_from(delivery.frame_rate.num) {
@@ -4571,6 +4635,10 @@ fn execute_resident_hevc_export(
                 return ResidentExportAttemptOutcome::NotStarted;
             }
         };
+    visual_session.visual_diagnostics.video_encoder =
+        Some(crate::hardware_encoding::resident_hevc_d3d12_diagnostics(
+            renderer_adapter_identity.as_ref(),
+        ));
     visual_session.visual_diagnostics.resident_encode_sessions =
         visual_session.visual_diagnostics.resident_encode_sessions.saturating_add(1);
     let root_color_context = match resolved_export_color_context(timeline, delivery) {
@@ -6924,10 +6992,8 @@ impl ExportVisualRenderSession {
     fn active_adapter_identity(
         &mut self,
     ) -> Option<crate::hardware_encoding::ActiveGraphicsAdapterIdentity> {
-        if !self.resource_policy.opportunistic_gpu_acceleration {
-            return None;
-        }
-        self.gpu_output.active_adapter_identity()
+        self.gpu_output
+            .active_adapter_identity(self.resource_policy.opportunistic_gpu_acceleration)
     }
 
     #[cfg(test)]
@@ -10449,6 +10515,7 @@ mod tests {
             resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
             visual_active_grant: GpuVisualFrameExecutionResourceGrant::default(),
             active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
+            adapter_evidence: ExportGpuAdapterEvidenceState::Cold,
             state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
         };
 
@@ -10545,6 +10612,7 @@ mod tests {
             resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
             visual_active_grant,
             active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
+            adapter_evidence: ExportGpuAdapterEvidenceState::Cold,
             state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
         };
         let policy = ExportExecutionResourcePolicy {
@@ -10575,6 +10643,7 @@ mod tests {
             },
             visual_active_grant: GpuVisualFrameExecutionResourceGrant::new(1, 1),
             active_output_grant: policy.gpu_output_active,
+            adapter_evidence: ExportGpuAdapterEvidenceState::Cold,
             state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
         };
 
@@ -14286,6 +14355,31 @@ mod tests {
         assert!(diagnostics.gpu_visual_peak_active_textures >= 3);
         assert_eq!(canvas.len(), 4 * 2 * 4);
         assert!(canvas.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    #[ignore = "manual real adapter Export GPU backend construction qualification"]
+    fn active_adapter_constructs_complete_export_gpu_backend() {
+        let backend = build_export_gpu_output_runtime(GpuColorFrameWgpuResourcePoolOptions {
+            max_per_contract: 0,
+            max_retained_bytes: 0,
+        })
+        .expect("active adapter must construct the production Export GPU backend");
+        eprintln!("adapter={:?}", backend.context.adapter.get_info());
+    }
+
+    #[test]
+    #[ignore = "manual real adapter encoder admission during concurrent playback"]
+    fn concurrent_playback_policy_keeps_video_encoder_adapter_admission() {
+        let policy = service::ExportExecutionResourcePolicy {
+            opportunistic_gpu_acceleration: false,
+            ..service::ExportExecutionResourcePolicy::default()
+        };
+        let mut session = ExportVisualRenderSession::for_reference_generation(1, policy);
+        let adapter = session
+            .active_adapter_identity()
+            .expect("video-engine admission must remain independent of Export render-queue use");
+        eprintln!("adapter={adapter:?}");
     }
 
     #[test]

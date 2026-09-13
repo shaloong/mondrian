@@ -462,12 +462,21 @@ candidate must match the active Export renderer Adapter vendor and complete a
 bounded real one-frame encode using the exact codec profile and delivery pixel
 format. Qualified NVIDIA, Intel, and AMD adapters may select NVENC, QSV, or AMF;
 ordinary codec probe failure, a timeout with successful cleanup, an unsupported vendor, or unavailable
-GPU context selects the explicit libx264/libx265 fallback before Timeline frame
+Adapter evidence selects the explicit libx264/libx265 fallback before Timeline frame
 streaming begins. Authored static HDR metadata remains on libx265 until another
 backend has an exact metadata lowering. The generic FFmpeg rawvideo pipe is a
 CPU boundary and therefore records one CPU-to-encoder upload per frame; generic
 hardware encoder selection alone is acceleration evidence, never a zero-copy
-claim.
+claim. During concurrent Playback, the resource coordinator can disable the
+Export render queue while a lightweight adapter-only request still admits the
+independent video engine; that request creates no second wgpu Device or Queue.
+Every job diagnostic retains the selected encoder, hardware-admission
+disposition, candidate implementation, renderer Adapter vendor/device/backend,
+and the CPU-rawvideo versus same-device-surface transport. A completed artifact
+therefore cannot be used as evidence that NVENC/QSV/AMF or resident encoding ran
+unless this production selection receipt says so. Probe failure remains an
+explicit software selection rather than disappearing behind the successful
+fallback artifact.
 
 Cancellation observed during admission returns cancellation before selecting
 either encoder. Provider identity failures and independent process/worker

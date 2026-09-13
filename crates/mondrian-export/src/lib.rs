@@ -11,6 +11,11 @@ pub mod delivery;
 mod dynamic_hdr;
 pub mod frame_contract;
 mod hardware_encoding;
+pub use hardware_encoding::{
+    ExportHardwareEncoderAdmission, ExportVideoEncoderDiagnostics,
+    ExportVideoEncoderFrameTransport, ExportVideoEncoderImplementation,
+    ExportVideoEncoderRendererBackend,
+};
 mod image_sequence;
 mod interlaced_delivery;
 pub mod mezzanine;
