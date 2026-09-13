@@ -2057,6 +2057,22 @@ fn accepted_headless_terminal_status(
     }
 }
 
+fn pump_headless_boundary_preview(
+    state: &mut AppState,
+    adapter: &impl PlaybackPreviewAdapter,
+) -> (
+    PlaybackPreviewPumpOutcome,
+    Option<HeadlessGpuCandidateStatus>,
+) {
+    // Applying a terminal delivery may change quality and consume its demand.
+    // Match the accepted receipt against the opportunity that entered the pump,
+    // not the post-application snapshot selected by that same receipt.
+    let current = HeadlessGpuCandidateIntent::from_state(state);
+    let outcome = pump_playback_preview(state, adapter);
+    let terminal = accepted_headless_terminal_status(current, outcome.accepted_delivery);
+    (outcome, terminal)
+}
+
 fn headless_terminal_delivery_status(
     kind: mondrian_playback::FrameDeliveryKind,
 ) -> HeadlessGpuCandidateStatus {
@@ -2342,7 +2358,8 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
             false
         };
         let preview_pump_started = Instant::now();
-        let pump_outcome = pump_playback_preview(state, preview_service);
+        let (pump_outcome, accepted_terminal) =
+            pump_headless_boundary_preview(state, preview_service);
         interval_timing.preview_pump.observe(preview_pump_started.elapsed());
         if coordinate_changed {
             let sample = completed_headless_interval_sample(
@@ -2350,8 +2367,6 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 driver.sample(sampled_intent, preview_service),
             );
             let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-            let accepted_terminal =
-                accepted_headless_terminal_status(current_intent, pump_outcome.accepted_delivery);
             if !prepared_boundary_promoted {
                 let already_visible_at = preview_service
                     .registered_gpu_output_key()
@@ -3091,6 +3106,68 @@ mod tests {
             ),
             HeadlessGpuCandidateBindingUpdate::SatisfiedIntent,
             "a stopped or already-consumed intent may use exact physical-current evidence"
+        );
+    }
+
+    #[test]
+    fn boundary_late_receipt_survives_its_own_quality_transition() {
+        use mondrian_playback::{
+            FrameDeliveryCandidate, FrameDeliveryKind, PlaybackEngine, PlaybackPolicy,
+        };
+        struct TerminalAdapter;
+        impl PlaybackPreviewAdapter for TerminalAdapter {
+            fn poll_playback_work(
+                &self,
+                pending: Option<mondrian_playback::FrameDemandIdentity>,
+                _: super::super::playback_preview::PreviewTransportIntent,
+            ) -> super::super::playback_preview::PreviewWorkPoll {
+                super::super::playback_preview::PreviewWorkPoll {
+                    frame_delivery_candidates: vec![FrameDeliveryCandidate::for_demand(
+                        pending.expect("live production demand"),
+                        FrameDeliveryKind::Late,
+                    )],
+                    ..Default::default()
+                }
+            }
+            fn video_preroll(
+                &self,
+                _: super::super::preview_runtime::PreviewVideoPrerollRequest<'_>,
+            ) -> Option<super::super::playback_preview::PreviewVideoPreroll> {
+                None
+            }
+        }
+        let mut state = AppState::new();
+        state.playback_engine = PlaybackEngine::new(
+            state.playback_engine.snapshot().position.time_base,
+            PlaybackPolicy {
+                pressure_window: 1,
+                pressure_threshold: 1,
+                ..Default::default()
+            },
+        )
+        .expect("production engine with one-observation pressure window");
+        state.set_playback_frame_running(9);
+        state
+            .playback_engine
+            .complete_priming(
+                mondrian_playback::ClockMaster::Synthetic,
+                state.playback_engine.monotonic_high_water(),
+            )
+            .expect("timed playback");
+        let before = HeadlessGpuCandidateIntent::from_state(&state);
+        let (outcome, terminal) = pump_headless_boundary_preview(&mut state, &TerminalAdapter);
+        let after = HeadlessGpuCandidateIntent::from_state(&state);
+        assert!(
+            outcome.accepted_delivery.is_some(),
+            "real Playback accepted the terminal receipt"
+        );
+        assert_eq!((before.epoch, before.frame), (after.epoch, after.frame));
+        assert!(after.quality_revision > before.quality_revision);
+        assert!(after.pending_demand.is_none());
+        assert_eq!(
+            terminal,
+            Some(HeadlessGpuCandidateStatus::DroppedLate),
+            "quality selection must not erase the terminal receipt needed for bounded recovery"
         );
     }
 

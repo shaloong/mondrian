@@ -83,6 +83,14 @@ that turn. Headless execution retains this receipt through candidate/GPU
 reconciliation. An output that completes after Playback accepted `Late`,
 `Blocked`, `Canceled`, or `Failed` cannot overwrite the terminal opportunity as
 `Ready`; the receipt remains bound to its epoch, quality revision, and frame. Acceptance is retained separately from public `PlaybackSnapshot` mutation: consuming a recovery demand can leave transport state, coordinate, and quality unchanged while still exhausting that exact terminal authority.
+
+The Headless clock-boundary pump samples its demand identity before applying
+deliveries: a terminal result can itself change the quality revision and leave
+no pending demand. Matching against the resulting snapshot would discard the
+accepted terminal fact and strand the next pre-clock opportunity in Loading.
+The retained terminal status enters the existing bounded recovery path; neither
+identity validation nor its deadline is relaxed.
+
 | Preview Execution Coordinator | complete generation binding, pending state, executed presentation quality, candidate identity, exact registered output | timeline interpretation, codec payloads, GPU resources, Widget state |
 | Preview Output Unavailability | `NoContent`/`Blocked`/`Failed` disposition, owning production stage, stable code, bounded aggregate evidence | scheduler policy, renderer error details, localized UI wording |
 | Presentation Adapter | output registration, Viewer handoff, exact presentation-ticket completion, presentation evidence | timeline advancement, GPU color/composite interpretation, scheduler state |
