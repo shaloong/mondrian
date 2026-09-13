@@ -857,9 +857,11 @@ consumes the driver, drops the process-local EventLoop, seals the shared
 platform owner-closure contract, and only then permits create-new run-manifest
 publication. Every earlier validation, startup, runtime, or publication error
 also performs this exactly-once close and retains both primary and closure
-evidence. The current `mondrian-endurance` composition still selects
-`NoPhysicalSurfaceDriver`, so physical phases remain `NotRun` rather than
-claiming Window execution. Windows, macOS, X11, and Wayland
+evidence. The current `mondrian-endurance` composition constructs a
+`MachineSurfaceDriver` at admission. It owns the real Window driver when the
+platform event loop and display server are available; otherwise it retains the
+construction error and returns an admission-time `NotRun` for physical Surface
+work without inventing a Window receipt. Windows, macOS, X11, and Wayland
 support this desktop on-demand lifecycle; macOS still requires construction and
 execution on the process main thread, while a Linux host without a display
 server must report the Surface capability as `NotRun` without blocking the
