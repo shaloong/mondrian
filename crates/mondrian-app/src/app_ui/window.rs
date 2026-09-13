@@ -106,9 +106,10 @@ use mondrian_renderer::{
     },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
-    GpuProgramScopesRequest, GpuSignalMonitorRequest, ViewerGpuExecutionError,
-    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision,
-    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
+    GpuProgramScopesRequest, GpuSignalMonitorRequest, RenderMonitorAdaptation,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -6540,11 +6541,20 @@ fn prepare_viewer_gpu_preview(
     host: &AppUiHost,
 ) {
     let prepare_started = Instant::now();
+    let mut renderer_record_us = None;
+    let mut renderer_cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings> = None;
     macro_rules! finish_prepare {
         () => {{
-            session
-                .viewer_gpu_output_telemetry
-                .record_prepare_duration(prepare_started.elapsed());
+            let prepare_duration = prepare_started.elapsed();
+            session.viewer_gpu_output_telemetry.record_prepare_duration(prepare_duration);
+            if prepare_duration.as_micros() >= u128::from(APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US) {
+                tracing::warn!(
+                    prepare_duration_us = prepare_duration.as_micros(),
+                    ?renderer_record_us,
+                    ?renderer_cpu_stage_timings,
+                    "slow Window Viewer GPU preparation stage breakdown"
+                );
+            }
             return;
         }};
     }
@@ -7016,6 +7026,7 @@ fn prepare_viewer_gpu_preview(
         display_calibration.is_some(),
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
+    let renderer_record_started = Instant::now();
     let mut record = match session.viewer_gpu_execution.record(
         device,
         queue,
@@ -7132,6 +7143,9 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
+    renderer_record_us =
+        Some(renderer_record_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    renderer_cpu_stage_timings = Some(record.cpu_stage_timings);
     host.record_preview_gpu_compositing(record.compositing_diagnostics);
     let uniform_arena = session.viewer_gpu_execution.compositor_uniform_arena_diagnostics();
     session
@@ -7346,9 +7360,7 @@ fn prepare_viewer_gpu_preview(
     }
     register_ordinary_window_program_scopes(session, device, submission_id);
     publish_ordinary_window_viewer_gpu_submission(session, host, submission_id);
-    session
-        .viewer_gpu_output_telemetry
-        .record_prepare_duration(prepare_started.elapsed());
+    finish_prepare!();
 }
 
 /// Warm a bounded CPU-side horizon beyond the immediate successor.
@@ -8162,7 +8174,71 @@ impl AppUiPreparedWindowSession {
         let frame_renderer =
             AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
         if let Some(startup) = viewer_gpu_startup {
-            startup.install_runtime(ViewerGpuExecutionRuntime::new(adapter, device, queue)?);
+            let mut viewer_runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
+            match host.active_program_color_context() {
+                Ok(color_context) => {
+                    match crate::app::preview_cpu_execution::output_boundary_from_color_context(
+                        &color_context,
+                    ) {
+                        Ok(program_output_boundary) => {
+                            match display_management_policy.resolve_output_color_space(
+                                &color_engine,
+                                program_output_boundary.output_color_space(),
+                            ) {
+                                Ok(monitor_color_space) => match RenderMonitorAdaptation::new(
+                                    program_output_boundary.output_color_space(),
+                                    monitor_color_space,
+                                    color_engine.clone(),
+                                ) {
+                                    Ok(monitor_adaptation) => {
+                                        let output_precision =
+                                            ViewerGpuOutputPrecision::minimum_for_display(
+                                                monitor_color_space,
+                                                initial_display_resolution.calibration.is_some(),
+                                            );
+                                        if let Err(error) = viewer_runtime
+                                            .prepare_program_output_backend(
+                                                device,
+                                                queue,
+                                                color_context.working_color_space(),
+                                                &program_output_boundary,
+                                                &monitor_adaptation,
+                                                output_precision,
+                                                host.preferences()
+                                                    .video_scopes
+                                                    .monitoring
+                                                    .is_active(),
+                                            )
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                "Viewer Program Output startup prewarm was unavailable"
+                                            );
+                                        }
+                                    }
+                                    Err(error) => tracing::warn!(
+                                        %error,
+                                        "Viewer monitor adaptation startup prewarm was unavailable"
+                                    ),
+                                },
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "Viewer monitor contract startup prewarm was unavailable"
+                                ),
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "Viewer Program Output contract startup prewarm was unavailable"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Viewer Program color context startup prewarm was unavailable"
+                ),
+            }
+            startup.install_runtime(viewer_runtime);
             startup
                 .runtime()
                 .expect("installed Window runtime")

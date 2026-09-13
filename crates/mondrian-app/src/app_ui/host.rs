@@ -349,6 +349,21 @@ impl AppUiHost {
             .unwrap_or(state.new_sequence_defaults().color.program_output.color_space)
     }
 
+    /// Resolve the active Sequence's production Program color contract.
+    pub(crate) fn active_program_color_context(
+        &self,
+    ) -> Result<
+        mondrian_timeline::sequence::ProgramColorContext,
+        mondrian_timeline::sequence::ProgramColorContextError,
+    > {
+        let state = self.app_state.borrow();
+        let settings = state
+            .active_sequence()
+            .map(|sequence| &sequence.settings)
+            .unwrap_or_else(|| state.new_sequence_defaults());
+        settings.root_program_color_context(state.project_color_environment())
+    }
+
     /// Build a GPU-output preview candidate for the current app state.
     pub(crate) fn gpu_preview_frame_for_current_state(&self) -> PreviewGpuFrameState {
         let state = self.app_state.borrow();

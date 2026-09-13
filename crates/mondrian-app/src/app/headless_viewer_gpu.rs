@@ -1026,6 +1026,18 @@ impl HeadlessViewerGpuAdapter {
         frame: &PreviewGpuFrame,
     ) -> Result<(), ViewerGpuExecutionError> {
         debug_assert!(frame.is_successor_preparation());
+        self.runtime.prepare_program_output_backend(
+            &self.device,
+            &self.queue,
+            frame.working_color_space,
+            &frame.program_output_boundary,
+            &frame.monitor_adaptation,
+            ViewerGpuOutputPrecision::minimum_for_display(
+                frame.monitor_adaptation.monitor_color_space(),
+                false,
+            ),
+            false,
+        )?;
         let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
         self.runtime.prepare_cpu_yuv_uploads(layers)?;
         self.runtime.prepare_native_video_imports(layers)?;

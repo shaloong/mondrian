@@ -814,6 +814,59 @@ impl RenderGpuOutputBoundaryRuntime {
         tracing::warn!("{}", message());
     }
 
+    /// Prepare the exact device objects for a GPU-resident output boundary.
+    ///
+    /// This performs shader lowering, layout preparation, LUT upload and
+    /// render-pipeline creation without allocating a frame, recording commands,
+    /// or changing frame identity. A later record with the same descriptor and
+    /// boundary reuses the prepared objects through this runtime's caches.
+    pub fn prepare_wgpu_output_boundary_gpu_frame_backend(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        input: ColorFrameDescriptor,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), RenderGpuOutputBoundaryRuntimeRecordError> {
+        let mut planner =
+            RenderOutputColorBoundaryPlanner::prefer_gpu(&mut self.shader_cache, gpu_options);
+        let plan = planner
+            .plan_descriptor_for_texture(input, boundary, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
+        let output_format = match output_texture_format {
+            GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+            GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
+            GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
+        };
+        let shader_plan = plan
+            .stage_plan
+            .stages
+            .iter()
+            .find_map(|stage| match stage {
+                RenderColorStage::GpuColorTransform { plan, .. } => {
+                    Some(plan.wgpu.shader_plan.clone())
+                }
+                RenderColorStage::UploadToGpu { .. }
+                | RenderColorStage::CpuInputTransform { .. }
+                | RenderColorStage::CpuOutputTransform { .. }
+                | RenderColorStage::ReadbackToCpu { .. } => None,
+            })
+            .ok_or(RenderGpuOutputBoundaryRuntimeRecordError::Plan(
+                RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "GPU output-boundary preparation produced no GPU color stage",
+                },
+            ))?;
+        let static_pipeline = self
+            .backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
+        self.backend_objects
+            .prepare_backend_objects(device, queue, &shader_plan, &static_pipeline)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendObjects)?;
+        Ok(())
+    }
+
     /// Return point-in-time runtime diagnostics.
     pub fn diagnostics(&self) -> RenderGpuOutputBoundaryRuntimeDiagnostics {
         RenderGpuOutputBoundaryRuntimeDiagnostics {
@@ -6003,6 +6056,66 @@ mod tests {
         assert_eq!(record.stage_diagnostics.upload_stages, 1);
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_output_boundary_exact_prewarm_is_reused_by_production_record() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu output prewarm test: no GPU adapter available");
+            return;
+        };
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_250).expect("GPU output runtime");
+        let mut resident_input = frame.descriptor();
+        resident_input.residency = ColorFrameResidency::Gpu;
+
+        runtime
+            .prepare_wgpu_output_boundary_gpu_frame_backend(
+                &boundary,
+                resident_input,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions::default(),
+                &context.device,
+                &context.queue,
+            )
+            .expect("exact Program Output backend prewarm");
+        let prepared = runtime.diagnostics();
+        assert_eq!(prepared.backend_objects.entries, 1);
+        assert_eq!(prepared.backend_objects.misses, 1);
+        assert_eq!(prepared.backend_objects.hits, 0);
+        assert_eq!(prepared.next_frame_id, 1_250);
+        assert_eq!(prepared.frame_table_entries, 0);
+
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-output-boundary-prewarm-reuse"),
+        });
+        runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("production Program Output record after exact prewarm");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        let recorded = runtime.diagnostics();
+        assert_eq!(recorded.backend_objects.entries, 1);
+        assert_eq!(recorded.backend_objects.misses, 1);
+        assert_eq!(recorded.backend_objects.hits, 1);
     }
 
     #[tokio::test]

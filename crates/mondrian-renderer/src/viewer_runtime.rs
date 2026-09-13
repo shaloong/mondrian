@@ -363,6 +363,49 @@ impl ViewerGpuExecutionRuntime {
         self.cpu_yuv_upload.install_completion_waker(waker);
     }
 
+    /// Prepare the exact Program Output device objects before this Viewer
+    /// generation starts accepting frame submissions.
+    ///
+    /// The preparation uses this runtime's production color planner and object
+    /// caches. It allocates no frame identity and records no commands. Callers
+    /// should run it while device-generation startup is still serialized so a
+    /// driver pipeline build cannot contend with the device progress loop.
+    pub fn prepare_program_output_backend(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        working_color_space: WorkingColorSpace,
+        program_output_boundary: &RenderOutputColorBoundary,
+        monitor_adaptation: &RenderMonitorAdaptation,
+        output_precision: ViewerGpuOutputPrecision,
+        signal_monitoring_active: bool,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        let output_texture_format =
+            if monitor_adaptation.requires_pass() || signal_monitoring_active {
+                GpuColorFrameTextureFormat::Rgba16Float
+            } else {
+                output_precision.texture_format()
+            };
+        self.color_output
+            .prepare_wgpu_output_boundary_gpu_frame_backend(
+                program_output_boundary,
+                crate::ColorFrameDescriptor {
+                    width: 1,
+                    height: 1,
+                    color_space: working_color_space.into(),
+                    domain: crate::ColorFrameDomain::Working,
+                    encoding: crate::ColorFrameEncoding::LinearFloat,
+                    residency: crate::ColorFrameResidency::Gpu,
+                    alpha: crate::ColorFrameAlpha::StraightCoverage,
+                },
+                output_texture_format,
+                RenderColorTransformGpuOptions::default(),
+                device,
+                queue,
+            )
+            .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))
+    }
+
     /// Start compact CPU YUV transfer preparation without recording or
     /// reserving a GPU submission.
     ///
@@ -2685,6 +2728,54 @@ mod tests {
         )?;
         context.queue.submit(std::iter::once(encoder.finish()));
         Ok(record)
+    }
+
+    #[tokio::test]
+    async fn viewer_startup_prewarm_populates_the_production_output_cache() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer Program Output prewarm test: no GPU adapter available");
+            return;
+        };
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let before = runtime.color_output_diagnostics();
+
+        runtime
+            .prepare_program_output_backend(
+                &context.device,
+                &context.queue,
+                WorkingColorSpace::LinearRec709,
+                &boundary,
+                &adaptation,
+                ViewerGpuOutputPrecision::Encoded8,
+                false,
+            )
+            .expect("Viewer startup Program Output prewarm");
+        let prepared = runtime.color_output_diagnostics();
+        assert_eq!(prepared.next_frame_id, before.next_frame_id);
+        assert_eq!(prepared.frame_table_entries, 0);
+        assert_eq!(prepared.backend_objects.entries, 1);
+        assert_eq!(prepared.backend_objects.misses, 1);
+
+        let _record = try_record_empty_viewer_frame(&context, &mut runtime, 0, None)
+            .expect("production Viewer record after startup prewarm");
+        let recorded = runtime.color_output_diagnostics();
+        assert_eq!(recorded.backend_objects.entries, 1);
+        assert_eq!(recorded.backend_objects.misses, 1);
+        assert_eq!(recorded.backend_objects.hits, 1);
     }
 
     #[test]

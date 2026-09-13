@@ -114,6 +114,16 @@ that omitted the returned feature is rejected by
 adapters therefore produce a typed admission error; they do not enter wgpu
 validation, silently select RGBA16F, or claim a CPU fallback as GPU execution.
 
+Before a Window device generation is published, startup resolves the active
+production Program Output and monitor contract and prepares its exact OCIO
+device objects in that generation's `ViewerGpuExecutionRuntime`. Headless
+cold-activation validation uses the same production method and candidate
+contract. The method fills the runtime's existing output cache without frame
+allocation or command recording, so it introduces neither a second color
+planner nor a second submission lifecycle. Pipeline preparation stays ordered
+with generation startup; it is not dispatched beside the active device-poll
+worker because driver pipeline creation and wgpu polling can contend on Linux.
+
 Program Output, monitor/presentation carriers, encoded native-video sources,
 Export pipe formats, RGBA32F LUTs, typed DataTextures/AlphaMasks, and the
 lossless Render Cache have separate storage contracts. They do not inherit the

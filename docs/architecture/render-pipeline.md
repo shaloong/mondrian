@@ -3045,6 +3045,26 @@ per-frame input bind groups reuse that layout instead of creating another
 layout object. LUT payload hashes are computed once when the immutable shader
 plan is extracted, rather than walking a 57^3 payload during every frame.
 
+Window generation startup resolves the active Sequence Program color context,
+display policy, monitor adaptation, output precision, and signal-monitoring
+carrier before publishing the new Viewer runtime. It prepares that exact
+Program Output backend in the same `ViewerGpuExecutionRuntime::color_output`
+cache later used by production recording. Preparation allocates no frame ID,
+records no command, and creates no parallel color or completion authority. The
+first production record must therefore observe a cache hit for an unchanged
+contract. A changed contract remains an ordinary cache miss under the same
+runtime owner. Headless cold-activation validation invokes the same seam with
+the candidate's exact production contract before timing the successor frame.
+
+This preparation is ordered on device-generation startup before normal frame
+submission. It must not run on a background thread concurrently with the
+generation's device-progress polling and active queue submissions: the Linux
+NVIDIA/wgpu backend can serialize driver pipeline creation behind that work and
+turn an attempted asynchronous warm-up into device backpressure. A preparation
+failure is logged at startup; the first production record still executes the
+same structured fail-closed planner and error path instead of treating warm-up
+failure as successful rendering.
+
 Every cache-hit authorization in this preparation chain uses a domain-separated
 32-byte canonical identity, including shader requests, extracted shader plans,
 translation artifacts, resource layouts, static pipelines, wrapper artifacts,
