@@ -649,6 +649,10 @@ request and exact FFmpeg preparation. Its report hard-codes
 `qualifying: false` and states that no App, phase, physical output, or duration
 was exercised; it is machine-readiness evidence only and cannot be replayed as
 a campaign manifest.
+`mondrian-endurance -h` and `--help` print those two accepted command forms
+before graphics initialization and exit without opening a request, App, phase,
+report, or provider. Help output is informational and cannot become campaign
+evidence.
 
 After factory composition creates owners, the realtime start boundary drains
 the opened Reference Session's initial provider-status events and accepts an
@@ -1627,6 +1631,9 @@ and 360-second Export completion grace are recorded explicitly and do not alter
 the original 900/90-second stress profile. Alpha HEVC is excluded from this
 control and `original_native_media_qualified` remains false. Successful control
 evidence proves the three-phase software composition and recovery paths only.
+Its `-h` and `--help` forms print the exact fixture-root, create-only output
+directory, and optional-seconds arguments before graphics initialization; they
+perform no smoke work and emit no report.
 
 Linux all-target builds retain portable strict-schema rejection tests while
 compiling Windows-only immutable-file preparation and native journal binding

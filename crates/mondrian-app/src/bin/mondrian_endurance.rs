@@ -171,8 +171,14 @@ fn main() -> anyhow::Result<()> {
     if mode.as_deref() == Some(OsStr::new(mondrian_media::MEDIA_PROBE_WORKER_ARGUMENT)) {
         return mondrian_media::run_media_probe_worker();
     }
-    mondrian_platform::prepare_graphics_process()?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if matches!(arguments.as_slice(), [argument] if argument == "-h" || argument == "--help") {
+        println!(
+            "Usage:\n  mondrian-endurance <run-request.json>\n  mondrian-endurance --self-test <run-request.json> <create-only-report.json>\n\nThe self-test validates the strict request and exact FFmpeg toolchain only; it is non-qualifying."
+        );
+        return Ok(());
+    }
+    mondrian_platform::prepare_graphics_process()?;
     match arguments.as_slice() {
         [request] => run_campaign(strict_path(request, "run request")?),
         [mode, request, report] if mode == "--self-test" => write_self_test(
