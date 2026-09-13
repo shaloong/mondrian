@@ -56,6 +56,43 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     closure?;
     Ok(())
 }
+#[test]
+#[ignore = "requires Vulkan, explicit demux worker and equivalent tagged planar SDR fixtures"]
+fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
+    mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
+    let fixtures = std::env::var_os("MONDRIAN_PLANAR_PARITY_FIXTURES")
+        .context("explicit equivalent fixtures")?;
+    let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+    anyhow::ensure!(
+        paths.len() == 3,
+        "expected 422p, 444p and 444p10le equivalent fixtures"
+    );
+    let context = pollster::block_on(GpuContext::new())?;
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    anyhow::ensure!(runtime
+        .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
+    let result = (|| -> Result<()> {
+        let reference = measure(&paths[0], false, &context, &mut runtime)?;
+        for path in &paths[1..] {
+            let actual = measure(path, false, &context, &mut runtime)?;
+            anyhow::ensure!(actual.len() == reference.len());
+            for (expected, actual) in reference.iter().zip(actual) {
+                anyhow::ensure!(expected.len() == actual.len());
+                let max =
+                    expected.iter().zip(actual).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+                eprintln!("{} planar Viewer maximum difference {max}", path.display());
+                anyhow::ensure!(max <= 1.0 / 1024.0, "planar output disagreement: {max}");
+            }
+        }
+        Ok(())
+    })();
+    let closure = retirement::retire_runtime(&context.device, runtime);
+    result?;
+    closure?;
+    Ok(())
+}
+
 fn measure(
     path: &Path,
     native: bool,
@@ -69,10 +106,7 @@ fn measure(
     );
     let mut decoder = bootstrap.build();
     let fingerprint = MediaFileFingerprint::capture(path);
-    let selector = runtime
-        .native_import_support()
-        .hardware_decode_device_selector
-        .context("exact CUDA device")?;
+    let selector = runtime.native_import_support().hardware_decode_device_selector;
     let graph = mondrian_effects::compile_reference_render_graph(
         mondrian_effects::EffectGraphBuilderState::new().finish(),
     )
@@ -122,7 +156,7 @@ fn measure(
             PreviewDecodeRepresentation::CompactCpuYuv
         };
         if native {
-            request.hardware_decode_device_selector = Some(selector);
+            request.hardware_decode_device_selector = Some(selector.context("exact CUDA device")?);
         }
         let outcome = decoder.decode_cancellable(request, move || Instant::now() >= deadline)?;
         let (width, height, native_source, cpu_yuv_source) = match outcome {

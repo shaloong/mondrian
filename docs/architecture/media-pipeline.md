@@ -3945,6 +3945,15 @@ Required native requests fail before this fallback; CPU-addressable requests
 continue to receive their typed RGBA/float payload. This reduces pixel
 materialization without altering quality, deadlines, or cache budgets.
 
+The compact software route retains FFmpeg planar 8/10-bit 4:2:0, 4:2:2,
+and 4:4:4 without an intermediate CPU RGB image. Probe admission and decoded
+surface validation agree on these layouts. Full-resolution 4:4:4 chroma does
+not acquire an invented subsampled chroma location. Planning charges each
+aligned plane row and its actual chroma extent; retained allocation accounting
+remains authoritative. These CPU layouts do not advertise native GPU residency
+or hardware codec support. Alpha and scene-linear inputs retain their existing
+separate contracts.
+
 Compact CPU payload accounting charges the retained FFmpeg image buffer
 references, including vertical allocation alignment and inter-plane padding.
 Visible strided plane slices remain the upload contract but are not allocation

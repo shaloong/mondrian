@@ -286,7 +286,8 @@ backend cannot skip, reorder, or mislabel either pass.
 The same YUV shader is also the sole materializer for media-owned compact CPU
 YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
 CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
-luma/CbCr views; FFmpeg `YUV422P10LE` binds stride-preserving luma/Cb/Cr views
+luma/CbCr views; FFmpeg planar 8/10-bit 4:2:0, 4:2:2, and 4:4:4 bind
+stride-preserving luma/Cb/Cr views
 without expanding or converting them into an RGB staging image. The compact
 plane textures survive ordinary Viewer candidate clears. A bounded
 renderer-owned upload worker copies visible plane rows into reusable mapped,

@@ -45,6 +45,21 @@ fn compact_yuv_layout(
             CpuYuvSampleFormat::Unorm16Lsb10,
             CpuYuvChromaPlaneLayout::Planar,
         ),
+        Pixel::YUV422P => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P10LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
         Pixel::NV12 => (
             CpuYuvChromaSubsampling::Cs420,
             CpuYuvSampleFormat::Unorm8,
@@ -72,7 +87,9 @@ fn convert_decoded_to_compact_yuv(
     let mut video_sampling = decoded_video_sampling_from_frame(decoded);
     video_sampling.matrix = color_contract.applied_matrix;
     video_sampling.range = color_contract.applied_range;
-    if video_sampling.chroma_location == DecodedVideoChromaLocation::Unknown {
+    if subsampling != CpuYuvChromaSubsampling::Cs444
+        && video_sampling.chroma_location == DecodedVideoChromaLocation::Unknown
+    {
         // FFmpeg's conventional MPEG-family planar layouts are horizontally
         // left-sited when stream metadata omits a more local fact. Bind that
         // fallback explicitly so the renderer never invents sampling policy.
@@ -80,10 +97,13 @@ fn convert_decoded_to_compact_yuv(
     }
     let width = decoded.width();
     let height = decoded.height();
-    let chroma_width = width.div_ceil(2);
+    let chroma_width = match subsampling {
+        CpuYuvChromaSubsampling::Cs444 => width,
+        _ => width.div_ceil(2),
+    };
     let chroma_height = match subsampling {
         CpuYuvChromaSubsampling::Cs420 => height.div_ceil(2),
-        CpuYuvChromaSubsampling::Cs422 => height,
+        CpuYuvChromaSubsampling::Cs422 | CpuYuvChromaSubsampling::Cs444 => height,
     };
     // SAFETY: decoded is valid for this borrow. av_frame_clone creates an
     // independently owned AVFrame and retains each immutable AVBufferRef.

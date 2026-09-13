@@ -1887,6 +1887,8 @@ impl TryFrom<DecodedVideoSurfaceFormat> for GpuNativeDecodedFrameTextureFormat {
             | DecodedVideoSurfaceFormat::Yuv420p10le
             | DecodedVideoSurfaceFormat::Yuv422p
             | DecodedVideoSurfaceFormat::Yuv422p10le
+            | DecodedVideoSurfaceFormat::Yuv444p
+            | DecodedVideoSurfaceFormat::Yuv444p10le
             | DecodedVideoSurfaceFormat::Other => {
                 Err(GpuNativeDecodedFrameSourceFormatError::Unsupported { format })
             }

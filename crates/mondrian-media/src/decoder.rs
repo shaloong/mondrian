@@ -1062,6 +1062,10 @@ pub enum DecodedVideoSurfaceFormat {
     Yuv422p,
     /// Planar 10-bit YUV 4:2:2.
     Yuv422p10le,
+    /// Planar eight-bit CPU YUV 4:4:4.
+    Yuv444p,
+    /// Planar little-endian ten-bit CPU YUV 4:4:4 with right-aligned samples.
+    Yuv444p10le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
@@ -2039,6 +2043,8 @@ impl DecodedVideoSurfaceFormat {
             Self::Yuv420p10le => "Yuv420p10le",
             Self::Yuv422p => "Yuv422p",
             Self::Yuv422p10le => "Yuv422p10le",
+            Self::Yuv444p => "Yuv444p",
+            Self::Yuv444p10le => "Yuv444p10le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
             Self::Rgba16Float => "Rgba16Float",
@@ -2122,11 +2128,18 @@ impl DecodedVideoSurfaceFormat {
                     native_gpu_payload: true,
                 }
             }
-            Self::Yuv420p | Self::Yuv420p10le | Self::Yuv422p | Self::Yuv422p10le => {
+            Self::Yuv420p
+            | Self::Yuv420p10le
+            | Self::Yuv422p
+            | Self::Yuv422p10le
+            | Self::Yuv444p
+            | Self::Yuv444p10le => {
                 let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
                     Self::Yuv420p => (Cs420, 8, Unorm8),
                     Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p => (Cs422, 8, Unorm8),
+                    Self::Yuv444p => (Cs444, 8, Unorm8),
+                    Self::Yuv444p10le => (Cs444, 10, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
                     _ => unreachable!(),
                 };

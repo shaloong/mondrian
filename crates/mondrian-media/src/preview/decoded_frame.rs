@@ -47,6 +47,8 @@ pub enum CpuYuvChromaSubsampling {
     Cs420,
     /// One Cb/Cr pair covers a 2x1 luma region.
     Cs422,
+    /// Full-resolution chroma in both dimensions.
+    Cs444,
 }
 
 /// Normalized texture representation used by a compact CPU YUV frame.
@@ -584,6 +586,13 @@ impl CpuYuvFrame {
             frame: Arc::new(frame),
             chroma_plane_layout,
         }
+    }
+
+    /// Physical surface format of the retained immutable decoder allocation.
+    ///
+    /// Read the allocation itself; diagnostic snapshots are not an input contract.
+    pub fn surface_format(&self) -> DecodedVideoSurfaceFormat {
+        super::frame_contract::decoded_surface_format_from_pixel(self.frame.format())
     }
 
     /// Borrow luma bytes and their physical row stride.

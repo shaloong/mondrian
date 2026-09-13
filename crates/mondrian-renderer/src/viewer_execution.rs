@@ -665,15 +665,26 @@ pub fn native_video_sampling_from_decoded(
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
     decoded: DecodedVideoSampling,
 ) -> Option<GpuNativeDecodedFrameVideoSampling> {
+    decoded_video_sampling_for_surface(
+        source_color_space,
+        source_texture_format.physical_descriptor()?,
+        decoded,
+    )
+}
+
+pub(crate) fn decoded_video_sampling_for_surface(
+    source_color_space: ColorSpace,
+    physical: mondrian_media::DecodedVideoSurfaceDescriptor,
+    decoded: DecodedVideoSampling,
+) -> Option<GpuNativeDecodedFrameVideoSampling> {
     let range = match decoded.range {
         DecodedVideoRange::Limited => GpuVideoRange::Limited,
         DecodedVideoRange::Full => GpuVideoRange::Full,
         DecodedVideoRange::Unknown => return None,
     };
-    if decoded.bit_depth != expected_native_source_bit_depth(source_texture_format) {
+    if decoded.bit_depth != physical.component_bit_depth {
         return None;
     }
-    let physical = source_texture_format.physical_descriptor()?;
     let (matrix, chroma_location) = match physical.color_model {
         mondrian_media::DecodedVideoSurfaceColorModel::Ycbcr => {
             let matrix = match decoded.matrix {
@@ -689,7 +700,13 @@ pub fn native_video_sampling_from_decoded(
             };
             (
                 matrix,
-                decoded_chroma_location_to_gpu(decoded.chroma_location)?,
+                if physical.chroma_subsampling
+                    == Some(mondrian_media::DecodedVideoSurfaceChromaSubsampling::Cs444)
+                {
+                    GpuVideoChromaLocation::Unspecified
+                } else {
+                    decoded_chroma_location_to_gpu(decoded.chroma_location)?
+                },
             )
         }
         mondrian_media::DecodedVideoSurfaceColorModel::Rgb => {
@@ -709,12 +726,6 @@ pub fn native_video_sampling_from_decoded(
         bit_depth: decoded.bit_depth,
         chroma_location,
     })
-}
-
-fn expected_native_source_bit_depth(format: GpuNativeDecodedFrameTextureFormat) -> u8 {
-    format
-        .physical_descriptor()
-        .map_or(0, |descriptor| descriptor.component_bit_depth)
 }
 
 fn decoded_chroma_location_to_gpu(
@@ -784,6 +795,42 @@ mod tests {
             native_source_texture_format_from_decoded(DecodedVideoSurfaceFormat::Unknown),
             None
         );
+    }
+
+    #[test]
+    fn full_resolution_chroma_does_not_require_a_subsample_origin() {
+        let decoded = DecodedVideoSampling {
+            matrix: DecodedVideoMatrix::Bt709,
+            range: DecodedVideoRange::Limited,
+            chroma_location: DecodedVideoChromaLocation::Unknown,
+            bit_depth: 10,
+        };
+        let physical =
+            DecodedVideoSurfaceFormat::Yuv444p10le.descriptor().expect("planar descriptor");
+        let sampling = decoded_video_sampling_for_surface(ColorSpace::Rec709, physical, decoded)
+            .expect("co-sited full-resolution chroma");
+        assert_eq!(
+            sampling.chroma_location,
+            GpuVideoChromaLocation::Unspecified
+        );
+        assert!(decoded_video_sampling_for_surface(
+            ColorSpace::Rec709,
+            physical,
+            DecodedVideoSampling { range: DecodedVideoRange::Unknown, ..decoded }
+        )
+        .is_none());
+        assert!(decoded_video_sampling_for_surface(
+            ColorSpace::Rec709,
+            physical,
+            DecodedVideoSampling { matrix: DecodedVideoMatrix::Unknown, ..decoded }
+        )
+        .is_none());
+        assert!(decoded_video_sampling_for_surface(
+            ColorSpace::Rec709,
+            DecodedVideoSurfaceFormat::Yuv422p10le.descriptor().expect("422 descriptor"),
+            decoded
+        )
+        .is_none());
     }
 
     #[test]

@@ -128,6 +128,12 @@ pub enum PreviewCompactCpuYuvHint {
     Yuv420p10le,
     /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
     Yuv422p10le,
+    /// Planar eight-bit 4:2:2 with full-height chroma planes.
+    Yuv422p,
+    /// Planar eight-bit 4:4:4 with full-resolution chroma planes.
+    Yuv444p,
+    /// Planar little-endian ten-bit 4:4:4 with right-aligned samples.
+    Yuv444p10le,
 }
 
 impl PreviewCompactCpuYuvHint {
@@ -137,9 +143,10 @@ impl PreviewCompactCpuYuvHint {
     /// admission, including odd chroma extents and aligned row strides.
     pub const fn retained_bytes_per_pixel(self) -> usize {
         match self {
-            Self::Yuv420p | Self::Nv12 => 2,
-            Self::Yuv420p10le | Self::P010 => 3,
+            Self::Yuv420p | Self::Nv12 | Self::Yuv422p => 2,
+            Self::Yuv420p10le | Self::P010 | Self::Yuv444p => 3,
             Self::Yuv422p10le => 4,
+            Self::Yuv444p10le => 6,
         }
     }
 
@@ -168,10 +175,23 @@ impl PreviewCompactCpuYuvHint {
                     chroma_row.saturating_mul(2).saturating_mul(extent.height.div_ceil(2) as usize),
                 )
             }
-            Self::Yuv422p10le => {
-                let luma_row = align_up_saturating((extent.width as usize).saturating_mul(2), 256);
-                let chroma_row =
-                    align_up_saturating((extent.width.div_ceil(2) as usize).saturating_mul(2), 256);
+            Self::Yuv422p | Self::Yuv422p10le | Self::Yuv444p | Self::Yuv444p10le => {
+                let component_bytes = match self {
+                    Self::Yuv422p | Self::Yuv444p => 1,
+                    _ => 2,
+                };
+                let chroma_width = match self {
+                    Self::Yuv444p | Self::Yuv444p10le => extent.width,
+                    _ => extent.width.div_ceil(2),
+                };
+                let luma_row = align_up_saturating(
+                    (extent.width as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                let chroma_row = align_up_saturating(
+                    (chroma_width as usize).saturating_mul(component_bytes),
+                    256,
+                );
                 luma_row
                     .saturating_add(chroma_row.saturating_mul(2))
                     .saturating_mul(extent.height as usize)
@@ -1008,6 +1028,9 @@ const fn compact_cpu_yuv_hint_from_pixel_format(
         PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
         PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
         PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+        PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
+        PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
+        PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
         PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
         _ => None,
     }
@@ -1262,6 +1285,55 @@ mod tests {
     }
 
     #[test]
+    fn compact_cpu_yuv_extended_aligned_budget_preserves_full_chroma_rows() {
+        for (hint, expected) in [
+            (PreviewCompactCpuYuvHint::Yuv422p, 3072),
+            (PreviewCompactCpuYuvHint::Yuv444p, 4608),
+            (PreviewCompactCpuYuvHint::Yuv444p10le, 6912),
+        ] {
+            assert_eq!(
+                hint.retained_bytes_for_extent(Resolution { width: 257, height: 3 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn compact_cpu_yuv_extended_planar_layouts_are_admitted_without_rgb_expansion() {
+        let mut rejected = Vec::new();
+        for pixel in [
+            PixelFormat::Yuv422p,
+            PixelFormat::Yuv444p,
+            PixelFormat::Yuv444p10le,
+        ] {
+            let mut stream = video_stream(9, pixel, true);
+            stream.codec = VideoCodec::H264;
+            stream.codec_profile = VideoCodecProfile::H264High444Predictive;
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/planar.mp4"),
+                exact_fingerprint(19),
+                &stream,
+            )
+            .expect("explicit planar source");
+            let representation = PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("valid representation");
+            if representation != PreviewDecodeRepresentation::CompactCpuYuv {
+                rejected.push((pixel, representation));
+            }
+        }
+        assert!(
+            rejected.is_empty(),
+            "planar software sources expanded to RGB: {rejected:?}"
+        );
+    }
+
+    #[test]
     fn compact_cpu_yuv_hint_requires_exact_probed_layout() {
         let mut sony_422 = video_stream(8, PixelFormat::Yuv422p10le, true);
         sony_422.codec = VideoCodec::H264;
@@ -1349,7 +1421,10 @@ mod tests {
             &video_stream(9, PixelFormat::Yuv444p10le, true),
         )
         .expect("10-bit 4:4:4 source");
-        assert_eq!(yuv444.compact_cpu_yuv_hint(), None);
+        assert_eq!(
+            yuv444.compact_cpu_yuv_hint(),
+            Some(PreviewCompactCpuYuvHint::Yuv444p10le)
+        );
     }
 
     #[test]

@@ -15,12 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::{
-    native_video_sampling_from_decoded, product_gpu_working_texture_format, ColorFrameAlpha,
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
-    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling, GpuYuvCodeAlignment,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    product_gpu_working_texture_format, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
+    GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
+    GpuYuvCodeAlignment, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
 };
 
@@ -432,9 +431,12 @@ pub(crate) fn record_cpu_yuv_frame(
             GpuNativeDecodedFrameTextureFormat::P010
         }
     };
-    let video_sampling = native_video_sampling_from_decoded(
+    let video_sampling = crate::viewer_execution::decoded_video_sampling_for_surface(
         source_color_space,
-        source_texture_format,
+        frame
+            .surface_format()
+            .descriptor()
+            .ok_or(CpuYuvMaterializationError::InvalidVideoSampling)?,
         frame.video_sampling,
     )
     .ok_or(CpuYuvMaterializationError::InvalidVideoSampling)?;
@@ -469,6 +471,7 @@ pub(crate) fn record_cpu_yuv_frame(
     let chroma_subsampling = match frame.chroma_subsampling {
         CpuYuvChromaSubsampling::Cs420 => GpuYuvChromaSubsampling::Cs420,
         CpuYuvChromaSubsampling::Cs422 => GpuYuvChromaSubsampling::Cs422,
+        CpuYuvChromaSubsampling::Cs444 => GpuYuvChromaSubsampling::Cs444,
     };
     let code_alignment = match frame.sample_format {
         CpuYuvSampleFormat::Unorm8 | CpuYuvSampleFormat::Unorm16Msb10 => {

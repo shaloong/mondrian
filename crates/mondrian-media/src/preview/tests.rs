@@ -2600,6 +2600,79 @@ fn compact_cpu_yuv_semiplanar_retains_interleaved_chroma() {
 }
 
 #[test]
+fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut rejected = Vec::new();
+    for (pixel, chroma_width, bytes) in [
+        (Pixel::YUV422P, 3, 1),
+        (Pixel::YUV444P, 5, 1),
+        (Pixel::YUV444P10LE, 5, 2),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..3 {
+            for sample in decoded.data_mut(plane).chunks_exact_mut(bytes) {
+                sample.fill(0);
+                sample[0] = 0x5a;
+            }
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let result = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            5,
+            3,
+            Path::new("synthetic-planar-retention"),
+            test_source_color(),
+        );
+        let mut frame = match result {
+            Ok(PreviewDecodedFramePayload::CpuYuv(frame)) => frame,
+            other => {
+                rejected.push(format!("{pixel:?}: {other:?}"));
+                continue;
+            }
+        };
+        let physical_format = frame.surface_format();
+        frame.diagnostics.decoded_surface_format = DecodedVideoSurfaceFormat::Unknown;
+        assert_eq!(
+            frame.surface_format(),
+            physical_format,
+            "diagnostics cannot alter the input contract"
+        );
+        assert_eq!((frame.chroma_width, frame.chroma_height), (chroma_width, 3));
+        assert_eq!(frame.sample_format.bytes_per_component(), bytes);
+        assert_eq!(frame.luma_plane().data().as_ptr(), decoded.data(0).as_ptr());
+        let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+            panic!("planar storage must not be interleaved or expanded");
+        };
+        assert_eq!(cb.data().as_ptr(), decoded.data(1).as_ptr());
+        assert_eq!(cr.data().as_ptr(), decoded.data(2).as_ptr());
+        drop(decoded);
+        assert_eq!(
+            frame.luma_plane().data()[0],
+            0x5a,
+            "retained allocation remains live"
+        );
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+    }
+    assert!(
+        rejected.is_empty(),
+        "compact planar layouts were rejected: {rejected:?}"
+    );
+}
+
+#[test]
 fn compact_cpu_yuv_representation_is_exact_and_fail_closed() {
     let mut decoded = ffmpeg::util::frame::video::Video::new(
         ffmpeg::util::format::pixel::Pixel::YUV422P10LE,
