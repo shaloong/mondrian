@@ -35,6 +35,8 @@ const REQUEST_CAPACITY: usize = 1;
 const RESULT_CAPACITY: usize = 1;
 
 pub(crate) struct PreviewCpuFallbackRequest {
+    pub(crate) cpu_materialization_active_bytes: u64,
+    pub(crate) cpu_working_set_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
     pub(crate) generation: u64,
     pub(crate) epoch: PlaybackEpoch,
     pub(crate) output_key: PreviewOutputKey,
@@ -222,6 +224,13 @@ fn execute_cpu_fallback(
     ),
     String,
 > {
+    scratch.reconfigure_cpu_working_set(request.cpu_working_set_grant);
+    scratch
+        .admit_cpu_active_working_set(
+            request.cpu_materialization_active_bytes,
+            mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+        )
+        .map_err(|error| error.to_string())?;
     let contract = preview_raster_presentation_contract(&request.color_context)
         .map_err(|error| error.to_string())?;
     let execution = match &request.cached_working {
@@ -287,4 +296,61 @@ fn execute_cpu_fallback(
         },
         render_cache_frame,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_materialization_worker_installs_owner_grant_before_allocating() {
+        let sequence = mondrian_timeline::Sequence::new("CPU root admission");
+        let grant = mondrian_renderer::TimelineCpuWorkingSetGrant {
+            max_active_bytes: 512 * 1024 * 1024,
+            max_retained_scratch_bytes: 0,
+        };
+        let request = PreviewCpuFallbackRequest {
+            cpu_materialization_active_bytes: 663_552_000,
+            cpu_working_set_grant: grant,
+            generation: 1,
+            epoch: mondrian_playback::PlaybackEngine::new(sequence.time_base(), Default::default())
+                .expect("engine")
+                .snapshot()
+                .epoch,
+            output_key: PreviewOutputKey::new(
+                sequence.id,
+                3840,
+                2160,
+                super::super::preview_execution::PreviewSemanticIdentityBuilder::new(
+                    b"cpu-grant-test",
+                )
+                .finish_identity(),
+            ),
+            width: 3840,
+            height: 2160,
+            elements: Arc::from([]),
+            color_context: sequence
+                .settings
+                .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+                .expect("context"),
+            render_cache_identity: None,
+            cached_working: None,
+            monitoring_tap: Default::default(),
+            monitoring_settings: Default::default(),
+        };
+        let mut scratch = TimelineCompositeScratch::default();
+        let error = match execute_cpu_fallback(&request, &mut scratch) {
+            Err(error) => error,
+            Ok(_) => panic!("unfunded CPU root executed"),
+        };
+        assert!(
+            error.contains("663552000") && error.contains("536870912"),
+            "{error}"
+        );
+        assert_eq!(scratch.cpu_working_set_diagnostics().grant, grant);
+        assert_eq!(
+            scratch.cpu_working_set_diagnostics().retained_scratch_bytes,
+            0
+        );
+    }
 }

@@ -519,7 +519,24 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 preserve_current_output,
             );
         };
+        let cached_working = resolved
+            .render_cache_identity
+            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
+        if let Err(error) = self.scratch.borrow().admit_cpu_active_working_set(
+            resolved.cpu_materialization_active_bytes,
+            mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+        ) {
+            return self.unavailable_gpu_candidate_with_retention(
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineComposite,
+                    error.to_string(),
+                ),
+                preserve_current_output,
+            );
+        }
         let request = PreviewCpuFallbackRequest {
+            cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
+            cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
             generation,
             epoch,
             output_key: resolved.cpu_cache_key.clone(),
@@ -528,9 +545,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             elements: Arc::clone(&resolved.elements),
             color_context: resolved.color_context.clone(),
             render_cache_identity: resolved.render_cache_identity,
-            cached_working: resolved
-                .render_cache_identity
-                .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity)),
+            cached_working,
             monitoring_tap: self.viewer_signal_monitoring.get().0,
             monitoring_settings: self.viewer_signal_monitoring.get().1,
         };
@@ -1101,6 +1116,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                 }
                 ResolvedPlanView {
+                    cpu_materialization_active_bytes: evaluation.cpu_materialization_active_bytes,
                     elements: Arc::clone(&evaluation.elements),
                     cache_key,
                     cpu_cache_key: evaluation
@@ -2439,6 +2455,7 @@ fn join_preview_workers_until(
 /// evaluation itself becomes the single authoritative construction point
 /// (output key, elements, color context, reuse policy).
 struct ResolvedPlanView {
+    cpu_materialization_active_bytes: u64,
     elements: Arc<[ResolvedPreviewElement]>,
     cache_key: PreviewOutputKey,
     cpu_cache_key: PreviewOutputKey,

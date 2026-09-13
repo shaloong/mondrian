@@ -7961,9 +7961,10 @@ fn wait_for_headless_gpu_ready_observation_impl(
         }
         anyhow::ensure!(
             Instant::now() < deadline,
-            "timed out waiting for a real headless Viewer GPU output; current_intent={sampled_intent:?}, candidate_status={candidate_status:?}, candidate_binding={candidate_binding:?}, candidate_output_binding={candidate_output_binding:?}, output_binding_matches={output_binding_matches}, pending_demand={:?}, transport={:?}, diagnostics={:?}",
+            "timed out waiting for a real headless Viewer GPU output; current_intent={sampled_intent:?}, candidate_status={candidate_status:?}, candidate_binding={candidate_binding:?}, candidate_output_binding={candidate_output_binding:?}, output_binding_matches={output_binding_matches}, pending_demand={:?}, transport={:?}, unavailability={:?}, diagnostics={:?}",
             state.pending_playback_frame_demand_identity(),
             state.playback_engine.snapshot(),
+            preview_service.last_unavailability(),
             preview_service.diagnostics()
         );
         wait_for_headless_preview_revision(

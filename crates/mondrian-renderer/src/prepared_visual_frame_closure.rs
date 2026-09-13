@@ -422,11 +422,32 @@ impl<T> PreparedVisualFrameClosure<T> {
     /// until its composite runs. It additionally reserves four canvases at
     /// the largest node extent for the compositor's proven worst case
     /// (output, both Cross Dissolve endpoints, and one Effect result).
-    /// Preview and Export must admit this value against the same owner-scoped
-    /// active-byte grant used by [`crate::TimelineCompositeScratch`] before
-    /// materializing any child pixels.
+    /// CPU-root consumers must admit this value against the same owner-scoped
+    /// active-byte grant used by [`crate::TimelineCompositeScratch`]. Consumers
+    /// that defer the root backend may first admit only CPU child materialization
+    /// using [`Self::conservative_cpu_nested_materialization_active_bytes`].
     pub fn conservative_cpu_materialization_active_bytes(
         &self,
+    ) -> Result<u64, PreparedVisualFrameClosureError> {
+        self.cpu_materialization_active_bytes(true)
+    }
+
+    /// Bound CPU child materialization while leaving the root as an unrendered plan.
+    ///
+    /// Preview resolves nested CPU outputs before selecting the root backend.
+    /// This counts every child output and the same worst-case child scratch as
+    /// full CPU materialization, but no hypothetical root CPU canvas. A caller
+    /// that later executes the root on CPU must separately admit the complete
+    /// closure estimate against its current owner grant before allocating pixels.
+    pub fn conservative_cpu_nested_materialization_active_bytes(
+        &self,
+    ) -> Result<u64, PreparedVisualFrameClosureError> {
+        self.cpu_materialization_active_bytes(false)
+    }
+
+    fn cpu_materialization_active_bytes(
+        &self,
+        include_root: bool,
     ) -> Result<u64, PreparedVisualFrameClosureError> {
         const FLOAT_PIXEL_BYTES: u64 = std::mem::size_of::<[f32; 4]>() as u64;
         const WORST_LOCAL_COMPOSITOR_CANVASES: u64 = 4;
@@ -434,6 +455,9 @@ impl<T> PreparedVisualFrameClosure<T> {
         let mut retained_outputs = 0_u64;
         let mut largest_output = 0_u64;
         for node in &self.nodes {
+            if !include_root && node.id == self.root {
+                continue;
+            }
             let resolution = node.execution_resolution;
             let bytes = u64::from(resolution.width)
                 .checked_mul(u64::from(resolution.height))
@@ -2096,6 +2120,65 @@ mod tests {
             closure.conservative_cpu_materialization_active_bytes(),
             Err(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)
         ));
+    }
+
+    #[test]
+    fn deferred_root_cpu_materialization_charges_only_real_children() {
+        let mut child = Sequence::new("CPU child");
+        child.settings.resolution = Resolution { width: 2, height: 1 };
+        let mut root = Sequence::new("GPU root");
+        root.settings.resolution = Resolution { width: 3840, height: 2160 };
+        let flat = prepare_direct_closure(
+            &root,
+            &[],
+            0,
+            root.settings.resolution,
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .expect("flat closure");
+        assert_eq!(
+            flat.conservative_cpu_nested_materialization_active_bytes()
+                .expect("nested estimate"),
+            0
+        );
+        let time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    TimelineTime::ZERO,
+                    frame_time(24, time_base),
+                    None,
+                )
+                .expect("nested placement"),
+            )
+            .expect("add nested");
+        let closure = prepare_direct_closure(
+            &root,
+            &[child],
+            0,
+            root.settings.resolution,
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .expect("nested closure");
+        let required = closure
+            .conservative_cpu_nested_materialization_active_bytes()
+            .expect("CPU child estimate");
+        assert_eq!(required, 160);
+        assert_eq!(
+            closure
+                .conservative_cpu_materialization_active_bytes()
+                .expect("full CPU estimate"),
+            663_552_032
+        );
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+            max_active_bytes: required - 1,
+            max_retained_scratch_bytes: 0,
+        });
+        assert!(scratch
+            .admit_cpu_active_working_set(required, TimelineCpuCompositePrecision::Float32)
+            .is_err());
     }
 
     #[test]

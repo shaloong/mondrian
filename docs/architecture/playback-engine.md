@@ -2428,3 +2428,15 @@ preroll observation at their existing call boundaries. Slow-call logs distinguis
 maintenance from the authoritative presentation commit without retaining another
 snapshot, renewing a deadline, changing publication order, or asserting a cause
 from elapsed time alone.
+
+
+### Preview CPU admission after backend selection
+
+A resolved frame evaluation carries the canonical complete CPU-materialization
+estimate without making CPU execution mandatory. Timeline preparation admits
+only CPU child materialization because it returns the root as a plan. Root GPU
+execution uses the existing Viewer resource authority. Choosing inline CPU or
+background CPU fallback requires admission of the complete estimate against
+the current Preview CPU grant; background requests carry that same grant to the
+worker. Thus large GPU pictures are not rejected for CPU buffers they never
+allocate, while CPU selection cannot bypass nested-output or scratch limits.

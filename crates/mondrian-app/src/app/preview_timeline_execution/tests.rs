@@ -186,6 +186,66 @@ fn ready_temporal_media_frame(
 }
 
 #[test]
+fn deferred_root_cpu_materialization_does_not_block_uhd_semantics() {
+    let mut sequence = solid_sequence("deferred UHD root", Color::from_rgba8(20, 40, 80, 255));
+    sequence.settings.resolution = Resolution { width: 3840, height: 2160 };
+    let programs = RefCell::new(PreparedVisualProgramCache::default());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    scratch.borrow_mut().reconfigure_cpu_working_set(
+        mondrian_renderer::TimelineCpuWorkingSetGrant {
+            max_active_bytes: 0,
+            max_retained_scratch_bytes: 0,
+        },
+    );
+    let cancellation = ExecutionCancellationToken::new();
+    let graph = PreviewTimelineGraph {
+        programs: &programs,
+        scratch: &scratch,
+        dependency_observer: None,
+        generation: 1,
+        cancellation: &cancellation,
+        author_snapshot: None,
+        heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
+    };
+    let result = resolve_preview_timeline_with_graph(
+        PreviewTimelineFrameRequest::new(
+            &sequence,
+            &[],
+            0,
+            sequence.settings.resolution,
+            PreviewResolutionScale::Full,
+            color_context(&sequence),
+        ),
+        PreviewTimelineSourceAdapters::new(&mut |_| panic!("no media"), &mut |_| {
+            panic!("no title")
+        }),
+        graph,
+    );
+    let PreviewTimelineResolution::Ready(resolved) = result else {
+        panic!("unrendered GPU root must not reserve CPU canvases");
+    };
+    assert!(
+        resolved.facts.is_empty(),
+        "semantic resolution must not allocate a CPU working frame"
+    );
+    assert_eq!(resolved.plan.cpu_materialization_active_bytes, 663_552_000);
+    assert_eq!(
+        scratch.borrow().cpu_working_set_diagnostics().retained_scratch_bytes,
+        0
+    );
+    assert!(
+        scratch
+            .borrow()
+            .admit_cpu_active_working_set(
+                resolved.plan.cpu_materialization_active_bytes,
+                TimelineCpuCompositePrecision::Float32
+            )
+            .is_err(),
+        "later CPU execution still requires its full grant"
+    );
+}
+
+#[test]
 fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
     ensure_mondrian_default_ocio_loaded().expect("default OCIO");
     let sequence = solid_sequence("root", Color::from_rgba8(20, 40, 80, 255));

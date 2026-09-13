@@ -365,6 +365,7 @@ fn evaluation_working_set_invalidates_only_the_exact_media_sample() {
 
     // A Ready evaluation retains the same exact dependency.
     let ready = Arc::new(ResolvedFrameEvaluation {
+        cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
             key.sequence_id,
@@ -419,6 +420,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         0,
     );
     let current = Arc::new(ResolvedFrameEvaluation {
+        cpu_materialization_active_bytes: 0,
         key: current_key,
         output_key: output.clone(),
         elements: Arc::from([]),
@@ -433,6 +435,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
     set.insert(
         successor_key,
         Arc::new(ResolvedFrameEvaluation {
+            cpu_materialization_active_bytes: 0,
             key: successor_key,
             output_key: output.clone(),
             elements: Arc::from([]),
@@ -545,6 +548,7 @@ fn completed_cpu_evaluation_releases_prefetch_headroom_without_clearing_store() 
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
             elements: elements.into(),
@@ -631,6 +635,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         PreviewDecodeExecutionSummary::default(),
     );
     let evaluation = Arc::new(ResolvedFrameEvaluation {
+        cpu_materialization_active_bytes: 0,
         key,
         output_key: PreviewOutputKey::new(
             key.sequence_id,
@@ -708,6 +713,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
             elements: Arc::from([ResolvedPreviewElement::Media {
@@ -15954,6 +15960,7 @@ fn retired_transport_releases_cpu_evaluation_guards_without_clearing_store() {
     set.insert(
         key,
         Arc::new(ResolvedFrameEvaluation {
+            cpu_materialization_active_bytes: 0,
             key,
             output_key: output.clone(),
             elements: elements.into(),

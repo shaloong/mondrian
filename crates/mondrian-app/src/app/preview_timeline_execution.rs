@@ -149,6 +149,8 @@ pub(crate) enum PreviewTimelinePendingDependency {
 /// Resolved root Viewer plan with an always-present semantic output identity
 /// and separate cross-call reuse evidence.
 pub(crate) struct ResolvedPreviewPlan {
+    /// Whole-closure CPU cost, admitted only if the root actually executes on CPU.
+    pub(crate) cpu_materialization_active_bytes: u64,
     pub(crate) elements: Vec<ResolvedPreviewElement>,
     pub(crate) cache_key: PreviewOutputKey,
     pub(crate) cache_reusable: bool,
@@ -466,14 +468,26 @@ where
             };
         }
     };
+    let nested_materialization_bytes =
+        match closure.conservative_cpu_nested_materialization_active_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return PreviewTimelineResolution::Unavailable {
+                    reason: PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        error.to_string(),
+                    ),
+                }
+            }
+        };
     if let Err(error) = scratch.borrow().admit_cpu_active_working_set(
-        materialization_bytes,
+        nested_materialization_bytes,
         TimelineCpuCompositePrecision::Float32,
     ) {
         return PreviewTimelineResolution::Unavailable {
             reason: PreviewUnavailability::blocked(
                 PreviewOutputStage::TimelineEvaluation,
-                format!("Preview visual closure exceeds its CPU working-set grant: {error}"),
+                format!("Preview nested visual closure exceeds its CPU working-set grant: {error}"),
             ),
         };
     }
@@ -559,6 +573,7 @@ where
         });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
         plan: ResolvedPreviewPlan {
+            cpu_materialization_active_bytes: materialization_bytes,
             elements,
             cache_key,
             cache_reusable,

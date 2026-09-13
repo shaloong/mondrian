@@ -98,6 +98,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     EvaluationReusePolicy::Transient
                 };
                 let evaluation = Arc::new(ResolvedFrameEvaluation {
+                    cpu_materialization_active_bytes: plan.cpu_materialization_active_bytes,
                     key: evaluation_key,
                     output_key: plan.cache_key,
                     elements: plan.elements.into(),

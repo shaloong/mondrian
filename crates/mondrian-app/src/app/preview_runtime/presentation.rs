@@ -248,6 +248,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let cached_working = evaluation.render_cache_identity.and_then(|identity| {
                         self.timeline_render_cache.borrow().ready_frame(identity)
                     });
+                    if let Err(error) = self.scratch.borrow().admit_cpu_active_working_set(
+                        evaluation.cpu_materialization_active_bytes,
+                        mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+                    ) {
+                        return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                            PreviewUnavailability::blocked(
+                                PreviewOutputStage::TimelineComposite,
+                                error.to_string(),
+                            ),
+                        ));
+                    }
                     let render_cache_hit = cached_working.is_some();
                     let execution = match cached_working {
                         Some(frame) => present_preview_working_with_signal_monitoring(

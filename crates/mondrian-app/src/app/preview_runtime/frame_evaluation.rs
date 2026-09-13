@@ -192,6 +192,8 @@ pub(crate) enum EvaluationUnavailableReason {
 /// evaluation working set must stay tiny so these handles never become an
 /// invisible decoded-frame cache.
 pub(crate) struct ResolvedFrameEvaluation {
+    /// Complete CPU closure estimate retained for actual CPU backend admission.
+    pub(crate) cpu_materialization_active_bytes: u64,
     pub(crate) key: FrameEvaluationKey,
     pub(crate) output_key: PreviewOutputKey,
     pub(crate) elements: Arc<[ResolvedPreviewElement]>,

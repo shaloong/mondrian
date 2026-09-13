@@ -1585,3 +1585,23 @@ all admitted owners and joins the worker before Viewer emits a receipt. A panic,
 failed release or abandoned retirement cannot establish successful closure.
 Moving destruction off the callback stack does not prove bounded foreign-driver
 execution or identify the cause of every observed playback stall.
+
+
+### CPU materialization admission follows executed nodes
+
+The canonical prepared visual closure exposes both its complete CPU estimate
+and the estimate for CPU children with an unrendered root. Both use the same
+checked output/scratch accounting. Preview's semantic executor materializes
+nested CPU nodes but returns root elements for later backend selection, so it
+admits the child estimate there. A GPU root consumes the existing Viewer GPU
+grant; it must not also reserve hypothetical CPU root canvases. This matters
+at UHD, where a conservative five-canvas Float32 CPU root exceeds 512 MiB even
+though the GPU route never allocates those CPU canvases.
+
+The complete CPU estimate remains attached to the single resolved evaluation.
+Actual inline CPU root execution and background CPU fallback admit that estimate
+before allocating pixels. The fallback request also carries the admitting
+owner's CPU working-set grant, which the worker installs instead of retaining
+an unbounded default. CPU adaptation of cached working frames retains the same
+conservative complete estimate and existing cache residency contracts.
+CPU child and root limits, retained-scratch limits, and GPU budgets are unchanged.
