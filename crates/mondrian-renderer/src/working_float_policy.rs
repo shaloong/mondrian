@@ -9,6 +9,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::GpuColorFrameTextureFormat;
 
+/// Required physical usages of the product GPU working texture.
+pub const PRODUCT_GPU_WORKING_TEXTURE_USAGES: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
+    .union(wgpu::TextureUsages::COPY_SRC)
+    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+    .union(wgpu::TextureUsages::RENDER_ATTACHMENT);
+
+/// Admission failure for the selected product GPU working representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GpuWorkingFloatAdapterAdmissionError {
+    /// The physical adapter cannot create the working texture with every
+    /// production usage required by upload, compositing, sampling, and export.
+    #[error(
+        "GPU working texture {format:?} requires usages {required:?}, but the adapter reports {available:?}"
+    )]
+    UnsupportedUsages {
+        /// Selected product texture format.
+        format: GpuColorFrameTextureFormat,
+        /// Complete production usage contract.
+        required: wgpu::TextureUsages,
+        /// Physical usages reported by the adapter.
+        available: wgpu::TextureUsages,
+    },
+    /// RGBA32F render attachments require native adapter-format capabilities
+    /// beyond the portable WebGPU format table.
+    #[error("GPU working texture {format:?} requires TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES")]
+    AdapterSpecificFormatFeatureUnavailable {
+        /// Selected product texture format.
+        format: GpuColorFrameTextureFormat,
+    },
+}
+
 /// Scene-linear floating-point representation used by GPU working textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GpuWorkingFloatFormat {
@@ -336,6 +367,45 @@ pub const fn product_gpu_working_bytes_per_pixel() -> u32 {
     PRODUCT_GPU_WORKING_FLOAT_DECISION.format().bytes_per_pixel()
 }
 
+/// Validate one physical adapter and return device features required by the
+/// selected product working representation.
+///
+/// This is the single device-admission seam shared by Viewer, headless, and
+/// Export contexts. It never changes the product precision decision.
+pub fn product_gpu_working_texture_device_features(
+    adapter: &wgpu::Adapter,
+) -> Result<wgpu::Features, GpuWorkingFloatAdapterAdmissionError> {
+    let format = product_gpu_working_texture_format();
+    let available = adapter.get_texture_format_features(format.to_wgpu()).allowed_usages;
+    product_gpu_working_texture_features_from_capabilities(format, adapter.features(), available)
+}
+
+fn product_gpu_working_texture_features_from_capabilities(
+    format: GpuColorFrameTextureFormat,
+    adapter_features: wgpu::Features,
+    available: wgpu::TextureUsages,
+) -> Result<wgpu::Features, GpuWorkingFloatAdapterAdmissionError> {
+    if !available.contains(PRODUCT_GPU_WORKING_TEXTURE_USAGES) {
+        return Err(GpuWorkingFloatAdapterAdmissionError::UnsupportedUsages {
+            format,
+            required: PRODUCT_GPU_WORKING_TEXTURE_USAGES,
+            available,
+        });
+    }
+    if format == GpuColorFrameTextureFormat::Rgba32Float {
+        let feature = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter_features.contains(feature) {
+            return Err(
+                GpuWorkingFloatAdapterAdmissionError::AdapterSpecificFormatFeatureUnavailable {
+                    format,
+                },
+            );
+        }
+        return Ok(feature);
+    }
+    Ok(wgpu::Features::empty())
+}
+
 const fn fingerprint_is_present(fingerprint: [u8; 32]) -> bool {
     let mut index = 0;
     while index < fingerprint.len() {
@@ -345,4 +415,54 @@ const fn fingerprint_is_present(fingerprint: [u8; 32]) -> bool {
         index += 1;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgba32_working_texture_rejects_incomplete_physical_usages() {
+        let available = PRODUCT_GPU_WORKING_TEXTURE_USAGES - wgpu::TextureUsages::RENDER_ATTACHMENT;
+        assert!(matches!(
+            product_gpu_working_texture_features_from_capabilities(
+                GpuColorFrameTextureFormat::Rgba32Float,
+                wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                available,
+            ),
+            Err(GpuWorkingFloatAdapterAdmissionError::UnsupportedUsages {
+                available: reported,
+                ..
+            }) if reported == available
+        ));
+    }
+
+    #[test]
+    fn rgba32_working_texture_requires_adapter_specific_format_feature() {
+        assert_eq!(
+            product_gpu_working_texture_features_from_capabilities(
+                GpuColorFrameTextureFormat::Rgba32Float,
+                wgpu::Features::empty(),
+                PRODUCT_GPU_WORKING_TEXTURE_USAGES,
+            ),
+            Err(
+                GpuWorkingFloatAdapterAdmissionError::AdapterSpecificFormatFeatureUnavailable {
+                    format: GpuColorFrameTextureFormat::Rgba32Float,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn qualified_rgba32_working_texture_requests_the_enabling_device_feature() {
+        let feature = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        assert_eq!(
+            product_gpu_working_texture_features_from_capabilities(
+                GpuColorFrameTextureFormat::Rgba32Float,
+                feature,
+                PRODUCT_GPU_WORKING_TEXTURE_USAGES,
+            ),
+            Ok(feature)
+        );
+    }
 }

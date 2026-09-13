@@ -15,13 +15,14 @@ use mondrian_renderer::profile::{
 use mondrian_renderer::{
     color::ProgramOutputBoundary, evaluate_realtime_visual_performance,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, GpuColorFrameTextureFormat,
-    GpuProgramScopesRequest, RealtimePerformanceExecutionPolicy, RealtimeVisualAdapterIdentity,
-    RealtimeVisualFrameEvidence, RealtimeVisualPerformanceObservation, RealtimeVisualScenarioId,
-    RealtimeVisualWarmPathEvidence, RenderMonitorAdaptation, TimelineSolidColorLayer,
-    ViewerGpuExecutionGpuStage, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision,
-    ViewerGpuSourceLayer, ViewerSourceRect,
+    product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
+    GpuColorFrameTextureFormat, GpuProgramScopesRequest, RealtimePerformanceExecutionPolicy,
+    RealtimeVisualAdapterIdentity, RealtimeVisualFrameEvidence,
+    RealtimeVisualPerformanceObservation, RealtimeVisualScenarioId, RealtimeVisualWarmPathEvidence,
+    RenderMonitorAdaptation, TimelineSolidColorLayer, ViewerGpuExecutionGpuStage,
+    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision, ViewerGpuSourceLayer,
+    ViewerSourceRect,
 };
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -422,9 +423,17 @@ async fn create_gpu_context() -> Result<Option<GpuContext>> {
     if timestamp_features.is_empty() {
         return Ok(None);
     }
+    let working_texture_features = match product_gpu_working_texture_device_features(&adapter) {
+        Ok(features) => features,
+        Err(error) => {
+            eprintln!("realtime visual GPU gate NotRun: {error}");
+            return Ok(None);
+        }
+    };
     let required_features = timestamp_features
         | native_video_texture_device_features(adapter.features())
-        | ocio_lut_filtering_device_features(adapter.features());
+        | ocio_lut_filtering_device_features(adapter.features())
+        | working_texture_features;
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("mondrian-realtime-visual-matrix-device"),
         required_features,

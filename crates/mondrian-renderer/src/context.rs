@@ -287,9 +287,14 @@ impl GpuContext {
 
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
+        let working_texture_features = crate::product_gpu_working_texture_device_features(&adapter)
+            .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                reason: error.to_string(),
+            })?;
         let device_descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(adapter.features())
-                | ocio_lut_filtering_device_features(adapter.features()),
+                | ocio_lut_filtering_device_features(adapter.features())
+                | working_texture_features,
             ..wgpu::DeviceDescriptor::default()
         };
         let (device, queue) =

@@ -17,12 +17,12 @@ use mondrian_renderer::{
         ProgramOutputBoundary,
     },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, ColorFrameDescriptor, ColorFrameDomain,
-    ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameTextureFormat, GpuColorQualificationExecutionPolicy, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor, OcioGpuShaderPlan,
-    OcioGpuShaderRequest, RenderColorTransformGpuOptions, RenderInputTransform,
-    RenderIntermediateColorTransform,
+    product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameTextureFormat,
+    GpuColorQualificationExecutionPolicy, GpuCompositeLayer, GpuCompositeLayerSource,
+    GpuCompositeRequest, GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest,
+    RenderColorTransformGpuOptions, RenderInputTransform, RenderIntermediateColorTransform,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -1025,9 +1025,17 @@ async fn create_timestamp_gpu_context() -> Result<Option<TimestampGpuContext>> {
     if timestamp_features.is_empty() {
         return Ok(None);
     }
+    let working_texture_features = match product_gpu_working_texture_device_features(&adapter) {
+        Ok(features) => features,
+        Err(error) => {
+            eprintln!("color-view GPU gate NotRun: {error}");
+            return Ok(None);
+        }
+    };
     let required_features = timestamp_features
         | native_video_texture_device_features(adapter.features())
-        | ocio_lut_filtering_device_features(adapter.features());
+        | ocio_lut_filtering_device_features(adapter.features())
+        | working_texture_features;
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("mondrian-color-view-4k-timestamp-device"),
         required_features,

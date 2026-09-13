@@ -42,6 +42,7 @@ use mondrian_renderer::ViewerGpuExecutionError;
 use mondrian_renderer::{
     color::RenderColorStageDiagnostics,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
+    product_gpu_working_texture_device_features,
     profile::gpu_timestamp_query_device_features,
     profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
     request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
@@ -911,6 +912,9 @@ impl HeadlessViewerGpuAdapter {
                 let raw_adapter_info = adapter.get_info();
                 let viewer_suffix_timing_features =
                     gpu_timestamp_query_device_features(supported_features);
+                let working_texture_features =
+                    product_gpu_working_texture_device_features(&adapter)
+                        .map_err(HeadlessViewerGpuError::from)?;
                 let native_import_timing_features = match policy {
                     NativeVideoImportGpuTimingPolicy::Disabled => wgpu::Features::empty(),
                     NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
@@ -920,6 +924,7 @@ impl HeadlessViewerGpuAdapter {
                 let descriptor = wgpu::DeviceDescriptor {
                     required_features: native_video_texture_device_features(supported_features)
                         | ocio_lut_filtering_device_features(supported_features)
+                        | working_texture_features
                         | viewer_suffix_timing_features
                         | native_import_timing_features,
                     ..wgpu::DeviceDescriptor::default()
@@ -2238,6 +2243,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Adapter(String),
     #[error("headless GPU device creation failed: {0}")]
     Device(String),
+    #[error(transparent)]
+    WorkingFloatAdapter(#[from] mondrian_renderer::GpuWorkingFloatAdapterAdmissionError),
     #[error(transparent)]
     DeviceProgressStart(#[from] ViewerGpuDeviceProgressStartError),
     #[error(transparent)]

@@ -436,11 +436,13 @@ pub use visual_execution_validation::{
     PreparedVisualExecutionTemporalSourceKindTrace, PreparedVisualExecutionTemporalSourceTrace,
 };
 pub use working_float_policy::{
-    product_gpu_working_bytes_per_pixel, product_gpu_working_texture_format,
-    GpuWorkingFloat16ImplementationQualification, GpuWorkingFloatBlockers, GpuWorkingFloatDecision,
+    product_gpu_working_bytes_per_pixel, product_gpu_working_texture_device_features,
+    product_gpu_working_texture_format, GpuWorkingFloat16ImplementationQualification,
+    GpuWorkingFloatAdapterAdmissionError, GpuWorkingFloatBlockers, GpuWorkingFloatDecision,
     GpuWorkingFloatDecisionReason, GpuWorkingFloatFormat, GpuWorkingFloatPerformanceEvidence,
     GpuWorkingFloatPolicy, GpuWorkingFloatPreference, GpuWorkingFloatQualityEvidence,
     PRODUCT_GPU_WORKING_FLOAT_DECISION, PRODUCT_GPU_WORKING_FLOAT_POLICY,
+    PRODUCT_GPU_WORKING_TEXTURE_USAGES,
 };
 mod basic_title;
 pub use basic_title::{

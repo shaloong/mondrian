@@ -104,6 +104,16 @@ CPU-prefix/GPU-suffix Implementation are Float32-only, so their explicit
 contracts remain qualification blockers rather than being mechanically
 relabeled.
 
+Device creation resolves the fixed product working texture through one adapter
+admission seam. The adapter must report `COPY_SRC`, `COPY_DST`,
+`TEXTURE_BINDING`, and `RENDER_ATTACHMENT` for that exact format. RGBA32F also
+requires `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`, which Viewer, Headless,
+and standalone/Export device constructors explicitly enable. A supplied device
+that omitted the returned feature is rejected by
+`ViewerGpuExecutionRuntime::new` before any pipeline is created. Unsupported
+adapters therefore produce a typed admission error; they do not enter wgpu
+validation, silently select RGBA16F, or claim a CPU fallback as GPU execution.
+
 Program Output, monitor/presentation carriers, encoded native-video sources,
 Export pipe formats, RGBA32F LUTs, typed DataTextures/AlphaMasks, and the
 lossless Render Cache have separate storage contracts. They do not inherit the

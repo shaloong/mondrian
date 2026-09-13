@@ -23,7 +23,8 @@ use crate::{
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
     GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
     GpuProgramScopesRuntimeDiagnostics, GpuSignalMonitorError, GpuSignalMonitorRequest,
-    GpuSignalMonitorRuntime, GpuViewerSpatialRuntimeDiagnostics, GpuWorkingFloatDecision,
+    GpuSignalMonitorRuntime, GpuViewerSpatialRuntimeDiagnostics,
+    GpuWorkingFloatAdapterAdmissionError, GpuWorkingFloatDecision,
     HeterogeneousGpuCompletedContinuation, HeterogeneousGpuContinuationError,
     HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
     HeterogeneousGpuSubmittedContinuation, NativeVideoImportCandidateTimingReceipt,
@@ -174,6 +175,20 @@ pub struct ViewerGpuExecutionRuntime {
 /// Error creating one Viewer GPU execution context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ViewerGpuExecutionRuntimeCreateError {
+    /// The selected adapter cannot implement the fixed product working texture.
+    #[error(transparent)]
+    WorkingFloatAdapter(#[from] GpuWorkingFloatAdapterAdmissionError),
+    /// The device was created without the adapter-specific working-format
+    /// feature returned by product admission.
+    #[error(
+        "GPU device is missing working-texture features {required:?}; enabled features are {enabled:?}"
+    )]
+    WorkingFloatDeviceFeatures {
+        /// Features required by the selected adapter/format pair.
+        required: wgpu::Features,
+        /// Features enabled on the supplied device.
+        enabled: wgpu::Features,
+    },
     /// Renderer frame identity allocation is exhausted.
     #[error(transparent)]
     FrameId(#[from] GpuColorFrameIdAllocationError),
@@ -207,6 +222,17 @@ impl ViewerGpuExecutionRuntime {
         queue: &wgpu::Queue,
         native_import_gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
     ) -> Result<Self, ViewerGpuExecutionRuntimeCreateError> {
+        let required_working_features =
+            crate::product_gpu_working_texture_device_features(adapter)?;
+        let enabled_features = device.features();
+        if !enabled_features.contains(required_working_features) {
+            return Err(
+                ViewerGpuExecutionRuntimeCreateError::WorkingFloatDeviceFeatures {
+                    required: required_working_features,
+                    enabled: enabled_features,
+                },
+            );
+        }
         let resource_grant = ViewerGpuExecutionResourceGrant::default();
         let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             resource_grant.output_pool,

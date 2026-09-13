@@ -105,10 +105,10 @@ use mondrian_renderer::{
         RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
     },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, GpuProgramScopesRequest, GpuSignalMonitorRequest,
-    ViewerGpuExecutionError, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
-    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
-    ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
+    product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
+    GpuProgramScopesRequest, GpuSignalMonitorRequest, ViewerGpuExecutionError,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision,
+    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -2104,9 +2104,14 @@ struct AppUiSurfaceDeviceReopenTransition {
 fn request_app_ui_device(
     adapter: &wgpu::Adapter,
 ) -> Result<(wgpu::Device, wgpu::Queue), mondrian_core::MondrianError> {
+    let working_texture_features =
+        product_gpu_working_texture_device_features(adapter).map_err(|error| {
+            mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() }
+        })?;
     let descriptor = wgpu::DeviceDescriptor {
         required_features: native_video_texture_device_features(adapter.features())
-            | ocio_lut_filtering_device_features(adapter.features()),
+            | ocio_lut_filtering_device_features(adapter.features())
+            | working_texture_features,
         ..wgpu::DeviceDescriptor::default()
     };
     pollster::block_on(mondrian_renderer::request_device_with_native_video_support(
