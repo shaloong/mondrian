@@ -2723,6 +2723,91 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
 }
 
 #[test]
+fn gpu_composite_layers_materialize_native_video_at_projected_preview_density() {
+    let media = MediaPreviewFrame::from_native(
+        test_native_source_frame(3840, 2160),
+        Resolution { width: 3840, height: 2160 },
+        Resolution { width: 3840, height: 2160 },
+        test_preview_semantic_identity(145),
+        mondrian_playback::FramePresentationQuality::Ready,
+        PreviewDecodeExecutionSummary::default(),
+    );
+    let effect_graph = mondrian_effects::compile_reference_effect_graph(
+        &mondrian_effects::EffectRenderPlan::default(),
+    )
+    .expect("compile identity graph");
+    let elements = vec![ResolvedPreviewElement::Media {
+        frame: media,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [0.25, 0.0, 0.0, 0.0, 0.25, 0.0],
+        effect_graph,
+        prepared_heterogeneous_route: None,
+        frame_seed: 7,
+    }];
+
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("native source should remain on the GPU path");
+
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { native_source: Some(source), transform, .. }) => {
+            assert_eq!(
+                (source.materialization_width, source.materialization_height),
+                (960, 540),
+                "native YUV conversion should fuse the 4K-to-Preview reduction"
+            );
+            assert_eq!(
+                *transform,
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                "rebased spatial coordinates must preserve the authored picture"
+            );
+            assert_eq!(
+                (source.native_frame.width, source.native_frame.height),
+                (3840, 2160),
+                "the decoder surface and cache identity remain source-native"
+            );
+        }
+        _ => panic!("expected native media layer"),
+    }
+}
+
+#[test]
+fn gpu_composite_layers_keep_native_source_density_for_preview_zoom() {
+    let media = MediaPreviewFrame::from_native(
+        test_native_source_frame(3840, 2160),
+        Resolution { width: 3840, height: 2160 },
+        Resolution { width: 3840, height: 2160 },
+        test_preview_semantic_identity(146),
+        mondrian_playback::FramePresentationQuality::Ready,
+        PreviewDecodeExecutionSummary::default(),
+    );
+    let elements = vec![ResolvedPreviewElement::Media {
+        frame: media,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: [1.0, 0.0, -1440.0, 0.0, 1.0, -810.0],
+        effect_graph: mondrian_effects::identity_compiled_effect_graph().expect("identity graph"),
+        prepared_heterogeneous_route: None,
+        frame_seed: 7,
+    }];
+
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("zoomed native source should remain on the GPU path");
+
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { native_source: Some(source), transform, .. }) => {
+            assert_eq!(
+                (source.materialization_width, source.materialization_height),
+                (3840, 2160),
+                "a zoomed crop needs the source density visible in the Viewer"
+            );
+            assert_eq!(*transform, [1.0, 0.0, -1440.0, 0.0, 1.0, -810.0]);
+        }
+        _ => panic!("expected native media layer"),
+    }
+}
+
+#[test]
 fn native_source_only_media_frame_fails_cpu_working_fallback() {
     let frame = MediaPreviewFrame::from_native(
         test_native_source_frame(320, 180),

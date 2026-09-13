@@ -124,6 +124,14 @@ impl PreviewWorkNotifier {
         self.publish_progress()
     }
 
+    /// Advance the revision after worker-owned lifecycle cleanup progresses.
+    ///
+    /// This is a wake hint for owners waiting to observe physical retirement;
+    /// the worker's execution diagnostics remain the sole lifecycle evidence.
+    pub(crate) fn lifecycle_progressed(&self) -> PreviewWorkRevision {
+        self.publish_progress()
+    }
+
     /// Create a guard that publishes when the owning worker exits.
     pub(crate) fn worker_exit_notification(&self) -> PreviewWorkerExitNotification {
         PreviewWorkerExitNotification { notifier: self.clone() }

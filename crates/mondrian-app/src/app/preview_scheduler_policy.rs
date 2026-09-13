@@ -47,12 +47,12 @@ const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
 /// Conservative physical reservation for one speculative decoded frame.
 ///
 /// CPU bytes include both the retained source payload and the lazily
-/// materialized working float frame. A renderer-requested compact YUV source
-/// has no CPU working fallback, so its exact plane footprint is reserved
-/// without inventing a full RGBA float payload. A strict native request
-/// reserves only one decoder-surface unit. A preferred native request also
-/// reserves the source-plus-working CPU payload permitted by Media's bounded
-/// software recovery, before lookahead planning or producer admission.
+/// materialized working float frame. A renderer-consumable YUV source reserves
+/// its exact probed plane footprint without inventing a full RGBA float
+/// payload. A strict native request reserves only one decoder-surface unit. A
+/// preferred native request reserves that unit together with the exact compact
+/// YUV payload that Media can produce during bounded software recovery. The
+/// Frame Store revalidates the successful payload's actual charge at commit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaPreviewResidencyReservation {
     pub(crate) entries: usize,
@@ -64,11 +64,14 @@ impl MediaPreviewResidencyReservation {
     fn for_key(key: &MediaPreviewKey, hardware: PreviewHardwareDecodeRequest) -> Self {
         let resolution = key.residency_resolution();
         let pixels = (resolution.width as usize).saturating_mul(resolution.height as usize);
-        let cpu_bytes = if key.decode.representation().is_native_surface()
+        let native_surface = key.decode.representation().is_native_surface();
+        let compact_cpu_recovery =
+            native_surface && hardware != PreviewHardwareDecodeRequest::RequireGpuResident;
+        let cpu_bytes = if native_surface
             && hardware == PreviewHardwareDecodeRequest::RequireGpuResident
         {
             0
-        } else if key.decode.representation().is_compact_cpu_yuv() {
+        } else if key.decode.representation().is_compact_cpu_yuv() || compact_cpu_recovery {
             key.decode.source().compact_cpu_yuv_hint().map_or_else(
                 || pixels.saturating_mul(2 * 4 * std::mem::size_of::<f32>()),
                 |hint| hint.retained_bytes_for_extent(resolution),
@@ -81,7 +84,7 @@ impl MediaPreviewResidencyReservation {
                     + 4 * std::mem::size_of::<f32>(),
             )
         };
-        let decoder_resource_units = usize::from(key.decode.representation().is_native_surface());
+        let decoder_resource_units = usize::from(native_surface);
         Self { entries: 1, cpu_bytes, decoder_resource_units }
     }
 }
@@ -645,14 +648,36 @@ mod tests {
     }
 
     #[test]
-    fn preferred_native_reservation_covers_software_recovery_payload() {
+    fn preferred_native_reservation_covers_exact_compact_software_recovery_payload() {
         let key = four_k_native_surface_key();
         let reservation = media_preview_residency_reservation(
             &key,
             PreviewHardwareDecodeRequest::PreferGpuResident,
         );
-        assert_eq!(reservation.cpu_bytes, 3840usize * 2160 * 32);
+        assert_eq!(
+            reservation.cpu_bytes,
+            mondrian_media::PreviewCompactCpuYuvHint::P010
+                .retained_bytes_for_extent(mondrian_core::Resolution { width: 3840, height: 2160 })
+        );
         assert_eq!(reservation.decoder_resource_units, 1);
+    }
+
+    #[test]
+    fn preferred_native_4k_preroll_fits_the_minimum_optional_grant() {
+        let reservation = media_preview_residency_reservation(
+            &four_k_native_surface_key(),
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+        );
+        let preroll_frames = 3usize;
+        assert!(
+            reservation.cpu_bytes.saturating_mul(preroll_frames) <= 128 * 1024 * 1024,
+            "three exact P010 recovery payloads must fit the 128 MiB minimum optional grant"
+        );
+        assert_eq!(
+            reservation.decoder_resource_units.saturating_mul(preroll_frames),
+            3,
+            "the same preroll reserves exactly three decoder-surface units"
+        );
     }
 
     #[test]
@@ -663,7 +688,11 @@ mod tests {
             &key,
             PreviewHardwareDecodeRequest::PreferGpuResident,
         );
-        assert_eq!(reservation.cpu_bytes, 3840usize * 2160 * 32);
+        assert_eq!(
+            reservation.cpu_bytes,
+            mondrian_media::PreviewCompactCpuYuvHint::P010
+                .retained_bytes_for_extent(mondrian_core::Resolution { width: 3840, height: 2160 })
+        );
     }
 
     #[test]

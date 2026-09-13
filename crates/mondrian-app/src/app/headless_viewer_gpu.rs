@@ -48,12 +48,13 @@ use mondrian_renderer::{
     request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
     GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
-    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
-    NativeVideoImportCandidateTimingReceipt, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, ViewerGpuExecutionCpuStageTimings,
-    ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
-    ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision,
-    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
+    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
+    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1097,6 +1098,18 @@ impl HeadlessViewerGpuAdapter {
             device_loss_count: terminal_kind.map_or(0, |kind| kind.device_loss_count()),
             fatal_error_count: terminal_kind.map_or(0, |kind| kind.fatal_error_count()),
         }
+    }
+
+    /// Retire renderer source records after their completed candidate owner was consumed.
+    ///
+    /// Completion polling must first return and drop the `PreviewGpuFrame` that
+    /// held the decoder source. This second, nonblocking pass then observes the
+    /// released strong reference and returns the exact remaining source count.
+    pub(crate) fn retire_released_native_import_sources(
+        &mut self,
+    ) -> Result<usize, HeadlessViewerGpuError> {
+        self.runtime.retire_completed_native_import_sources()?;
+        Ok(self.runtime.native_import_retained_source_count())
     }
 
     /// Exact App session qualifying renderer-local native-import tokens.
@@ -2259,6 +2272,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Backpressure(String),
     #[error("headless Viewer GPU recording failed: {0}")]
     Record(String),
+    #[error(transparent)]
+    NativeImportRetirement(#[from] GpuNativeDecodedFrameImportError),
     #[error("headless Viewer GPU execution exceeded its caller's monotonic deadline")]
     DeadlineExceeded,
     #[error("headless Viewer GPU submission identity space is exhausted")]

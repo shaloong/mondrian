@@ -5433,8 +5433,14 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
                 Duration::from_secs(30),
             )?;
 
+            let mut next_frame_at = Instant::now()
+                .checked_add(frame_interval)
+                .context("derive first accelerated playback boundary")?;
             for _ in 0..frame_count {
-                state.advance_playback_clock(frame_interval);
+                if let Some(remaining) = next_frame_at.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(remaining);
+                }
+                state.advance_playback_clock_at(Instant::now());
                 wait_for_headless_gpu_ready(
                     preview_service,
                     state,
@@ -5442,6 +5448,9 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
                     &mut gpu_summary,
                     Duration::from_secs(30),
                 )?;
+                next_frame_at = next_frame_at
+                    .checked_add(frame_interval)
+                    .context("advance accelerated playback boundary")?;
             }
 
             state.pause()?;
@@ -5463,17 +5472,39 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
                     Duration::from_secs(30),
                 )?;
             }
-            wait_for_preview_idle_residency_release(
+            settle_headless_preview_and_release_transport_media(
                 preview_service,
                 state,
+                gpu_adapter,
+                &mut gpu_summary,
                 Duration::from_secs(30),
             )?;
+            let native_import_sources_after_release =
+                gpu_adapter.retire_released_native_import_sources()?;
             let diagnostics = preview_service.diagnostics();
+            let frame_store = diagnostics.frame_store;
+            let only_current_protection_remains = frame_store.media_aggregate_entries
+                == frame_store.protected_media_entries
+                && frame_store.media_aggregate_reserved_bytes == frame_store.protected_media_bytes
+                && frame_store.media_aggregate_resource_units
+                    == frame_store.protected_media_resource_units;
             anyhow::ensure!(
-                diagnostics.worker_queue.in_flight_jobs == 0
-                    && diagnostics.frame_store.media_aggregate_resource_units == 0
-                    && gpu_summary.native_import_retained_sources_peak == 0,
-                "accelerated endurance left native resources resident: {diagnostics:?}"
+                diagnostics.worker_queue.in_flight_jobs == 0,
+                "accelerated endurance left Preview decode work in flight: {diagnostics:?}"
+            );
+            anyhow::ensure!(
+                frame_store.media_entries == 0
+                    && frame_store.current_media_overflow_entries == 0
+                    && frame_store.media_work_reservations == 0,
+                "accelerated endurance left decoded payload or work residency: {frame_store:?}"
+            );
+            anyhow::ensure!(
+                only_current_protection_remains,
+                "accelerated endurance retained media charges outside the exact current-output protection: {frame_store:?}"
+            );
+            anyhow::ensure!(
+                native_import_sources_after_release == 0,
+                "accelerated endurance left {native_import_sources_after_release} renderer native-import sources resident after the explicit release boundary"
             );
             let report = serde_json::json!({
                 "scenario": "preview_media_external_accelerated_native_surface_endurance",
@@ -5485,6 +5516,8 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
                 "external_frames_registered": diagnostics.gpu_preview_external_frames_registered,
                 "media_cache_evictions": diagnostics.frame_store.media_evictions,
                 "native_import_retained_sources_peak": gpu_summary.native_import_retained_sources_peak,
+                "native_import_sources_after_release": native_import_sources_after_release,
+                "retained_current_protection_units": frame_store.protected_media_resource_units,
             });
             if let Some(journal) = decode_execution_journal {
                 journal.finish()?;
@@ -7356,12 +7389,13 @@ fn wait_for_preview_idle_residency_release(
     let work_watch = preview_service.work_watch();
     loop {
         let drain_target_revision = work_watch.revision();
-        let pump_outcome = apply_headless_preview_outcome(preview_service, state);
         let diagnostics = preview_service.diagnostics();
         let work_remains = diagnostics.scheduler.pending_requests > 0
             || diagnostics.worker_queue.queued_jobs > 0
             || diagnostics.worker_queue.in_flight_jobs > 0;
         if !work_remains
+            && diagnostics.decode_residency_required_acknowledgements
+                == diagnostics.decode_residency_acknowledged_retirements
             && preview_decode_workers_idle_and_reaped(diagnostics.decode_worker_execution)
         {
             return Ok(());
@@ -7370,12 +7404,7 @@ fn wait_for_preview_idle_residency_release(
             Instant::now() < deadline,
             "Preview workers did not retire decoder Sessions and reap demux helpers after idle residency release: {diagnostics:?}"
         );
-        wait_for_headless_preview_revision(
-            &work_watch,
-            drain_target_revision,
-            deadline,
-            pump_outcome.needs_follow_up_poll,
-        );
+        wait_for_headless_preview_revision(&work_watch, drain_target_revision, deadline, false);
     }
 }
 
@@ -7861,6 +7890,12 @@ fn settle_headless_preview_and_release_transport_media(
 ) -> anyhow::Result<()> {
     wait_for_headless_gpu_ready(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
     drain_headless_gpu_submission(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
+    // The Adapter's bounded successor staging owns complete PreviewGpuFrames,
+    // including native decoder outputs. An explicit all-media release must
+    // consume these speculative owners before asking worker-local Sessions to
+    // prove that their output leases reached zero. The current physical output
+    // remains intact and continues to justify the stopped transport boundary.
+    gpu_adapter.retain_staged_successor_intents(&[]);
     wait_for_preview_idle_residency_release(preview_service, state, timeout)
 }
 

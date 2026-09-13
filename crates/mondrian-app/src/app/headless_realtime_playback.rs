@@ -2837,17 +2837,26 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
         let intent = state.preview_execution_snapshot(Instant::now()).transport().playback_intent();
         preview_service.release_completed_gpu_evaluation(&key, intent);
     }
+    let settled_native_import_sources = if gpu_adapter.has_submission_in_flight() {
+        None
+    } else {
+        Some(gpu_adapter.retire_released_native_import_sources()?)
+    };
     match candidate {
         HeadlessPreviewCandidate::Ready { output, completed_demand } => {
             let ready_binding =
                 ready_headless_candidate_binding(attempted_intent, completed_demand);
             let (status, binding, output_binding) = match output {
                 HeadlessPresentedOutput::Gpu { execution } => {
+                    let mut execution = *execution;
+                    if let Some(retained_sources) = settled_native_import_sources {
+                        execution.native_import_retained_sources = retained_sources;
+                    }
                     let output_key = preview_service.registered_gpu_output_key().context(
                         "published Headless GPU execution omitted its Runtime output binding",
                     )?;
                     observer.execution_completed(
-                        *execution,
+                        execution,
                         HeadlessGpuExecutionDisposition::PublishedCurrent,
                         completed_demand,
                     );
@@ -2895,6 +2904,10 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
             Ok(HeadlessGpuCandidateAttempt { status, binding, output_binding, completed_demand })
         }
         HeadlessPreviewCandidate::CompletedGpu { execution, disposition } => {
+            let mut execution = *execution;
+            if let Some(retained_sources) = settled_native_import_sources {
+                execution.native_import_retained_sources = retained_sources;
+            }
             let terminal_status = match disposition {
                 HeadlessCompletedGpuDisposition::TerminalDelivery(kind) => {
                     Some(headless_terminal_delivery_status(kind))
@@ -2919,7 +2932,7 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
                     None,
                 ),
             };
-            observer.execution_completed(*execution, publication, completed_demand);
+            observer.execution_completed(execution, publication, completed_demand);
             if let Some(status) = terminal_status {
                 // Carry the accepted terminal publication result across this
                 // candidate-call boundary. Draining another candidate here can

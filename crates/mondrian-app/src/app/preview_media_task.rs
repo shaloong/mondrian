@@ -376,7 +376,9 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     // retired lazily once the last native lease drops.
     let mut pending_native_retire = PendingMediaPreviewSessionRetirements::default();
     loop {
-        pending_native_retire.clear_released(&mut decode_context);
+        if pending_native_retire.clear_released(&mut decode_context) {
+            work_notifier.lifecycle_progressed();
+        }
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
             if directive.retire_context() {
                 let families = if directive.retire_all_contexts() {
@@ -736,19 +738,23 @@ impl PendingMediaPreviewSessionRetirements {
         }
     }
 
-    fn clear_released(&mut self, context: &mut MediaPreviewWorkerDecodeContext) {
+    fn clear_released(&mut self, context: &mut MediaPreviewWorkerDecodeContext) -> bool {
+        let mut progressed = false;
         if self.playback
             && context.family_native_outputs_released(PreviewDecodeSessionFamily::Playback)
         {
             context.clear_family(PreviewDecodeSessionFamily::Playback);
             self.playback = false;
+            progressed = true;
         }
         if self.interactive
             && context.family_native_outputs_released(PreviewDecodeSessionFamily::Interactive)
         {
             context.clear_family(PreviewDecodeSessionFamily::Interactive);
             self.interactive = false;
+            progressed = true;
         }
+        progressed
     }
 }
 

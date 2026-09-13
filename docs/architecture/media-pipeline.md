@@ -3013,7 +3013,16 @@ telemetry. Media decode diagnostics feed the renderer-owned
 `ViewerGpuNativeSource`. The latter keeps physical source extent separate from
 the renderer materialization extent, so a 4K decoder surface need not allocate
 and color-transform a 4K working frame for a quarter-resolution Viewer. App
-product admission combines decoder residency/handle/format with the active
+derives each native materialization axis from the already projected Timeline
+affine: it retains at least one source sample per displayed pixel, clamps zoomed
+sources to their physical raster, and rebases the affine onto the selected
+materialization. The renderer then performs the reduction in its existing
+native YUV-to-encoded-RGB pass before the shared OCIO input transform. Decode
+and Frame Store identity remain at the source representation, so this execution
+choice does not create an output-sized decode cache or a second color path.
+The Viewer active-working-set estimate consumes those same selected dimensions;
+it cannot admit a reduced estimate and allocate source-sized RGBA32F textures.
+App product admission combines decoder residency/handle/format with the active
 device's Renderer import support. This does not make CPU RGBA preview hardware
 decoded; it prevents the future hardware decoder adapter from being hidden
 behind a generic "GPU input upload" label once it starts producing NV12/P010

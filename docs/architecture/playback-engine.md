@@ -1808,6 +1808,16 @@ than sleeping for an assumed timeout. Together these two ownership releases let
 the driver surface pool disappear without blanking the paused Viewer. Any
 active or unresolved work makes the release fail closed.
 
+The explicit idle boundary first removes the GPU Adapter's bounded staged
+successor intents, then clears Frame Store media, and finally requests the
+worker-owned decoder-family retirement. Waiting is observation-only: it cannot
+call presentation again and accidentally re-admit the just-released media.
+When a native output lease delays codec destruction, the worker publishes a
+payload-free lifecycle revision after the physical Session is finally removed;
+the waiter therefore observes completion without polling an unrelated state
+authority. Closure requires every requested retirement acknowledgement, not
+merely zero queued jobs.
+
 The Headless lifecycle converges this condition in ownership order: establish
 the exact stopped-frame Viewer output, retire its exact GPU submission and
 move-only presentation/media-protection owners, wait for Preview
@@ -1827,7 +1837,11 @@ on the commonly 15.6 ms-quantized condition-variable timeout and does not
 change the process-wide timer period. A raced work notification can therefore
 add at most one poll interval, while deadline cadence remains precise enough
 to enforce the half-frame presentation-phase contract. Other platforms retain
-the same revision predicate and bounded wait Interface.
+the same revision predicate and bounded wait Interface. The native-media
+endurance probe advances Playback through the production absolute-`Instant`
+clock seam at each scheduled frame boundary. Mixing synthetic duration steps
+with renderer presentation timestamps from the host clock is invalid evidence
+and must fail the same non-monotonic clock check as product Playback.
 
 The concrete product Window coordinator and the Headless realtime validation
 coordinator share one platform scheduling seam. During active playback, Windows
@@ -1998,16 +2012,19 @@ index survive mutable-session retirement because neither owns codec continuity
 or decoder surfaces.
 
 The Frame Store release above is necessary but not sufficient for native video.
-The renderer's D3D12 bridge temporarily retains the imported source resource
+The renderer's platform bridge temporarily retains the imported source resource
 through its GPU copy. That command-lifetime lease is governed by the bridge's
-copy-ready fence, not by Preview generation, cache membership, decoder-session
-lifetime, or visibility of the final Viewer texture. Headless presentation
-retires completed source leases immediately after its completion wait; the
-Window presentation loop retries the same non-blocking retirement before every
-candidate request. A completed Headless output is invalid evidence if any
-decoder source remains retained. This keeps the independently copied Viewer
-output and reusable renderer bridge resources resident while returning decoder
-surfaces early enough for the next exact seek.
+completion primitive, not by Preview generation, cache membership,
+decoder-session lifetime, or visibility of the final Viewer texture. Headless
+presentation retires completed source leases after its completion wait and
+again immediately after consuming the completed candidate owner, because that
+owner itself may have held the last source clone during the first retirement
+attempt. The Window presentation loop retries the same non-blocking retirement
+before every candidate request. A completed Headless output is invalid evidence
+if the renderer's current retained-source count is nonzero after explicit
+release. This keeps the independently copied Viewer output and reusable
+renderer bridge resources resident while returning decoder surfaces early
+enough for the next exact seek.
 
 The exact-output shortcut is generation-safe rather than cache-presence based.
 The Preview generation includes Sequence identity/revision, Project Author

@@ -631,11 +631,13 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         }
 
         if let Ok(effect_plan) = self.scratch.get_or_lower_effect_gpu_plan(effect_graph) {
+            let (native_source, transform) =
+                native_source_for_projected_transform(frame, transform);
             return Ok(ViewerGpuSourceLayer::Media {
                 frame: frame.working_payload(),
                 is_data_texture: frame.is_data_texture(),
                 gpu_source: frame.gpu_source(),
-                native_source: frame.native_source(),
+                native_source,
                 cpu_yuv_source: frame.cpu_yuv_source(),
                 heterogeneous_input: None,
                 opacity,
@@ -846,11 +848,12 @@ fn gpu_media_source(
     let effect_plan = scratch
         .get_or_lower_effect_gpu_plan(effect_graph)
         .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    let (native_source, transform) = native_source_for_projected_transform(frame, transform);
     Ok(ViewerGpuSourceLayer::Media {
         frame: frame.working_payload(),
         is_data_texture: frame.is_data_texture(),
         gpu_source: frame.gpu_source(),
-        native_source: frame.native_source(),
+        native_source,
         cpu_yuv_source: frame.cpu_yuv_source(),
         heterogeneous_input: None,
         opacity,
@@ -859,6 +862,41 @@ fn gpu_media_source(
         effect_plan,
         frame_seed,
     })
+}
+
+fn native_source_for_projected_transform(
+    frame: &MediaPreviewFrame,
+    mut transform: [f32; 6],
+) -> (Option<mondrian_renderer::ViewerGpuNativeSource>, [f32; 6]) {
+    let Some(mut source) = frame.native_source() else {
+        return (None, transform);
+    };
+    let source_width = source.materialization_width;
+    let source_height = source.materialization_height;
+    let materialization_width =
+        native_materialization_axis(source_width, transform[0], transform[3]);
+    let materialization_height =
+        native_materialization_axis(source_height, transform[1], transform[4]);
+
+    if materialization_width != source_width || materialization_height != source_height {
+        let source_x = source_width as f32 / materialization_width as f32;
+        let source_y = source_height as f32 / materialization_height as f32;
+        transform[0] *= source_x;
+        transform[3] *= source_x;
+        transform[1] *= source_y;
+        transform[4] *= source_y;
+        source.materialization_width = materialization_width;
+        source.materialization_height = materialization_height;
+    }
+    (Some(source), transform)
+}
+
+fn native_materialization_axis(source_extent: u32, x: f32, y: f32) -> u32 {
+    let projected_extent = (x.hypot(y) * source_extent as f32).ceil();
+    if !projected_extent.is_finite() {
+        return source_extent;
+    }
+    (projected_extent as u32).clamp(1, source_extent)
 }
 
 fn gpu_solid_source(
