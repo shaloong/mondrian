@@ -1,5 +1,21 @@
 # Playback Engine
 
+The existing evaluation working set retains at most one resource-free completion
+proof after releasing the physically completed evaluation. It contains the exact
+picture key, compiled output identity, resolved presentation quality and typed
+media dependencies, with no decoded frames or GPU resources. A stopped request
+may use it only for the identical picture contract, then recomputes the monitor
+and scope overlays and asks the existing output owner for exact-key reuse. Media
+dependency invalidation and full working-set clear remove this proof. Transient
+plans never produce one.
+
+Transport work retirement cancels the old generation and prepared successors while
+retaining the independently owned final Viewer output as stale. Only a newly
+resolved exact output key can make it current through the existing execution
+coordinator. Authoring-session, device and shutdown invalidation still discard
+that output. This distinction does not retain decoded native surfaces or relax
+presentation generation checks.
+
 Headless candidate wall time includes presentation arbitration and the following
 resource-policy projection. Slow-boundary diagnostics attribute these separately
 from applying the Viewer GPU grant, with the observed frame attached. These are

@@ -250,6 +250,17 @@ pub(crate) struct FrameEvaluationLease {
 pub(crate) struct EvaluationWorkingSet {
     entries: Vec<EvaluationWorkingSetEntry>,
     waiting: Vec<EvaluationWaitEntry>,
+    completed: Option<CompletedEvaluationProof>,
+}
+
+/// Semantic identity of the last physically completed reusable evaluation.
+/// This owns no decoded frames, GPU objects, or producer leases.
+#[derive(Clone)]
+pub(crate) struct CompletedEvaluationProof {
+    pub(crate) key: FrameEvaluationKey,
+    pub(crate) output_key: PreviewOutputKey,
+    pub(crate) presentation_quality: mondrian_playback::FramePresentationQuality,
+    dependencies: Arc<[EvaluationDependency]>,
 }
 
 struct EvaluationWorkingSetEntry {
@@ -274,13 +285,18 @@ impl EvaluationWorkingSet {
     }
 
     pub(crate) fn new() -> Self {
-        Self { entries: Vec::new(), waiting: Vec::new() }
+        Self {
+            entries: Vec::new(),
+            waiting: Vec::new(),
+            completed: None,
+        }
     }
 
     /// Drop every retained evaluation and wait entry.
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.waiting.clear();
+        self.completed = None;
     }
 
     /// Retire producer waits when their scheduling generation is replaced.
@@ -331,7 +347,19 @@ impl EvaluationWorkingSet {
         }) else {
             return false;
         };
-        self.entries.remove(index);
+        let entry = self.entries.remove(index);
+        self.completed =
+            (entry.evaluation.reuse_policy == EvaluationReusePolicy::Reusable).then(|| {
+                CompletedEvaluationProof {
+                    key: entry.key,
+                    output_key: entry.evaluation.output_key.clone(),
+                    presentation_quality:
+                        crate::app::preview_viewer_plan::resolved_preview_presentation_quality(
+                            &entry.evaluation.elements,
+                        ),
+                    dependencies: Arc::clone(&entry.evaluation.dependencies),
+                }
+            });
         true
     }
 
@@ -367,6 +395,14 @@ impl EvaluationWorkingSet {
     pub(crate) fn clear_decoder_resource_entries(&mut self) {
         self.entries
             .retain(|entry| !entry.evaluation.elements.iter().any(element_pins_decoder_resource));
+    }
+
+    /// Read resource-free completion evidence for an identical picture contract.
+    pub(crate) fn completed_for(
+        &self,
+        key: FrameEvaluationKey,
+    ) -> Option<CompletedEvaluationProof> {
+        self.completed.as_ref().filter(|proof| proof.key == key).cloned()
     }
 
     /// Return the retained evaluation for an exact key, if resident.
@@ -452,6 +488,13 @@ impl EvaluationWorkingSet {
 
     /// Drop exact dependents and report whether a waiting candidate became actionable.
     pub(crate) fn invalidate_for_media_key(&mut self, media_key: &MediaPreviewKey) -> bool {
+        if self.completed.as_ref().is_some_and(|proof| {
+            proof.dependencies.iter().any(|dependency| {
+                matches!(dependency, EvaluationDependency::MediaProducer(key) if key == media_key)
+            })
+        }) {
+            self.completed = None;
+        }
         let waiting_before = self.waiting.len();
         self.waiting.retain(|entry| {
             !entry.dependencies.iter().any(|dependency| {

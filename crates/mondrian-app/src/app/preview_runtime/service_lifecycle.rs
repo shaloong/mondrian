@@ -24,7 +24,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             // Session can request work.
             self.visual_programs.borrow_mut().rotate_scope();
             self.transport_epoch.set(None);
-            self.retire_obsolete_transport_work();
+            self.retire_obsolete_transport_work(false);
             self.clear_all_preview_residency();
         }
         self.future_media_window.borrow_mut().clear();
@@ -54,7 +54,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if !was_playing && !intent.playing() {
                 self.try_release_settled_transport_media_residency();
             }
-            self.retire_obsolete_transport_work();
+            self.retire_obsolete_transport_work(true);
         }
 
         self.transport_playing.set(intent.playing());
@@ -159,7 +159,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.visual_programs.borrow_mut().rotate_scope();
         self.future_media_window.borrow_mut().clear();
         self.transport_epoch.set(None);
-        self.retire_obsolete_transport_work();
+        self.retire_obsolete_transport_work(false);
         self.clear_all_preview_residency();
         self.retire_all_decoder_sessions();
     }
@@ -169,8 +169,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.jobs.interrupt_workers_for_lifecycle();
     }
 
-    fn retire_obsolete_transport_work(&self) {
-        let (pending_requests, queued_jobs) = self.retire_all_preview_work();
+    fn retire_obsolete_transport_work(&self, preserve_output: bool) {
+        let (pending_requests, queued_jobs) = self.retire_all_preview_work(preserve_output);
         bump(&self.metrics.interactive_cancel_requests);
         add_cell(
             &self.metrics.interactive_cancel_scheduler_requests,
@@ -184,14 +184,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// device root while preserving device-independent CPU frame residency.
     pub(super) fn retire_decoder_device_generation(&self) {
         self.future_media_window.borrow_mut().clear();
-        let _ = self.retire_all_preview_work();
+        let _ = self.retire_all_preview_work(false);
         self.clear_decoder_resource_preview_residency();
         // Wake idle workers and force active workers through their Broker
         // cancellation checkpoint before another Session can be reused.
         self.jobs.interrupt_workers_for_lifecycle();
     }
 
-    fn retire_all_preview_work(&self) -> (u64, u64) {
+    fn retire_all_preview_work(&self, preserve_output: bool) -> (u64, u64) {
         // Resolved CPU evaluations also carry old Current protection leases.
         // Retire this reuse owner with the transport/device work, otherwise
         // the next Priming window can wait for capacity held only by an
@@ -214,7 +214,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.cpu_fallback_in_flight.borrow_mut().take();
         self.cpu_fallback_failure.borrow_mut().take();
         let queued_jobs = queued_jobs as u64;
-        self.execution.borrow_mut().invalidate(|| generation);
+        if preserve_output {
+            self.execution.borrow_mut().retire_scheduling(|| generation);
+        } else {
+            self.execution.borrow_mut().invalidate(|| generation);
+        }
         (pending_requests, queued_jobs)
     }
 
@@ -358,7 +362,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let (_replacement_sender, replacement_receiver) = mpsc::sync_channel(1);
         drop(self.results.replace(replacement_receiver));
         self.future_media_window.borrow_mut().clear();
-        self.retire_obsolete_transport_work();
+        self.retire_obsolete_transport_work(false);
         self.clear_all_preview_residency();
         already_shutdown
     }

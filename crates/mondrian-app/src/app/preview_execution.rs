@@ -815,13 +815,20 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// Invalidate every intent and bind the resulting empty lifecycle to a new
     /// execution generation.
     pub(crate) fn invalidate(&mut self, begin_generation: impl FnOnce() -> u64) -> u64 {
+        let generation = self.retire_scheduling(begin_generation);
+        self.current_output = None;
+        generation
+    }
+
+    /// Cancel obsolete work while retaining independent output as stale only.
+    /// A later consumer must prove its complete semantic key through `output_for`.
+    pub(crate) fn retire_scheduling(&mut self, begin_generation: impl FnOnce() -> u64) -> u64 {
         self.generation_cancellation.cancel();
         self.generation_key = None;
         self.generation = begin_generation();
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.pending = false;
         self.presentation_quality = FramePresentationQuality::Ready;
-        self.current_output = None;
         self.current_output_generation = None;
         self.prepared_successor = None;
         self.prepared_successor_generation = None;
@@ -1204,6 +1211,21 @@ mod tests {
         assert_eq!(coordinator.output_for(&9), None);
         assert!(!coordinator.has_exact_current_output());
         assert_eq!(coordinator.exact_current_output(), None);
+    }
+
+    #[test]
+    fn scheduling_retirement_preserves_only_stale_output_and_content_invalidation_drops_it() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "texture");
+        let cancellation = coordinator.generation_cancellation();
+        coordinator.retire_scheduling(|| 42);
+        assert!(cancellation.is_canceled());
+        assert!(!coordinator.has_exact_current_output());
+        assert_eq!(coordinator.output_for(&8), None);
+        assert_eq!(coordinator.output_for(&9), Some("texture"));
+        coordinator.invalidate(|| 43);
+        assert_eq!(coordinator.output_for(&9), None);
     }
 
     #[test]

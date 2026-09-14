@@ -1028,6 +1028,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             display_color_space,
             display_contract_identity: self.display_snapshot_identity.get(),
         };
+        if !transport.is_playing()
+            && let Some(proof) = self.evaluation_working_set.borrow().completed_for(evaluation_key)
+        {
+            let (tap, settings) = self.viewer_signal_monitoring.get();
+            let key = proof
+                .output_key
+                .with_monitor_adaptation(&monitor_adaptation)
+                .with_signal_monitoring(tap, settings);
+            if self.execution.borrow_mut().output_for(&key).is_some() {
+                self.execution.borrow_mut().set_presentation_quality(proof.presentation_quality);
+                self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_current);
+                return PreviewGpuFrameState::Current(
+                    PreviewPresentationCandidate::already_visible(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ),
+                );
+            }
+        }
         let evaluation_started = Instant::now();
         let resolution = self.acquire_frame_evaluation(
             snapshot,

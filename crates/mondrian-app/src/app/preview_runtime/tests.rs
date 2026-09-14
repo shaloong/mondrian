@@ -105,6 +105,40 @@ fn presentation_then_gpu_share_one_evaluation_for_the_same_frame() {
 }
 
 #[test]
+fn completed_gpu_output_survives_same_picture_pause_without_reevaluation() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    pin_standard_execution_resources(&mut state);
+    state.play().expect("start exact transport fixture");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let frame = match execute_gpu_preview_for_test_app(&runtime, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected initial GPU candidate"),
+    };
+    let output_key = frame.output_key.clone();
+    let intent = frame.playback_intent();
+    runtime.register_gpu_output(output_key.clone(), ());
+    assert!(runtime.release_completed_gpu_evaluation(&output_key, intent));
+    drop(frame);
+    let before = evaluation_resolve_count(&runtime);
+    state.pause().expect("pause without changing the picture");
+    assert_eq!(state.current_frame(), intent.frame);
+    match execute_gpu_preview_for_test_app(&runtime, &state) {
+        PreviewGpuFrameState::Current(_) => {}
+        PreviewGpuFrameState::Ready(candidate) => panic!(
+            "pause requested fresh output: same_key={}, resolves_before={before}, resolves_after={}",
+            candidate.output_key == output_key,
+            evaluation_resolve_count(&runtime),
+        ),
+        _ => panic!("pause did not produce an exact current output"),
+    }
+    assert_eq!(
+        evaluation_resolve_count(&runtime),
+        before,
+        "a completed reusable output should retain its semantic proof after releasing decoded inputs"
+    );
+}
+
+#[test]
 fn repeated_acquires_for_the_same_evaluation_do_not_re_resolve() {
     let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
@@ -419,6 +453,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         7,
         0,
     );
+    let dependency = test_media_key(961);
     let current = Arc::new(ResolvedFrameEvaluation {
         cpu_materialization_active_bytes: 0,
         key: current_key,
@@ -427,7 +462,7 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         color_context: test_color_context(ColorSpace::Srgb),
         resolved_quality: ResolvedFrameQuality::Full,
         reuse_policy: EvaluationReusePolicy::Reusable,
-        dependencies: Arc::from([]),
+        dependencies: Arc::from([EvaluationDependency::MediaProducer(dependency.clone())]),
         render_cache_identity: None,
     });
     let weak = Arc::downgrade(&current);
@@ -493,6 +528,54 @@ fn completed_gpu_evaluation_release_is_exact_and_preserves_other_owners() {
         weak.upgrade().is_none(),
         "only the completed reuse owner was removed"
     );
+    assert!(set.completed_for(current_key).is_some());
+    for changed in [
+        FrameEvaluationKey { frame: 1, ..current_key },
+        FrameEvaluationKey { author_generation: 1, ..current_key },
+        FrameEvaluationKey { width: 640, ..current_key },
+        FrameEvaluationKey {
+            runtime_scale: mondrian_playback::PreviewResolutionScale::Half,
+            ..current_key
+        },
+        FrameEvaluationKey {
+            display_color_space: ColorSpace::Rec709,
+            ..current_key
+        },
+    ] {
+        assert!(set.completed_for(changed).is_none());
+    }
+    set.invalidate_for_media_key(&test_media_key(962));
+    assert!(set.completed_for(current_key).is_some());
+    set.invalidate_for_media_key(&dependency);
+    assert!(set.completed_for(current_key).is_none());
+    for reuse_policy in [
+        EvaluationReusePolicy::Reusable,
+        EvaluationReusePolicy::Transient,
+    ] {
+        set.insert(
+            current_key,
+            Arc::new(ResolvedFrameEvaluation {
+                cpu_materialization_active_bytes: 0,
+                key: current_key,
+                output_key: output.clone(),
+                elements: Arc::from([]),
+                color_context: test_color_context(ColorSpace::Srgb),
+                resolved_quality: ResolvedFrameQuality::Full,
+                reuse_policy,
+                dependencies: Arc::from([]),
+                render_cache_identity: None,
+            }),
+            4,
+        );
+        set.bind_gpu_output(current_key, output.clone(), intent);
+        assert!(set.release_completed_gpu_evaluation(&output, intent));
+        assert_eq!(
+            set.completed_for(current_key).is_some(),
+            reuse_policy == EvaluationReusePolicy::Reusable
+        );
+        set.clear();
+        assert!(set.completed_for(current_key).is_none());
+    }
 }
 
 #[test]
