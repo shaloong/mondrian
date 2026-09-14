@@ -705,7 +705,8 @@ fn maintain_headless_preview_lookahead(
                 .map(|request| request.snapshot().transport().playback_intent())
         }),
     );
-    gpu.retain_staged_successor_intents(&expected);
+    gpu.retain_staged_successor_intents(&expected)
+        .context("refresh Headless physical upload horizon")?;
 
     // The media preroll owner already found the next distinct physical source
     // inside its bounded horizon. Materialize that exact frame far enough
@@ -780,6 +781,8 @@ fn maintain_headless_preview_lookahead(
                 );
                 gpu.stage_successor(frame)
                     .context("prewarm staged Headless lookahead uploads")?;
+                gpu.retain_staged_successor_intents(&expected)
+                    .context("refresh staged Headless physical upload horizon")?;
             }
             PreviewGpuFrameState::Loading | PreviewGpuFrameState::Unavailable(_) => {}
             PreviewGpuFrameState::Prepared

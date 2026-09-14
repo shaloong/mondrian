@@ -7916,7 +7916,9 @@ fn settle_headless_preview_and_release_transport_media(
     // consume these speculative owners before asking worker-local Sessions to
     // prove that their output leases reached zero. The current physical output
     // remains intact and continues to justify the stopped transport boundary.
-    gpu_adapter.retain_staged_successor_intents(&[]);
+    gpu_adapter
+        .retain_staged_successor_intents(&[])
+        .context("retire staged physical upload horizon")?;
     wait_for_preview_idle_residency_release(preview_service, state, timeout)
 }
 

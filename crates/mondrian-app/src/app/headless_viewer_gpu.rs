@@ -1084,13 +1084,20 @@ impl HeadlessViewerGpuAdapter {
         self.staged_successors.contains(intent)
     }
 
-    /// Retire CPU-complete frames outside the current bounded horizon.
+    /// Retire CPU-complete frames outside the current bounded horizon and
+    /// refresh physical upload preparation in that same owner-supplied order.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retain_staged_successor_intents(
         &mut self,
         intents: &[crate::app::preview_execution::PreviewPlaybackIntent],
-    ) {
+    ) -> Result<(), ViewerGpuExecutionError> {
         self.staged_successors.retain_only(intents);
+        self.runtime.prewarm_cpu_yuv_upload_horizon(
+            self.staged_successors.ordered_frames(intents).map(|frame| {
+                let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+                layers.as_slice()
+            }),
+        )
     }
 
     /// Adapter identity bound to this execution device.

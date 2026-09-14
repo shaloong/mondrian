@@ -15,6 +15,15 @@ Viewer candidate's physical input set. Complete current preparation and recordin
 share the Renderer resource admission and upload owner; Playback does not infer
 transfer readiness from individually sampled inputs or acquire another queue.
 
+The shared CPU staging owner exposes borrowed frames in the existing transport
+intent horizon's next-use order. Both Window and Headless project that order to
+the renderer's bounded physical upload horizon on each maintenance turn, even
+when no new CPU frame is staged. This replenishes uploads as prior inputs are
+consumed without repeating semantic evaluation. The renderer keeps at most four
+distinct speculative physical inputs; the farther CPU horizon remains intact.
+No renderer Timeline ordering, additional Playback state or enlarged budget is
+introduced by this projection.
+
 A CPU-complete speculative GPU frame may acquire the current Frame Presentation
 Ticket only after the Preview Runtime resolves the current snapshot through the
 same `ViewerPreviewGenerationKey` construction used by ordinary production.

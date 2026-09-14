@@ -7391,20 +7391,20 @@ fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &Ap
             && frame.is_successor_preparation()
             && frame.playback_intent() == intent
         {
-            let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
-            if let Err(error) = session.viewer_gpu_execution.prewarm_cpu_yuv_uploads(layers) {
-                tracing::warn!(
-                    %error,
-                    timeline_frame = frame.frame,
-                    "failed to prewarm compact CPU YUV Viewer lookahead"
-                );
-            }
             session.staged_viewer_gpu_successors.stage(frame);
         }
         // Preserve current-frame priority: each event-loop turn may fill only
         // the nearest missing speculative coordinate. Later turns extend the
         // same bounded horizon without a three-request burst.
         break;
+    }
+    if let Err(error) = session.viewer_gpu_execution.prewarm_cpu_yuv_upload_horizon(
+        session.staged_viewer_gpu_successors.ordered_frames(&expected).map(|frame| {
+            let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+            layers.as_slice()
+        }),
+    ) {
+        tracing::warn!(%error, "failed to refresh compact CPU YUV Viewer upload horizon");
     }
 }
 

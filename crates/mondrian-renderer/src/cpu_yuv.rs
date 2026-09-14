@@ -84,11 +84,16 @@ struct CpuYuvUploadState {
 struct CpuYuvUploadInterest {
     generation: u64,
     candidate_inputs: Vec<(CpuYuvFrameUploadKey, Arc<CpuYuvFrame>)>,
+    lookahead_inputs: Option<Vec<(CpuYuvFrameUploadKey, Arc<CpuYuvFrame>)>>,
 }
 
 impl Default for CpuYuvUploadInterest {
     fn default() -> Self {
-        Self { generation: 1, candidate_inputs: Vec::new() }
+        Self {
+            generation: 1,
+            candidate_inputs: Vec::new(),
+            lookahead_inputs: None,
+        }
     }
 }
 
@@ -286,6 +291,7 @@ impl CpuYuvUploadRuntime {
             let mut interest = state.interest.lock();
             interest.generation = interest.generation.wrapping_add(1);
             interest.candidate_inputs.clear();
+            interest.lookahead_inputs = None;
         }
         state.pending.clear();
         state.prepared.clear();
@@ -458,7 +464,55 @@ impl CpuYuvUploadRuntime {
             || state.recorded_uploads.iter().any(|(recorded_key, _)| *recorded_key == key)
     }
 
+    /// Project an already ordered owner horizon into the existing bounded
+    /// physical upload set. This does not infer Timeline order or admit output.
+    pub(crate) fn prepare_horizon(
+        &self,
+        frames: &[Arc<CpuYuvFrame>],
+    ) -> Result<(), CpuYuvMaterializationError> {
+        let selected = {
+            let mut state = self.state.lock();
+            let mut selected = Vec::with_capacity(CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY);
+            for frame in frames {
+                let key = Self::frame_key(&state, frame);
+                if selected.iter().any(|(existing, _)| *existing == key) {
+                    continue;
+                }
+                selected.push((key, Arc::clone(frame)));
+                if selected.len() == CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY {
+                    break;
+                }
+            }
+            state.interest.lock().lookahead_inputs = Some(selected.clone());
+            Self::drain_worker_results(&mut state);
+            Self::trim_speculative_results(&mut state);
+            selected
+        };
+        for (_, frame) in selected {
+            self.prepare(&frame)?;
+        }
+        Ok(())
+    }
+
     fn trim_speculative_results(state: &mut CpuYuvUploadState) {
+        // Retire obsolete physical speculation before allocating replacement
+        // work. Current admission always retains its independent protection.
+        loop {
+            let obsolete = {
+                let interest = state.interest.lock();
+                interest.lookahead_inputs.as_ref().and_then(|inputs| {
+                    state.prepared.iter().position(|result| {
+                        !interest.is_candidate_input(result.key)
+                            && !inputs.iter().any(|(key, _)| *key == result.key)
+                    })
+                })
+            };
+            let Some(index) = obsolete else {
+                break;
+            };
+            Self::recycle_unsubmitted_result(state, index);
+        }
+
         while state
             .prepared
             .iter()
@@ -510,6 +564,16 @@ impl CpuYuvUploadRuntime {
                 return Ok(false);
             }
             let current = state.is_candidate_input(key);
+            if !current
+                && state
+                    .interest
+                    .lock()
+                    .lookahead_inputs
+                    .as_ref()
+                    .is_some_and(|inputs| !inputs.iter().any(|(wanted, _)| *wanted == key))
+            {
+                return Ok(false);
+            }
             let speculative = state
                 .pending
                 .iter()
@@ -535,6 +599,9 @@ impl CpuYuvUploadRuntime {
                     Self::recycle_unsubmitted_result(&mut state, index);
                 }
             } else if speculative >= CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY {
+                if state.interest.lock().lookahead_inputs.is_some() {
+                    return Ok(false);
+                }
                 let recyclable = reusable.or_else(|| {
                     state.prepared.iter().position(|result| !state.is_candidate_input(result.key))
                 });
@@ -1355,6 +1422,146 @@ mod tests {
         assert!(
             weak.upgrade().is_none(),
             "retirement must release the admitted source"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn farther_prewarm_does_not_evict_nearest_staged_input() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("priority.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut request = PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+            decoder.decode_cancellable(request, || false).expect("decode")
+        else {
+            panic!("compact frame")
+        };
+        decoder.clear();
+        let frames = (0..5).map(|_| Arc::new(frame.clone())).collect::<Vec<_>>();
+        let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        for count in 1..=frames.len() {
+            loop {
+                runtime.prepare_horizon(&frames[..count]).expect("ordered prewarm");
+                let ready = {
+                    let mut state = runtime.state.lock();
+                    CpuYuvUploadRuntime::drain_worker_results(&mut state);
+                    frames.iter().take(count.min(CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY)).all(
+                        |frame| {
+                            CpuYuvUploadRuntime::input_is_ready(
+                                &state,
+                                CpuYuvUploadRuntime::frame_key(&state, frame),
+                            )
+                        },
+                    )
+                };
+                if ready {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "prewarm deadline");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        let nearest_ready = {
+            let mut state = runtime.state.lock();
+            CpuYuvUploadRuntime::drain_worker_results(&mut state);
+            CpuYuvUploadRuntime::input_is_ready(
+                &state,
+                CpuYuvUploadRuntime::frame_key(&state, &frames[0]),
+            )
+        };
+        let initial_buffers = {
+            let state = runtime.state.lock();
+            assert!(!CpuYuvUploadRuntime::input_is_ready(
+                &state,
+                CpuYuvUploadRuntime::frame_key(&state, &frames[4])
+            ));
+            state
+                .prepared
+                .iter()
+                .map(|result| result.outcome.as_ref().expect("prepared upload").buffer.clone())
+                .collect::<Vec<_>>()
+        };
+        loop {
+            runtime.prepare_horizon(&frames[1..]).expect("advance physical horizon");
+            let ready = {
+                let mut state = runtime.state.lock();
+                CpuYuvUploadRuntime::drain_worker_results(&mut state);
+                frames[1..].iter().all(|frame| {
+                    CpuYuvUploadRuntime::input_is_ready(
+                        &state,
+                        CpuYuvUploadRuntime::frame_key(&state, frame),
+                    )
+                })
+            };
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "advanced horizon deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        {
+            let state = runtime.state.lock();
+            assert_eq!(
+                state.prepared.len(),
+                CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY
+            );
+            assert!(
+                state.prepared.iter().all(|result| initial_buffers
+                    .contains(&result.outcome.as_ref().expect("prepared upload").buffer)),
+                "horizon advancement must reuse retired mapped storage"
+            );
+            assert!(!CpuYuvUploadRuntime::input_is_ready(
+                &state,
+                CpuYuvUploadRuntime::frame_key(&state, &frames[0])
+            ));
+        }
+        runtime.prepare_candidate(&[Arc::clone(&frames[1])]).expect("current admission");
+        runtime.prepare_horizon(&[]).expect("retire speculative horizon");
+        {
+            let state = runtime.state.lock();
+            assert_eq!(
+                state.prepared.len(),
+                1,
+                "empty horizon preserves only the admitted current input"
+            );
+        }
+        drop(initial_buffers);
+        let mut retirement = runtime.into_retirement();
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owner closure deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        assert!(
+            nearest_ready,
+            "farther staged input evicted the nearest physical preparation"
         );
     }
 

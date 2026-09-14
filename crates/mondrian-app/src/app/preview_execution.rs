@@ -506,6 +506,17 @@ impl PreviewGpuFrameStaging {
         self.frames.iter().any(|frame| frame.playback_intent() == intent)
     }
 
+    /// Borrow staged frames in the order supplied by the existing transport
+    /// owner, without creating another retained scheduling snapshot.
+    pub(crate) fn ordered_frames<'a>(
+        &'a self,
+        expected: &'a [PreviewPlaybackIntent],
+    ) -> impl Iterator<Item = &'a PreviewGpuFrame> {
+        expected.iter().filter_map(|intent| {
+            self.frames.iter().find(|frame| frame.playback_intent() == *intent)
+        })
+    }
+
     /// Retire entries outside the current bounded playback horizon.
     pub(crate) fn retain_only(&mut self, expected: &[PreviewPlaybackIntent]) {
         self.frames.retain(|frame| expected.contains(&frame.playback_intent()));

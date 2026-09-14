@@ -437,6 +437,20 @@ impl ViewerGpuExecutionRuntime {
         Ok(ready)
     }
 
+    /// Refresh the physical upload horizon in the owning Adapter's exact
+    /// next-use order. Only the existing bounded number of distinct inputs is
+    /// retained; farther CPU-staged frames do not displace nearer transfers.
+    /// Current candidate admission remains independent of this speculative set.
+    pub fn prewarm_cpu_yuv_upload_horizon<'a>(
+        &self,
+        layers: impl IntoIterator<Item = &'a [ViewerGpuExecutionLayer]>,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        let frames = layers.into_iter().flat_map(Self::cpu_yuv_upload_inputs).collect::<Vec<_>>();
+        self.cpu_yuv_upload
+            .prepare_horizon(&frames)
+            .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))
+    }
+
     fn prepare_admitted_cpu_yuv_uploads(
         &self,
         layers: &[ViewerGpuExecutionLayer],

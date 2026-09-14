@@ -363,13 +363,26 @@ A bounded
 renderer-owned upload worker copies visible plane rows into reusable mapped,
 256-byte-aligned transfer buffers before realtime candidate recording. The
 runtime distinguishes bounded ticketless prewarming from complete current
-candidate preparation. Window and Headless lookahead use `prewarm_cpu_yuv_uploads`;
+candidate preparation. Window and Headless lookahead use `prewarm_cpu_yuv_upload_horizon`;
 this retains four speculative results and cannot replace the current candidate's
 protected physical input set. `prepare_cpu_yuv_uploads` consumes a complete
 Viewer request and performs the same pure active-resource admission as recording
 before protecting or allocating its transfers. The estimate includes each
 candidate's exact padded staging extent; the worker reuses only matching buffer
 capacities so a larger old allocation cannot escape that charge.
+
+The Adapter borrows CPU-staged frames in the exact next-use order of its existing
+transport intent horizon. The upload owner retains only the first four distinct
+physical inputs of that projection, without interpreting Timeline coordinates.
+Farther CPU-staged frames do not evict nearer mapped preparations. Refreshing the
+horizon recycles obsolete completed speculation before replacement admission;
+already pending work still occupies its original bounded transport until its
+result is consumed. Standalone cold prewarming cannot displace the selected
+horizon, and full current candidate admission keeps its independent protection.
+An empty horizon retires speculation; generation clear removes the projection.
+The native `farther_prewarm_does_not_evict_nearest_staged_input` regression first
+reproduced nearest-input eviction on the unranked seam and verifies retention
+through the explicit ordered horizon on the same production upload owner.
 
 The worker reads the same generation and retained candidate-input table as the
 upload owner before starting each transfer. Within a bounded receive batch from
