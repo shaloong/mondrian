@@ -2452,6 +2452,63 @@ fn cpu_staging_is_bounded_and_retires_intents_outside_the_horizon() {
 }
 
 #[test]
+fn staged_frames_retire_on_seek_and_quality_rotation_but_preserve_exact_current() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let mut staging = PreviewGpuFrameStaging::default();
+    let mut intents = Vec::new();
+    for offset in 2..=4 {
+        let request = state
+            .preview_lookahead_execution_request(Instant::now(), offset)
+            .expect("lookahead");
+        intents.push(request.snapshot().transport().playback_intent());
+        let PreviewGpuFrameState::Ready(frame) = service.gpu_preview_frame(request) else {
+            panic!("expected speculative frame");
+        };
+        staging.stage(frame);
+    }
+    staging.retain_current_generation(intents[1], true);
+    assert_eq!(staging.len(), 2);
+    assert!(
+        staging.contains(intents[1]),
+        "exact current survives natural end"
+    );
+    assert!(
+        staging.contains(intents[2]),
+        "valid future work remains reusable"
+    );
+    staging.retain_current_generation(intents[1], false);
+    assert_eq!(
+        staging.len(),
+        1,
+        "pause without an epoch change retires future owners"
+    );
+    assert!(staging.contains(intents[1]));
+    let mut changed_quality = intents[1];
+    changed_quality.quality_revision += 1;
+    staging.retain_current_generation(changed_quality, true);
+    assert_eq!(staging.len(), 0, "old quality owners are consumed");
+
+    let request = state.preview_lookahead_execution_request(Instant::now(), 2).expect("lookahead");
+    let PreviewGpuFrameState::Ready(frame) = service.gpu_preview_frame(request) else {
+        panic!("expected speculative frame");
+    };
+    staging.stage(frame);
+    state.pause().expect("pause");
+    state.seek(0).expect("seek");
+    staging.retain_current_generation(
+        state.preview_execution_snapshot(Instant::now()).transport().playback_intent(),
+        false,
+    );
+    assert_eq!(
+        staging.len(),
+        0,
+        "paused seek releases old transport owners"
+    );
+}
+
+#[test]
 fn running_transport_without_a_pending_demand_cannot_publish_a_retry() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));

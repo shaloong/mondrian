@@ -243,6 +243,11 @@ fn present_headless_preview_candidate_inner(
         .map(|(key, _)| (key.clone(), already_visible_at.unwrap_or(sampled_at)));
     let current_playback_intent =
         state.preview_execution_snapshot(sampled_at).transport().playback_intent();
+    // A paused seek may never enter realtime lookahead maintenance. Consume
+    // obsolete speculative native leases before the new decoder family waits
+    // for old worker-owned contexts to retire. Physical submissions retain
+    // their own owners until completion.
+    gpu.retire_stale_staged_successors(current_playback_intent, state.is_playing());
     let exact_prepared_current = preview
         .registered_relevant_prepared_gpu_output_key(current_playback_intent, None)
         .is_some_and(|key| gpu.has_prepared_physical_output_for_key(&key));

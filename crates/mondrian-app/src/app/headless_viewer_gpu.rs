@@ -1100,6 +1100,15 @@ impl HeadlessViewerGpuAdapter {
         )
     }
 
+    /// Retire obsolete speculative native leases before current-frame admission.
+    pub(crate) fn retire_stale_staged_successors(
+        &mut self,
+        current: crate::app::preview_execution::PreviewPlaybackIntent,
+        playing: bool,
+    ) {
+        self.staged_successors.retain_current_generation(current, playing);
+    }
+
     /// Adapter identity bound to this execution device.
     pub(crate) fn adapter_info(&self) -> &HeadlessViewerGpuAdapterInfo {
         &self.adapter_info

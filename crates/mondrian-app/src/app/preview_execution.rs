@@ -522,6 +522,21 @@ impl PreviewGpuFrameStaging {
         self.frames.retain(|frame| expected.contains(&frame.playback_intent()));
     }
 
+    /// Release speculative owners invalidated by transport or quality changes.
+    /// Keep the exact current frame available for promotion at natural end.
+    pub(crate) fn retain_current_generation(
+        &mut self,
+        current: PreviewPlaybackIntent,
+        playing: bool,
+    ) {
+        self.frames.retain(|frame| {
+            let intent = frame.playback_intent();
+            intent.epoch == current.epoch
+                && intent.quality_revision == current.quality_revision
+                && (intent.frame == current.frame || (playing && intent.frame > current.frame))
+        });
+    }
+
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn len(&self) -> usize {
         self.frames.len()

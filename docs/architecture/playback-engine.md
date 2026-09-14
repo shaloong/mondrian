@@ -2525,6 +2525,16 @@ publication. These wall-time observations carry no deadline, readiness, or
 qualification authority: a later successful run cannot clear a prior non-unit
 frame advance, and a slow stage alone does not identify its blocking cause.
 
+The common Headless presentation boundary retires speculative staged frames
+whose transport epoch or quality revision no longer matches the current intent,
+including during paused seeks that do not run realtime lookahead maintenance.
+Past frames and, while stopped, future frames are also released even if the
+epoch is unchanged. The exact current frame remains eligible for
+promotion at natural end. This releases Adapter-owned native decoder leases
+before a new decoder family waits for retirement acknowledgement. Submitted
+GPU work retains its independent completion owners. Neither decoder admission
+nor its retirement barrier is weakened to accommodate stale speculation.
+
 Headless presentation diagnostics also time candidate acquisition, submission
 retirement, stale-output retirement, physical promotion, demand completion and
 preroll observation at their existing call boundaries. Slow-call logs distinguish
