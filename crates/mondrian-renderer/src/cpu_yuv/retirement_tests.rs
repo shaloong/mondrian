@@ -22,9 +22,8 @@ fn protocol_owner(
         state: Mutex::new(CpuYuvUploadState {
             slots: vec![],
             next_slot: 0,
-            generation: 1,
+            interest: Arc::new(Mutex::new(CpuYuvUploadInterest::default())),
             pending: vec![],
-            candidate_inputs: vec![],
             prepared: VecDeque::new(),
             result_receiver,
             returned_sender,

@@ -70,9 +70,8 @@ impl CpuYuvUploadRetirement {
 struct CpuYuvUploadState {
     slots: Vec<CpuYuvUploadSlot>,
     next_slot: usize,
-    generation: u64,
+    interest: Arc<Mutex<CpuYuvUploadInterest>>,
     pending: Vec<CpuYuvFrameUploadKey>,
-    candidate_inputs: Vec<(CpuYuvFrameUploadKey, Arc<CpuYuvFrame>)>,
     prepared: VecDeque<CpuYuvUploadWorkerResult>,
     result_receiver: mpsc::Receiver<CpuYuvUploadWorkerResult>,
     returned_sender: mpsc::Sender<wgpu::Buffer>,
@@ -80,9 +79,28 @@ struct CpuYuvUploadState {
     completion_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
-impl CpuYuvUploadState {
+/// The single physical generation and current-input authority shared with the
+/// upload worker. It contains no Timeline coordinates or publication state.
+struct CpuYuvUploadInterest {
+    generation: u64,
+    candidate_inputs: Vec<(CpuYuvFrameUploadKey, Arc<CpuYuvFrame>)>,
+}
+
+impl Default for CpuYuvUploadInterest {
+    fn default() -> Self {
+        Self { generation: 1, candidate_inputs: Vec::new() }
+    }
+}
+
+impl CpuYuvUploadInterest {
     fn is_candidate_input(&self, key: CpuYuvFrameUploadKey) -> bool {
         self.candidate_inputs.iter().any(|(candidate, _)| *candidate == key)
+    }
+}
+
+impl CpuYuvUploadState {
+    fn is_candidate_input(&self, key: CpuYuvFrameUploadKey) -> bool {
+        self.interest.lock().is_candidate_input(key)
     }
 }
 
@@ -162,13 +180,14 @@ impl CpuYuvUploadRuntime {
         let worker_device = device.clone();
         let trim_requested = Arc::new(AtomicBool::new(false));
         let worker_trim_requested = Arc::clone(&trim_requested);
+        let interest = Arc::new(Mutex::new(CpuYuvUploadInterest::default()));
+        let worker_interest = Arc::clone(&interest);
         // Complete bounded owner allocation before starting physical execution.
         let state = Mutex::new(CpuYuvUploadState {
             slots: Vec::new(),
             next_slot: 0,
-            generation: 1,
+            interest,
             pending: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
-            candidate_inputs: Vec::new(),
             prepared: VecDeque::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
             result_receiver,
             returned_sender,
@@ -184,6 +203,7 @@ impl CpuYuvUploadRuntime {
                     result_sender,
                     returned_receiver,
                     worker_trim_requested,
+                    worker_interest,
                 );
             })
             .map_err(|_| CpuYuvUploadWorkerStartError)?;
@@ -195,9 +215,8 @@ impl CpuYuvUploadRuntime {
         let CpuYuvUploadState {
             slots,
             next_slot: _,
-            generation: _,
+            interest: _,
             pending: _,
-            candidate_inputs: _,
             prepared,
             result_receiver,
             returned_sender,
@@ -263,9 +282,12 @@ impl CpuYuvUploadRuntime {
         let mut state = self.state.lock();
         state.slots.clear();
         state.next_slot = 0;
-        state.generation = state.generation.wrapping_add(1);
+        {
+            let mut interest = state.interest.lock();
+            interest.generation = interest.generation.wrapping_add(1);
+            interest.candidate_inputs.clear();
+        }
         state.pending.clear();
-        state.candidate_inputs.clear();
         state.prepared.clear();
         state.recorded_uploads.clear();
         self.trim_requested.store(true, Ordering::Release);
@@ -407,10 +429,11 @@ impl CpuYuvUploadRuntime {
     ) -> Result<bool, CpuYuvMaterializationError> {
         {
             let mut state = self.state.lock();
-            state.candidate_inputs = frames
+            let inputs = frames
                 .iter()
                 .map(|frame| (Self::frame_key(&state, frame), Arc::clone(frame)))
                 .collect();
+            state.interest.lock().candidate_inputs = inputs;
             Self::drain_worker_results(&mut state);
             Self::trim_speculative_results(&mut state);
         }
@@ -421,7 +444,13 @@ impl CpuYuvUploadRuntime {
         // accumulation of per-input observations taken while results change.
         let mut state = self.state.lock();
         Self::drain_worker_results(&mut state);
-        Ok(state.candidate_inputs.iter().all(|(key, _)| Self::input_is_ready(&state, *key)))
+        let ready = state
+            .interest
+            .lock()
+            .candidate_inputs
+            .iter()
+            .all(|(key, _)| Self::input_is_ready(&state, *key));
+        Ok(ready)
     }
 
     fn input_is_ready(state: &CpuYuvUploadState, key: CpuYuvFrameUploadKey) -> bool {
@@ -577,7 +606,8 @@ impl CpuYuvUploadRuntime {
     fn drain_worker_results(state: &mut CpuYuvUploadState) {
         while let Ok(result) = state.result_receiver.try_recv() {
             state.pending.retain(|pending| *pending != result.key);
-            if result.key.generation == state.generation {
+            let generation = state.interest.lock().generation;
+            if result.key.generation == generation {
                 state.prepared.push_back(result);
                 Self::trim_speculative_results(state);
             }
@@ -586,7 +616,7 @@ impl CpuYuvUploadRuntime {
 
     fn frame_key(state: &CpuYuvUploadState, frame: &Arc<CpuYuvFrame>) -> CpuYuvFrameUploadKey {
         CpuYuvFrameUploadKey {
-            generation: state.generation,
+            generation: state.interest.lock().generation,
             frame_identity: Arc::as_ptr(frame) as usize,
         }
     }
@@ -862,9 +892,49 @@ fn run_cpu_yuv_upload_worker(
     result_sender: mpsc::SyncSender<CpuYuvUploadWorkerResult>,
     returned_receiver: mpsc::Receiver<wgpu::Buffer>,
     trim_requested: Arc<AtomicBool>,
+    interest: Arc<Mutex<CpuYuvUploadInterest>>,
 ) {
     let mut pool = Vec::with_capacity(CPU_YUV_UPLOAD_POOL_CAPACITY);
-    while let Ok(command) = request_receiver.recv() {
+    let mut commands = VecDeque::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY);
+    let mut retired_commands = Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY);
+    'worker: loop {
+        if commands.is_empty() {
+            match request_receiver.recv() {
+                Ok(command) => commands.push_back(command),
+                Err(_) => break,
+            }
+        }
+        // Receive a bounded batch from the existing transport. Pending
+        // ownership includes this batch; it does not create extra admission.
+        for _ in commands.len()..CPU_YUV_UPLOAD_WORKER_CAPACITY {
+            match request_receiver.try_recv() {
+                Ok(command) => commands.push_back(command),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break 'worker,
+            }
+        }
+        let command = {
+            let interest = interest.lock();
+            for index in (0..commands.len()).rev() {
+                if matches!(&commands[index], CpuYuvUploadWorkerCommand::Prepare { key, .. }
+                    if key.generation != interest.generation)
+                    && let Some(command) = commands.remove(index)
+                {
+                    retired_commands.push(command);
+                }
+            }
+            let next = commands.iter().position(|command| matches!(command, CpuYuvUploadWorkerCommand::Trim))
+                .or_else(|| commands.iter().position(|command| matches!(command,
+                    CpuYuvUploadWorkerCommand::Prepare { key, .. } if interest.is_candidate_input(*key))))
+                .unwrap_or(0);
+            commands.remove(next)
+        };
+        // Payload destruction and all native calls stay outside the shared
+        // interest lock, so allocation cannot lock out candidate admission.
+        retired_commands.clear();
+        let Some(command) = command else {
+            continue;
+        };
         if trim_requested.swap(false, Ordering::AcqRel) {
             pool.clear();
         }
@@ -1285,6 +1355,84 @@ mod tests {
         assert!(
             weak.upgrade().is_none(),
             "retirement must release the admitted source"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn queued_current_upload_precedes_speculative_uploads() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("priority.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut request = PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+            decoder.decode_cancellable(request, || false).expect("decode")
+        else {
+            panic!("compact frame")
+        };
+        decoder.clear();
+        let frames = (0..4).map(|_| Arc::new(frame.clone())).collect::<Vec<_>>();
+        let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let (entered, entry) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let released = Mutex::new(released);
+        runtime.install_completion_waker(move || {
+            entered.send(()).expect("first upload complete");
+            released
+                .lock()
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("release worker");
+        });
+        assert!(!runtime.prepare(&frames[0]).expect("first upload"));
+        entry.recv_timeout(std::time::Duration::from_secs(5)).expect("worker paused");
+        let (completed, completion) = mpsc::channel();
+        for (index, frame) in frames.iter().enumerate().skip(1) {
+            let completed = completed.clone();
+            runtime.install_completion_waker(move || {
+                let _ = completed.send(index);
+            });
+            assert!(!runtime.prepare(frame).expect("queued speculative input"));
+        }
+        assert!(!runtime
+            .prepare_candidate(&[Arc::clone(&frames[3])])
+            .expect("promote current input"));
+        release.send(()).expect("release worker");
+        let first = completion
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("next completion");
+        let mut retirement = runtime.into_retirement();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owner closure deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        assert_eq!(
+            first, 3,
+            "already queued current input must precede unstarted speculation"
         );
     }
 

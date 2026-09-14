@@ -371,6 +371,18 @@ before protecting or allocating its transfers. The estimate includes each
 candidate's exact padded staging extent; the worker reuses only matching buffer
 capacities so a larger old allocation cannot escape that charge.
 
+The worker reads the same generation and retained candidate-input table as the
+upload owner before starting each transfer. Within a bounded receive batch from
+the existing transport, current inputs precede unstarted speculative inputs;
+generation-invalid work is discarded before allocation. Promotion does not
+resubmit the input or create another admission queue. Native calls and discarded
+payload destruction occur outside the shared interest lock. The worker retains
+only this interest table, not the result receiver, so consuming retirement still
+closes publication and joins the original worker.
+`queued_current_upload_precedes_speculative_uploads` pauses the real worker,
+promotes the last queued prewarm and verifies that it completes next before
+consuming the worker's shutdown receipt.
+
 Unsubmitted preparations retain their CPU mapping after the worker finishes
 copying. Speculative replacement returns that same mapped buffer to the existing
 worker pool before scheduling its replacement; no GPU remap or native allocation
