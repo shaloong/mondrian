@@ -87,6 +87,7 @@ struct CpuYuvUploadSlot {
     luma: wgpu::Texture,
     chroma: wgpu::Texture,
     chroma_v: Option<wgpu::Texture>,
+    views: CpuYuvUploadedPlaneViews,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,7 @@ struct CpuYuvUploadKey {
     chroma_plane_layout: CpuYuvChromaPlaneLayout,
 }
 
+#[derive(Clone)]
 struct CpuYuvUploadedPlaneViews {
     luma: wgpu::TextureView,
     chroma: wgpu::TextureView,
@@ -274,26 +276,25 @@ impl CpuYuvUploadRuntime {
         let slot_index = state.next_slot;
         state.next_slot = state.next_slot.saturating_add(1);
         if state.slots.get(slot_index).is_none_or(|slot| slot.key != key) {
-            let slot = CpuYuvUploadSlot {
-                key,
-                luma: create_plane_texture(
-                    device,
-                    "mondrian.cpu-yuv.luma",
-                    frame.width,
-                    frame.height,
-                    luma_format,
-                ),
-                chroma: create_plane_texture(
-                    device,
-                    "mondrian.cpu-yuv.chroma",
-                    frame.chroma_width,
-                    frame.chroma_height,
-                    match key.chroma_plane_layout {
-                        CpuYuvChromaPlaneLayout::Interleaved => interleaved_chroma_format,
-                        CpuYuvChromaPlaneLayout::Planar => planar_chroma_format,
-                    },
-                ),
-                chroma_v: (key.chroma_plane_layout == CpuYuvChromaPlaneLayout::Planar).then(|| {
+            let luma = create_plane_texture(
+                device,
+                "mondrian.cpu-yuv.luma",
+                frame.width,
+                frame.height,
+                luma_format,
+            );
+            let chroma = create_plane_texture(
+                device,
+                "mondrian.cpu-yuv.chroma",
+                frame.chroma_width,
+                frame.chroma_height,
+                match key.chroma_plane_layout {
+                    CpuYuvChromaPlaneLayout::Interleaved => interleaved_chroma_format,
+                    CpuYuvChromaPlaneLayout::Planar => planar_chroma_format,
+                },
+            );
+            let chroma_v =
+                (key.chroma_plane_layout == CpuYuvChromaPlaneLayout::Planar).then(|| {
                     create_plane_texture(
                         device,
                         "mondrian.cpu-yuv.chroma-v",
@@ -301,8 +302,18 @@ impl CpuYuvUploadRuntime {
                         frame.chroma_height,
                         planar_chroma_format,
                     )
-                }),
+                });
+            let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
+            let chroma_v_view = match &chroma_v {
+                Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                None => chroma_view.clone(),
             };
+            let views = CpuYuvUploadedPlaneViews {
+                luma: luma.create_view(&wgpu::TextureViewDescriptor::default()),
+                chroma: chroma_view,
+                chroma_v: chroma_v_view,
+            };
+            let slot = CpuYuvUploadSlot { key, luma, chroma, chroma_v, views };
             if slot_index == state.slots.len() {
                 state.slots.push(slot);
             } else {
@@ -319,12 +330,10 @@ impl CpuYuvUploadRuntime {
                 .ok_or(CpuYuvMaterializationError::MissingPlanarChromaTexture)?;
             record_prepared_plane_copy(encoder, &prepared.buffer, chroma_v, chroma_v_copy);
         }
-        let chroma_v = slot.chroma_v.as_ref().unwrap_or(&slot.chroma);
-        let views = CpuYuvUploadedPlaneViews {
-            luma: slot.luma.create_view(&wgpu::TextureViewDescriptor::default()),
-            chroma: slot.chroma.create_view(&wgpu::TextureViewDescriptor::default()),
-            chroma_v: chroma_v.create_view(&wgpu::TextureViewDescriptor::default()),
-        };
+        // Views describe immutable texture extent/format, not frame content.
+        // Retain them with the physical slot instead of entering the native
+        // object allocator three times on every realtime candidate.
+        let views = slot.views.clone();
         state.used_buffers.push(prepared.buffer);
         Ok(views)
     }
@@ -911,6 +920,93 @@ mod retirement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn persistent_upload_slot_reuses_native_plane_views() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("planes.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut request = PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+            decoder.decode_cancellable(request, || false).expect("software decode")
+        else {
+            panic!("compact frame")
+        };
+        decoder.clear();
+        let frame = Arc::new(frame);
+        let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut views = Vec::new();
+        for index in 0..3 {
+            if index == 2 {
+                runtime.clear();
+            }
+            runtime.begin_frame();
+            while !runtime.prepare(&frame).expect("prepare") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "upload preparation deadline"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            views.push(
+                runtime.upload(&context.device, &mut encoder, &frame).expect("record upload"),
+            );
+            drop(encoder);
+            runtime.discard_candidate();
+        }
+        let mut retirement = runtime.into_retirement();
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "upload owner closure deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        assert_eq!(
+            views[0].luma, views[1].luma,
+            "one physical slot must retain its luma view"
+        );
+        assert_eq!(
+            views[0].chroma, views[1].chroma,
+            "one physical slot must retain its Cb view"
+        );
+        assert_eq!(
+            views[0].chroma_v, views[1].chroma_v,
+            "one physical slot must retain its Cr view"
+        );
+        assert_ne!(
+            views[0].luma, views[2].luma,
+            "retired slot must not reuse an old view"
+        );
+        assert_ne!(
+            views[0].chroma, views[2].chroma,
+            "retired slot must not reuse an old chroma view"
+        );
+    }
 
     #[test]
     fn plane_upload_layout_preserves_aligned_uhd_ten_bit_rows() {

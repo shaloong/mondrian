@@ -344,7 +344,10 @@ CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
 luma/CbCr views; FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2, and 4:4:4 bind
 stride-preserving luma/Cb/Cr views
 without expanding or converting them into an RGB staging image. The compact
-plane textures survive ordinary Viewer candidate clears. A bounded
+plane textures and their immutable views survive ordinary Viewer candidate
+clears. A frame clones the slot-owned views rather than creating native views
+again; slot replacement or explicit clear retires the views together with their
+textures, so a new generation cannot recover an old view. A bounded
 renderer-owned upload worker copies visible plane rows into reusable mapped,
 256-byte-aligned transfer buffers before realtime candidate recording. The
 runtime exposes one command-free preflight over the complete layer/Transition
