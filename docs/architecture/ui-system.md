@@ -1754,6 +1754,14 @@ The horizon is populated incrementally, one nearest missing entry per event or
 Headless coordinator turn, so its depth does not multiply per-frame decode
 admission pressure.
 
+The same generation health owner handles `on_uncaptured_error`: allocation,
+validation, and internal wgpu errors reject future publication and wake the
+existing progress domain instead of invoking wgpu's default panic handler.
+These errors preserve the first terminal cause but do not prove that previous
+submissions retired; only their actual completion or a later device-loss fact
+can discharge that resource obligation. This does not make allocation failure
+a successful render or start a replacement device implicitly.
+
 A unique `set_device_lost_callback` is installed immediately after
 `request_device`, before any runtime or queue consumer. It can terminalize an
 idle generation without a submission identity. A non-timeout native wait error

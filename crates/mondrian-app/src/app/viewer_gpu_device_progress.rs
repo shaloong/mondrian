@@ -634,7 +634,22 @@ impl ViewerGpuDeviceGenerationHealth {
             callback_health.state.mark_terminal(None, kind, diagnostic, Instant::now());
             callback_health.wake.notify();
         });
+        let error_health = health.clone();
+        device.on_uncaptured_error(Arc::new(move |error| {
+            error_health.observe_uncaptured_error(error);
+        }));
         health
+    }
+
+    fn observe_uncaptured_error(&self, error: wgpu::Error) {
+        // An allocation/validation/internal error invalidates publication, but
+        // does not prove that earlier submitted work has stopped using owners.
+        self.mark_progress_failure(
+            None,
+            format!("wgpu uncaptured error: {error}"),
+            Instant::now(),
+        );
+        self.wake.notify();
     }
 
     #[cfg(test)]
@@ -1745,6 +1760,63 @@ mod tests {
             && (!evidence.retirement_requested
                 || (evidence.retirement_handoff_accepted && evidence.retirement_completed))
             && evidence.renderer_retirement.is_none_or(|receipt| receipt.is_healthy())
+    }
+
+    #[test]
+    #[ignore = "requires a real wgpu device; injects a validation error without allocating large memory"]
+    fn uncaptured_device_error_fails_generation_without_panicking() {
+        let context =
+            pollster::block_on(mondrian_renderer::GpuContext::new()).expect("physical GPU context");
+        let wake = ViewerGpuDeviceProgressWake::default();
+        let health = ViewerGpuDeviceGenerationHealth::install(&context.device, wake);
+        let invalid_size = context
+            .device
+            .limits()
+            .max_buffer_size
+            .checked_add(1)
+            .expect("invalid buffer size");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("uncaptured-error-generation-regression"),
+                size: invalid_size,
+                usage: wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        }));
+        assert!(
+            outcome.is_ok(),
+            "uncaptured error must fail the device generation, not panic"
+        );
+        let terminal = health.terminal().expect("uncaptured error closes generation admission");
+        assert_eq!(
+            terminal.kind,
+            ViewerGpuDeviceGenerationTerminalKind::ProgressFailure
+        );
+        assert!(
+            !terminal.wgpu_work_is_terminal(),
+            "an API error cannot prove older GPU work retired"
+        );
+        context.device.destroy();
+    }
+
+    #[test]
+    fn uncaptured_out_of_memory_preserves_retirement_obligation_and_first_cause() {
+        let health =
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+        health.observe_uncaptured_error(wgpu::Error::OutOfMemory {
+            source: Box::new(std::io::Error::other("injected allocation failure")),
+        });
+        let first = health.terminal().expect("OOM terminal");
+        assert_eq!(
+            first.kind,
+            ViewerGpuDeviceGenerationTerminalKind::ProgressFailure
+        );
+        assert!(!first.wgpu_work_is_terminal());
+        health.mark_device_lost("later physical loss");
+        let after = health.terminal().expect("retained terminal");
+        assert_eq!(after.reason, first.reason);
+        assert_eq!(after.observed_at, first.observed_at);
+        assert!(after.wgpu_work_is_terminal());
     }
 
     #[test]
