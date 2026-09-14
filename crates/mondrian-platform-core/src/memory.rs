@@ -273,8 +273,8 @@ pub trait ProcessMemoryProbe: Send + Sync {
 pub enum PhysicalMemoryCapacityProbeBackend {
     /// Windows `GetPhysicallyInstalledSystemMemory`.
     WindowsInstalledSystemMemory,
-    /// Linux `/proc/meminfo` `MemTotal` capacity.
-    LinuxProcfsMemTotal,
+    /// Linux installed DIMM sizes from the system udev DMI inventory.
+    LinuxUdevDmi,
     /// macOS `hw.memsize` sysctl capacity.
     MacOsHwMemsizeSysctl,
 }
@@ -284,7 +284,7 @@ impl PhysicalMemoryCapacityProbeBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WindowsInstalledSystemMemory => "windows-installed-system-memory",
-            Self::LinuxProcfsMemTotal => "linux-procfs-mem-total",
+            Self::LinuxUdevDmi => "linux-udev-dmi",
             Self::MacOsHwMemsizeSysctl => "macos-hw-memsize-sysctl",
         }
     }

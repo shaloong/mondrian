@@ -22,7 +22,7 @@ inputs into a versioned immutable decision:
   whole-system pressure (`Nominal`, `Elevated`, or `Critical`).
 
 The default profile Adapter reads physically installed memory through Windows
-`GetPhysicallyInstalledSystemMemory`, Linux `/proc/meminfo`, or macOS
+`GetPhysicallyInstalledSystemMemory`, Linux's system udev DMI inventory, or macOS
 `hw.memsize`. A platform or failed probe without reliable evidence is classified
 as `UnknownConservative`, not falsely reported as an 8 GiB machine. Measured machines below 8 GiB are explicitly
 `BelowMinimum`; the half-open range [8 GiB, 16 GiB) is `MinimumSupported`,
@@ -30,6 +30,17 @@ as `UnknownConservative`, not falsely reported as an 8 GiB machine. Measured mac
 Unknown capacity uses the same conservative budgets as the 8 GiB policy while
 remaining distinguishable evidence; below-minimum capacity gets
 smaller derived-media budgets and a coarser realtime Preview floor.
+
+Linux dynamically loads `libudev.so.1` and reads the system-populated DMI
+device properties through its native API. Every declared memory slot must
+contain a positive byte size or explicit absence; incomplete, contradictory,
+non-volatile, or overflowing inventories fail closed. The library, context,
+and device are owned for the bounded query and released in dependency order.
+An unavailable provider or inventory produces `UnknownConservative` without
+requiring elevated application privileges. Linux `MemTotal` remains part of
+live pressure evidence only: it excludes reserved memory and cannot be labeled
+installed capacity or rounded up to a policy tier. The existing tier boundaries
+and per-tier budgets do not change.
 
 ## Interface and ownership
 

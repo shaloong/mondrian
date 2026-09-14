@@ -9,6 +9,10 @@ use mondrian_platform_core::{
     SystemMemoryProbeBackend, SystemMemoryProbeResult,
 };
 
+#[cfg(target_os = "linux")]
+#[path = "linux_installed_memory.rs"]
+mod linux_installed_memory;
+
 pub(super) fn physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
     platform::physical_memory_capacity()
 }
@@ -88,10 +92,10 @@ mod platform {
     use super::*;
 
     pub(super) fn physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
-        let backend = PhysicalMemoryCapacityProbeBackend::LinuxProcfsMemTotal;
-        match meminfo().and_then(|values| required_bytes(&values, "MemTotal")) {
+        let backend = PhysicalMemoryCapacityProbeBackend::LinuxUdevDmi;
+        match linux_installed_memory::installed_bytes() {
             Ok(bytes) => PhysicalMemoryCapacityProbeResult::observed(backend, bytes),
-            Err(error) => PhysicalMemoryCapacityProbeResult::failed(backend, error),
+            Err(error) => PhysicalMemoryCapacityProbeResult::failed(backend, error.to_string()),
         }
     }
 
@@ -155,6 +159,22 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        #[ignore = "requires independently verified installed memory in MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES"]
+        fn installed_capacity_matches_independent_dmi_evidence() {
+            let expected = std::env::var("MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES")
+                .expect("independent installed-capacity evidence")
+                .parse::<u64>()
+                .expect("installed capacity in bytes");
+            assert!(expected > 0);
+            let actual = physical_memory_capacity();
+            assert_eq!(
+                actual.installed_physical_bytes,
+                Some(expected),
+                "{actual:?}"
+            );
+        }
 
         #[test]
         fn parses_required_meminfo_units() {
