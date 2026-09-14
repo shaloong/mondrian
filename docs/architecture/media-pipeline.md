@@ -3914,7 +3914,12 @@ Cancellation sends SIGKILL to that group, including launcher descendants that
 inherit pipes. Exit observation uses `waitid(WNOWAIT)` and the Linux process-group
 inventory before reaping the leader. Keeping the exited leader unreaped pins its
 numeric group identity; a launcher exit alone cannot release a live descendant
-or an executable lease. Unreadable inventory fails observation closed.
+or an executable lease. A procfs record can disappear either before open
+(`ENOENT`) or after open but before read (`ESRCH`); both mean that task no longer
+has an inventory record. Other I/O errors, including permission failures, still
+fail observation closed. The native regression opens a real task's stat file,
+terminates and reaps that task, then reads the retained descriptor through the
+production classification seam; it does not synthesize the disappearance error.
 
 The existing `SupervisedChild` also owns `wait_with_output` pipe capture and
 consuming native wait, so convenience commands do not bypass group closure.

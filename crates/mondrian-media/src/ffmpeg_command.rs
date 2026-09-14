@@ -498,6 +498,21 @@ mod linux_process_group {
     #[error("invalid Linux process-group inventory record")]
     struct InvalidProcessRecord;
 
+    fn process_stat_record(result: io::Result<Vec<u8>>) -> io::Result<Option<Vec<u8>>> {
+        match result {
+            Ok(stat) => Ok(Some(stat)),
+            // procfs may lose the task after open succeeds. Reading that
+            // retained descriptor returns ESRCH rather than open's ENOENT.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     impl ProcessGroup {
         pub(super) fn new(leader: u32) -> Self {
             Self { leader }
@@ -540,10 +555,9 @@ mod linux_process_group {
                 if pid == self.leader {
                     continue;
                 }
-                let stat = match std::fs::read(entry.path().join("stat")) {
-                    Ok(stat) => stat,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
+                let Some(stat) = process_stat_record(std::fs::read(entry.path().join("stat")))?
+                else {
+                    continue;
                 };
                 // comm may contain spaces, parentheses and non-UTF8 bytes.
                 let end = stat
@@ -592,6 +606,43 @@ mod linux_process_group {
                 });
             if let Err(error) = result {
                 tracing::error!(pid, %error, "native process reaper creation failed");
+            }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read;
+
+        #[test]
+        fn reaped_process_stat_is_absent_even_after_successful_open() {
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("native process fixture");
+            let record = std::fs::File::open(format!("/proc/{}/stat", child.id()));
+            child.kill().expect("terminate native fixture");
+            child.wait().expect("reap native fixture");
+            let mut record = record.expect("open stat before process exit");
+            let mut bytes = Vec::new();
+            let result = record.read_to_end(&mut bytes).map(|_| bytes);
+            assert_eq!(
+                result.as_ref().err().and_then(io::Error::raw_os_error),
+                Some(libc::ESRCH),
+                "kernel must reproduce the post-open disappearance rather than ENOENT at open"
+            );
+            assert!(matches!(process_stat_record(result), Ok(None)),
+                "an already opened proc record whose process was reaped is absent, not an I/O failure");
+        }
+
+        #[test]
+        fn inaccessible_process_stat_remains_an_error() {
+            for code in [libc::EACCES, libc::EPERM, libc::EIO] {
+                let result = process_stat_record(Err(io::Error::from_raw_os_error(code)));
+                assert_eq!(
+                    result.expect_err("retain inventory failure").raw_os_error(),
+                    Some(code)
+                );
             }
         }
     }
