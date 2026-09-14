@@ -1,6 +1,6 @@
 //! Linux `/proc` process-memory Adapter.
 //!
-//! A product-tree sample is accepted only when two full PID/start-time
+//! A product-tree sample is accepted only when two full PID/start-time/group
 //! inventories of live address spaces match. This rejects PID reuse, live-member
 //! exit, and newly visible descendants instead of silently undercounting them.
 //! Confirmed zombie/dead tasks have released their user address space; they stay
@@ -21,6 +21,7 @@ const PROCESS_TREE_MAX_ATTEMPTS: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessIdentity {
     parent_pid: u32,
+    process_group: u32,
     start_ticks: u64,
     address_space_exited: bool,
 }
@@ -172,14 +173,24 @@ fn product_tree_inventory(root_pid: u32) -> Result<BTreeMap<u32, ProcessIdentity
         .copied()
         .ok_or_else(|| format!("root process {root_pid} was absent from /proc inventory"))?;
     let mut members = BTreeSet::from([root_pid]);
+    let mut owned_groups = BTreeSet::new();
     loop {
-        let previous_len = members.len();
+        let previous = (members.len(), owned_groups.len());
         for (&pid, identity) in &all {
-            if members.contains(&identity.parent_pid) {
+            if members.contains(&identity.parent_pid)
+                || owned_groups.contains(&identity.process_group)
+            {
                 members.insert(pid);
             }
+            // Native helper owners retain their group leader until the group
+            // exits. Its ancestry anchors live members even after reparenting.
+            // The root may share a terminal/job group with unrelated peers;
+            // only a descendant leader establishes this ownership boundary.
+            if pid != root_pid && members.contains(&pid) && identity.process_group == pid {
+                owned_groups.insert(pid);
+            }
         }
-        if members.len() == previous_len {
+        if (members.len(), owned_groups.len()) == previous {
             break;
         }
     }
@@ -240,6 +251,11 @@ fn parse_stat_identity(contents: &[u8]) -> Result<ProcessIdentity, String> {
         .ok_or_else(|| String::from("/proc stat has no parent PID"))?
         .parse::<u32>()
         .map_err(|error| format!("invalid parent PID: {error}"))?;
+    let process_group = fields
+        .get(2)
+        .ok_or_else(|| String::from("/proc stat has no process group"))?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid process group: {error}"))?;
     let start_ticks = fields
         .get(19)
         .ok_or_else(|| String::from("/proc stat has no start time"))?
@@ -253,6 +269,7 @@ fn parse_stat_identity(contents: &[u8]) -> Result<ProcessIdentity, String> {
         .map_err(|error| format!("invalid thread count: {error}"))?;
     Ok(ProcessIdentity {
         parent_pid,
+        process_group,
         start_ticks,
         // A zombie group leader may still have live sibling threads. Missing
         // counters in that case remain unknown, never an invented zero sample.
@@ -298,6 +315,87 @@ fn status_kib(contents: &[u8], key: &str) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These fixtures share the test process as their inventory root. Their
+    // ownership transitions must not invalidate another fixture's stable scan.
+    static NATIVE_PROCESS_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn root_group_does_not_claim_an_unrelated_peer() {
+        let _fixture = NATIVE_PROCESS_FIXTURE.lock().expect("exclusive native fixture ownership");
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        let mut root = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("native root fixture");
+        let peer = Command::new("/bin/sleep").arg("30").process_group(root.id() as i32).spawn();
+        let inventory = product_tree_inventory(root.id());
+        let mut peer = match peer {
+            Ok(peer) => peer,
+            Err(error) => {
+                root.kill().expect("terminate root after failed peer startup");
+                root.wait().expect("reap root after failed peer startup");
+                panic!("native peer fixture: {error}");
+            }
+        };
+        root.kill().expect("terminate owned root fixture");
+        peer.kill().expect("terminate owned peer fixture");
+        root.wait().expect("reap root fixture");
+        peer.wait().expect("reap peer fixture");
+        let inventory = inventory.expect("native root inventory");
+        assert_eq!(
+            inventory.len(),
+            1,
+            "same terminal group does not prove product ancestry"
+        );
+        assert!(inventory.contains_key(&root.id()));
+        assert!(!inventory.contains_key(&peer.id()));
+    }
+
+    #[test]
+    fn exited_owned_group_leader_does_not_hide_live_descendant_memory() {
+        let _fixture = NATIVE_PROCESS_FIXTURE.lock().expect("exclusive native fixture ownership");
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let mut leader = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & printf '%s\\n' $!; exit 0"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("owned launcher fixture");
+        let mut line = String::new();
+        let readiness =
+            BufReader::new(leader.stdout.take().expect("descendant PID pipe")).read_line(&mut line);
+        let descendant = line.trim().parse::<u32>();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if read_process_identity(leader.id()).is_ok_and(|record| record.address_space_exited) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let inventory = product_tree_inventory(std::process::id());
+        // The unreaped leader still pins this fixture's numeric group; never
+        // signal another process or let the launcher release the identity first.
+        let killed = unsafe { libc::kill(-(leader.id() as libc::pid_t), libc::SIGKILL) };
+        let reaped = leader.wait();
+        readiness.expect("read descendant identity");
+        assert_eq!(killed, 0, "terminate owned descendant group");
+        reaped.expect("reap owned launcher");
+        assert!(exited, "fixture must reach exited/unreaped launcher state");
+        let descendant = descendant.expect("native descendant PID");
+        assert!(
+            inventory.expect("product inventory").contains_key(&descendant),
+            "a live member of an owned process group must remain counted after launcher exit"
+        );
+    }
+
     #[test]
     fn opaque_status_name_does_not_relax_numeric_counter_validation() {
         let status = b"Name:\tworker\xff\nRssAnon:\t10 kB\n";
@@ -343,6 +441,7 @@ mod tests {
 
     #[test]
     fn non_utf8_child_name_remains_in_inventory_and_memory_sample() {
+        let _fixture = NATIVE_PROCESS_FIXTURE.lock().expect("exclusive native fixture ownership");
         use std::io::{BufRead, BufReader};
         use std::process::{Command, Stdio};
         let mut child = Command::new("/bin/sh")
@@ -381,6 +480,7 @@ mod tests {
 
     #[test]
     fn exited_unreaped_child_does_not_invalidate_live_memory_inventory() {
+        let _fixture = NATIVE_PROCESS_FIXTURE.lock().expect("exclusive native fixture ownership");
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
         let mut child = Command::new("/bin/sh")
@@ -447,6 +547,7 @@ mod tests {
             parse_stat_identity(stat.as_bytes()).expect("stat should parse"),
             ProcessIdentity {
                 parent_pid: 12,
+                process_group: 0,
                 start_ticks: 991,
                 address_space_exited: false
             }

@@ -735,6 +735,15 @@ other I/O failures invalidate the observation instead of silently reducing the
 membership set. A native child with a non-UTF8 comm verifies both ancestry
 inclusion and memory sampling through the production probe.
 
+An owned descendant group leader also anchors that group's live members. Linux
+reparents children when a launcher exits, before it is reaped; PPID-only walking
+would omit those live address spaces even though the native process owner still
+retains the group. Group membership is derived from the same stat inventory and
+included in the before/after identity comparison. The root's own terminal/job
+group does not establish descendant ownership and cannot pull unrelated peers
+into the sample. Native tests cover both an exited/unreaped helper launcher with
+a live group member and an unrelated peer sharing the sampled root's group.
+
 Linux process-memory inventories retain zombie/dead tasks for ancestry discovery
 but exclude their exited user address spaces from RSS aggregation. Such tasks
 legitimately omit RssAnon/VmRSS/VmHWM; missing counters on a live process remain
