@@ -371,6 +371,18 @@ P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layo
 `Source + EncodedFloat` intermediate and therefore share color validation,
 OCIO execution, spatial scaling, and Viewer composition semantics.
 
+The mapped-upload transport and prepared-result retention currently share a
+four-entry bound. This is a known liveness defect, not a qualification limit:
+five independently retained, contributing compact inputs fit the Standard
+active resource grant but cannot simultaneously become ready because result
+drain evicts an earlier required preparation. The opt-in native
+`five_compact_inputs_can_prepare_and_record_one_candidate` regression reproduces
+this through the public decoder and Viewer runtime, verifies resource admission
+first, and consumes the production retirement owner before reporting failure.
+A complete fix must distinguish bounded worker transport from the complete
+candidate's active input ownership without enlarging the idle cache grant.
+
+
 The YUV shader uses unfiltered `textureLoad` operations because YUV plane
 formats are not assumed filterable. It performs renderer-defined bilinear
 4:2:0, 4:2:2, or 4:4:4 chroma reconstruction using explicit Left, Center, or TopLeft sample origins,

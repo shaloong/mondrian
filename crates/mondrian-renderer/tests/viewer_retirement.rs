@@ -214,3 +214,100 @@ fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
     );
     assert!(!receipt.is_healthy());
 }
+
+#[test]
+#[ignore = "requires an explicitly available GPU adapter"]
+fn five_compact_inputs_can_prepare_and_record_one_candidate() {
+    use mondrian_renderer::*;
+    mondrian_core::ensure_mondrian_default_ocio_loaded().expect("OCIO config");
+    let context = pollster::block_on(GpuContext::new()).expect("required local GPU");
+    let temp = tempfile::tempdir().expect("owned fixture directory");
+    let decoded = decode_fixture(&temp.path().join("five-inputs.y4m"));
+    let layers: Vec<_> = (0..5)
+        .map(|_| {
+            let mut value = layer(decoded.clone());
+            if let ViewerGpuExecutionLayer::Source(source) = &mut value
+                && let ViewerGpuSourceLayer::Media { opacity, .. } = source.as_mut()
+            {
+                *opacity = 0.5;
+            }
+            value
+        })
+        .collect();
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+            .expect("upload runtime");
+    let boundary = mondrian_renderer::color::ProgramOutputBoundary::display(
+        ColorSpace::Srgb,
+        false,
+        ColorEngine::mondrian_standard(),
+    );
+    let monitor = RenderMonitorAdaptation::new(
+        ColorSpace::Srgb,
+        ColorSpace::Srgb,
+        ColorEngine::mondrian_standard(),
+    )
+    .expect("monitor");
+    let sequence_id = mondrian_core::SequenceId::new();
+    let request = || ViewerGpuExecutionRequest {
+        sequence_id,
+        timeline_frame: 0,
+        width: 4,
+        height: 2,
+        working_color_space: WorkingColorSpace::LinearRec709,
+        layers: &layers,
+        heterogeneous_inputs: vec![],
+        program_output_boundary: &boundary,
+        monitor_adaptation: &monitor,
+        source_rect: ViewerSourceRect::FULL,
+        output_width: 4,
+        output_height: 2,
+        output_precision: ViewerGpuOutputPrecision::Encoded8,
+        display_calibration: None,
+        program_scopes: None,
+        signal_monitoring: None,
+    };
+    let grant = ViewerGpuExecutionResourceGrant::new(3, 256 * 1024 * 1024)
+        .with_active_limits(2 * 1024 * 1024 * 1024, 96);
+    assert!(runtime.reconfigure_resource_grant(grant));
+    grant
+        .admit_active_working_set(
+            estimate_viewer_gpu_active_working_set(&request()).expect("complete candidate demand"),
+        )
+        .expect("five small inputs fit the unchanged Standard grant");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut recorded = false;
+    let mut attempts = 0;
+    let mut preflight_ready = 0;
+    while Instant::now() < deadline {
+        attempts += 1;
+        if runtime.prepare_cpu_yuv_uploads(&layers).expect("prepare complete candidate") {
+            preflight_ready += 1;
+            runtime.clear_frame_resources();
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            let result = runtime.record(&context.device, &context.queue, &mut encoder, request());
+            match result {
+                Ok(_) => {
+                    context.queue.submit([encoder.finish()]);
+                    context
+                        .device
+                        .poll(wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: Some(Duration::from_secs(5)),
+                        })
+                        .expect("bounded submission completion");
+                    recorded = true;
+                    break;
+                }
+                Err(ViewerGpuExecutionError::Backpressure(_)) => {}
+                Err(error) => panic!("unexpected candidate failure: {error:?}"),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut retirement = runtime.into_retirement();
+    assert!(finish(&context, &mut retirement).is_healthy());
+    drop(retirement);
+    assert!(recorded,
+        "five admitted compact inputs never formed one candidate: attempts={attempts}, preflight_ready={preflight_ready}");
+}
