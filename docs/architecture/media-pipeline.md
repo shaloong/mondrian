@@ -2062,6 +2062,11 @@ inside that already-admitted media worker. They must not fan each worker into
 Rayon's process-global pool or any other unbudgeted inner executor; measured
 inner parallelism may be added only through an explicit media-domain grant with
 cancellation and workload evidence.
+The Session-owned BWDIF graph follows the same rule: its FFmpeg filter thread
+ceiling is one, set before creating any filter context. The codec can still
+decode ahead on its granted threads; an automatic BWDIF pool would spend that
+CPU budget again and compete with interactive and audio work. Field cadence,
+pixel processing, and the existing decoder thread grant remain unchanged.
 Each worker bootstrap carries its lane-specific FFmpeg thread ceiling into the
 non-`Send` decode context. Access-mode defaults and environment overrides may
 choose any lower value but cannot exceed that ceiling; diagnostics report the

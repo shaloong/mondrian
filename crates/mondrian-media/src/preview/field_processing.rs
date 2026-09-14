@@ -145,6 +145,12 @@ impl BwdifGraph {
         let settb = ffmpeg::filter::find("settb")
             .ok_or_else(|| field_error(path, "linked FFmpeg runtime has no settb filter"))?;
         let mut graph = ffmpeg::filter::Graph::new();
+        // Filtering executes inside the already-admitted media worker. Codec
+        // threads may still be decoding ahead, so an automatic filter pool
+        // would spend the same CPU grant a second time. Set this before adding
+        // filters: FFmpeg initializes graph threading during filter creation.
+        // SAFETY: this fresh, exclusively owned graph has no filter contexts.
+        unsafe { (*graph.as_mut_ptr()).nb_threads = 1 };
         let args = format!(
             "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
             frame.width(),
@@ -273,6 +279,30 @@ fn field_error(path: &Path, reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bwdif_does_not_create_an_unbudgeted_inner_thread_pool() {
+        ffmpeg::init().expect("linked FFmpeg runtime");
+        let frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            1920,
+            1080,
+        );
+        let graph = BwdifGraph::open(
+            &frame,
+            ffmpeg::Rational(1, 50),
+            PictureFieldDominance::TopFirst,
+            Path::new("bounded-field-processing.mov"),
+        )
+        .expect("BWDIF graph");
+        // SAFETY: the graph is initialized, owned here and only read during
+        // this borrow. This is FFmpeg's actual configured execution ceiling.
+        let threads = unsafe { (*graph.graph.as_ptr()).nb_threads };
+        assert_eq!(
+            threads, 1,
+            "field processing must stay on its admitted worker"
+        );
+    }
 
     #[test]
     fn automatic_session_rejects_mixed_scan_and_dominance_changes() {
