@@ -314,14 +314,29 @@ but physical decoder support remains fail-closed. The native import plan owns di
 linear-working handles so a
 backend cannot skip, reorder, or mislabel either pass.
 
+Compact CPU YUV materialization fuses these two semantic stages into one
+physical draw. The shared YUV reconstruction function returns encoded Float32
+RGB directly to the existing OCIO-generated input callable, preserving alpha;
+only the Working Float32 texture is allocated. OCIO lowering, processor identity,
+LUT/uniform uploads and refresh remain owned by the same color runtime. Its
+bounded device-owned pipeline cache keys the fused shader by the complete OCIO
+identity and input source, and retires with that runtime. The GLSL frontend's
+required dummy entry is removed from validated IR before callable WGSL emission;
+no custom transfer function or color-engine fallback is introduced. Native
+import currently retains the explicit two-pass physical path described above.
+
 The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
 observes exact UHD frames through the production decoder and Viewer using the
 Standard 256 MiB idle grant and unchanged active limits. It checks that texture
-allocation misses stop after warmup. The current two-intermediate CPU YUV path
-fails this test: returning two UHD Float32 textures evicts the reusable display
+allocation misses stop after warmup. The previous two-intermediate CPU YUV path
+failed this test: returning two UHD Float32 textures evicted the reusable display
 texture, producing one allocation and eviction per subsequent frame. Native
-texture eviction can block the realtime caller. This is an unresolved resource
-lifetime/performance defect, not a reason to enlarge the qualification grant.
+texture eviction blocked the realtime caller. The fused path keeps Working
+Float32 plus display Float16 within that same grant, eliminating the unnecessary
+encoded-RGB texture rather than enlarging the cache. Active demand charges the
+retained plane extent and one Working texture, with the exact physical planar
+or interleaved texture count. Allocation stability does not itself qualify
+playback deadlines or physical HDR presentation.
 
 The same YUV shader is also the sole materializer for media-owned compact CPU
 YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained

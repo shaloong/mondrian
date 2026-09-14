@@ -4293,6 +4293,7 @@ fn refresh_backend_uniform(
 /// Renderer-owned runtime for concrete OCIO GPU backend object preparation.
 pub struct OcioGpuWgpuBackendObjectRuntime {
     objects: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuPreparedBackendObjects>>,
+    input_pipelines: LruCache<OcioGpuCanonicalIdentity, Arc<wgpu::RenderPipeline>>,
     wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache,
     render_pipelines: OcioGpuWgpuRenderPipelineCache,
     hits: u64,
@@ -4308,6 +4309,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
             objects: LruCache::new(capacity),
+            input_pipelines: LruCache::new(capacity),
             wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default(),
             render_pipelines: OcioGpuWgpuRenderPipelineCache::default(),
             hits: 0,
@@ -4379,6 +4381,82 @@ impl OcioGpuWgpuBackendObjectRuntime {
                 Err(err)
             }
         }
+    }
+
+    /// Compose a physical input fetch with the same compiled OCIO callable and LUTs.
+    /// The caller supplies a group-1 input layout; OCIO retains group 0.
+    pub(crate) fn prepare_fused_input_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        shader_plan: &OcioGpuShaderPlan,
+        backend: &OcioGpuWgpuPreparedBackendObjects,
+        input_source: &str,
+        input_layout: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<wgpu::RenderPipeline>, OcioGpuFusedInputError> {
+        if backend.ocio_bind_group.bind_group_index != 0 {
+            return Err(OcioGpuFusedInputError::ResourceGroup);
+        }
+        let key = OcioGpuCanonicalIdentity::for_hash(
+            b"fused-input-pipeline",
+            &(
+                shader_plan.canonical_identity(),
+                backend.ocio_bind_group.layout_identity,
+                input_source,
+            ),
+        );
+        if let Some(pipeline) = self.input_pipelines.get(&key) {
+            return Ok(Arc::clone(pipeline));
+        }
+        let source = format!("{}\n{input_source}", ocio_input_callable_wgsl(shader_plan)?);
+        let module = naga::front::wgsl::parse_str(&source)
+            .map_err(|error| OcioGpuFusedInputError::Parse(error.emit_to_string(&source)))?;
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .map_err(|error| OcioGpuFusedInputError::Validation(error.to_string()))?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.ocio.fused-input.shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.ocio.fused-input.layout"),
+            bind_group_layouts: &[Some(&backend.ocio_bind_group.layout), Some(input_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = Arc::new(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.ocio.fused-input.pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: crate::product_gpu_working_texture_format().to_wgpu(),
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            }),
+        );
+        self.input_pipelines.put(key, Arc::clone(&pipeline));
+        Ok(pipeline)
     }
 
     fn prepare_backend_objects_uncached(
@@ -6214,6 +6292,65 @@ fn wrapper_ocio_program_glsl_call(contract: &OcioGpuGeneratedProgramContract) ->
         }
         OcioGpuGeneratedProgramCallStyle::Unknown => String::new(),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OcioGpuFusedInputError {
+    #[error("OCIO input program is not a callable function")]
+    NotCallable,
+    #[error("fused input requires the canonical group-0 OCIO resource contract")]
+    ResourceGroup,
+    #[error("OCIO callable lowering failed: {0}")]
+    Lowering(String),
+    #[error("OCIO callable translation failed: {0:?}")]
+    Translation(OcioGpuShaderTranslationFailure),
+    #[error("fused input WGSL parsing failed: {0}")]
+    Parse(String),
+    #[error("fused input shader validation failed: {0}")]
+    Validation(String),
+    #[error("OCIO callable WGSL emission failed: {0}")]
+    Emission(String),
+}
+
+/// Lower the canonical OCIO callable without materializing an RGBA input texture.
+fn ocio_input_callable_wgsl(
+    shader_plan: &OcioGpuShaderPlan,
+) -> Result<String, OcioGpuFusedInputError> {
+    let contract = OcioGpuGeneratedProgramContract::for_shader_plan(shader_plan);
+    if contract.call_style == OcioGpuGeneratedProgramCallStyle::Unknown
+        || contract.main_function_present
+    {
+        return Err(OcioGpuFusedInputError::NotCallable);
+    }
+    let source = format!(
+        "#version 450 core\n{}\nvec4 mondrian_apply_input(vec4 {}) {{\nfloat saved_alpha = {}.a;\n{}\n{}.a = saved_alpha;\nreturn {};\n}}\nvoid main() {{}}",
+        lower_ocio_program_source_for_wgpu(shader_plan).map_err(OcioGpuFusedInputError::Lowering)?,
+        contract.pixel_name, contract.pixel_name,
+        wrapper_ocio_program_glsl_call(&contract), contract.pixel_name, contract.pixel_name,
+    );
+    let artifact = translate_naga_shader_stage(
+        GpuLanguage::Glsl4_0,
+        OcioGpuShaderTargetLanguage::NagaIr,
+        OcioGpuShaderStage::Fragment,
+        hash_value(&source),
+        &source,
+    )
+    .map_err(OcioGpuFusedInputError::Translation)?;
+    let mut module = artifact.naga_module;
+    module.entry_points.clear();
+    for (_, function) in module.functions.iter_mut() {
+        if function.name.as_deref() == Some("main") {
+            function.name = Some("mondrian_unused_library_entry".into());
+        }
+    }
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|error| OcioGpuFusedInputError::Validation(error.to_string()))?;
+    naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+        .map_err(|error| OcioGpuFusedInputError::Emission(error.to_string()))
 }
 
 fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result<String, String> {
@@ -9382,6 +9519,24 @@ mod tests {
             render_descriptor.color_target_state().format,
             wgpu::TextureFormat::Rgba16Float
         );
+    }
+
+    #[test]
+    fn input_callable_links_without_rgba_texture_for_both_ocio_call_styles() {
+        for source in [callable_ocio_program_text(), returning_ocio_program_text()] {
+            let library = ocio_input_callable_wgsl(&shader_plan_with_text(source))
+                .expect("canonical callable lowers");
+            let source = format!("{library}\n@fragment fn main() -> @location(0) vec4<f32> {{ return mondrian_apply_input(vec4<f32>(0.5)); }}");
+            let module = naga::front::wgsl::parse_str(&source).expect("callable links");
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("linked module validates");
+            assert_eq!(module.entry_points.len(), 1);
+            assert!(module.global_variables.iter().all(|(_, variable)| variable.binding.is_none()));
+        }
     }
 
     #[test]

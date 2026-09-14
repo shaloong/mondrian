@@ -657,6 +657,25 @@ pub enum RenderGpuInputStageRuntimeRecordError {
     Record(RenderGpuOutputStageRecordError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RenderGpuFusedInputError {
+    #[error("input stage planning failed: {0:?}")]
+    Plan(RenderColorTransformError),
+    #[error("input stage resource contract failed: {0:?}")]
+    ResourcePlan(RenderGpuInputStageResourcePlanError),
+    #[error("input backend planning failed: {0:?}")]
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    #[error("input backend preparation failed: {0:?}")]
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    #[error(transparent)]
+    Shader(#[from] crate::ocio_gpu::OcioGpuFusedInputError),
+}
+
+pub(crate) struct RenderGpuFusedInputBackend {
+    pub(crate) pipeline: std::sync::Arc<wgpu::RenderPipeline>,
+    pub(crate) objects: std::sync::Arc<crate::ocio_gpu::OcioGpuWgpuPreparedBackendObjects>,
+}
+
 /// Error returned when a runtime-owned in-graph GPU OCIO pass cannot record.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RenderGpuColorTransformRuntimeRecordError {
@@ -1524,6 +1543,49 @@ impl RenderGpuOutputBoundaryRuntime {
                 },
             })
             .map_err(RenderGpuInputStageRuntimeRecordError::Record)
+    }
+
+    pub(crate) fn prepare_fused_yuv_input(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        decoder: &crate::GpuNativeYuvDecoder,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut self.shader_cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_input_to_working(input.descriptor(), transform)
+            .map_err(RenderGpuFusedInputError::Plan)?;
+        // Retain the canonical source/working contract validation even though
+        // the source is now a shader value instead of a physical texture.
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            input,
+            output,
+            &stage_plan,
+        )
+        .map_err(RenderGpuFusedInputError::ResourcePlan)?;
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = self
+            .backend_prep
+            .prepare_static_pipeline(&shader_plan, color_target_format_for_gpu_frame(output))
+            .map_err(RenderGpuFusedInputError::BackendPrep)?;
+        let backend = self
+            .backend_objects
+            .prepare_backend_objects(device, queue, &shader_plan, &static_pipeline)
+            .map_err(RenderGpuFusedInputError::BackendObjects)?;
+        let pipeline = self.backend_objects.prepare_fused_input_pipeline(
+            device,
+            &shader_plan,
+            &backend,
+            crate::GpuNativeYuvDecoder::fused_texture_source(),
+            decoder.texture_input_layout(),
+        )?;
+        Ok(RenderGpuFusedInputBackend { pipeline, objects: backend })
     }
 
     /// Prepare and retain the concrete OCIO backend objects for an encoded GPU
@@ -9385,3 +9447,7 @@ mod tests {
         assert!(report.root_causes.iter().any(|rc| rc.code == "gpu_stage_blocked"));
     }
 }
+
+#[cfg(test)]
+#[path = "color_stage_fused_tests.rs"]
+mod fused_input_tests;

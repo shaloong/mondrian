@@ -640,12 +640,6 @@ fn estimate_source(
             }
 
             if let Some(source) = cpu_yuv_source {
-                let encoded_rgb_bytes = checked_texture_bytes(
-                    source.materialization_width,
-                    source.materialization_height,
-                    8,
-                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                )?;
                 let working_bytes = checked_texture_bytes(
                     source.materialization_width,
                     source.materialization_height,
@@ -654,13 +648,18 @@ fn estimate_source(
                 )?;
                 let bytes = u64::try_from(source.frame.retained_bytes())
                     .ok()
-                    .and_then(|bytes| bytes.checked_add(encoded_rgb_bytes))
                     .and_then(|bytes| bytes.checked_add(working_bytes))
                     .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     })?;
                 estimate.source_preparation.checked_add(
-                    ViewerGpuActiveTextureDemand { textures: 4, bytes },
+                    ViewerGpuActiveTextureDemand {
+                        textures: match source.frame.chroma_plane_layout() {
+                            mondrian_media::CpuYuvChromaPlaneLayout::Interleaved => 3,
+                            mondrian_media::CpuYuvChromaPlaneLayout::Planar => 4,
+                        },
+                        bytes,
+                    },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 observe_effect_extent(

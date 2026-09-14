@@ -56,8 +56,7 @@ fn sample_chroma(source_center: vec2<f32>) -> vec2<f32> {
     return mix(mix(c00, c10, weight.x), mix(c01, c11, weight.x), weight.y);
 }
 
-@fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn decode_encoded_rgb(position: vec4<f32>) -> vec4<f32> {
     let source_extent = vec2<f32>(uniforms.extent.xy);
     let output_extent = vec2<f32>(uniforms.extent.zw);
     let source_center = position.xy * source_extent / output_extent;
@@ -74,6 +73,12 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         y + uniforms.matrix1.z * cb,
     );
     return vec4<f32>(rgb, 1.0);
+}
+"#;
+const YUV_DECODE_ENTRY: &str = r#"
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return decode_encoded_rgb(position);
 }
 "#;
 const YUV_TEXTURE_SOURCE: &str = r#"@group(0) @binding(0) var luma_texture: texture_2d<f32>;
@@ -680,7 +685,7 @@ impl GpuNativeYuvDecodeUniforms {
 /// Prepared immutable bindings for a reusable native YUV surface and plan.
 pub struct GpuNativeYuvPreparedPass {
     contract: GpuNativeYuvSamplingContract,
-    bind_group: wgpu::BindGroup,
+    pub(crate) bind_group: wgpu::BindGroup,
     _uniform_buffer: wgpu::Buffer,
     buffer_source: bool,
 }
@@ -715,8 +720,9 @@ impl GpuNativeYuvDecoder {
 
     fn create_pipeline(device: &wgpu::Device, buffer_source: bool) -> YuvPipeline {
         let source = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             YUV_DECODE_COMMON_SHADER,
+            YUV_DECODE_ENTRY,
             if buffer_source {
                 YUV_BUFFER_SOURCE
             } else {
@@ -780,6 +786,28 @@ impl GpuNativeYuvDecoder {
             cache: None,
         });
         YuvPipeline { pipeline, bind_group_layout }
+    }
+
+    pub(crate) fn texture_input_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.texture.bind_group_layout
+    }
+
+    pub(crate) fn fused_texture_source() -> &'static str {
+        static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "{}\n{}\n{}",
+                YUV_DECODE_COMMON_SHADER,
+                YUV_TEXTURE_SOURCE,
+                r#"
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return mondrian_apply_input(decode_encoded_rgb(position));
+}
+"#
+            )
+            .replace("@group(0)", "@group(1)")
+        });
+        &SOURCE
     }
 
     /// Allocate the encoded-float output resource declared by a plan.

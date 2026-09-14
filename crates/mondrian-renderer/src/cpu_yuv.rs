@@ -19,8 +19,7 @@ use crate::{
     ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
     GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
-    GpuYuvCodeAlignment, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
+    GpuYuvCodeAlignment, RenderGpuOutputBoundaryRuntime, RenderInputTransform,
 };
 
 /// Viewer-owned compact-plane upload cache.
@@ -507,45 +506,50 @@ pub(crate) fn record_cpu_yuv_frame(
             chroma_v: &planes.chroma_v,
         },
     );
-    // The encoded RGB intermediate is frame-local, but its physical texture is
-    // part of the steady Viewer working set. Acquiring it from the same
-    // exact-contract pool as the working/output stages prevents a fresh UHD
-    // allocation on every software-decoded frame. Direct allocation appears
-    // cheap until the backend allocator grows, at which point it can stall a
-    // realtime successor record for an entire frame interval.
+    let backend = runtime
+        .prepare_fused_yuv_input(
+            input_transform,
+            &encoded_source,
+            &working,
+            decoder,
+            device,
+            queue,
+        )
+        .map_err(CpuYuvMaterializationError::ColorStage)?;
     let resource_pool = runtime.resource_pool();
-    let encoded_resource = resource_pool.acquire(
+    let working_resource = resource_pool.acquire(
         device,
-        &GpuColorFrameAllocationPlan::for_handle(encoded_source.clone()),
+        &GpuColorFrameAllocationPlan::for_handle(working.clone()),
     );
-    decoder.record(encoder, &plan, &prepared, &encoded_resource)?;
-    if let Some(previous) = runtime.frame_table_mut().insert(encoded_resource)? {
-        if let Some(inserted) = runtime.frame_table_mut().remove(encoded_source.id()) {
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.cpu-yuv.working-input"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &working_resource.resource().texture_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&backend.pipeline);
+        pass.set_bind_group(0, &backend.objects.ocio_bind_group.bind_group, &[]);
+        pass.set_bind_group(1, &prepared.bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+    if let Some(previous) = runtime.frame_table_mut().insert(working_resource)? {
+        if let Some(inserted) = runtime.frame_table_mut().remove(working.id()) {
             resource_pool.release(inserted);
         }
         let displaced = runtime.frame_table_mut().insert(previous)?;
         debug_assert!(displaced.is_none());
         return Err(CpuYuvMaterializationError::LiveResourceCollision);
-    }
-    let record_result = runtime.record_wgpu_input_stage_gpu_frame_owned_backend(
-        input_transform,
-        &encoded_source,
-        &working,
-        RenderColorTransformGpuOptions::default(),
-        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-            device,
-            queue,
-            encoder,
-            load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-        },
-    );
-    if let Err(error) = record_result {
-        for id in [encoded_source.id(), working.id()] {
-            if let Some(resource) = runtime.frame_table_mut().remove(id) {
-                resource_pool.release(resource);
-            }
-        }
-        return Err(CpuYuvMaterializationError::ColorStage(format!("{error:?}")));
     }
     Ok(working)
 }
@@ -893,7 +897,7 @@ pub(crate) enum CpuYuvMaterializationError {
     #[error(transparent)]
     ResourceTable(#[from] crate::GpuColorFrameResourceTableError),
     #[error("compact CPU YUV color stage failed: {0}")]
-    ColorStage(String),
+    ColorStage(crate::color_stage::RenderGpuFusedInputError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
