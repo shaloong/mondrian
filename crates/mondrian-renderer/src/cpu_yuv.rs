@@ -72,12 +72,18 @@ struct CpuYuvUploadState {
     next_slot: usize,
     generation: u64,
     pending: Vec<CpuYuvFrameUploadKey>,
-    candidate_inputs: Vec<CpuYuvFrameUploadKey>,
+    candidate_inputs: Vec<(CpuYuvFrameUploadKey, Arc<CpuYuvFrame>)>,
     prepared: VecDeque<CpuYuvUploadWorkerResult>,
     result_receiver: mpsc::Receiver<CpuYuvUploadWorkerResult>,
     returned_sender: mpsc::Sender<wgpu::Buffer>,
     recorded_uploads: Vec<(CpuYuvFrameUploadKey, CpuYuvPreparedUpload)>,
     completion_waker: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl CpuYuvUploadState {
+    fn is_candidate_input(&self, key: CpuYuvFrameUploadKey) -> bool {
+        self.candidate_inputs.iter().any(|(candidate, _)| *candidate == key)
+    }
 }
 
 const CPU_YUV_UPLOAD_WORKER_CAPACITY: usize = 4;
@@ -401,8 +407,10 @@ impl CpuYuvUploadRuntime {
     ) -> Result<bool, CpuYuvMaterializationError> {
         {
             let mut state = self.state.lock();
-            state.candidate_inputs =
-                frames.iter().map(|frame| Self::frame_key(&state, frame)).collect();
+            state.candidate_inputs = frames
+                .iter()
+                .map(|frame| (Self::frame_key(&state, frame), Arc::clone(frame)))
+                .collect();
             Self::drain_worker_results(&mut state);
             Self::trim_speculative_results(&mut state);
         }
@@ -413,7 +421,7 @@ impl CpuYuvUploadRuntime {
         // accumulation of per-input observations taken while results change.
         let mut state = self.state.lock();
         Self::drain_worker_results(&mut state);
-        Ok(state.candidate_inputs.iter().all(|key| Self::input_is_ready(&state, *key)))
+        Ok(state.candidate_inputs.iter().all(|(key, _)| Self::input_is_ready(&state, *key)))
     }
 
     fn input_is_ready(state: &CpuYuvUploadState, key: CpuYuvFrameUploadKey) -> bool {
@@ -425,18 +433,27 @@ impl CpuYuvUploadRuntime {
         while state
             .prepared
             .iter()
-            .filter(|result| !state.candidate_inputs.contains(&result.key))
+            .filter(|result| !state.is_candidate_input(result.key))
             .count()
             > CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY
         {
-            let Some(index) = state
-                .prepared
-                .iter()
-                .position(|result| !state.candidate_inputs.contains(&result.key))
+            let Some(index) =
+                state.prepared.iter().position(|result| !state.is_candidate_input(result.key))
             else {
                 break;
             };
-            state.prepared.remove(index);
+            Self::recycle_unsubmitted_result(state, index);
+        }
+    }
+
+    fn recycle_unsubmitted_result(state: &mut CpuYuvUploadState, index: usize) {
+        if let Some(result) = state.prepared.remove(index)
+            && let Ok(upload) = result.outcome
+        {
+            // No command buffer has consumed this storage. Its CPU mapping
+            // remains valid, so the existing worker pool can overwrite it
+            // without a native allocation or an asynchronous GPU remap.
+            let _ = state.returned_sender.send(upload.buffer);
         }
     }
 
@@ -457,6 +474,48 @@ impl CpuYuvUploadRuntime {
             return Ok(true);
         }
         if !state.pending.contains(&key) {
+            if self.worker.is_finished() {
+                return Err(CpuYuvMaterializationError::UploadWorkerUnavailable);
+            }
+            if state.pending.len() >= CPU_YUV_UPLOAD_WORKER_CAPACITY {
+                return Ok(false);
+            }
+            let current = state.is_candidate_input(key);
+            let speculative = state
+                .pending
+                .iter()
+                .filter(|pending| !state.is_candidate_input(**pending))
+                .count()
+                + state
+                    .prepared
+                    .iter()
+                    .filter(|result| !state.is_candidate_input(result.key))
+                    .count();
+            let required_bytes = cpu_yuv_upload_byte_count(frame)?;
+            let reusable = state.prepared.iter().position(|result| {
+                !state.is_candidate_input(result.key)
+                    && result
+                        .outcome
+                        .as_ref()
+                        .is_ok_and(|upload| upload.buffer.size() == required_bytes)
+            });
+            if current {
+                // Current admission may reclaim speculative storage, but it
+                // must never reclaim another input of its complete candidate.
+                if let Some(index) = reusable {
+                    Self::recycle_unsubmitted_result(&mut state, index);
+                }
+            } else if speculative >= CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY {
+                let recyclable = reusable.or_else(|| {
+                    state.prepared.iter().position(|result| !state.is_candidate_input(result.key))
+                });
+                let Some(index) = recyclable else {
+                    // The bounded speculative capacity is still in flight.
+                    // Do not allocate a fifth result before retiring one.
+                    return Ok(false);
+                };
+                Self::recycle_unsubmitted_result(&mut state, index);
+            }
             let command = CpuYuvUploadWorkerCommand::Prepare {
                 key,
                 frame: Arc::clone(frame),
@@ -505,6 +564,10 @@ impl CpuYuvUploadRuntime {
         if !Arc::ptr_eq(&prepared.frame, frame) {
             return Err(CpuYuvMaterializationError::UploadIdentityMismatch);
         }
+        // Transfer CPU ownership to the command encoder exactly once. Until
+        // this point a discarded speculative result can return directly to the
+        // mapped worker pool without touching the native allocator.
+        prepared.buffer.unmap();
         // One immutable transfer is shared by every use of this source in the
         // candidate. Only finish_candidate installs its single remap callback.
         state.recorded_uploads.push((key, prepared.clone()));
@@ -912,7 +975,8 @@ fn prepare_cpu_yuv_upload(
             copy_plane_to_mapped(&mut mapped, copy.offset, layout, plane)?;
         }
     }
-    buffer.unmap();
+    // Keep unsubmitted storage mapped. Actual recording consumes that mapping;
+    // speculative replacement can instead return it directly to the worker.
     Ok(CpuYuvPreparedUpload { frame, buffer, luma, chroma, chroma_v })
 }
 
@@ -1055,6 +1119,173 @@ mod tests {
     #[ignore = "requires an explicitly available GPU adapter"]
     fn persistent_upload_slot_reuses_native_yuv_bindings() {
         exercise_persistent_upload_slot(true);
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn unsubmitted_prewarm_recycles_native_storage_without_growing_capacity() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("unsubmitted.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\n".to_vec();
+        for value in 64..72 {
+            bytes.extend_from_slice(b"FRAME\n");
+            bytes.extend_from_slice(&[value; 12]);
+        }
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut buffers = Vec::new();
+        let mut samples = Vec::new();
+        for index in 0..8 {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                mondrian_core::SourceSampleTarget::covering(
+                    mondrian_core::TimelineTime::new(index, 25).expect("exact frame time"),
+                ),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    mondrian_core::ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                )
+                .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            );
+            request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+            let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+                decoder.decode_cancellable(request, || false).expect("decode")
+            else {
+                panic!("compact frame")
+            };
+            let frame = Arc::new(frame);
+            while !runtime.prepare(&frame).expect("prepare") {
+                assert!(std::time::Instant::now() < deadline, "prewarm deadline");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let state = runtime.state.lock();
+            let key = CpuYuvUploadRuntime::frame_key(&state, &frame);
+            let upload = state
+                .prepared
+                .iter()
+                .find(|result| result.key == key)
+                .expect("prepared input")
+                .outcome
+                .as_ref()
+                .expect("prepared upload");
+            samples.push(upload.buffer.slice(..).get_mapped_range().ok().map(|data| data[0]));
+            if !buffers.contains(&upload.buffer) {
+                buffers.push(upload.buffer.clone());
+            }
+        }
+        decoder.clear();
+        let mut retirement = runtime.into_retirement();
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "upload owner closure deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        assert!(
+            buffers.len() <= CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY,
+            "unsubmitted replacement allocated {} native buffers for a {}-entry retention grant",
+            buffers.len(),
+            CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY
+        );
+        assert_eq!(
+            samples,
+            (64..72).map(Some).collect::<Vec<_>>(),
+            "unsubmitted buffers stay mapped and replacement copies the new source pixels"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn admitted_candidate_retains_unscheduled_source_identity() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("retained.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut request = PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+            decoder.decode_cancellable(request, || false).expect("decode")
+        else {
+            panic!("compact frame")
+        };
+        decoder.clear();
+        let frames = (0..6).map(|_| Arc::new(frame.clone())).collect::<Vec<_>>();
+        let weak = Arc::downgrade(&frames[5]);
+        let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let (entered, entry) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let released = Mutex::new(released);
+        let first = AtomicBool::new(true);
+        runtime.install_completion_waker(move || {
+            if first.swap(false, Ordering::AcqRel) {
+                entered.send(()).expect("worker entered");
+                released
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("release worker");
+            }
+        });
+        assert!(!runtime.prepare(&frames[0]).expect("schedule first input"));
+        entry.recv_timeout(std::time::Duration::from_secs(5)).expect("worker paused");
+        assert!(!runtime.prepare_candidate(&frames).expect("admit complete candidate"));
+        {
+            let state = runtime.state.lock();
+            assert!(
+                !state.pending.contains(&CpuYuvUploadRuntime::frame_key(&state, &frames[5])),
+                "last input must still be outside the bounded worker transport"
+            );
+        }
+        drop(frames);
+        let retained = weak.upgrade().is_some();
+        release.send(()).expect("release worker");
+        let mut retirement = runtime.into_retirement();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owner closure deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        assert!(
+            retained,
+            "admitted input identity must retain its source even before worker scheduling"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "retirement must release the admitted source"
+        );
     }
 
     fn exercise_persistent_upload_slot(check_bindings: bool) {

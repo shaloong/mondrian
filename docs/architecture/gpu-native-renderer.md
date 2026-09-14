@@ -371,9 +371,29 @@ before protecting or allocating its transfers. The estimate includes each
 candidate's exact padded staging extent; the worker reuses only matching buffer
 capacities so a larger old allocation cannot escape that charge.
 
+Unsubmitted preparations retain their CPU mapping after the worker finishes
+copying. Speculative replacement returns that same mapped buffer to the existing
+worker pool before scheduling its replacement; no GPU remap or native allocation
+is needed for matching capacity. The speculative bound includes pending work as
+well as completed results, so a fifth allocation cannot be justified by delaying
+result eviction until completion. Current candidate admission may reclaim an
+unprotected matching preparation, but never another input of its own admitted
+set. The first actual recording consumes the CPU mapping exactly once; only
+submitted storage uses the existing completion-bound remap. Generation clear and
+consuming retirement retain their original ownership boundaries.
+The native `unsubmitted_prewarm_recycles_native_storage_without_growing_capacity`
+regression checks both physical buffer identity and changing source bytes across
+eight unsubmitted preparations under the unchanged four-entry bound.
+
 The upload owner protects every distinct contributing input of the admitted
-candidate, independently of its unchanged four-entry worker transport. Readiness
-is read atomically from that owner after the whole set is admitted. Recording
+candidate and retains its source Arc together with its physical key, including
+inputs that have not yet entered the bounded worker transport. Caller release
+therefore cannot leave an address-only identity that aliases a later allocation.
+Replacement, generation clear and consuming retirement release these references.
+The native `admitted_candidate_retains_unscheduled_source_identity` regression
+pauses the real worker, drops the caller's inputs and checks both retention and
+release through the production owner. This protection is independent of the
+unchanged four-entry worker transport. Readiness is read atomically from that owner after the whole set is admitted. Recording
 keeps one immutable transfer lease per input until the candidate finishes; a
 source reused at multiple materialization extents does not consume or copy its
 CPU preparation twice. Successful candidates install one submission-bound remap
