@@ -314,6 +314,15 @@ but physical decoder support remains fail-closed. The native import plan owns di
 linear-working handles so a
 backend cannot skip, reorder, or mislabel either pass.
 
+The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
+observes exact UHD frames through the production decoder and Viewer using the
+Standard 256 MiB idle grant and unchanged active limits. It checks that texture
+allocation misses stop after warmup. The current two-intermediate CPU YUV path
+fails this test: returning two UHD Float32 textures evicts the reusable display
+texture, producing one allocation and eviction per subsequent frame. Native
+texture eviction can block the realtime caller. This is an unresolved resource
+lifetime/performance defect, not a reason to enlarge the qualification grant.
+
 The same YUV shader is also the sole materializer for media-owned compact CPU
 YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
 CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved

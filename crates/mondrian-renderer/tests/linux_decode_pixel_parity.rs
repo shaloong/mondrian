@@ -99,6 +99,57 @@ fn measure(
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
 ) -> Result<Vec<Vec<f32>>> {
+    measure_with_resource_observer(path, native, context, runtime, |_, _, _| {})
+}
+
+#[test]
+#[ignore = "requires Vulkan, explicit demux worker and a 4K 30 fps tagged SDR planar fixture"]
+fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
+    mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
+    let path =
+        std::env::var_os("MONDRIAN_UHD_PLANAR_FIXTURE").context("explicit UHD planar fixture")?;
+    let context = pollster::block_on(GpuContext::new())?;
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    anyhow::ensure!(runtime.reconfigure_resource_grant(
+        ViewerGpuExecutionResourceGrant::new(3, 256 * 1024 * 1024)
+            .with_active_limits(2 * 1024 * 1024 * 1024, 96)
+    ));
+    let mut observations = Vec::new();
+    let mut extents = Vec::new();
+    let result = measure_with_resource_observer(
+        Path::new(&path),
+        false,
+        &context,
+        &mut runtime,
+        |width, height, diagnostics| {
+            extents.push((width, height));
+            observations.push(diagnostics);
+        },
+    );
+    let closure = retirement::retire_runtime(&context.device, runtime);
+    result?;
+    closure?;
+    anyhow::ensure!(
+        extents.iter().all(|extent| *extent == (3840, 2160)),
+        "fixture must be UHD"
+    );
+    let first = observations.first().context("missing warmup allocation evidence")?;
+    anyhow::ensure!(observations.len() == 6, "missing steady frame observations");
+    anyhow::ensure!(
+        observations.iter().skip(1).all(|sample| sample.misses == first.misses),
+        "UHD working-set allocations continued after warmup: {observations:?}"
+    );
+    Ok(())
+}
+
+fn measure_with_resource_observer(
+    path: &Path,
+    native: bool,
+    context: &GpuContext,
+    runtime: &mut ViewerGpuExecutionRuntime,
+    mut observe: impl FnMut(u32, u32, GpuColorFrameWgpuResourcePoolDiagnostics),
+) -> Result<Vec<Vec<f32>>> {
     let (bootstrap, observer) = PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(
         std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
             .context("explicit packaged demux worker")?
@@ -274,6 +325,7 @@ fn measure(
         drop(mapped);
         buffer.unmap();
         drop(output);
+        observe(width, height, runtime.resource_pool_diagnostics());
         samples.push(pixels);
     }
     runtime.clear_frame_resources();
