@@ -39,6 +39,14 @@ const FIXTURES: [&str; 6] = [
     "Graphics/Adobe Mayan Art.png",
     "Audio/APM_Adobe_Going Home_v3.wav",
 ];
+#[derive(Debug, thiserror::Error)]
+#[error("qualification fixture {relative} could not be admitted")]
+struct LocalMediaFixtureAdmissionError {
+    relative: &'static str,
+    #[source]
+    source: anyhow::Error,
+}
+
 const MEMORY_LIMIT: u64 = 6 * 1024 * 1024 * 1024;
 const MAXIMUM_PHASE_SECONDS: u64 = 60;
 const MAXIMUM_ARTIFACTS: u64 = 8;
@@ -98,26 +106,30 @@ fn run_profile(
     let mut paths = Vec::new();
     let admission = (|| -> anyhow::Result<()> {
         for relative in FIXTURES {
-            let path = mondrian_assets::canonical_asset_file_path(&root.join(relative))?;
-            let mut options = OpenOptions::new();
-            options.read(true);
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.share_mode(1);
-            }
-            let mut lease = options.open(&path)?;
-            ensure!(
-                lease.metadata()?.is_file() && lease.metadata()?.len() <= 512 * 1024 * 1024,
-                "fixture must be a regular file within 512 MiB"
-            );
-            let digest = hash_until(&mut lease, deadline)?;
-            report["fixtures"]
-                .as_array_mut()
-                .context("fixture inventory")?
-                .push(json!({"path":path,"sha256":digest,"byte_len":lease.metadata()?.len()}));
-            paths.push(path);
-            leases.push(lease);
+            (|| -> anyhow::Result<()> {
+                let path = mondrian_assets::canonical_asset_file_path(&root.join(relative))?;
+                let mut options = OpenOptions::new();
+                options.read(true);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    options.share_mode(1);
+                }
+                let mut lease = options.open(&path)?;
+                ensure!(
+                    lease.metadata()?.is_file() && lease.metadata()?.len() <= 512 * 1024 * 1024,
+                    "fixture must be a regular file within 512 MiB"
+                );
+                let digest = hash_until(&mut lease, deadline)?;
+                report["fixtures"]
+                    .as_array_mut()
+                    .context("fixture inventory")?
+                    .push(json!({"path":path,"sha256":digest,"byte_len":lease.metadata()?.len()}));
+                paths.push(path);
+                leases.push(lease);
+                Ok(())
+            })()
+            .map_err(|source| LocalMediaFixtureAdmissionError { relative, source })?;
         }
         let mut tools = Vec::new();
         for command in [
@@ -1077,6 +1089,13 @@ mod tests {
         assert_eq!(report["status"], "NotRun");
         assert!(report["phases"].as_array().expect("phases").is_empty());
         assert_eq!(report["commercial_qualification"], false);
+        assert!(
+            report["admission_notrun_reason"]
+                .as_str()
+                .expect("admission reason")
+                .contains(FIXTURES[0]),
+            "missing fixture identity: {report}"
+        );
     }
 
     #[test]

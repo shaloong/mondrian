@@ -1659,3 +1659,9 @@ The checked-in 59.94 profile binds the exact bytes of its three 60000/1001
 workload descriptors. Updating a stale descriptor digest does not alter phase
 duration, counters or quality requirements, and old profile-bound machine plans
 must be regenerated rather than reusing earlier qualification receipts.
+
+The bounded local-media smoke retains the required relative fixture identity in
+its typed admission error chain. A missing, unreadable, or invalid fixture stays
+`NotRun` before any phase owner starts; its durable reason identifies the failing
+fixture instead of exposing only a context-free filesystem error. CLI success
+means the report was written, not that its campaign status is `Passed`.
