@@ -520,7 +520,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
     let camera_raw = crate::camera_raw::probe_camera_raw_metadata(path)?;
 
-    let input =
+    let mut input =
         ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
             path: path.display().to_string(),
             reason: e.to_string(),
@@ -740,21 +740,27 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
         }
     }
 
-    for video in &mut video_streams {
-        if !video_stream_needs_frame_hdr_probe(video) {
-            continue;
-        }
-        match probe_first_frame_hdr_metadata(path, video.index) {
+    let hdr_streams = video_streams
+        .iter()
+        .filter(|video| video_stream_needs_frame_hdr_probe(video))
+        .map(|video| video.index)
+        .collect::<Vec<_>>();
+    for (stream_index, result) in probe_first_frames_hdr_metadata(&mut input, &hdr_streams) {
+        match result {
             Ok(frame_metadata) => {
-                merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
+                if let Some(video) =
+                    video_streams.iter_mut().find(|video| video.index == stream_index)
+                {
+                    merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
+                }
             }
             Err(reason) => {
                 tracing::warn!(
-                        "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
-                        path,
-                        video.index,
-                        reason
-                    );
+                    "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
+                    path,
+                    stream_index,
+                    reason
+                );
             }
         }
     }
@@ -1620,54 +1626,170 @@ fn video_stream_needs_frame_hdr_probe(stream: &VideoStreamInfo) -> bool {
         })
 }
 
-fn probe_first_frame_hdr_metadata(
-    path: &Path,
+#[derive(Debug, thiserror::Error)]
+enum FrameHdrProbeError {
+    #[error("video stream {0} is unavailable")]
+    StreamUnavailable(u32),
+    #[error("{stage} for HDR stream {stream_index}: {source}")]
+    Decoder {
+        stream_index: u32,
+        stage: &'static str,
+        source: ffmpeg::Error,
+    },
+    #[error("read first-frame HDR packet: {0}")]
+    PacketRead(ffmpeg::Error),
+    #[error("no decoded frame after {0} target packets")]
+    PacketBudget(usize),
+}
+
+type FrameHdrProbeResult = Result<Vec<VideoHdrMetadataSummary>, FrameHdrProbeError>;
+
+struct FirstFrameHdrProbe {
     stream_index: u32,
-) -> Result<Vec<VideoHdrMetadataSummary>, String> {
-    const MAX_VIDEO_PACKETS: usize = 512;
+    state: FirstFrameHdrProbeState,
+}
 
-    let mut input = ffmpeg::format::input(path)
-        .map_err(|error| format!("open first-frame HDR probe input: {error}"))?;
-    let parameters = input
-        .streams()
-        .find(|stream| stream.index() == stream_index as usize)
-        .map(|stream| stream.parameters())
-        .ok_or_else(|| format!("video stream {stream_index} is unavailable"))?;
-    let context = ffmpeg::codec::context::Context::from_parameters(parameters)
-        .map_err(|error| format!("create first-frame HDR decoder context: {error}"))?;
-    let mut decoder = context
-        .decoder()
-        .video()
-        .map_err(|error| format!("open first-frame HDR video decoder: {error}"))?;
+enum FirstFrameHdrProbeState {
+    Pending {
+        decoder: ffmpeg::decoder::Video,
+        target_packets: usize,
+    },
+    Complete(FrameHdrProbeResult),
+}
 
-    let mut target_packets = 0usize;
-    for (stream, packet) in input.packets() {
-        if stream.index() != stream_index as usize {
-            continue;
-        }
-        target_packets = target_packets.saturating_add(1);
-        decoder
-            .send_packet(&packet)
-            .map_err(|error| format!("send first-frame HDR packet: {error}"))?;
-        let mut decoded = ffmpeg::util::frame::video::Video::empty();
-        if decoder.receive_frame(&mut decoded).is_ok() {
-            return Ok(collect_frame_hdr_metadata_summaries(&decoded));
-        }
-        if target_packets >= MAX_VIDEO_PACKETS {
-            return Err(format!(
-                "no decoded frame after {MAX_VIDEO_PACKETS} packets"
-            ));
-        }
+impl FirstFrameHdrProbe {
+    fn new(input: &ffmpeg::format::context::Input, stream_index: u32) -> Self {
+        let decoder =
+            (|| {
+                let parameters = input
+                    .streams()
+                    .find(|stream| stream.index() == stream_index as usize)
+                    .map(|stream| stream.parameters())
+                    .ok_or(FrameHdrProbeError::StreamUnavailable(stream_index))?;
+                let context = ffmpeg::codec::context::Context::from_parameters(parameters)
+                    .map_err(|source| FrameHdrProbeError::Decoder {
+                        stream_index,
+                        stage: "create first-frame decoder context",
+                        source,
+                    })?;
+                context.decoder().video().map_err(|source| FrameHdrProbeError::Decoder {
+                    stream_index,
+                    stage: "open first-frame decoder",
+                    source,
+                })
+            })();
+        let state = match decoder {
+            Ok(decoder) => FirstFrameHdrProbeState::Pending { decoder, target_packets: 0 },
+            Err(error) => FirstFrameHdrProbeState::Complete(Err(error)),
+        };
+        Self { stream_index, state }
     }
 
-    decoder
-        .send_eof()
-        .map_err(|error| format!("flush first-frame HDR decoder: {error}"))?;
-    let mut decoded = ffmpeg::util::frame::video::Video::empty();
-    decoder
-        .receive_frame(&mut decoded)
-        .map_err(|error| format!("decode first HDR frame at end of stream: {error}"))?;
-    Ok(collect_frame_hdr_metadata_summaries(&decoded))
+    fn is_pending(&self) -> bool {
+        matches!(self.state, FirstFrameHdrProbeState::Pending { .. })
+    }
+
+    fn send(&mut self, packet: Option<&ffmpeg::Packet>) {
+        const MAX_VIDEO_PACKETS: usize = 512;
+        let FirstFrameHdrProbeState::Pending { decoder, target_packets } = &mut self.state else {
+            return;
+        };
+        let result = (|| {
+            match packet {
+                Some(packet) => {
+                    *target_packets += 1;
+                    decoder.send_packet(packet)
+                }
+                None => decoder.send_eof(),
+            }
+            .map_err(|source| FrameHdrProbeError::Decoder {
+                stream_index: self.stream_index,
+                stage: "send first-frame HDR input",
+                source,
+            })?;
+            let mut decoded = ffmpeg::util::frame::video::Video::empty();
+            match decoder.receive_frame(&mut decoded) {
+                Ok(()) => Ok(Some(collect_frame_hdr_metadata_summaries(&decoded))),
+                Err(ffmpeg::Error::Other { errno })
+                    if packet.is_some() && errno == ffmpeg::error::EAGAIN =>
+                {
+                    if *target_packets >= MAX_VIDEO_PACKETS {
+                        Err(FrameHdrProbeError::PacketBudget(MAX_VIDEO_PACKETS))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Err(source) => Err(FrameHdrProbeError::Decoder {
+                    stream_index: self.stream_index,
+                    stage: "receive first HDR frame",
+                    source,
+                }),
+            }
+        })();
+        match result {
+            Ok(None) => {}
+            Ok(Some(metadata)) => self.state = FirstFrameHdrProbeState::Complete(Ok(metadata)),
+            Err(error) => self.state = FirstFrameHdrProbeState::Complete(Err(error)),
+        }
+    }
+}
+
+fn probe_first_frames_hdr_metadata(
+    input: &mut ffmpeg::format::context::Input,
+    stream_indices: &[u32],
+) -> Vec<(
+    u32,
+    Result<Vec<VideoHdrMetadataSummary>, FrameHdrProbeError>,
+)> {
+    // Stream-info retains its probed packets on this same input. Consume that
+    // original demux position once for all target streams; reopening or seeking
+    // per stream both repeats discovery and can miss another stream's first frame.
+    let mut probes = stream_indices
+        .iter()
+        .map(|&index| FirstFrameHdrProbe::new(input, index))
+        .collect::<Vec<_>>();
+    while probes.iter().any(FirstFrameHdrProbe::is_pending) {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(input) {
+            Ok(()) => {
+                if let Some(probe) =
+                    probes.iter_mut().find(|probe| probe.stream_index as usize == packet.stream())
+                {
+                    probe.send(Some(&packet));
+                }
+            }
+            Err(ffmpeg::Error::Eof) => {
+                for probe in &mut probes {
+                    probe.send(None);
+                }
+                break;
+            }
+            Err(source) => {
+                for probe in &mut probes {
+                    if probe.is_pending() {
+                        probe.state = FirstFrameHdrProbeState::Complete(Err(
+                            FrameHdrProbeError::PacketRead(source),
+                        ));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    probes
+        .into_iter()
+        .map(|probe| {
+            let result = match probe.state {
+                FirstFrameHdrProbeState::Complete(result) => result,
+                FirstFrameHdrProbeState::Pending { .. } => Err(FrameHdrProbeError::Decoder {
+                    stream_index: probe.stream_index,
+                    stage: "finish first-frame HDR probe",
+                    source: ffmpeg::Error::Eof,
+                }),
+            };
+            (probe.stream_index, result)
+        })
+        .collect()
 }
 
 fn collect_frame_hdr_metadata_summaries(
@@ -4151,6 +4273,65 @@ mod tests {
             content_light,
             Some(VideoHdrMetadataPayload::ContentLightLevel(_))
         ));
+    }
+
+    #[test]
+    fn frame_hdr_probe_consumes_one_input_for_interleaved_streams() {
+        let directory = tempfile::tempdir().expect("HDR probe fixture directory");
+        let path = directory.path().join("two-hdr-streams.mp4");
+        let output = crate::ffmpeg_command().expect("admit HDR fixture command")
+            .args([
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-n",
+                "-filter_threads", "2",
+                "-f", "lavfi", "-i", "color=red:s=16x16:r=2:d=1",
+                "-f", "lavfi", "-i", "color=blue:s=16x16:r=2:d=1",
+                "-map", "0:v", "-map", "1:v", "-c:v", "libx265",
+                "-pix_fmt", "yuv420p10le", "-threads", "2",
+                "-color_range", "tv", "-color_primaries", "bt2020",
+                "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
+                "-x265-params:v:0",
+                "pools=1:frame-threads=1:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll=1000,400",
+                "-x265-params:v:1",
+                "pools=1:frame-threads=1:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll=2000,600",
+            ])
+            .arg(&path).output().expect("encode interleaved HDR fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(&path).expect("initialize FFmpeg");
+        let mut input = ffmpeg::format::input(&path).expect("open original input");
+        assert!(probe_first_frames_hdr_metadata(&mut input, &[]).is_empty());
+        // The metadata supplement must consume the original input owner, not
+        // reopen a pathname that may no longer identify the same object.
+        #[cfg(unix)]
+        std::fs::remove_file(&path).expect("unlink already-open fixture");
+        let results = probe_first_frames_hdr_metadata(&mut input, &[u32::MAX, 0, 1]);
+        assert_eq!(results.len(), 3);
+        assert!(matches!(
+            results[0].1,
+            Err(FrameHdrProbeError::StreamUnavailable(u32::MAX))
+        ));
+        for (position, expected) in [(1, (1000, 400)), (2, (2000, 600))] {
+            let (stream, metadata) = &results[position];
+            assert_eq!(*stream, (position - 1) as u32);
+            let metadata = metadata.as_ref().expect("first frame metadata");
+            let content = metadata
+                .iter()
+                .find_map(|item| match &item.payload {
+                    Some(VideoHdrMetadataPayload::ContentLightLevel(content)) => Some(content),
+                    _ => None,
+                })
+                .expect("stream-specific content light metadata");
+            assert_eq!(
+                (
+                    content.max_content_light_level,
+                    content.max_frame_average_light_level
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,17 @@
 # Media Pipeline
 
+Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
+input. Stream discovery retains its packets; the HDR supplement dispatches that
+same packet stream to the requested video decoders until each has its first
+frame, reaches the unchanged 512-target-packet bound, or fails. Interleaved video
+streams retain separate decoder/results and first-frame metadata identities.
+There is no second input open or repeated stream-info discovery for each HDR
+stream, and the HDR supplement never resolves the pathname again.
+Empty HDR admission does not consume packets. Decoder and demux errors remain
+explicit unavailable supplements; only actual EOF flushes pending decoders.
+The probe does not use PacketIter's retry-on-error behavior, infer missing HDR
+data, skip the first decoded-frame evidence, or increase discovery budgets.
+
 Exact random access treats container keyframe timestamps as decode anchors,
 not presentation-coverage proof. Before submitting a seek root, the existing
 decode session inspects its real packet PTS. A reordered future key picture
