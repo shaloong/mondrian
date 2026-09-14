@@ -3111,8 +3111,8 @@ stage timings plus max queue wait, while aggregate stage totals remain trend
 evidence. This avoids blaming a cumulative stage total when an interactive stall
 came from one pathological seek, decode, software-scale/copy, composite,
 output-boundary frame, or current-frame job waiting behind other decode work.
-The in-process preview decoder uses bounded frame threading by default for all
-software-decode access modes. Frame threading pipelines coded pictures and
+The in-process preview decoder uses bounded frame threading by default for
+long-GOP software decoding in every access mode. Frame threading pipelines coded pictures and
 does not assume the source contains enough independent slices to use a declared
 slice-thread count. With the retained compact-YUV and explicit GPU staging
 paths active, real H.264 High 4:2:2 10-bit
@@ -3125,6 +3125,20 @@ Viewer output. `MONDRIAN_PREVIEW_DECODE_THREADING` and
 they are not machine-local correctness state. Spawning a second concurrent
 Playback decoder for the same source remains invalid as a generic throughput
 fix because duplicated long-GOP seek/demux work destroys sequential locality.
+ProRes defaults to slice threading within the same decoder owner and existing
+thread budget. Its intra pictures do not need future coded pictures: the native
+two-packet regression requires each picture before another packet or EOF and
+compares decoded planes with serial decoding. Frame threading imposed artificial
+lookahead, extra frame residency, and discarded future work on seek. On Ubuntu
+with an eight-logical-CPU host, a generated 40-frame 4K ProRes 4444/PQ fixture
+measured 1.20–1.31 s in direct frame-threaded decoding versus 1.02–1.07 s with
+slices; decoder peak RSS decreased from about 400 MiB to 157 MiB. Three
+alternating complete production playback/seek controls also reduced total CPU
+time from about 18 s to 15.5 s. Asynchronous caller-only worker time is not total
+codec CPU cost. This codec-specific default adds no conversion, decoder, queue,
+or fallback; explicit qualification overrides and the EXR shutdown policy remain
+intact. These short generated-source results are not physical HDR qualification
+or a general machine/codec throughput guarantee.
 Output resolution pressure (Full -> Half -> Quarter) reduces renderer work but
 does not falsely claim to reduce codec work; a source that still cannot meet
 cadence requires hardware decode or a separately admitted proxy/optimized-media

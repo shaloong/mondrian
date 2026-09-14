@@ -1744,13 +1744,16 @@ fn preview_trace(message: String) {
 }
 
 fn preview_decode_threading_config(
+    codec_id: ffmpeg::codec::Id,
     access_mode: PreviewDecodeAccessMode,
     decode_pixels: u64,
 ) -> PreviewDecodeThreadingConfig {
     let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
-        .unwrap_or_else(|| default_threading_kind_for_software_decode(access_mode, decode_pixels));
+        .unwrap_or_else(|| {
+            default_threading_kind_for_software_decode(codec_id, access_mode, decode_pixels)
+        });
     let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
@@ -1770,11 +1773,19 @@ fn preview_decode_threading_config(
 /// frame with frame threading versus 15-25 ms and load-sensitive underruns
 /// with slice threading. An explicit `MONDRIAN_PREVIEW_DECODE_THREADING`
 /// override remains available for codec/source qualification.
+/// ProRes instead parallelizes slices within the requested intra picture:
+/// frame threading unnecessarily retains future pictures across seek/EOF and
+/// increases residency without improving measured native decode throughput.
 fn default_threading_kind_for_software_decode(
+    codec_id: ffmpeg::codec::Id,
     _access_mode: PreviewDecodeAccessMode,
     _decode_pixels: u64,
 ) -> PreviewDecodeThreadingKind {
-    PreviewDecodeThreadingKind::Frame
+    if codec_id == ffmpeg::codec::Id::PRORES {
+        PreviewDecodeThreadingKind::Slice
+    } else {
+        PreviewDecodeThreadingKind::Frame
+    }
 }
 
 fn default_decoder_threads_for_access_mode(
@@ -1794,7 +1805,7 @@ fn preview_decode_threading_config_for_codec(
     decode_pixels: u64,
     worker_thread_limit: Option<usize>,
 ) -> PreviewDecodeThreadingConfig {
-    let requested = preview_decode_threading_config(access_mode, decode_pixels);
+    let requested = preview_decode_threading_config(codec_id, access_mode, decode_pixels);
     let requested = cap_preview_decode_threading_config(requested, worker_thread_limit);
     apply_preview_codec_threading_policy(codec_id, requested)
 }

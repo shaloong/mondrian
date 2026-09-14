@@ -3432,6 +3432,97 @@ fn packet_source_execution_family_matches(
 mod session_topology_tests {
     use super::*;
 
+    #[test]
+    fn prores_default_threading_outputs_each_packet_without_future_frames() {
+        let directory = tempfile::tempdir().expect("ProRes fixture directory");
+        let path = directory.path().join("intra.mov");
+        let output = crate::ffmpeg_command()
+            .expect("admit fixture encoder")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-n",
+                "-filter_threads",
+                "1",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=128x64:r=30",
+                "-frames:v",
+                "2",
+                "-c:v",
+                "prores_ks",
+                "-profile:v",
+                "4",
+                "-pix_fmt",
+                "yuv444p10le",
+                "-threads",
+                "1",
+            ])
+            .arg(&path)
+            .output()
+            .expect("encode ProRes fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure_ffmpeg_initialized(&path).expect("initialize FFmpeg");
+        let mut input = ffmpeg::format::input(&path).expect("open fixture");
+        let parameters = input.stream(0).expect("video stream").parameters();
+        let kind = super::super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::PRORES,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            128 * 64,
+        );
+        let mut decoder = preview_decode_context_from_parameters(
+            parameters.clone(),
+            ffmpeg::codec::threading::Config { kind: kind.to_ffmpeg(), count: 3 },
+            &path,
+        )
+        .expect("production context")
+        .decoder()
+        .video()
+        .expect("production decoder");
+        let mut reference = preview_decode_context_from_parameters(
+            parameters,
+            ffmpeg::codec::threading::Config {
+                kind: ffmpeg::codec::threading::Type::None,
+                count: 1,
+            },
+            &path,
+        )
+        .expect("reference context")
+        .decoder()
+        .video()
+        .expect("reference decoder");
+        for _ in 0..2 {
+            let mut packet = ffmpeg::Packet::empty();
+            packet.read(&mut input).expect("one complete intra picture");
+            decoder.send_packet(&packet).expect("submit production picture");
+            reference.send_packet(&packet).expect("submit reference picture");
+            let mut actual = ffmpeg::util::frame::video::Video::empty();
+            let mut expected = ffmpeg::util::frame::video::Video::empty();
+            decoder
+                .receive_frame(&mut actual)
+                .expect("an intra picture must not require future packets or EOF");
+            reference.receive_frame(&mut expected).expect("reference picture");
+            assert_eq!(actual.pts(), expected.pts());
+            assert_eq!(actual.format(), expected.format());
+            for plane in 0..3 {
+                for row in 0..64 {
+                    let a = row * actual.stride(plane);
+                    let e = row * expected.stride(plane);
+                    assert_eq!(
+                        &actual.data(plane)[a..a + 256],
+                        &expected.data(plane)[e..e + 256]
+                    );
+                }
+            }
+        }
+    }
+
     fn empty_sessions() -> PreviewDecodeSessions {
         PreviewDecodeSessions {
             playback: Vec::new(),

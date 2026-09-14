@@ -960,19 +960,31 @@ fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
 }
 
 #[test]
-fn software_decode_threading_defaults_to_frame_pipelining_for_every_access_mode() {
+fn long_gop_decode_threading_defaults_to_frame_pipelining_for_every_access_mode() {
     let playback = super::PreviewDecodeAccessMode::PlaybackCursor;
     let scrub = super::PreviewDecodeAccessMode::ScrubCursor;
     assert_eq!(
-        super::default_threading_kind_for_software_decode(playback, 3_840 * 2_160),
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            playback,
+            3_840 * 2_160
+        ),
         super::PreviewDecodeThreadingKind::Frame
     );
     assert_eq!(
-        super::default_threading_kind_for_software_decode(playback, 1_920 * 1_080),
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            playback,
+            1_920 * 1_080
+        ),
         super::PreviewDecodeThreadingKind::Frame
     );
     assert_eq!(
-        super::default_threading_kind_for_software_decode(scrub, 3_840 * 2_160),
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            scrub,
+            3_840 * 2_160
+        ),
         super::PreviewDecodeThreadingKind::Frame
     );
 }
