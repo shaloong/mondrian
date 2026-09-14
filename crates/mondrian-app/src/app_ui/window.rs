@@ -2189,11 +2189,14 @@ fn prepare_initial_window_candidate(
     host: &AppUiHost,
     deadline: Instant,
 ) -> Result<AppUiInitialWindowCandidate, AppUiPreActiveWindowStartupFailure> {
+    // The initial native carrier must match the already-owned Host mode.
+    // An opened Project must not allocate and immediately replace a Startup surface.
+    let role = window_role_for_mode(host.mode());
     catch_pre_active_window_construction(deadline, |last_stage, viewer_gpu_startup| {
         let preview_work_event_proxy = event_loop.create_proxy();
         let startup_window = Arc::new(
             event_loop
-                .create_window(window_attributes_for_role(AppUiWindowRole::Startup))
+                .create_window(window_attributes_for_role(role))
                 .map_err(|error| format!("could not create startup Window: {error}"))?,
         );
         *last_stage = AppUiPreActiveWindowStartupStage::WindowCreated;
@@ -2276,7 +2279,7 @@ fn prepare_initial_window_candidate(
             .as_mut()
             .ok_or_else(|| "Viewer GPU startup owner was lost before preparation".to_owned())?;
         let prepared_session = AppUiPreparedWindowSession::prepare(
-            AppUiWindowRole::Startup,
+            role,
             startup_window,
             startup_surface,
             &adapter,

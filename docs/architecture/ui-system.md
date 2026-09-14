@@ -1,5 +1,14 @@
 # UI System
 
+The first native Window/Surface/Renderer candidate uses the existing Host mode,
+through the same role mapping as subsequent window synchronization. A Host with
+an already-open Project therefore starts directly with a Workspace carrier;
+it does not allocate a Startup carrier only to replace it on the first event
+loop turn. A Host without a Project still starts with the Startup carrier.
+Both paths keep the original pre-active construction owner, deadline, wake
+registration, activation, and partial-start cleanup. Opening or closing a
+Project later still uses the production role-replacement lifecycle.
+
 Empty and model-only UI construction must not create an `AppState`. A disabled
 empty Timeline has explicit unavailable edit flags, and a model-only shell has
 a plain status placeholder with no claimed Project context. Only the adapters
