@@ -303,11 +303,10 @@ pub(crate) fn resolve_preview_media_source(
 
     let field_processing =
         mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan());
-    let payload_requirement = if request.cpu_working_required
-        || source_color.is_data_texture()
-        || field_processing.requires_cpu_decode()
-    {
+    let payload_requirement = if request.cpu_working_required || source_color.is_data_texture() {
         PreviewDecodePayloadRequirement::CpuAddressable
+    } else if field_processing.requires_cpu_decode() {
+        PreviewDecodePayloadRequirement::CpuYuvAllowed
     } else {
         PreviewDecodePayloadRequirement::NativeAllowed
     };

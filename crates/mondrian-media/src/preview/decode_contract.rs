@@ -593,7 +593,7 @@ impl PreviewDecodeRepresentation {
         }
         match representation_quality {
             PreviewRepresentationQuality::Full
-                if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
+                if payload_requirement != PreviewDecodePayloadRequirement::CpuAddressable
                     && source.compact_cpu_yuv_hint().is_some()
                     && !source_color.is_scene_linear()
                     && !source_color.is_data_texture() =>
@@ -605,7 +605,7 @@ impl PreviewDecodeRepresentation {
                 Err(PreviewDecodeContractError::IdentityReducedRepresentation)
             }
             PreviewRepresentationQuality::Reduced { divisor }
-                if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
+                if payload_requirement != PreviewDecodePayloadRequirement::CpuAddressable
                     && source.compact_cpu_yuv_hint().is_some()
                     && !source_color.is_scene_linear()
                     && !source_color.is_data_texture() =>
@@ -679,8 +679,12 @@ impl PreviewDecodeRepresentation {
 /// Addressability required by the downstream Preview execution path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreviewDecodePayloadRequirement {
-    /// The downstream processor must be able to address CPU pixels.
+    /// The downstream processor requires CPU RGB pixels rather than YUV planes.
     CpuAddressable,
+    /// CPU decoding is required, but the downstream Renderer can consume compact
+    /// YUV planes. Native GPU surfaces remain forbidden; unsupported plane
+    /// layouts retain the ordinary CPU RGB representation.
+    CpuYuvAllowed,
     /// A renderer-admitted native surface may be returned.
     NativeAllowed,
 }
@@ -1296,6 +1300,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cpu_field_payload_keeps_planes_without_admitting_native_surfaces() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/field-422.mov"),
+            exact_fingerprint(19),
+            &video_stream(0, PixelFormat::Yuv422p10le, true),
+        )
+        .expect("opaque 422 source");
+        for hardware in [
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+        ] {
+            for (quality, expected) in [
+                (
+                    PreviewRepresentationQuality::Full,
+                    PreviewDecodeRepresentation::CompactCpuYuv,
+                ),
+                (
+                    PreviewRepresentationQuality::Reduced {
+                        divisor: NonZeroU32::new(2).expect("two"),
+                    },
+                    PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                        divisor: NonZeroU32::new(2).expect("two"),
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    PreviewDecodeRepresentation::canonical(
+                        &source,
+                        PreviewDecodePayloadRequirement::CpuYuvAllowed,
+                        hardware,
+                        quality,
+                        source_color(),
+                    )
+                    .expect("CPU planes"),
+                    expected,
+                );
+            }
+        }
+        assert!(matches!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuYuvAllowed,
+                PreviewHardwareDecodeRequest::RequireGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            ),
+            Err(PreviewDecodeContractError::RequiredNativeOutputUnavailable { .. })
+        ));
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("CPU RGB consumer"),
+            PreviewDecodeRepresentation::NativeCpu,
+        );
     }
 
     #[test]

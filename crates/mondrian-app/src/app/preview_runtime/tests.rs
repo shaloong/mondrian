@@ -1637,6 +1637,10 @@ fn pin_standard_execution_resources(state: &mut AppState) {
 }
 
 fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
+    state_with_invalid_video_asset_for_cpu_rgb(false)
+}
+
+fn state_with_invalid_video_asset_for_cpu_rgb(cpu_rgb: bool) -> (AppState, AssetId, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-invalid-video");
     let media_path = root.join("source.mp4");
@@ -1644,8 +1648,13 @@ fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
     std::fs::write(&media_path, b"not a real video").expect("invalid media");
     let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
     let library = AssetLibrary::open(root.join("library")).expect("asset library");
-    let asset_id =
-        commit_preview_test_media(&library, media_path, rec709_video_media_info(file_size));
+    let mut info = rec709_video_media_info(file_size);
+    if cpu_rgb {
+        // These admission scenarios explicitly budget expanded CPU RGB, rather
+        // than relying on unknown scan metadata to force expansion of YUV.
+        info.video_streams[0].pixel_format = PixelFormat::Gbrp10le;
+    }
+    let asset_id = commit_preview_test_media(&library, media_path, info);
 
     let mut state = AppState::new();
     pin_standard_execution_resources(&mut state);
@@ -1732,7 +1741,9 @@ fn state_with_solid_then_invalid_video_activation() -> (AppState, PathBuf) {
     (state, root)
 }
 
-fn state_with_solid_then_invalid_video_layers_activation() -> (AppState, PathBuf) {
+fn state_with_solid_then_invalid_video_layers_activation_for_cpu_rgb(
+    cpu_rgb: bool,
+) -> (AppState, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-solid-then-layered-video");
     std::fs::create_dir_all(&root).expect("test root");
@@ -1742,11 +1753,11 @@ fn state_with_solid_then_invalid_video_layers_activation() -> (AppState, PathBuf
         let media_path = root.join(name);
         std::fs::write(&media_path, b"not a real video").expect("invalid media");
         let file_size = std::fs::metadata(&media_path).expect("media metadata").len();
-        asset_ids.push(commit_preview_test_media(
-            &library,
-            media_path,
-            rec709_video_media_info(file_size),
-        ));
+        let mut info = rec709_video_media_info(file_size);
+        if cpu_rgb {
+            info.video_streams[0].pixel_format = PixelFormat::Gbrp10le;
+        }
+        asset_ids.push(commit_preview_test_media(&library, media_path, info));
     }
 
     let mut state = AppState::new();
@@ -4735,7 +4746,7 @@ fn startup_preroll_decode_evidence_is_separate_from_steady_state_latency() {
 
 #[test]
 fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residency() {
-    let (mut state, asset_id, root) = state_with_invalid_video_asset();
+    let (mut state, asset_id, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
     state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     assert_eq!(
@@ -4863,7 +4874,7 @@ fn priming_reserves_cold_source_activation_before_releasing_the_clock() {
 
 #[test]
 fn layered_cold_activation_reserves_its_complete_surface_closure_atomically() {
-    let (mut state, root) = state_with_solid_then_invalid_video_layers_activation();
+    let (mut state, root) = state_with_solid_then_invalid_video_layers_activation_for_cpu_rgb(true);
     state.play().expect("play");
     deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
 
@@ -4898,7 +4909,7 @@ fn layered_cold_activation_reserves_its_complete_surface_closure_atomically() {
     // Capacity alternatives are independent admission scenarios. A fresh App
     // owner prevents the first scenario's monotonic Priming deadline from
     // becoming an implicit input to the second.
-    let (mut state, root) = state_with_solid_then_invalid_video_layers_activation();
+    let (mut state, root) = state_with_solid_then_invalid_video_layers_activation_for_cpu_rgb(true);
     state.play().expect("play admitted scenario");
     deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
     let admitted_snapshot = state.preview_execution_snapshot(Instant::now());
@@ -5647,7 +5658,7 @@ fn reverse_future_media_prefix_follows_transport_order_toward_sequence_start() {
 
 #[test]
 fn future_media_window_revalidates_each_physical_source_once_per_planning_turn() {
-    let (mut state, _, root) = state_with_invalid_video_asset();
+    let (mut state, _, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
     state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let target_resolution = Resolution { width: 64, height: 36 };
@@ -5718,7 +5729,7 @@ fn future_media_window_fails_closed_when_a_retained_source_revision_drifts() {
 
 #[test]
 fn future_media_window_invalidates_scale_extent_color_revision_and_library_edges() {
-    let (mut state, _, root) = state_with_invalid_video_asset();
+    let (mut state, _, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
     state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let first_target = Resolution { width: 64, height: 36 };
@@ -16043,7 +16054,7 @@ fn media_preview_decode_cancellation_drops_late_playback_current_work() {
 
 #[test]
 fn preview_representation_quality_selects_a_reduced_decode_identity() {
-    let (mut state, _, root) = state_with_invalid_video_asset();
+    let (mut state, _, root) = state_with_invalid_video_asset_for_cpu_rgb(true);
     state.play().expect("play");
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let full_key = media_preview_key_for_simple_sequence_frame_at_scale(

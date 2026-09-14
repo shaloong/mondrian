@@ -1,5 +1,13 @@
 # Media Pipeline
 
+Preview distinguishes CPU RGB consumers from CPU field processing whose output
+can remain compact YUV. BWDIF still belongs to the existing decode Session and
+runs before scaling/color/composition; its CPU requirement excludes native GPU
+surfaces without forcing RGB expansion. The canonical representation selector
+uses the existing compact CPU YUV representation only for proved supported opaque
+encoded layouts. CPU working/data consumers retain RGB, and required GPU
+residency still fails when field processing needs CPU access.
+
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
 input. Stream discovery retains its packets; the HDR supplement dispatches that
 same packet stream to the requested video decoders until each has its first

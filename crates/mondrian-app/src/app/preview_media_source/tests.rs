@@ -297,7 +297,7 @@ fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
         source.clone(),
         detected,
         0,
-        PixelFormat::P010,
+        PixelFormat::Yuv422p10le,
         true,
         10,
         false,
@@ -342,7 +342,7 @@ fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
     );
     assert_eq!(
         resolved.key.decode.representation(),
-        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+        mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv
     );
     assert_eq!(
         resolved.key.decode.field_processing(),
