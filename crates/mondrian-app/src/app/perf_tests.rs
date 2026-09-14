@@ -4576,6 +4576,7 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
         return Ok(());
     };
     let media_info = probe_media_info(&media_path)?;
+    let video_source = media_info.video_streams.first().cloned();
     let audio_stream_duration = media_info
         .primary_audio()
         .and_then(|audio| audio.duration)
@@ -4591,6 +4592,13 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
         audio_stream_duration >= required_duration,
         "CPAL smoke audio is too short: {audio_stream_duration:?} < {required_duration:?}"
     );
+    if let Some(video) = &video_source {
+        let duration = video.duration.context("CPAL A/V smoke requires a proven video duration")?;
+        anyhow::ensure!(
+            duration >= required_duration,
+            "CPAL A/V smoke video is too short: {duration:?} < {required_duration:?}",
+        );
+    }
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_cpal_av_smoke_{uniq}"));
     fs::create_dir_all(&root_dir)?;
@@ -4728,10 +4736,33 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                     "CPAL smoke observed rejected terminal deliveries: {:?}",
                     evidence.deliveries
                 );
+                if let Some(video) = &video_source {
+                    anyhow::ensure!(
+                        readiness.ready == frame_count
+                            && readiness.loading == 0
+                            && readiness.stale == 0
+                            && readiness.unavailable == 0
+                            && readiness.missed_deadline == 0,
+                        "coupled media A/V did not present every requested frame: {readiness:?}",
+                    );
+                    anyhow::ensure!(
+                        !gpu_summary.output_extents.is_empty()
+                            && gpu_summary
+                                .output_extents
+                                .iter()
+                                .all(|extent| extent.width == video.width
+                                    && extent.height == video.height),
+                        "coupled media A/V changed the authored full raster: {:?}",
+                        gpu_summary.output_extents,
+                    );
+                }
                 state.pause()?;
                 let coordinator_timing = realtime.finish_realtime()?;
                 Ok(serde_json::json!({
                     "scenario": "playback_cpal_av_external",
+                    "video_source": video_source,
+                    "gpu_execution": gpu_summary,
+                    "preview_diagnostics": realtime.preview()?.diagnostics(),
                     "stream_generation": stream_generation,
                     "active_callback_consumed_frames": output.active_callback_consumed_frames,
                     "callback_count": output.callback_count,
@@ -5175,22 +5206,39 @@ fn build_professional_cpal_av_state(
     frame_count: usize,
 ) -> anyhow::Result<AppState> {
     let library = AssetLibrary::open(root_dir.join("library"))?;
-    let audio_asset_id = commit_perf_media_probe(&library, media_path, media_info)?;
-    let solid_asset_id = library.create_solid_color_asset(Some("CPAL A/V gate picture"))?;
+    let video_extent = media_info
+        .video_streams
+        .first()
+        .map(|video| Resolution { width: video.width, height: video.height });
+    let media_asset_id = commit_perf_media_probe(&library, media_path, media_info)?;
     let mut sequence = Sequence::new("Professional CPAL A/V gate");
     sequence.settings.frame_rate = Rational::FPS_2997;
     let time_base = sequence.time_base();
     let duration = tt(frame_count as i64, time_base);
-    sequence.video_tracks[0].add_clip(Clip::new_solid_color(
-        solid_asset_id,
-        mondrian_core::Color::from_rgba8(18, 18, 18, 255),
-        TimelineTime::ZERO,
-        duration,
-    )?)?;
+    if let Some(extent) = video_extent {
+        configure_preview_media_authored_output(
+            &mut sequence,
+            PreviewMediaAuthoredOutput::SourceFull,
+            extent,
+        )?;
+        sequence.video_tracks[0].add_clip(Clip::new(
+            media_asset_id,
+            TimelineTime::ZERO,
+            duration,
+        )?)?;
+    } else {
+        let solid_asset_id = library.create_solid_color_asset(Some("CPAL A/V gate picture"))?;
+        sequence.video_tracks[0].add_clip(Clip::new_solid_color(
+            solid_asset_id,
+            mondrian_core::Color::from_rgba8(18, 18, 18, 255),
+            TimelineTime::ZERO,
+            duration,
+        )?)?;
+    }
     let audio_track_id = sequence.audio_tracks[0].id;
     sequence.add_media_audio_clip(
         audio_track_id,
-        Clip::new(audio_asset_id, TimelineTime::ZERO, duration)?,
+        Clip::new(media_asset_id, TimelineTime::ZERO, duration)?,
         AudioSourceComponentId::primary(),
     )?;
     sequence.playhead = TimelineTime::ZERO;

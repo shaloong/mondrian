@@ -1049,6 +1049,11 @@ the same driver. Qualification only observes callback, clock, generation, and
 stability evidence; a separate current-frame polling loop cannot start transport
 because it omits the production successor readiness gate. The existing startup
 and recovery deadlines and one-second stable-device requirement remain intact.
+When the external CPAL fixture also contains video, the gate authors that same
+imported media on the video track at its probed full raster, retaining the
+30000/1001 program cadence. Audio-only fixtures retain the generated picture.
+Reports identify the video probe and actual decode/GPU execution diagnostics so
+separate audio and video tests cannot masquerade as coupled media qualification.
 
 Every presentable Preview result carries the ticket captured by the same
 evaluation that produced it. This includes a new GPU output, a CPU raster, an
