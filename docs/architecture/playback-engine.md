@@ -1,5 +1,14 @@
 # Playback Engine
 
+Native decoded-output release can wake the existing Frame Work Broker lifecycle
+transport through a weak waker. The notification retains no Broker or queued
+payload and carries no completion authority. Workers still inspect their native
+leases and destroy their own obsolete decoder Sessions before reporting closure.
+Cross-family admission remains blocked while any worker has deferred native
+retirement. The last-output wake lets that worker consume the old Session and
+only then acknowledge the existing residency revision; a wake alone never
+permits the new family to allocate overlapping decoder pools.
+
 Preview distinguishes CPU RGB consumers from CPU field processing whose output
 can remain compact YUV. BWDIF still belongs to the existing decode Session and
 runs before scaling/color/composition; its CPU requirement excludes native GPU

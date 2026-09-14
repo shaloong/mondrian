@@ -670,6 +670,10 @@ impl MediaPreviewJobQueueSender {
         self.broker.interrupt_worker_waits();
     }
 
+    pub(crate) fn lifecycle_waker(&self) -> std::task::Waker {
+        self.broker.worker_lifecycle_waker()
+    }
+
     #[cfg(test)]
     pub(crate) fn prune_obsolete_jobs(&self, generation: u64) -> usize {
         self.broker.prune_before(generation)

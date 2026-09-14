@@ -3,6 +3,27 @@ use crate::{FrameExecutionCancellationEvidence, MediaWorkReservationIntent};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
+#[test]
+fn lifecycle_waker_publishes_existing_revision_without_retaining_broker() {
+    let broker = FrameWorkBroker::<u64, u64, u64>::new(1, 1);
+    let weak = Arc::downgrade(&broker.shared);
+    let before = broker.worker_lifecycle_revision();
+    let waker = broker.worker_lifecycle_waker();
+    waker.wake_by_ref();
+    assert_eq!(broker.worker_lifecycle_revision(), before + 1);
+    assert!(matches!(
+        broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Any,
+            Duration::ZERO,
+            before,
+        ),
+        FrameWorkReceiveWait::Interrupted { revision } if revision == before + 1
+    ));
+    drop(broker);
+    assert!(weak.upgrade().is_none());
+    waker.wake_by_ref();
+}
+
 #[derive(Clone)]
 struct ManualRuntimeClock {
     now_nanos: Arc<AtomicU64>,

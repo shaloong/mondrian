@@ -489,6 +489,22 @@ pub struct FrameWorkBroker<K, D, P> {
     shared: Arc<BrokerShared<K, D, P>>,
 }
 
+struct WorkerLifecycleWake<K, D, P>(std::sync::Weak<BrokerShared<K, D, P>>);
+
+impl<K: Send, D: Send, P: Send> std::task::Wake for WorkerLifecycleWake<K, D, P> {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(shared) = self.0.upgrade() {
+            let mut state = lock_state(&shared.state);
+            state.worker_lifecycle_revision = state.worker_lifecycle_revision.saturating_add(1);
+            shared.changed.notify_all();
+        }
+    }
+}
+
 impl<K, D, P> Clone for FrameWorkBroker<K, D, P> {
     fn clone(&self) -> Self {
         Self { shared: Arc::clone(&self.shared) }
@@ -1051,6 +1067,20 @@ where
         let revision = state.worker_lifecycle_revision;
         self.shared.changed.notify_all();
         revision
+    }
+
+    /// Create a payload-free wake for the existing worker-lifecycle transport.
+    ///
+    /// This retains only a weak reference, so late resource destruction cannot
+    /// keep the Broker or its queued payloads alive. Invoke outside Broker-locked
+    /// callbacks; waking publishes the same revision as `interrupt_worker_waits`.
+    pub fn worker_lifecycle_waker(&self) -> std::task::Waker
+    where
+        K: Send + 'static,
+        D: Send + 'static,
+        P: Send + 'static,
+    {
+        std::task::Waker::from(Arc::new(WorkerLifecycleWake(Arc::downgrade(&self.shared))))
     }
 
     /// Decide atomically whether an execution must stop for lifecycle or

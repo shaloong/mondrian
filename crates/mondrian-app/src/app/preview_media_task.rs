@@ -370,13 +370,14 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     let mut decode_context = MediaPreviewWorkerDecodeContext::new(decode_context_bootstrap);
     let mut residency_revision = 0;
     // A family retirement whose native outputs are still leased (e.g. a
-    // hardware-decoded still frame retained by the Frame Store or Viewer) is
-    // acknowledged immediately so the family barrier cannot stall decode
-    // admission behind one renderer/lease lifetime; the codec context is then
-    // retired lazily once the last native lease drops.
+    // hardware-decoded still frame retained by the Frame Store or Viewer)
+    // remains pending until the last native lease drops and this worker
+    // destroys the codec. Native release wakes the existing Broker lifecycle
+    // transport; acknowledging earlier would overlap old and new surface pools.
     let mut pending_native_retire = PendingMediaPreviewSessionRetirements::default();
     loop {
         if pending_native_retire.clear_released(&mut decode_context) {
+            pending_native_retire.acknowledge_if_released(&residency, lane, residency_revision);
             work_notifier.lifecycle_progressed();
         }
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
@@ -401,7 +402,11 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                         pending_native_retire.insert(family);
                     }
                 }
-                residency.acknowledge_retirement(lane, directive.revision());
+                pending_native_retire.acknowledge_if_released(
+                    &residency,
+                    lane,
+                    directive.revision(),
+                );
             }
             residency_revision = directive.revision();
         }
@@ -724,6 +729,17 @@ struct PendingMediaPreviewSessionRetirements {
 }
 
 impl PendingMediaPreviewSessionRetirements {
+    fn acknowledge_if_released(
+        &self,
+        residency: &PreviewDecodeResidencyCoordinator,
+        lane: MediaPreviewWorkerLane,
+        revision: u64,
+    ) {
+        if !self.playback && !self.interactive {
+            residency.acknowledge_retirement(lane, revision);
+        }
+    }
+
     fn insert(&mut self, family: PreviewDecodeSessionFamily) {
         match family {
             PreviewDecodeSessionFamily::Playback => self.playback = true,

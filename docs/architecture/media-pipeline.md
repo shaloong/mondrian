@@ -1,5 +1,12 @@
 # Media Pipeline
 
+Preview worker resources may bind a lifecycle waker before the family is shared.
+The last logical native output releases its Session and family charges before
+waking the existing worker transport. Renderer clones share the original lease;
+they neither multiply charges nor publish premature release notifications.
+The waker is only a progress hint; native counters and worker-owned Session
+destruction remain the resource-lifetime evidence.
+
 Preview distinguishes CPU RGB consumers from CPU field processing whose output
 can remain compact YUV. BWDIF still belongs to the existing decode Session and
 runs before scaling/color/composition; its CPU requirement excludes native GPU

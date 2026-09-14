@@ -26,9 +26,15 @@ use std::sync::OnceLock;
 #[derive(Clone, Debug, Default)]
 pub(super) struct PreviewNativeOutputTracker {
     outstanding: Arc<AtomicUsize>,
+    release_waker: Option<std::task::Waker>,
 }
 
 impl PreviewNativeOutputTracker {
+    pub(super) fn with_release_waker(mut self, waker: std::task::Waker) -> Self {
+        self.release_waker = Some(waker);
+        self
+    }
+
     pub(super) fn outstanding(&self) -> usize {
         self.outstanding.load(Ordering::Acquire)
     }
@@ -49,6 +55,11 @@ impl PreviewNativeOutputTracker {
     fn decrement(&self) {
         let previous = self.outstanding.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "native-output tracker underflow");
+        if previous == 1
+            && let Some(waker) = &self.release_waker
+        {
+            waker.wake_by_ref();
+        }
     }
 }
 
@@ -1059,6 +1070,38 @@ pub enum PreviewNativeDecodedFrameError {
 #[cfg(test)]
 mod session_output_lease_tests {
     use super::*;
+
+    #[test]
+    fn final_native_output_release_wakes_only_after_both_counters_are_zero() {
+        struct ObserveRelease {
+            family: PreviewNativeOutputTracker,
+            session: PreviewNativeOutputTracker,
+            wakes: AtomicUsize,
+        }
+        impl std::task::Wake for ObserveRelease {
+            fn wake(self: Arc<Self>) {
+                assert!(self.family.is_released());
+                assert!(self.session.is_released());
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let observer = Arc::new(ObserveRelease {
+            family: family.clone(),
+            session: session.clone(),
+            wakes: AtomicUsize::new(0),
+        });
+        let family = family.with_release_waker(std::task::Waker::from(observer.clone()));
+        let first = PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("first");
+        let clone = first.clone();
+        let second = PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("second");
+        drop(first);
+        drop(second);
+        assert_eq!(observer.wakes.load(Ordering::SeqCst), 0);
+        drop(clone);
+        assert_eq!(observer.wakes.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn logical_outputs_are_counted_once_while_clones_share_their_token() {

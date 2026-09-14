@@ -146,8 +146,8 @@ impl PreviewDecodeResidencyCoordinator {
     }
 
     /// Retire both worker-owned families without changing transport authority.
-    /// Admission resumes only after every worker observes this revision; native
-    /// output leases retain their existing deferred destruction contract.
+    /// Admission resumes only after every worker consumes the requested Sessions.
+    /// Native output leases defer destruction and acknowledgement until release.
     pub(crate) fn retire_all(&self) {
         let mut state = lock_state(&self.state);
         state.revision = state.revision.saturating_add(1);

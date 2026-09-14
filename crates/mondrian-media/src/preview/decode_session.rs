@@ -128,6 +128,16 @@ pub struct PreviewDecodeWorkerResources {
 }
 
 impl PreviewDecodeWorkerResources {
+    /// Attach a payload-free lifecycle wake before sharing this worker-family owner.
+    ///
+    /// The last native output release wakes the existing worker transport;
+    /// workers must still inspect their Session leases and perform destruction.
+    /// The waker must be nonblocking and must not panic or retain this owner.
+    pub fn with_native_output_release_waker(mut self, waker: std::task::Waker) -> Self {
+        self.native_outputs = self.native_outputs.with_release_waker(waker);
+        self
+    }
+
     /// Construct a worker-family resource owner from explicit cache and device pools.
     pub fn new(
         seek_index_cache: PreviewSeekIndexCache,

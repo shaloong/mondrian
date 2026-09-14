@@ -201,7 +201,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new_with_notifier(
             work_notifier.clone(),
         ));
-        let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default();
+        let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default()
+            .with_native_output_release_waker(job_tx.lifecycle_waker());
         Self {
             work_notifier: work_notifier.clone(),
             work_watch,
