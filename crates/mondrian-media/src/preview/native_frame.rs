@@ -863,6 +863,9 @@ impl FfmpegDrmPrimeFrame {
     }
 
     /// Duplicate one object FD for ownership transfer to Vulkan.
+    ///
+    /// The duplicate is close-on-exec from creation, so concurrently spawned
+    /// helpers cannot inherit this temporary transfer owner.
     pub fn duplicate_object_fd(
         &self,
         object_index: usize,
@@ -872,9 +875,10 @@ impl FfmpegDrmPrimeFrame {
         let object = self.objects.get(object_index).ok_or_else(|| {
             invalid_drm_descriptor(format!("object index {object_index} is out of range"))
         })?;
-        // SAFETY: `object.fd` remains live through `self`; dup returns a new
-        // independently owned descriptor on success.
-        let duplicated = unsafe { libc::dup(object.fd) };
+        // SAFETY: `object.fd` remains live through `self`. F_DUPFD_CLOEXEC
+        // creates an independent descriptor and its exec barrier atomically;
+        // dup followed by F_SETFD would race a concurrent helper spawn.
+        let duplicated = unsafe { libc::fcntl(object.fd, libc::F_DUPFD_CLOEXEC, 0) };
         if duplicated < 0 {
             return Err(
                 FfmpegNativeDecodedFrameResourceError::DrmPrimeFileDescriptorDuplicationFailed {
@@ -883,7 +887,7 @@ impl FfmpegDrmPrimeFrame {
                 },
             );
         }
-        // SAFETY: dup returned a fresh owned descriptor.
+        // SAFETY: fcntl returned a fresh owned descriptor.
         Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
     }
 }
@@ -1089,5 +1093,52 @@ mod session_output_lease_tests {
 
         drop(output);
         assert!(family.is_released());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod drm_descriptor_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn duplicated_drm_object_is_close_on_exec() {
+        // Exercise the production FD transfer with a real descriptor. The
+        // AVFrame owns only descriptor storage; this is not a VA-API fixture.
+        let source = std::fs::File::open("/dev/null").expect("open source descriptor");
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        unsafe {
+            let buffer = ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<
+                ffmpeg::ffi::AVDRMFrameDescriptor,
+            >());
+            assert!(!buffer.is_null(), "descriptor buffer");
+            (*frame.as_mut_ptr()).buf[0] = buffer;
+            (*frame.as_mut_ptr()).data[0] = (*buffer).data;
+            let descriptor = (*buffer).data.cast::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            std::ptr::write_bytes(descriptor, 0, 1);
+            (*descriptor).nb_objects = 1;
+            (*descriptor).objects[0].fd = source.as_raw_fd();
+            (*descriptor).objects[0].size = 4096;
+            (*descriptor).nb_layers = 1;
+            (*descriptor).layers[0].nb_planes = 1;
+            (*descriptor).layers[0].planes[0].pitch = 64;
+        }
+        let retained = NonNull::new(unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) })
+            .expect("retain descriptor storage");
+        let mapping = FfmpegDrmPrimeFrame::from_mapped_frame(retained).expect("owned descriptor");
+        let duplicate = mapping.duplicate_object_fd(0).expect("duplicate for Vulkan");
+        assert_ne!(duplicate.as_raw_fd(), source.as_raw_fd());
+        let flags = unsafe { libc::fcntl(duplicate.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0, "live duplicate");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "a concurrent helper exec must not inherit the DMA-BUF transfer descriptor"
+        );
+        drop(duplicate);
+        assert!(
+            unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0,
+            "original ownership remains live"
+        );
     }
 }

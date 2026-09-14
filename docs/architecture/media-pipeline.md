@@ -4008,6 +4008,13 @@ render node, and publishes the selector through the existing coherent renderer
 admission observation. Missing or mismatched identity rejects native import
 admission instead of allowing FFmpeg to open an unrelated default GPU.
 
+The VA-API mapping retains its original DRM object descriptors. A temporary
+descriptor transferred to Vulkan is duplicated with atomic `F_DUPFD_CLOEXEC`,
+so an unrelated concurrent FFmpeg/helper exec cannot retain that transfer
+owner. Setting the flag after `dup` would leave a spawn race. Duplication
+failure retains the existing structured error and original mapping ownership;
+the native FD regression does not constitute VA-API device qualification.
+
 A preferred native representation that receives supported software YUV or a
 hardware download can retain compact CPU planes for the same GPU consumer.
 Its diagnostics still report CPU residency and the actual decode execution.
