@@ -160,7 +160,9 @@ fn product_tree_inventory(root_pid: u32) -> Result<BTreeMap<u32, ProcessIdentity
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
         };
-        if let Ok(identity) = read_process_identity(pid) {
+        if let Some(identity) = inventory_identity(read_process_identity(pid))
+            .map_err(|error| format!("could not inventory process {pid}: {error}"))?
+        {
             all.insert(pid, identity);
         }
     }
@@ -194,17 +196,45 @@ fn product_tree_inventory(root_pid: u32) -> Result<BTreeMap<u32, ProcessIdentity
     Ok(result)
 }
 
-fn read_process_identity(pid: u32) -> Result<ProcessIdentity, String> {
-    let path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
-    let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    parse_stat_identity(&contents)
+#[derive(Debug, thiserror::Error)]
+enum ProcessIdentityReadError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("invalid Linux process identity record: {0}")]
+    Record(String),
 }
 
-fn parse_stat_identity(contents: &str) -> Result<ProcessIdentity, String> {
+fn inventory_identity(
+    result: Result<ProcessIdentity, ProcessIdentityReadError>,
+) -> Result<Option<ProcessIdentity>, ProcessIdentityReadError> {
+    match result {
+        Ok(identity) => Ok(Some(identity)),
+        Err(ProcessIdentityReadError::Io(error))
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_process_identity(pid: u32) -> Result<ProcessIdentity, ProcessIdentityReadError> {
+    let path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
+    let contents = fs::read(&path)?;
+    parse_stat_identity(&contents).map_err(ProcessIdentityReadError::Record)
+}
+
+fn parse_stat_identity(contents: &[u8]) -> Result<ProcessIdentity, String> {
+    // comm is an opaque kernel byte string, not a UTF-8 path or identifier.
+    // Only the numeric/state suffix participates in the identity contract.
     let closing = contents
-        .rfind(')')
+        .iter()
+        .rposition(|byte| *byte == b')')
         .ok_or_else(|| String::from("/proc stat command name is unterminated"))?;
-    let fields: Vec<&str> = contents[closing + 1..].split_whitespace().collect();
+    let suffix = std::str::from_utf8(&contents[closing + 1..])
+        .map_err(|error| format!("invalid process identity suffix: {error}"))?;
+    let fields: Vec<&str> = suffix.split_whitespace().collect();
     let parent_pid = fields
         .get(1)
         .ok_or_else(|| String::from("/proc stat has no parent PID"))?
@@ -231,19 +261,21 @@ fn parse_stat_identity(contents: &str) -> Result<ProcessIdentity, String> {
 }
 
 fn read_status(path: &Path) -> io::Result<ProcessCounters> {
-    let contents = fs::read_to_string(path)?;
+    let contents = fs::read(path)?;
     let private_bytes = status_kib(&contents, "RssAnon:")?;
     let resident_bytes = status_kib(&contents, "VmRSS:")?;
     let peak_resident_bytes = status_kib(&contents, "VmHWM:")?;
     Ok(ProcessCounters { private_bytes, resident_bytes, peak_resident_bytes })
 }
 
-fn status_kib(contents: &str, key: &str) -> io::Result<u64> {
+fn status_kib(contents: &[u8], key: &str) -> io::Result<u64> {
     let line = contents
-        .lines()
-        .find(|line| line.starts_with(key))
+        .split(|byte| *byte == b'\n')
+        .find(|line| line.starts_with(key.as_bytes()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing {key}")))?;
-    let mut fields = line[key.len()..].split_whitespace();
+    let value = std::str::from_utf8(&line[key.len()..])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut fields = value.split_whitespace();
     let kib = fields
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("empty {key}")))?
@@ -266,6 +298,87 @@ fn status_kib(contents: &str, key: &str) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opaque_status_name_does_not_relax_numeric_counter_validation() {
+        let status = b"Name:\tworker\xff\nRssAnon:\t10 kB\n";
+        assert_eq!(
+            status_kib(status, "RssAnon:").expect("numeric counter"),
+            10 * 1024
+        );
+        let malformed = status_kib(b"RssAnon:\t1\xff kB\n", "RssAnon:");
+        assert_eq!(
+            malformed.expect_err("malformed numeric field").kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn only_disappeared_inventory_records_can_be_omitted() {
+        for code in [libc::ENOENT, libc::ESRCH] {
+            assert!(matches!(
+                inventory_identity(Err(ProcessIdentityReadError::Io(
+                    io::Error::from_raw_os_error(code)
+                ))),
+                Ok(None)
+            ));
+        }
+        assert!(inventory_identity(Err(ProcessIdentityReadError::Record(
+            "malformed stat".to_owned()
+        )))
+        .is_err());
+    }
+
+    #[test]
+    fn unreadable_inventory_record_cannot_be_silently_omitted() {
+        for code in [libc::EACCES, libc::EPERM, libc::EIO] {
+            let observed = inventory_identity(Err(ProcessIdentityReadError::Io(
+                io::Error::from_raw_os_error(code),
+            )));
+            assert!(
+                observed.is_err(),
+                "inventory omitted an unreadable record for OS error {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_child_name_remains_in_inventory_and_memory_sample() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '\\377owned' > /proc/$$/comm; printf 'ready\\n'; read -r line",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("owned native child");
+        let pid = child.id();
+        let mut ready = String::new();
+        let readiness =
+            BufReader::new(child.stdout.take().expect("readiness pipe")).read_line(&mut ready);
+        let name = fs::read(format!("/proc/{pid}/comm"));
+        let inventory = product_tree_inventory(std::process::id());
+        let sample = sample_tree_once(pid);
+        child.kill().expect("terminate native fixture");
+        child.wait().expect("reap native fixture before assertions");
+        readiness.expect("read readiness");
+        assert_eq!(ready, "ready\n");
+        assert!(
+            name.expect("native task name").contains(&0xff),
+            "fixture must use a real non-UTF8 task name"
+        );
+        assert!(
+            inventory.expect("product inventory").contains_key(&pid),
+            "a legal native task name must not hide a live product child"
+        );
+        let (count, private, resident, _) = sample.expect("native memory counters remain readable");
+        assert_eq!(count, 1);
+        assert!(resident >= private);
+    }
+
     #[test]
     fn exited_unreaped_child_does_not_invalidate_live_memory_inventory() {
         use std::process::{Command, Stdio};
@@ -316,7 +429,7 @@ mod tests {
         fields[1] = "12";
         fields[17] = "2"; // num_threads: the leader exited but another thread lives.
         fields[19] = "991";
-        let identity = parse_stat_identity(&format!("42 (worker) {}", fields.join(" ")))
+        let identity = parse_stat_identity(format!("42 (worker) {}", fields.join(" ")).as_bytes())
             .expect("zombie leader stat");
         assert!(
             !identity.address_space_exited,
@@ -331,7 +444,7 @@ mod tests {
         suffix.push("991");
         let stat = format!("42 (render worker (copy)) {}", suffix.join(" "));
         assert_eq!(
-            parse_stat_identity(&stat).expect("stat should parse"),
+            parse_stat_identity(stat.as_bytes()).expect("stat should parse"),
             ProcessIdentity {
                 parent_pid: 12,
                 start_ticks: 991,
@@ -344,7 +457,10 @@ mod tests {
     fn status_parser_preserves_metric_meaning() {
         let status = "VmHWM:\t30 kB\nVmRSS:\t20 kB\nRssAnon:\t10 kB\n";
         let path = Path::new("unused");
-        assert_eq!(status_kib(status, "RssAnon:").expect("value"), 10 * 1024);
+        assert_eq!(
+            status_kib(status.as_bytes(), "RssAnon:").expect("value"),
+            10 * 1024
+        );
         let _ = path;
     }
 }

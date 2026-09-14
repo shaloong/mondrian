@@ -726,6 +726,15 @@ charge the full decoded extent; downscaling cannot reduce its charge. A 4K-to-10
 admission regression checks both surface formats, the exact grant boundary and
 one-byte-under rejection without increasing any grant.
 
+Linux task names are opaque kernel bytes. Process identity parsing reads the
+numeric/state suffix after the final `)` in stat; memory parsing reads only the
+required ASCII counter lines in status. A non-UTF8 task name cannot hide a live
+child or make its counters unreadable. Inventory may omit only a procfs record
+that vanished (`ENOENT` or post-open `ESRCH`); permission, malformed-record and
+other I/O failures invalidate the observation instead of silently reducing the
+membership set. A native child with a non-UTF8 comm verifies both ancestry
+inclusion and memory sampling through the production probe.
+
 Linux process-memory inventories retain zombie/dead tasks for ancestry discovery
 but exclude their exited user address spaces from RSS aggregation. Such tasks
 legitimately omit RssAnon/VmRSS/VmHWM; missing counters on a live process remain
