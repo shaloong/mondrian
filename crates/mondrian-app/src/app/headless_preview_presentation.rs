@@ -273,12 +273,13 @@ fn present_headless_preview_candidate_inner(
             clear_revoked_headless_gpu_output(preview, &output_key, &output);
         }
     });
-    // The transport reached its natural end: no next frame demand will ever
-    // promote a prepared successor, so release its retained capacity-one
-    // physical lease. Otherwise it reports as a second live presentation
-    // output and rejects every later ordinary record with a
-    // presentation-capacity Backpressure.
-    if state.playback_engine.snapshot().state == mondrian_playback::TransportState::Ended {
+    // Natural end can advance into the already prepared terminal frame.
+    // Keep that exact current lease for normal promotion below. No later
+    // demand can consume unrelated preparation, so release only that lease
+    // to avoid presentation-capacity Backpressure on subsequent work.
+    if state.playback_engine.snapshot().state == mondrian_playback::TransportState::Ended
+        && !exact_prepared_current
+    {
         gpu.clear_prepared_physical_output();
     }
     // A presentable publication consumes its exact Frame Demand before the

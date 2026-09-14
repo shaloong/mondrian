@@ -1,5 +1,16 @@
 # Playback Engine
 
+At natural Ended, Preview may consume an already completed exact successor before
+retiring transport work. The existing execution owner checks its generation and
+full epoch/frame/quality intent; App additionally verifies unchanged authoring,
+output extent and display contract after external dependency refresh. Promotion
+then crosses normal generation binding and exact output-key reuse, preserving
+the original already-visible flag and current presentation ticket. No decoder
+inputs are retained and seek/device/authoring changes cannot use this path.
+Headless terminal cleanup retains an exact prepared-current physical output until
+normal promotion; only unrelated terminal preparation is discarded to release
+presentation capacity.
+
 The existing evaluation working set retains at most one resource-free completion
 proof after releasing the physically completed evaluation. It contains the exact
 picture key, compiled output identity, resolved presentation quality and typed

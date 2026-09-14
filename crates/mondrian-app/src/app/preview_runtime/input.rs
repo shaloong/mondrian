@@ -288,6 +288,11 @@ impl PreviewTransportSnapshot {
         )
     }
 
+    /// Whether the Engine reached the authored terminal coordinate naturally.
+    pub(crate) const fn is_ended(self) -> bool {
+        matches!(self.state, TransportState::Ended)
+    }
+
     /// Whether startup preroll currently holds the Clock Master.
     pub(crate) const fn is_priming(self) -> bool {
         matches!(self.state, TransportState::Priming)

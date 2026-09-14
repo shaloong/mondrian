@@ -788,6 +788,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         bump(&self.metrics.gpu_preview_candidate_requests);
         self.synchronize_visual_program_authoring_session(snapshot);
+        let terminal_promotion = self.promote_terminal_output_before_retirement(snapshot);
         self.synchronize_transport_intent(transport.intent());
         if transport.is_playing()
             && !transport.is_speculative_preparation()
@@ -911,7 +912,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.execution
                 .borrow_mut()
                 .promote_prepared_successor_for_intent(playback_intent)
-        };
+        }
+        .or_else(|| {
+            terminal_promotion.and_then(|promotion| {
+                match &promotion {
+                    PreviewPreparedPromotion::Gpu { key, .. } => {
+                        self.execution.borrow_mut().output_for(key)?;
+                    }
+                    PreviewPreparedPromotion::Transparent => {}
+                }
+                Some(promotion)
+            })
+        });
         if let Some(prepared) = prepared_promotion {
             // Promotion is the common steady-state current path in Headless
             // playback. It must retain the visible turn's recurring future
@@ -1684,6 +1696,41 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.scheduler.synchronize_playback_current_demand(ticket.identity());
         frame.bind_current_presentation(ticket);
         Some(frame)
+    }
+
+    /// Consume only an exact terminal successor before transport cancellation.
+    /// This changes no physical presentation: the ordinary promotion result still
+    /// carries its original already-visible flag and receives the current ticket.
+    fn promote_terminal_output_before_retirement(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> Option<PreviewPreparedPromotion<ViewerPreviewCacheKey>> {
+        let transport = snapshot.transport();
+        if !transport.is_ended() || transport.is_speculative_preparation() {
+            return None;
+        }
+        // External author/effect dependency changes must invalidate the old
+        // prepared artifact before its generation can be reused.
+        self.apply_visual_dependency_refreshes().ok()?;
+        let authoring = snapshot.authoring()?;
+        let sequence = authoring.active_sequence()?;
+        let (next, _, _, _) =
+            self.resolve_preview_generation_contract(snapshot, authoring, sequence).ok()?;
+        let mut execution = self.execution.borrow_mut();
+        let previous = execution.current_generation_key()?;
+        if !previous.playing
+            || previous.playback_epoch != Some(transport.epoch())
+            || previous.sequence_id != next.sequence_id
+            || previous.sequence_revision != next.sequence_revision
+            || previous.project_author_generation != next.project_author_generation
+            || previous.display_contract_identity != next.display_contract_identity
+            || previous.width != next.width
+            || previous.height != next.height
+            || previous.display_color_space != next.display_color_space
+        {
+            return None;
+        }
+        execution.promote_prepared_successor_for_intent(transport.playback_intent())
     }
 
     fn resolve_preview_generation_contract(

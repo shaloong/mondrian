@@ -105,6 +105,78 @@ fn presentation_then_gpu_share_one_evaluation_for_the_same_frame() {
 }
 
 #[test]
+fn naturally_ended_transport_promotes_its_exact_prepared_terminal_output() {
+    for case in ["exact", "frame", "quality", "epoch", "device"] {
+        let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+        pin_standard_execution_resources(&mut state);
+        state.play().expect("initialize transport");
+        state.pause().expect("pause before positioning");
+        let last = state.last_content_frame().expect("terminal frame");
+        state.seek(last - 1).expect("seek before terminal frame");
+        state.play().expect("resume before terminal frame");
+        let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+        let current = match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Ready(frame) => frame,
+            _ => panic!("expected current candidate"),
+        };
+        state
+            .complete_frame_presentation(
+                current.presentation_ticket().expect("current ticket"),
+                Instant::now(),
+            )
+            .expect("complete current presentation");
+        assert!(state.observe_video_preroll(0, 0));
+        let request = state
+            .preview_successor_execution_request(Instant::now())
+            .expect("terminal successor");
+        let intent = request.snapshot().transport().playback_intent();
+        assert_eq!(intent.frame, last);
+        let prepared = match runtime.gpu_preview_frame(request) {
+            PreviewGpuFrameState::Ready(frame) => frame,
+            _ => panic!("expected exact terminal preparation"),
+        };
+        let mut registered = intent;
+        match case {
+            "frame" => registered.frame -= 1,
+            "quality" => registered.quality_revision += 1,
+            "epoch" => {
+                registered.epoch = serde_json::from_value(serde_json::json!(intent.epoch.get() + 1))
+                    .expect("different epoch")
+            }
+            _ => {}
+        }
+        runtime.register_prepared_gpu_successor(registered, prepared.output_key.clone(), ());
+        drop(prepared);
+        let before = evaluation_resolve_count(&runtime);
+        state.advance_playback_clock_at(Instant::now() + Duration::from_millis(100));
+        assert_eq!(state.current_frame(), last);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            mondrian_playback::TransportState::Ended
+        );
+        assert!(runtime.has_prepared_successor_for_intent(registered));
+        if case == "device" {
+            runtime.retire_decoder_device_generation();
+        }
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Current(candidate) if case == "exact" => {
+                assert!(
+                    !candidate.was_already_visible(),
+                    "prepared terminal output still needs physical presentation"
+                );
+                assert_eq!(
+                    evaluation_resolve_count(&runtime),
+                    before,
+                    "terminal promotion must not evaluate or decode again"
+                );
+            }
+            PreviewGpuFrameState::Current(_) => panic!("invalid {case} successor became current"),
+            _ => assert_ne!(case, "exact", "exact terminal successor was not promoted"),
+        }
+    }
+}
+
+#[test]
 fn completed_gpu_output_survives_same_picture_pause_without_reevaluation() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     pin_standard_execution_resources(&mut state);
