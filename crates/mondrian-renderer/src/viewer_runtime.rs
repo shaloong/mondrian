@@ -2566,6 +2566,9 @@ impl ViewerGpuNativeVideoFacts {
             | mondrian_media::CpuYuvSampleFormat::Unorm16Msb10 => {
                 GpuNativeDecodedFrameTextureFormat::P010
             }
+            mondrian_media::CpuYuvSampleFormat::Unorm16Lsb12 => {
+                GpuNativeDecodedFrameTextureFormat::P012
+            }
         });
         let source_video_sampling = source_texture_format.and_then(|format| {
             source.frame.source_color.color_space().and_then(|color_space| {

@@ -3607,13 +3607,13 @@ zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
 sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
 encoded and working textures.
 
-An exact probed `Yuv420p`, `Yuv420p10le`, `Nv12`, `P010`, or `Yuv422p10le`
-source may instead resolve to the explicit
+An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
+semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
 `CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU
 materialization. Media retains an independently reference-counted immutable
 FFmpeg `AVFrame` with its native luma/chroma planes and explicit row strides.
 Planar samples retain separate Cb/Cr planes; NV12/P010 retain their interleaved
-plane. P010 preserves most-significant-bit alignment, while planar ten-bit
+plane. P010 preserves most-significant-bit alignment, while planar ten/twelve-bit
 samples remain least-significant-bit aligned. Both use the existing Renderer
 YUV sampling and OCIO input transform, with no parallel color interpretation. It does not repack or interleave roughly 33 MiB for every UHD frame.
 The reservation includes conservative FFmpeg row alignment and rounded-up
@@ -3984,14 +3984,17 @@ Required native requests fail before this fallback; CPU-addressable requests
 continue to receive their typed RGBA/float payload. This reduces pixel
 materialization without altering quality, deadlines, or cache budgets.
 
-The compact software route retains FFmpeg planar 8/10-bit 4:2:0, 4:2:2,
+The compact software route retains FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2,
 and 4:4:4 without an intermediate CPU RGB image. Probe admission and decoded
 surface validation agree on these layouts. Full-resolution 4:4:4 chroma does
 not acquire an invented subsampled chroma location. Planning charges each
 aligned plane row and its actual chroma extent; retained allocation accounting
 remains authoritative. These CPU layouts do not advertise native GPU residency
 or hardware codec support. Alpha and scene-linear inputs retain their existing
-separate contracts.
+separate contracts. Twelve-bit planar samples retain their original right-aligned
+16-bit words, including ProRes 4444 decoder output. The source hint, physical
+surface descriptor, and compact payload agree on the effective twelve-bit depth;
+no ten-bit quantization or CPU RGBA conversion is introduced.
 
 Compact CPU payload accounting charges the retained FFmpeg image buffer
 references, including vertical allocation alignment and inter-plane padding.

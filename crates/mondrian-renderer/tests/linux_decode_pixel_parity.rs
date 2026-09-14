@@ -64,8 +64,8 @@ fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
         .context("explicit equivalent fixtures")?;
     let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
     anyhow::ensure!(
-        paths.len() == 3,
-        "expected 422p, 444p and 444p10le equivalent fixtures"
+        paths.len() == 4,
+        "expected 422p, 444p, 444p10le and 444p12le equivalent fixtures"
     );
     let context = pollster::block_on(GpuContext::new())?;
     let mut runtime =

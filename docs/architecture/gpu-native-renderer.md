@@ -317,7 +317,7 @@ backend cannot skip, reorder, or mislabel either pass.
 The same YUV shader is also the sole materializer for media-owned compact CPU
 YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
 CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
-luma/CbCr views; FFmpeg planar 8/10-bit 4:2:0, 4:2:2, and 4:4:4 bind
+luma/CbCr views; FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2, and 4:4:4 bind
 stride-preserving luma/Cb/Cr views
 without expanding or converting them into an RGB staging image. The compact
 plane textures survive ordinary Viewer candidate clears. A bounded
@@ -337,7 +337,7 @@ completion; abandoned candidates drop their unsubmitted buffer. This avoids
 both `Queue::write_texture`'s per-plane native staging allocation and a
 full-frame host memcpy on the transport/UI thread, while keeping upload
 ordering, cancellation, and memory ownership inside the Viewer runtime.
-Its encoded source output also uses the product RGBA32F policy; compact 10-bit
+Its encoded source output also uses the product RGBA32F policy; compact 10/12-bit
 YUV must not take an otherwise hidden RGBA16F shortcut. The explicit layout contract distinguishes
 two-plane from three-plane storage, 4:2:0, 4:2:2, and 4:4:4, and most-significant-bit
 P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layouts produce the same typed

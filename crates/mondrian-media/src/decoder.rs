@@ -1109,14 +1109,20 @@ pub enum DecodedVideoSurfaceFormat {
     Yuv420p,
     /// Planar 10-bit YUV 4:2:0.
     Yuv420p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
+    Yuv420p12le,
     /// Planar 8-bit YUV 4:2:2.
     Yuv422p,
     /// Planar 10-bit YUV 4:2:2.
     Yuv422p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
+    Yuv422p12le,
     /// Planar eight-bit CPU YUV 4:4:4.
     Yuv444p,
     /// Planar little-endian ten-bit CPU YUV 4:4:4 with right-aligned samples.
     Yuv444p10le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
+    Yuv444p12le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
@@ -2092,10 +2098,13 @@ impl DecodedVideoSurfaceFormat {
             Self::Xv36 => "Xv36",
             Self::Yuv420p => "Yuv420p",
             Self::Yuv420p10le => "Yuv420p10le",
+            Self::Yuv420p12le => "Yuv420p12le",
             Self::Yuv422p => "Yuv422p",
             Self::Yuv422p10le => "Yuv422p10le",
+            Self::Yuv422p12le => "Yuv422p12le",
             Self::Yuv444p => "Yuv444p",
             Self::Yuv444p10le => "Yuv444p10le",
+            Self::Yuv444p12le => "Yuv444p12le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
             Self::Rgba16Float => "Rgba16Float",
@@ -2181,17 +2190,23 @@ impl DecodedVideoSurfaceFormat {
             }
             Self::Yuv420p
             | Self::Yuv420p10le
+            | Self::Yuv420p12le
             | Self::Yuv422p
             | Self::Yuv422p10le
+            | Self::Yuv422p12le
             | Self::Yuv444p
-            | Self::Yuv444p10le => {
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le => {
                 let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
                     Self::Yuv420p => (Cs420, 8, Unorm8),
                     Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv420p12le => (Cs420, 12, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p => (Cs422, 8, Unorm8),
                     Self::Yuv444p => (Cs444, 8, Unorm8),
                     Self::Yuv444p10le => (Cs444, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv444p12le => (Cs444, 12, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p12le => (Cs422, 12, Unorm16 { most_significant_bits: false }),
                     _ => unreachable!(),
                 };
                 DecodedVideoSurfaceDescriptor {

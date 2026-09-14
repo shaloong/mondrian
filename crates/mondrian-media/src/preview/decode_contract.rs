@@ -126,14 +126,20 @@ pub enum PreviewCompactCpuYuvHint {
     Yuv420p,
     /// Planar little-endian ten-bit 4:2:0 with right-aligned component samples.
     Yuv420p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
+    Yuv420p12le,
     /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
     Yuv422p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
+    Yuv422p12le,
     /// Planar eight-bit 4:2:2 with full-height chroma planes.
     Yuv422p,
     /// Planar eight-bit 4:4:4 with full-resolution chroma planes.
     Yuv444p,
     /// Planar little-endian ten-bit 4:4:4 with right-aligned samples.
     Yuv444p10le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
+    Yuv444p12le,
 }
 
 impl PreviewCompactCpuYuvHint {
@@ -144,9 +150,9 @@ impl PreviewCompactCpuYuvHint {
     pub const fn retained_bytes_per_pixel(self) -> usize {
         match self {
             Self::Yuv420p | Self::Nv12 | Self::Yuv422p => 2,
-            Self::Yuv420p10le | Self::P010 | Self::Yuv444p => 3,
-            Self::Yuv422p10le => 4,
-            Self::Yuv444p10le => 6,
+            Self::Yuv420p10le | Self::Yuv420p12le | Self::P010 | Self::Yuv444p => 3,
+            Self::Yuv422p10le | Self::Yuv422p12le => 4,
+            Self::Yuv444p10le | Self::Yuv444p12le => 6,
         }
     }
 
@@ -158,7 +164,7 @@ impl PreviewCompactCpuYuvHint {
     /// merely to make the allocation tightly packed.
     pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
         match self {
-            Self::Yuv420p | Self::Yuv420p10le | Self::Nv12 | Self::P010 => {
+            Self::Yuv420p | Self::Yuv420p10le | Self::Yuv420p12le | Self::Nv12 | Self::P010 => {
                 let component_bytes = match self {
                     Self::Yuv420p | Self::Nv12 => 1,
                     _ => 2,
@@ -175,13 +181,18 @@ impl PreviewCompactCpuYuvHint {
                     chroma_row.saturating_mul(2).saturating_mul(extent.height.div_ceil(2) as usize),
                 )
             }
-            Self::Yuv422p | Self::Yuv422p10le | Self::Yuv444p | Self::Yuv444p10le => {
+            Self::Yuv422p
+            | Self::Yuv422p10le
+            | Self::Yuv422p12le
+            | Self::Yuv444p
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le => {
                 let component_bytes = match self {
                     Self::Yuv422p | Self::Yuv444p => 1,
                     _ => 2,
                 };
                 let chroma_width = match self {
-                    Self::Yuv444p | Self::Yuv444p10le => extent.width,
+                    Self::Yuv444p | Self::Yuv444p10le | Self::Yuv444p12le => extent.width,
                     _ => extent.width.div_ceil(2),
                 };
                 let luma_row = align_up_saturating(
@@ -1028,10 +1039,13 @@ const fn compact_cpu_yuv_hint_from_pixel_format(
         PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
         PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
         PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+        PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
         PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
         PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
         PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
+        PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
         PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+        PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
         _ => None,
     }
 }
@@ -1290,6 +1304,9 @@ mod tests {
             (PreviewCompactCpuYuvHint::Yuv422p, 3072),
             (PreviewCompactCpuYuvHint::Yuv444p, 4608),
             (PreviewCompactCpuYuvHint::Yuv444p10le, 6912),
+            (PreviewCompactCpuYuvHint::Yuv444p12le, 6912),
+            (PreviewCompactCpuYuvHint::Yuv422p12le, 5376),
+            (PreviewCompactCpuYuvHint::Yuv420p12le, 4352),
         ] {
             assert_eq!(
                 hint.retained_bytes_for_extent(Resolution { width: 257, height: 3 }),
@@ -1305,6 +1322,9 @@ mod tests {
             PixelFormat::Yuv422p,
             PixelFormat::Yuv444p,
             PixelFormat::Yuv444p10le,
+            PixelFormat::Yuv420p12le,
+            PixelFormat::Yuv422p12le,
+            PixelFormat::Yuv444p12le,
         ] {
             let mut stream = video_stream(9, pixel, true);
             stream.codec = VideoCodec::H264;

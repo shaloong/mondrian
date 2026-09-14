@@ -2490,6 +2490,7 @@ fn compact_cpu_yuv_420_retains_samples_and_owner_at_odd_extents() {
     for (pixel, sample_format) in [
         (Pixel::YUV420P, CpuYuvSampleFormat::Unorm8),
         (Pixel::YUV420P10LE, CpuYuvSampleFormat::Unorm16Lsb10),
+        (Pixel::YUV420P12LE, CpuYuvSampleFormat::Unorm16Lsb12),
     ] {
         let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
         decoded.set_color_space(ffmpeg::util::color::Space::BT709);
@@ -2607,6 +2608,8 @@ fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
         (Pixel::YUV422P, 3, 1),
         (Pixel::YUV444P, 5, 1),
         (Pixel::YUV444P10LE, 5, 2),
+        (Pixel::YUV444P12LE, 5, 2),
+        (Pixel::YUV422P12LE, 3, 2),
     ] {
         let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
         decoded.set_color_space(ffmpeg::util::color::Space::BT709);
@@ -2644,6 +2647,13 @@ fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
             }
         };
         let physical_format = frame.surface_format();
+        if matches!(pixel, Pixel::YUV422P12LE | Pixel::YUV444P12LE) {
+            assert_eq!(frame.sample_format.bit_depth(), 12);
+            assert_eq!(
+                physical_format.descriptor().expect("planar descriptor").component_bit_depth,
+                12
+            );
+        }
         frame.diagnostics.decoded_surface_format = DecodedVideoSurfaceFormat::Unknown;
         assert_eq!(
             frame.surface_format(),

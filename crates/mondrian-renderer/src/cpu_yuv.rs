@@ -430,6 +430,7 @@ pub(crate) fn record_cpu_yuv_frame(
         CpuYuvSampleFormat::Unorm16Lsb10 | CpuYuvSampleFormat::Unorm16Msb10 => {
             GpuNativeDecodedFrameTextureFormat::P010
         }
+        CpuYuvSampleFormat::Unorm16Lsb12 => GpuNativeDecodedFrameTextureFormat::P012,
     };
     let video_sampling = crate::viewer_execution::decoded_video_sampling_for_surface(
         source_color_space,
@@ -477,7 +478,9 @@ pub(crate) fn record_cpu_yuv_frame(
         CpuYuvSampleFormat::Unorm8 | CpuYuvSampleFormat::Unorm16Msb10 => {
             GpuYuvCodeAlignment::MostSignificant
         }
-        CpuYuvSampleFormat::Unorm16Lsb10 => GpuYuvCodeAlignment::LeastSignificant,
+        CpuYuvSampleFormat::Unorm16Lsb10 | CpuYuvSampleFormat::Unorm16Lsb12 => {
+            GpuYuvCodeAlignment::LeastSignificant
+        }
     };
     let chroma_plane_layout = match frame.chroma_plane_layout() {
         CpuYuvChromaPlaneLayout::Interleaved => GpuYuvChromaPlaneLayout::Interleaved,
@@ -560,7 +563,9 @@ fn plane_formats(
             wgpu::TextureFormat::Rg8Unorm,
             wgpu::TextureFormat::R8Unorm,
         ),
-        CpuYuvSampleFormat::Unorm16Lsb10 | CpuYuvSampleFormat::Unorm16Msb10 => (
+        CpuYuvSampleFormat::Unorm16Lsb10
+        | CpuYuvSampleFormat::Unorm16Lsb12
+        | CpuYuvSampleFormat::Unorm16Msb10 => (
             wgpu::TextureFormat::R16Unorm,
             wgpu::TextureFormat::Rg16Unorm,
             wgpu::TextureFormat::R16Unorm,

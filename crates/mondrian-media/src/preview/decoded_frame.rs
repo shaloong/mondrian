@@ -62,6 +62,8 @@ pub enum CpuYuvSampleFormat {
     /// the original code values. Keeping FFmpeg's native alignment makes plane
     /// publication a bounded copy instead of a full-frame sample rewrite.
     Unorm16Lsb10,
+    /// Twelve-bit code values retained right-aligned in 16-bit component words.
+    Unorm16Lsb12,
     /// Ten-bit code values retained left-aligned in P010 component words.
     Unorm16Msb10,
 }
@@ -71,7 +73,7 @@ impl CpuYuvSampleFormat {
     pub const fn bytes_per_component(self) -> usize {
         match self {
             Self::Unorm8 => 1,
-            Self::Unorm16Lsb10 | Self::Unorm16Msb10 => 2,
+            Self::Unorm16Lsb10 | Self::Unorm16Lsb12 | Self::Unorm16Msb10 => 2,
         }
     }
 
@@ -80,6 +82,7 @@ impl CpuYuvSampleFormat {
         match self {
             Self::Unorm8 => 8,
             Self::Unorm16Lsb10 | Self::Unorm16Msb10 => 10,
+            Self::Unorm16Lsb12 => 12,
         }
     }
 }
