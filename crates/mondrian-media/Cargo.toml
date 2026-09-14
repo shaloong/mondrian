@@ -17,7 +17,7 @@ mondrian-platform-core = { workspace = true, optional = true }
 
 # FFmpeg bindings link dynamically for source builds. Product packages carry
 # their own verified private runtime closure; end users do not install FFmpeg.
-ffmpeg-next = "8"
+ffmpeg-next = { version = "8", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling"] }
 
 # 音频
 cpal    = "0.18.1"  # 跨平台音频输出与稳定设备身份

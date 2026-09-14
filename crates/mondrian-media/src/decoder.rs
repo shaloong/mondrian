@@ -2613,6 +2613,38 @@ mod tests {
         })
     }
 
+    #[test]
+    fn retiring_preview_family_preserves_budgeted_device_root_until_full_clear() {
+        let pool = HwDeviceContextPool::new(HwDeviceContextPoolPolicy::new(1));
+        let root = ownership_test_device_root();
+        let retained = Arc::downgrade(&root);
+        pool.install_renderer_device_context(
+            HwAccelDeviceSelector::CudaDeviceOrdinal(0),
+            RendererHwAccelDeviceContext { owner: root },
+        )
+        .expect("install ownership fixture");
+        let resources = crate::PreviewDecodeWorkerResources::new(
+            crate::PreviewSeekIndexCache::default(),
+            pool.clone(),
+        );
+        let mut context = crate::PreviewDecodeSessionContext::with_worker_resources(resources);
+        for family in [
+            crate::PreviewDecodeSessionFamily::Interactive,
+            crate::PreviewDecodeSessionFamily::Playback,
+        ] {
+            context.clear_family(family);
+            assert!(
+                retained.upgrade().is_some(),
+                "family retirement must honor the existing idle device-root budget"
+            );
+        }
+        context.clear();
+        assert!(
+            retained.upgrade().is_none(),
+            "full clear releases idle roots"
+        );
+    }
+
     fn observed_ownership_test_device_root(
         pool: &HwDeviceContextPool,
     ) -> (

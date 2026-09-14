@@ -10,13 +10,26 @@ fn native_retirement_does_not_admit_playback_before_old_family_is_consumed() {
     residency.register_worker(lane);
     residency.activate(PreviewDecodeResidencyFamily::Playback);
     let revision = residency.revision();
-    let mut pending = PendingMediaPreviewSessionRetirements::default();
+    let mut context =
+        MediaPreviewWorkerDecodeContext::new(PreviewDecodeSessionContext::bootstrap());
+    let mut pending = PendingMediaPreviewSessionRetirements {
+        release_device_roots: true,
+        ..PendingMediaPreviewSessionRetirements::default()
+    };
     pending.insert(PreviewDecodeSessionFamily::Interactive);
-    pending.acknowledge_if_released(&residency, lane, revision);
+    pending.acknowledge_if_released(&mut context, &residency, lane, revision);
+    assert!(
+        pending.release_device_roots,
+        "full clear must wait for native owners"
+    );
     assert!(!residency.admits(PreviewDecodeAccessMode::PlaybackCursor));
     // Only the owning worker removes this pending family after clear_family.
     pending.remove(PreviewDecodeSessionFamily::Interactive);
-    pending.acknowledge_if_released(&residency, lane, revision);
+    pending.acknowledge_if_released(&mut context, &residency, lane, revision);
+    assert!(
+        !pending.release_device_roots,
+        "full clear precedes acknowledgement"
+    );
     assert!(residency.admits(PreviewDecodeAccessMode::PlaybackCursor));
 }
 use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;

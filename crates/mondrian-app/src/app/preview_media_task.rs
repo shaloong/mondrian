@@ -377,10 +377,16 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     let mut pending_native_retire = PendingMediaPreviewSessionRetirements::default();
     loop {
         if pending_native_retire.clear_released(&mut decode_context) {
-            pending_native_retire.acknowledge_if_released(&residency, lane, residency_revision);
+            pending_native_retire.acknowledge_if_released(
+                &mut decode_context,
+                &residency,
+                lane,
+                residency_revision,
+            );
             work_notifier.lifecycle_progressed();
         }
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
+            pending_native_retire.release_device_roots = directive.retire_all_contexts();
             if directive.retire_context() {
                 let families = if directive.retire_all_contexts() {
                     [
@@ -403,6 +409,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                     }
                 }
                 pending_native_retire.acknowledge_if_released(
+                    &mut decode_context,
                     &residency,
                     lane,
                     directive.revision(),
@@ -726,16 +733,24 @@ const fn opposite_preview_decode_session_family(
 struct PendingMediaPreviewSessionRetirements {
     playback: bool,
     interactive: bool,
+    release_device_roots: bool,
 }
 
 impl PendingMediaPreviewSessionRetirements {
     fn acknowledge_if_released(
-        &self,
+        &mut self,
+        context: &mut MediaPreviewWorkerDecodeContext,
         residency: &PreviewDecodeResidencyCoordinator,
         lane: MediaPreviewWorkerLane,
         revision: u64,
     ) {
         if !self.playback && !self.interactive {
+            if self.release_device_roots {
+                // The all-context directive consumes idle device roots only
+                // after both families' native leases and codec owners retire.
+                context.clear();
+                self.release_device_roots = false;
+            }
             residency.acknowledge_retirement(lane, revision);
         }
     }

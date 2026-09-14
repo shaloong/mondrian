@@ -15,6 +15,13 @@ uses the existing compact CPU YUV representation only for proved supported opaqu
 encoded layouts. CPU working/data consumers retain RGB, and required GPU
 residency still fails when field processing needs CPU access.
 
+Media selects the FFmpeg binding features explicitly: codec, format, filter,
+software scaling, and software resampling. It does not register or link the
+unused libavdevice capture/output module through binding defaults. Hardware
+decoding and resident encoding continue to use libavutil hardware-device/frame
+contexts and libavcodec; field processing retains libavfilter. This dependency
+boundary does not change CLI-provider admission or qualify physical devices.
+
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
 input. Stream discovery retains its packets; the HDR supplement dispatches that
 same packet stream to the requested video decoders until each has its first
@@ -2467,6 +2474,13 @@ Playback/Interactive family barrier. Sharing the device removes driver device
 teardown/recreation from a transport discontinuity without allowing two native
 surface pools or sharing codec state. Pressure or an idle-family boundary may
 release idle roots, and the next acquisition creates a later generation. A
+transport-family `clear_family` retires codec/demux owners while leaving device
+root eviction to the existing pool policy. It must not force the idle allowance
+to zero: doing so recreates the immutable device on every play/pause transition.
+Full context `clear` still explicitly releases idle roots, and policy reduction
+and device-generation failure retain their existing eviction authority. A
+worker directive retiring all contexts performs this full clear after both
+families' native leases retire and before acknowledging the directive. A
 device-loss recovery path must retire the failed generation and create a new
 immutable device; it must not mutate an initialized context or reuse one across
 adapter selectors. The

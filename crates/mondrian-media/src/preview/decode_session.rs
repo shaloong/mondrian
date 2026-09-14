@@ -409,6 +409,8 @@ impl PreviewDecodeSessionContext {
     /// A shared App worker may own a cold Playback source and interactive
     /// Sessions at different times. Family transitions therefore retire the
     /// obsolete vector rather than destroying unrelated source locality.
+    /// Immutable device roots retain only the pool's existing idle allowance;
+    /// full context clearing and explicit pressure trimming release those roots.
     pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
         let _retirement = self.resources.lock_session_retirement();
         if !self.sessions.family_is_empty(family) {
@@ -417,7 +419,6 @@ impl PreviewDecodeSessionContext {
             self.sessions.clear_family(family);
             self.execution_observer.finish_idle();
         }
-        self.resources.hardware_device_contexts.release_idle();
     }
 
     /// Whether every decoder-native output issued by this context is released.
