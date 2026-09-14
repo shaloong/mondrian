@@ -350,20 +350,26 @@ again; slot replacement or explicit clear retires the views together with their
 textures, so a new generation cannot recover an old view. A bounded
 renderer-owned upload worker copies visible plane rows into reusable mapped,
 256-byte-aligned transfer buffers before realtime candidate recording. The
-runtime exposes one command-free preflight over the complete layer/Transition
-stack; Window and Headless CPU-complete lookahead call it without reserving a
-submission or presentation output. Recording repeats the same preflight and
-does not encode any layer until every distinct contributing compact frame is
-ready, preventing a multi-layer candidate from partially recording and
-thrashing its bounded transfer pool. Until preparation completes, Viewer
-execution returns typed backpressure and its payload-free completion edge wakes
-the existing Preview retry loop. The realtime caller then records only
-`copy_buffer_to_texture` commands in the same command buffer as YUV sampling.
-Successful candidates bind buffer remap and pool return to GPU submission
-completion; abandoned candidates drop their unsubmitted buffer. This avoids
-both `Queue::write_texture`'s per-plane native staging allocation and a
-full-frame host memcpy on the transport/UI thread, while keeping upload
-ordering, cancellation, and memory ownership inside the Viewer runtime.
+runtime distinguishes bounded ticketless prewarming from complete current
+candidate preparation. Window and Headless lookahead use `prewarm_cpu_yuv_uploads`;
+this retains four speculative results and cannot replace the current candidate's
+protected physical input set. `prepare_cpu_yuv_uploads` consumes a complete
+Viewer request and performs the same pure active-resource admission as recording
+before protecting or allocating its transfers. The estimate includes each
+candidate's exact padded staging extent; the worker reuses only matching buffer
+capacities so a larger old allocation cannot escape that charge.
+
+The upload owner protects every distinct contributing input of the admitted
+candidate, independently of its unchanged four-entry worker transport. Readiness
+is read atomically from that owner after the whole set is admitted. Recording
+keeps one immutable transfer lease per input until the candidate finishes; a
+source reused at multiple materialization extents does not consume or copy its
+CPU preparation twice. Successful candidates install one submission-bound remap
+and worker-pool return per transfer. Abandoned candidates release their recorded
+leases. All scheduling, cancellation, generation clearing and worker retirement
+remain inside the existing Viewer runtime; this adds no Timeline or Playback
+coordinator. The realtime caller records the existing `copy_buffer_to_texture`
+commands in the same command buffer as YUV sampling.
 Its encoded source output also uses the product RGBA32F policy; compact 10/12-bit
 YUV must not take an otherwise hidden RGBA16F shortcut. The explicit layout contract distinguishes
 two-plane from three-plane storage, 4:2:0, 4:2:2, and 4:4:4, and most-significant-bit
@@ -371,17 +377,13 @@ P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layo
 `Source + EncodedFloat` intermediate and therefore share color validation,
 OCIO execution, spatial scaling, and Viewer composition semantics.
 
-The mapped-upload transport and prepared-result retention currently share a
-four-entry bound. This is a known liveness defect, not a qualification limit:
-five independently retained, contributing compact inputs fit the Standard
-active resource grant but cannot simultaneously become ready because result
-drain evicts an earlier required preparation. The opt-in native
-`five_compact_inputs_can_prepare_and_record_one_candidate` regression reproduces
-this through the public decoder and Viewer runtime, verifies resource admission
-first, and consumes the production retirement owner before reporting failure.
-A complete fix must distinguish bounded worker transport from the complete
-candidate's active input ownership without enlarging the idle cache grant.
-
+The opt-in native `five_compact_inputs_can_prepare_and_record_one_candidate`
+regression first reproduced starvation for five small inputs that passed the
+Standard grant. It now covers complete recording despite competing speculative
+prewarm. `shared_compact_input_can_materialize_two_extents` covers one input's
+multiple uses in that same candidate. Both consume the production retirement
+owner before reporting the result; they do not turn missing GPU execution into
+qualification evidence.
 
 The YUV shader uses unfiltered `textureLoad` operations because YUV plane
 formats are not assumed filterable. It performs renderer-defined bilinear

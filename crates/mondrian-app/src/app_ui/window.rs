@@ -7392,7 +7392,7 @@ fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &Ap
             && frame.playback_intent() == intent
         {
             let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
-            if let Err(error) = session.viewer_gpu_execution.prepare_cpu_yuv_uploads(layers) {
+            if let Err(error) = session.viewer_gpu_execution.prewarm_cpu_yuv_uploads(layers) {
                 tracing::warn!(
                     %error,
                     timeline_frame = frame.frame,

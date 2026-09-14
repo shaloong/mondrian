@@ -261,7 +261,7 @@ fn measure_with_resource_observer(
             },
         ))];
         runtime.prepare_native_video_imports(&layers)?;
-        while !runtime.prepare_cpu_yuv_uploads(&layers)? {
+        while !runtime.prewarm_cpu_yuv_uploads(&layers)? {
             context.device.poll(wgpu::PollType::Poll)?;
             if Instant::now() >= deadline {
                 bail!("CPU upload timed out");

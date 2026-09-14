@@ -1039,7 +1039,7 @@ impl HeadlessViewerGpuAdapter {
             false,
         )?;
         let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
-        self.runtime.prepare_cpu_yuv_uploads(layers)?;
+        self.runtime.prewarm_cpu_yuv_uploads(layers)?;
         self.runtime.prepare_native_video_imports(layers)?;
         Ok(())
     }

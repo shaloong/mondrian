@@ -122,7 +122,7 @@ fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
             .recv_timeout(Duration::from_secs(5))
             .expect("release wake");
     });
-    assert!(!runtime.prepare_cpu_yuv_uploads(&layers).expect("schedule upload"));
+    assert!(!runtime.prewarm_cpu_yuv_uploads(&layers).expect("schedule upload"));
     entry.recv_timeout(Duration::from_secs(5)).expect("worker reached wake");
     let mut pending = runtime.into_retirement();
     assert_eq!(pending.poll().expect("pending retirement"), None);
@@ -137,7 +137,7 @@ fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
         ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
             .expect("submitted runtime");
     let upload_deadline = Instant::now() + Duration::from_secs(5);
-    while !runtime.prepare_cpu_yuv_uploads(&layers).expect("prepare real upload") {
+    while !runtime.prewarm_cpu_yuv_uploads(&layers).expect("prepare real upload") {
         assert!(
             Instant::now() < upload_deadline,
             "upload preparation timeout"
@@ -203,7 +203,7 @@ fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
         panic!("injected real upload wake panic");
     });
     assert!(!runtime
-        .prepare_cpu_yuv_uploads(&[layer(decoded)])
+        .prewarm_cpu_yuv_uploads(&[layer(decoded)])
         .expect("schedule panic upload"));
     entry.recv_timeout(Duration::from_secs(5)).expect("real upload before panic");
     let mut panicked = runtime.into_retirement();
@@ -218,12 +218,22 @@ fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
 #[test]
 #[ignore = "requires an explicitly available GPU adapter"]
 fn five_compact_inputs_can_prepare_and_record_one_candidate() {
+    exercise_compact_candidate(false);
+}
+
+#[test]
+#[ignore = "requires an explicitly available GPU adapter"]
+fn shared_compact_input_can_materialize_two_extents() {
+    exercise_compact_candidate(true);
+}
+
+fn exercise_compact_candidate(shared_input: bool) {
     use mondrian_renderer::*;
     mondrian_core::ensure_mondrian_default_ocio_loaded().expect("OCIO config");
     let context = pollster::block_on(GpuContext::new()).expect("required local GPU");
     let temp = tempfile::tempdir().expect("owned fixture directory");
     let decoded = decode_fixture(&temp.path().join("five-inputs.y4m"));
-    let layers: Vec<_> = (0..5)
+    let mut layers: Vec<_> = (0..5)
         .map(|_| {
             let mut value = layer(decoded.clone());
             if let ViewerGpuExecutionLayer::Source(source) = &mut value
@@ -234,6 +244,27 @@ fn five_compact_inputs_can_prepare_and_record_one_candidate() {
             value
         })
         .collect();
+    if shared_input {
+        let ViewerGpuExecutionLayer::Source(first) = &layers[0] else {
+            panic!("media layer")
+        };
+        let ViewerGpuSourceLayer::Media { cpu_yuv_source: Some(first), .. } = first.as_ref() else {
+            panic!("compact source")
+        };
+        let mut repeated = layer(decoded.clone());
+        let ViewerGpuExecutionLayer::Source(source) = &mut repeated else {
+            panic!("media layer")
+        };
+        let ViewerGpuSourceLayer::Media { cpu_yuv_source: Some(source), opacity, .. } =
+            source.as_mut()
+        else {
+            panic!("compact source")
+        };
+        source.frame = Arc::clone(&first.frame);
+        source.materialization_width = 2;
+        *opacity = 0.5;
+        layers.push(repeated);
+    }
     let mut runtime =
         ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
             .expect("upload runtime");
@@ -279,10 +310,29 @@ fn five_compact_inputs_can_prepare_and_record_one_candidate() {
     let mut recorded = false;
     let mut attempts = 0;
     let mut preflight_ready = 0;
+    let mut tested_prewarm = false;
     while Instant::now() < deadline {
         attempts += 1;
-        if runtime.prepare_cpu_yuv_uploads(&layers).expect("prepare complete candidate") {
+        if runtime.prepare_cpu_yuv_uploads(&request()).expect("prepare complete candidate") {
             preflight_ready += 1;
+            if !tested_prewarm {
+                for _ in 0..8 {
+                    let speculative = [layer(decoded.clone())];
+                    while !runtime.prewarm_cpu_yuv_uploads(&speculative).expect("speculative input")
+                    {
+                        assert!(
+                            Instant::now() < deadline,
+                            "speculative preparation deadline"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                assert!(runtime
+                    .prepare_cpu_yuv_uploads(&request())
+                    .expect("current inputs survive speculation"));
+                tested_prewarm = true;
+            }
+
             runtime.clear_frame_resources();
             let mut encoder = context.device.create_command_encoder(&Default::default());
             let result = runtime.record(&context.device, &context.queue, &mut encoder, request());

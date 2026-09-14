@@ -45,7 +45,7 @@ pub(crate) struct CpuYuvUploadRetirement {
     outcome: Option<crate::ViewerCpuYuvUploadWorkerExit>,
     _slots: Vec<CpuYuvUploadSlot>,
     _prepared: VecDeque<CpuYuvUploadWorkerResult>,
-    _used_buffers: Vec<wgpu::Buffer>,
+    _recorded_uploads: Vec<(CpuYuvFrameUploadKey, CpuYuvPreparedUpload)>,
 }
 
 impl CpuYuvUploadRetirement {
@@ -72,15 +72,17 @@ struct CpuYuvUploadState {
     next_slot: usize,
     generation: u64,
     pending: Vec<CpuYuvFrameUploadKey>,
+    candidate_inputs: Vec<CpuYuvFrameUploadKey>,
     prepared: VecDeque<CpuYuvUploadWorkerResult>,
     result_receiver: mpsc::Receiver<CpuYuvUploadWorkerResult>,
     returned_sender: mpsc::Sender<wgpu::Buffer>,
-    used_buffers: Vec<wgpu::Buffer>,
+    recorded_uploads: Vec<(CpuYuvFrameUploadKey, CpuYuvPreparedUpload)>,
     completion_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 const CPU_YUV_UPLOAD_WORKER_CAPACITY: usize = 4;
 const CPU_YUV_UPLOAD_POOL_CAPACITY: usize = 4;
+const CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY: usize = 4;
 
 struct CpuYuvUploadSlot {
     key: CpuYuvUploadKey,
@@ -113,6 +115,7 @@ struct CpuYuvFrameUploadKey {
     frame_identity: usize,
 }
 
+#[derive(Clone)]
 struct CpuYuvPreparedUpload {
     frame: Arc<CpuYuvFrame>,
     buffer: wgpu::Buffer,
@@ -157,10 +160,11 @@ impl CpuYuvUploadRuntime {
             next_slot: 0,
             generation: 1,
             pending: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
+            candidate_inputs: Vec::new(),
             prepared: VecDeque::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
             result_receiver,
             returned_sender,
-            used_buffers: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
+            recorded_uploads: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
             completion_waker: None,
         });
         let worker = std::thread::Builder::new()
@@ -185,10 +189,11 @@ impl CpuYuvUploadRuntime {
             next_slot: _,
             generation: _,
             pending: _,
+            candidate_inputs: _,
             prepared,
             result_receiver,
             returned_sender,
-            used_buffers,
+            recorded_uploads,
             completion_waker: _,
         } = state.into_inner();
         drop(request_sender);
@@ -203,7 +208,7 @@ impl CpuYuvUploadRuntime {
             outcome: None,
             _slots: slots,
             _prepared: prepared,
-            _used_buffers: used_buffers,
+            _recorded_uploads: recorded_uploads,
         }
     }
 
@@ -213,20 +218,23 @@ impl CpuYuvUploadRuntime {
 
     /// Start one Viewer candidate while retaining device allocations.
     pub(crate) fn begin_frame(&self) {
-        self.state.lock().next_slot = 0;
+        let mut state = self.state.lock();
+        state.next_slot = 0;
+        state.recorded_uploads.clear();
     }
 
     /// Bind every transfer buffer used by this candidate to asynchronous remap
     /// and worker-pool return after its command buffer completes.
     pub(crate) fn finish_candidate(&self, encoder: &wgpu::CommandEncoder) {
-        let (buffers, returned_sender) = {
+        let (uploads, returned_sender) = {
             let mut state = self.state.lock();
             (
-                std::mem::take(&mut state.used_buffers),
+                std::mem::take(&mut state.recorded_uploads),
                 state.returned_sender.clone(),
             )
         };
-        for buffer in buffers {
+        for (_, upload) in uploads {
+            let buffer = upload.buffer;
             let returned_sender = returned_sender.clone();
             let callback_buffer = buffer.clone();
             encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Write, .., move |result| {
@@ -239,7 +247,7 @@ impl CpuYuvUploadRuntime {
 
     /// Drop transfer buffers whose recorded copies will not be submitted.
     pub(crate) fn discard_candidate(&self) {
-        self.state.lock().used_buffers.clear();
+        self.state.lock().recorded_uploads.clear();
     }
 
     /// Retire every idle upload texture during critical trim or device reset.
@@ -249,8 +257,9 @@ impl CpuYuvUploadRuntime {
         state.next_slot = 0;
         state.generation = state.generation.wrapping_add(1);
         state.pending.clear();
+        state.candidate_inputs.clear();
         state.prepared.clear();
-        state.used_buffers.clear();
+        state.recorded_uploads.clear();
         self.trim_requested.store(true, Ordering::Release);
         let _ = self.request_sender.try_send(CpuYuvUploadWorkerCommand::Trim);
     }
@@ -334,8 +343,55 @@ impl CpuYuvUploadRuntime {
         // Retain them with the physical slot instead of entering the native
         // object allocator three times on every realtime candidate.
         let views = slot.views.clone();
-        state.used_buffers.push(prepared.buffer);
         Ok(views)
+    }
+
+    /// Protect one completely admitted candidate, independently of the worker's
+    /// bounded transport and speculative result retention. Only current-frame
+    /// admission calls this; prewarming cannot replace these physical inputs.
+    pub(crate) fn prepare_candidate(
+        &self,
+        frames: &[Arc<CpuYuvFrame>],
+    ) -> Result<bool, CpuYuvMaterializationError> {
+        {
+            let mut state = self.state.lock();
+            state.candidate_inputs =
+                frames.iter().map(|frame| Self::frame_key(&state, frame)).collect();
+            Self::drain_worker_results(&mut state);
+            Self::trim_speculative_results(&mut state);
+        }
+        for frame in frames {
+            self.prepare(frame)?;
+        }
+        // Readiness comes from one owner snapshot after all admissions, not an
+        // accumulation of per-input observations taken while results change.
+        let mut state = self.state.lock();
+        Self::drain_worker_results(&mut state);
+        Ok(state.candidate_inputs.iter().all(|key| Self::input_is_ready(&state, *key)))
+    }
+
+    fn input_is_ready(state: &CpuYuvUploadState, key: CpuYuvFrameUploadKey) -> bool {
+        state.prepared.iter().any(|result| result.key == key)
+            || state.recorded_uploads.iter().any(|(recorded_key, _)| *recorded_key == key)
+    }
+
+    fn trim_speculative_results(state: &mut CpuYuvUploadState) {
+        while state
+            .prepared
+            .iter()
+            .filter(|result| !state.candidate_inputs.contains(&result.key))
+            .count()
+            > CPU_YUV_SPECULATIVE_PREPARATION_CAPACITY
+        {
+            let Some(index) = state
+                .prepared
+                .iter()
+                .position(|result| !state.candidate_inputs.contains(&result.key))
+            else {
+                break;
+            };
+            state.prepared.remove(index);
+        }
     }
 
     /// Ensure one retained media frame has a worker-owned mapped upload ready.
@@ -351,7 +407,7 @@ impl CpuYuvUploadRuntime {
         let mut state = self.state.lock();
         Self::drain_worker_results(&mut state);
         let key = Self::frame_key(&state, frame);
-        if state.prepared.iter().any(|result| result.key == key) {
+        if Self::input_is_ready(&state, key) {
             return Ok(true);
         }
         if !state.pending.contains(&key) {
@@ -375,6 +431,15 @@ impl CpuYuvUploadRuntime {
         &self,
         frame: &Arc<CpuYuvFrame>,
     ) -> Result<CpuYuvPreparedUpload, CpuYuvMaterializationError> {
+        {
+            let state = self.state.lock();
+            let key = Self::frame_key(&state, frame);
+            if let Some((_, upload)) =
+                state.recorded_uploads.iter().find(|(candidate, _)| *candidate == key)
+            {
+                return Ok(upload.clone());
+            }
+        }
         if !self.prepare(frame)? {
             return Err(CpuYuvMaterializationError::UploadPending);
         }
@@ -394,6 +459,9 @@ impl CpuYuvUploadRuntime {
         if !Arc::ptr_eq(&prepared.frame, frame) {
             return Err(CpuYuvMaterializationError::UploadIdentityMismatch);
         }
+        // One immutable transfer is shared by every use of this source in the
+        // candidate. Only finish_candidate installs its single remap callback.
+        state.recorded_uploads.push((key, prepared.clone()));
         Ok(prepared)
     }
 
@@ -401,10 +469,8 @@ impl CpuYuvUploadRuntime {
         while let Ok(result) = state.result_receiver.try_recv() {
             state.pending.retain(|pending| *pending != result.key);
             if result.key.generation == state.generation {
-                if state.prepared.len() >= CPU_YUV_UPLOAD_WORKER_CAPACITY {
-                    state.prepared.pop_front();
-                }
                 state.prepared.push_back(result);
+                Self::trim_speculative_results(state);
             }
         }
     }
@@ -666,6 +732,29 @@ fn plane_upload_layout(
     })
 }
 
+pub(crate) fn cpu_yuv_upload_byte_count(
+    frame: &CpuYuvFrame,
+) -> Result<u64, CpuYuvMaterializationError> {
+    let component_bytes = frame.sample_format.bytes_per_component() as u32;
+    let luma = plane_upload_layout(frame.width, frame.height, component_bytes)?.upload_byte_count;
+    let (chroma_components, chroma_planes) = match frame.chroma_plane_layout() {
+        CpuYuvChromaPlaneLayout::Interleaved => (2, 1),
+        CpuYuvChromaPlaneLayout::Planar => (1, 2),
+    };
+    let chroma = plane_upload_layout(
+        frame.chroma_width,
+        frame.chroma_height,
+        component_bytes * chroma_components,
+    )?
+    .upload_byte_count;
+    luma.checked_add(
+        chroma
+            .checked_mul(chroma_planes)
+            .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?,
+    )
+    .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)
+}
+
 fn run_cpu_yuv_upload_worker(
     device: wgpu::Device,
     request_receiver: mpsc::Receiver<CpuYuvUploadWorkerCommand>,
@@ -760,15 +849,10 @@ fn prepare_cpu_yuv_upload(
     } else {
         (None, None)
     };
-    let total_bytes = chroma_v_layout
-        .map_or_else(
-            || chroma_offset.checked_add(chroma_layout.upload_byte_count),
-            |layout| chroma_v_offset.checked_add(layout.upload_byte_count),
-        )
-        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+    let total_bytes = cpu_yuv_upload_byte_count(&frame)?;
     let buffer = pool
         .iter()
-        .position(|buffer| buffer.size() >= total_bytes)
+        .position(|buffer| buffer.size() == total_bytes)
         .map(|index| pool.swap_remove(index))
         .unwrap_or_else(|| {
             device.create_buffer(&wgpu::BufferDescriptor {

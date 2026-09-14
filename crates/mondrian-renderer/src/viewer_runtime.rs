@@ -406,29 +406,55 @@ impl ViewerGpuExecutionRuntime {
             .map_err(|error| ViewerGpuExecutionError::ProgramOutputBoundary(Box::new(error)))
     }
 
-    /// Start compact CPU YUV transfer preparation without recording or
-    /// reserving a GPU submission.
+    /// Prepare every compact input of one complete current candidate.
     ///
-    /// The operation visits every contributing ordinary or Transition input,
-    /// schedules each distinct retained media frame, and leaves completed
-    /// preparations unconsumed for the later exact Viewer candidate. `true`
-    /// means every compact input is ready to record now; requests without such
-    /// inputs are trivially ready.
+    /// Pure resource admission precedes transfer allocation. The upload owner
+    /// protects this exact physical input set until a later current candidate
+    /// replaces it; speculative prewarming cannot evict it.
     pub fn prepare_cpu_yuv_uploads(
+        &self,
+        request: &ViewerGpuExecutionRequest<'_>,
+    ) -> Result<bool, ViewerGpuExecutionError> {
+        self.admit_active_request(request)?;
+        self.prepare_admitted_cpu_yuv_uploads(request.layers)
+    }
+
+    /// Start bounded, best-effort transfer preparation for ticketless lookahead.
+    /// This retains the existing speculative capacity and never replaces the
+    /// current candidate's admitted input set. Readiness is only a hint for
+    /// prewarming; recording always uses complete candidate admission.
+    pub fn prewarm_cpu_yuv_uploads(
         &self,
         layers: &[ViewerGpuExecutionLayer],
     ) -> Result<bool, ViewerGpuExecutionError> {
+        let mut ready = true;
+        for frame in Self::cpu_yuv_upload_inputs(layers) {
+            ready &= self
+                .cpu_yuv_upload
+                .prepare(&frame)
+                .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))?;
+        }
+        Ok(ready)
+    }
+
+    fn prepare_admitted_cpu_yuv_uploads(
+        &self,
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Result<bool, ViewerGpuExecutionError> {
+        self.cpu_yuv_upload
+            .prepare_candidate(&Self::cpu_yuv_upload_inputs(layers))
+            .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))
+    }
+
+    fn cpu_yuv_upload_inputs(
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Vec<Arc<mondrian_media::CpuYuvFrame>> {
         let mut seen = Vec::with_capacity(layers.len().saturating_mul(2));
-        let mut all_ready = true;
+        let mut frames = Vec::new();
         for layer in layers {
             match layer {
                 ViewerGpuExecutionLayer::Source(source) => {
-                    prepare_source_cpu_yuv_upload(
-                        source,
-                        &self.cpu_yuv_upload,
-                        &mut seen,
-                        &mut all_ready,
-                    )?;
+                    collect_source_cpu_yuv_upload(source, &mut seen, &mut frames);
                 }
                 ViewerGpuExecutionLayer::Adjustment { .. } => {}
                 ViewerGpuExecutionLayer::CrossDissolve(transition) => {
@@ -444,18 +470,57 @@ impl ViewerGpuExecutionRuntime {
                             continue;
                         }
                         if let crate::ViewerGpuTransitionInput::Source(source) = input {
-                            prepare_source_cpu_yuv_upload(
-                                source,
-                                &self.cpu_yuv_upload,
-                                &mut seen,
-                                &mut all_ready,
-                            )?;
+                            collect_source_cpu_yuv_upload(source, &mut seen, &mut frames);
                         }
                     }
                 }
             }
         }
-        Ok(all_ready)
+        frames
+    }
+
+    fn admit_active_request(
+        &self,
+        request: &ViewerGpuExecutionRequest<'_>,
+    ) -> Result<crate::ViewerGpuActiveWorkingSetEstimate, ViewerGpuExecutionError> {
+        let mut active_working_set =
+            estimate_viewer_gpu_active_working_set(request).map_err(|error| match error {
+                ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput { reason } => {
+                    ViewerGpuExecutionError::InvalidHeterogeneousInput { reason }
+                }
+                error => ViewerGpuExecutionError::ActiveWorkingSet(
+                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
+                ),
+            })?;
+        let (detached_presentation_textures, detached_presentation_bytes) = self
+            .resource_pool
+            .detached_presentation_demand()
+            .ok_or(ViewerGpuExecutionError::ActiveWorkingSet(
+                ViewerGpuActiveWorkingSetAdmissionError::Estimate(
+                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                        stage: crate::ViewerGpuActiveWorkingSetStage::DetachedPresentations,
+                    },
+                ),
+            ))?;
+        active_working_set
+            .include_presentation_residency(
+                detached_presentation_textures,
+                detached_presentation_bytes,
+            )
+            .map_err(|error| match error {
+                ViewerGpuActiveWorkingSetEstimateError::PresentationCapacityExceeded {
+                    live_outputs,
+                } => ViewerGpuExecutionError::Backpressure(format!(
+                    "capacity-one presentation owner still has {live_outputs} live outputs"
+                )),
+                error => ViewerGpuExecutionError::ActiveWorkingSet(
+                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
+                ),
+            })?;
+        self.resource_grant
+            .admit_active_working_set(active_working_set)
+            .map_err(ViewerGpuExecutionError::ActiveWorkingSet)?;
+        Ok(active_working_set)
     }
 
     /// Prepare contract-specific native-video input color objects without
@@ -671,49 +736,14 @@ impl ViewerGpuExecutionRuntime {
             request.monitor_adaptation,
             request.signal_monitoring,
         )?;
-        if !self.prepare_cpu_yuv_uploads(request.layers)? {
+        let active_working_set = self.admit_active_request(&request)?;
+        self.last_active_working_set = Some(active_working_set);
+        if !self.prepare_admitted_cpu_yuv_uploads(request.layers)? {
             return Err(ViewerGpuExecutionError::Backpressure(
                 "compact CPU YUV transfer preparation is still running".to_owned(),
             ));
         }
-        let mut active_working_set =
-            estimate_viewer_gpu_active_working_set(&request).map_err(|error| match error {
-                ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput { reason } => {
-                    ViewerGpuExecutionError::InvalidHeterogeneousInput { reason }
-                }
-                error => ViewerGpuExecutionError::ActiveWorkingSet(
-                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
-                ),
-            })?;
-        let (detached_presentation_textures, detached_presentation_bytes) = self
-            .resource_pool
-            .detached_presentation_demand()
-            .ok_or(ViewerGpuExecutionError::ActiveWorkingSet(
-                ViewerGpuActiveWorkingSetAdmissionError::Estimate(
-                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
-                        stage: crate::ViewerGpuActiveWorkingSetStage::DetachedPresentations,
-                    },
-                ),
-            ))?;
-        active_working_set
-            .include_presentation_residency(
-                detached_presentation_textures,
-                detached_presentation_bytes,
-            )
-            .map_err(|error| match error {
-                ViewerGpuActiveWorkingSetEstimateError::PresentationCapacityExceeded {
-                    live_outputs,
-                } => ViewerGpuExecutionError::Backpressure(format!(
-                    "capacity-one presentation owner still has {live_outputs} live outputs"
-                )),
-                error => ViewerGpuExecutionError::ActiveWorkingSet(
-                    ViewerGpuActiveWorkingSetAdmissionError::Estimate(error),
-                ),
-            })?;
-        self.resource_grant
-            .admit_active_working_set(active_working_set)
-            .map_err(ViewerGpuExecutionError::ActiveWorkingSet)?;
-        self.last_active_working_set = Some(active_working_set);
+
         let input_prepare_started = Instant::now();
         let mut heterogeneous_inputs = std::mem::take(&mut request.heterogeneous_inputs)
             .into_iter()
@@ -2176,34 +2206,22 @@ fn source_layer_has_zero_contribution(layer: &crate::ViewerGpuSourceLayer) -> bo
     opacity.clamp(0.0, 1.0) == 0.0
 }
 
-fn prepare_source_cpu_yuv_upload(
+fn collect_source_cpu_yuv_upload(
     layer: &crate::ViewerGpuSourceLayer,
-    uploads: &crate::cpu_yuv::CpuYuvUploadRuntime,
     seen: &mut Vec<usize>,
-    all_ready: &mut bool,
-) -> Result<(), ViewerGpuExecutionError> {
+    frames: &mut Vec<Arc<mondrian_media::CpuYuvFrame>>,
+) {
     if source_layer_has_zero_contribution(layer) {
-        return Ok(());
+        return;
     }
     let crate::ViewerGpuSourceLayer::Media { cpu_yuv_source: Some(source), .. } = layer else {
-        return Ok(());
+        return;
     };
     let identity = Arc::as_ptr(&source.frame) as usize;
-    if seen.contains(&identity) {
-        return Ok(());
+    if !seen.contains(&identity) {
+        seen.push(identity);
+        frames.push(Arc::clone(&source.frame));
     }
-    seen.push(identity);
-    *all_ready &= uploads.prepare(&source.frame).map_err(|error| match error {
-        crate::cpu_yuv::CpuYuvMaterializationError::UploadPending => {
-            ViewerGpuExecutionError::Backpressure(
-                "compact CPU YUV transfer preparation is still running".to_owned(),
-            )
-        }
-        error => ViewerGpuExecutionError::InputPreparation(format!(
-            "compact CPU YUV upload preparation failed: {error}"
-        )),
-    })?;
-    Ok(())
 }
 
 fn prepare_source_native_video_import(

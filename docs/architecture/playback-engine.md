@@ -9,7 +9,11 @@ recording or decoding.
 
 After an Adapter proves exact physical GPU completion and finalizes Presented/NoDemand, `release_completed_gpu_evaluation(output_key, playback_intent)` may retire that evaluation's reuse owner, including native decoded inputs. The bounded evaluation set records the final monitor/scopes key together with epoch, frame and quality; equal pixels at a different transport intent cannot retire a successor. Pending evaluations and Frame Store entries are untouched. In-flight candidate clones retain their independent CPU/native leases. Native decoder-family shutdown remains separate from dropping this optional reuse reference. This lets ordinary cache pressure reclaim old inputs after completed GPU output has become authoritative, without increasing the optional cache budget or granting speculative work Current capacity.
 
-Both immediate successor and farther lookahead requests are speculative media work. The shared media Adapter projects both ticketless purposes to Prefetch, never Current, including cache hits: they retain their physical payload lease without acquiring Current working-set protection. Optional capacity refusal therefore cannot reclaim an earlier Prefetch under a falsely promoted Current role. Physical immediate-successor GPU ownership remains a separate exact-intent contract.
+Both immediate successor and farther lookahead requests are speculative media work. The shared media Adapter projects both ticketless purposes to Prefetch, never Current, including cache hits: they retain their physical payload lease without acquiring Current working-set protection. Optional capacity refusal therefore cannot reclaim an earlier Prefetch under a falsely promoted Current role. Physical immediate-successor GPU ownership remains a separate exact-intent contract. Renderer transfer prewarming is also speculative: Window and Headless
+use the same bounded prewarm seam, which cannot replace the currently admitted
+Viewer candidate's physical input set. Complete current preparation and recording
+share the Renderer resource admission and upload owner; Playback does not infer
+transfer readiness from individually sampled inputs or acquire another queue.
 
 A CPU-complete speculative GPU frame may acquire the current Frame Presentation
 Ticket only after the Preview Runtime resolves the current snapshot through the

@@ -19,7 +19,7 @@ use mondrian_effects::EffectColorDomain;
 pub struct ViewerGpuActiveTextureDemand {
     /// Conservative number of simultaneously live texture resources.
     pub textures: u64,
-    /// Conservative logical texture bytes, excluding driver allocation padding.
+    /// Conservative logical texture and candidate transfer-buffer bytes, excluding driver allocation padding.
     pub bytes: u64,
 }
 
@@ -646,9 +646,16 @@ fn estimate_source(
                     working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
+                let transfer_bytes = crate::cpu_yuv::cpu_yuv_upload_byte_count(&source.frame)
+                    .map_err(
+                        |_| ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                        },
+                    )?;
                 let bytes = u64::try_from(source.frame.retained_bytes())
                     .ok()
                     .and_then(|bytes| bytes.checked_add(working_bytes))
+                    .and_then(|bytes| bytes.checked_add(transfer_bytes))
                     .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     })?;
