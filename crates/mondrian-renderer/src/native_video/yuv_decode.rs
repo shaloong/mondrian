@@ -685,9 +685,29 @@ impl GpuNativeYuvDecodeUniforms {
 /// Prepared immutable bindings for a reusable native YUV surface and plan.
 pub struct GpuNativeYuvPreparedPass {
     contract: GpuNativeYuvSamplingContract,
+    layout: wgpu::BindGroupLayout,
     pub(crate) bind_group: wgpu::BindGroup,
     _uniform_buffer: wgpu::Buffer,
     buffer_source: bool,
+}
+
+impl GpuNativeYuvPreparedPass {
+    /// Match the canonical sampling contract and the actual native texture layout.
+    /// Physical plane-view identity remains the responsibility of their owner.
+    pub(crate) fn matches_texture_plan(
+        &self,
+        decoder: &GpuNativeYuvDecoder,
+        plan: &GpuNativeYuvDecodePlan,
+    ) -> bool {
+        !self.buffer_source
+            && self.layout == decoder.texture.bind_group_layout
+            && self.contract == plan.sampling_contract()
+    }
+
+    /// Logical uniform storage retained by one immutable sampling binding.
+    pub(crate) const fn uniform_byte_count() -> u64 {
+        std::mem::size_of::<GpuNativeYuvDecodeUniforms>() as u64
+    }
 }
 
 /// Renderer runtime for native YUV to encoded-float RGB conversion.
@@ -859,6 +879,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         });
         GpuNativeYuvPreparedPass {
             contract: plan.sampling_contract(),
+            layout: self.texture.bind_group_layout.clone(),
             bind_group,
             _uniform_buffer: uniform_buffer,
             buffer_source: false,
@@ -930,6 +951,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         });
         Ok(GpuNativeYuvPreparedPass {
             contract: plan.sampling_contract(),
+            layout: pipeline.bind_group_layout.clone(),
             bind_group,
             _uniform_buffer: uniform_buffer,
             buffer_source: true,

@@ -347,7 +347,19 @@ without expanding or converting them into an RGB staging image. The compact
 plane textures and their immutable views survive ordinary Viewer candidate
 clears. A frame clones the slot-owned views rather than creating native views
 again; slot replacement or explicit clear retires the views together with their
-textures, so a new generation cannot recover an old view. A bounded
+textures, so a new generation cannot recover an old view. Each physical slot
+also owns one immutable YUV uniform buffer and bind group. Reuse compares the
+native decoder's canonical sampling contract and actual bind-group layout;
+range, matrix, transfer, bit depth, chroma layout/location, storage/output extent,
+layout or plane-generation changes cannot reuse stale bindings. These checks
+reuse the native YUV contract rather than maintaining another color key.
+The active estimate includes the retained uniform's logical bytes. This removes
+per-frame uniform allocation from the CPU-plane route: on Linux a tiny uniform
+allocation can block behind the same device's large background upload allocation.
+It does not claim that required native allocations are nonblocking.
+`persistent_upload_slot_reuses_native_yuv_bindings` verifies physical binding
+identity reuse, range invalidation and generation retirement on a real adapter.
+A bounded
 renderer-owned upload worker copies visible plane rows into reusable mapped,
 256-byte-aligned transfer buffers before realtime candidate recording. The
 runtime distinguishes bounded ticketless prewarming from complete current

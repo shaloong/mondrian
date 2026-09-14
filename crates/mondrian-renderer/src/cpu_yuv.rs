@@ -90,6 +90,7 @@ struct CpuYuvUploadSlot {
     chroma: wgpu::Texture,
     chroma_v: Option<wgpu::Texture>,
     views: CpuYuvUploadedPlaneViews,
+    prepared_pass: Option<Arc<crate::GpuNativeYuvPreparedPass>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,7 @@ struct CpuYuvUploadKey {
 
 #[derive(Clone)]
 struct CpuYuvUploadedPlaneViews {
+    slot_index: usize,
     luma: wgpu::TextureView,
     chroma: wgpu::TextureView,
     chroma_v: wgpu::TextureView,
@@ -318,11 +320,19 @@ impl CpuYuvUploadRuntime {
                 None => chroma_view.clone(),
             };
             let views = CpuYuvUploadedPlaneViews {
+                slot_index,
                 luma: luma.create_view(&wgpu::TextureViewDescriptor::default()),
                 chroma: chroma_view,
                 chroma_v: chroma_v_view,
             };
-            let slot = CpuYuvUploadSlot { key, luma, chroma, chroma_v, views };
+            let slot = CpuYuvUploadSlot {
+                key,
+                luma,
+                chroma,
+                chroma_v,
+                views,
+                prepared_pass: None,
+            };
             if slot_index == state.slots.len() {
                 state.slots.push(slot);
             } else {
@@ -344,6 +354,42 @@ impl CpuYuvUploadRuntime {
         // object allocator three times on every realtime candidate.
         let views = slot.views.clone();
         Ok(views)
+    }
+
+    fn prepare_plane_pass(
+        &self,
+        decoder: &GpuNativeYuvDecoder,
+        device: &wgpu::Device,
+        plan: &GpuNativeYuvDecodePlan,
+        planes: &CpuYuvUploadedPlaneViews,
+    ) -> Result<Arc<crate::GpuNativeYuvPreparedPass>, CpuYuvMaterializationError> {
+        let mut state = self.state.lock();
+        let slot = state
+            .slots
+            .get_mut(planes.slot_index)
+            .ok_or(CpuYuvMaterializationError::UploadSlotMismatch)?;
+        if slot.views.luma != planes.luma
+            || slot.views.chroma != planes.chroma
+            || slot.views.chroma_v != planes.chroma_v
+        {
+            return Err(CpuYuvMaterializationError::UploadSlotMismatch);
+        }
+        if let Some(prepared) = &slot.prepared_pass
+            && prepared.matches_texture_plan(decoder, plan)
+        {
+            return Ok(Arc::clone(prepared));
+        }
+        let prepared = Arc::new(decoder.prepare_pass(
+            device,
+            plan,
+            GpuNativeYuvPlaneViews {
+                luma: &planes.luma,
+                chroma: &planes.chroma,
+                chroma_v: &planes.chroma_v,
+            },
+        ));
+        slot.prepared_pass = Some(Arc::clone(&prepared));
+        Ok(prepared)
     }
 
     /// Protect one completely admitted candidate, independently of the worker's
@@ -572,15 +618,7 @@ pub(crate) fn record_cpu_yuv_frame(
         encoded_source.clone(),
     )?;
     let planes = uploads.upload(device, encoder, frame)?;
-    let prepared = decoder.prepare_pass(
-        device,
-        &plan,
-        GpuNativeYuvPlaneViews {
-            luma: &planes.luma,
-            chroma: &planes.chroma,
-            chroma_v: &planes.chroma_v,
-        },
-    );
+    let prepared = uploads.prepare_plane_pass(decoder, device, &plan, &planes)?;
     let backend = runtime
         .prepare_fused_yuv_input(
             input_transform,
@@ -969,6 +1007,8 @@ pub(crate) enum CpuYuvMaterializationError {
     UploadWorkerUnavailable,
     #[error("compact CPU YUV upload result did not retain the requested frame identity")]
     UploadIdentityMismatch,
+    #[error("compact CPU YUV plane views no longer belong to their upload slot")]
+    UploadSlotMismatch,
     #[error("compact CPU YUV upload preparation failed: {0}")]
     UploadPreparation(String),
     #[error("compact CPU YUV plane has {actual} bytes; expected {expected}")]
@@ -1008,6 +1048,16 @@ mod tests {
     #[test]
     #[ignore = "requires an explicitly available GPU adapter"]
     fn persistent_upload_slot_reuses_native_plane_views() {
+        exercise_persistent_upload_slot(false);
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly available GPU adapter"]
+    fn persistent_upload_slot_reuses_native_yuv_bindings() {
+        exercise_persistent_upload_slot(true);
+    }
+
+    fn exercise_persistent_upload_slot(check_bindings: bool) {
         use mondrian_media::preview::*;
         use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
         let context = pollster::block_on(crate::GpuContext::new()).expect("required GPU");
@@ -1038,7 +1088,44 @@ mod tests {
         let runtime = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut views = Vec::new();
-        for index in 0..3 {
+        let mut bindings = Vec::new();
+        let yuv_decoder = GpuNativeYuvDecoder::new(&context.device);
+        let sampling = crate::viewer_execution::decoded_video_sampling_for_surface(
+            mondrian_core::ColorSpace::Rec709,
+            frame.surface_format().descriptor().expect("physical contract"),
+            frame.video_sampling,
+        )
+        .expect("sampling contract");
+        let mut plan = GpuNativeYuvDecodePlan::new_with_plane_layout(
+            GpuNativeDecodedFrameTextureFormat::Nv12,
+            GpuYuvChromaSubsampling::Cs420,
+            GpuYuvChromaPlaneLayout::Planar,
+            GpuYuvCodeAlignment::MostSignificant,
+            GpuNativeVideoExtent { width: 4, height: 2 },
+            GpuNativeVideoExtent { width: 4, height: 2 },
+            GpuNativeVideoExtent { width: 4, height: 2 },
+            sampling,
+            GpuColorFrameHandle::new(
+                crate::GpuColorFrameId::from_raw(1),
+                ColorFrameDescriptor {
+                    width: 4,
+                    height: 2,
+                    color_space: mondrian_core::ColorSpace::Rec709.into(),
+                    domain: ColorFrameDomain::Source,
+                    encoding: ColorFrameEncoding::EncodedFloat,
+                    residency: ColorFrameResidency::Gpu,
+                    alpha: ColorFrameAlpha::Opaque,
+                },
+                product_gpu_working_texture_format(),
+                "binding-regression",
+            )
+            .expect("encoded source"),
+        )
+        .expect("YUV plan");
+        for index in 0..5 {
+            if index == 3 {
+                plan.video_sampling.range = crate::GpuVideoRange::Full;
+            }
             if index == 2 {
                 runtime.clear();
             }
@@ -1053,6 +1140,16 @@ mod tests {
             let mut encoder = context.device.create_command_encoder(&Default::default());
             views.push(
                 runtime.upload(&context.device, &mut encoder, &frame).expect("record upload"),
+            );
+            bindings.push(
+                runtime
+                    .prepare_plane_pass(
+                        &yuv_decoder,
+                        &context.device,
+                        &plan,
+                        views.last().expect("uploaded planes"),
+                    )
+                    .expect("prepare production YUV binding"),
             );
             drop(encoder);
             runtime.discard_candidate();
@@ -1070,6 +1167,24 @@ mod tests {
             Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
         );
         drop(retirement);
+        if check_bindings {
+            assert_eq!(
+                bindings[0].bind_group, bindings[1].bind_group,
+                "unchanged physical planes and sampling must retain immutable bindings"
+            );
+            assert_ne!(
+                bindings[1].bind_group, bindings[2].bind_group,
+                "generation clear must retire immutable bindings"
+            );
+            assert_ne!(
+                bindings[2].bind_group, bindings[3].bind_group,
+                "range change must rebuild immutable bindings"
+            );
+            assert_eq!(
+                bindings[3].bind_group, bindings[4].bind_group,
+                "new sampling contract must become reusable"
+            );
+        }
         assert_eq!(
             views[0].luma, views[1].luma,
             "one physical slot must retain its luma view"
