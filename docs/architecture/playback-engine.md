@@ -1041,6 +1041,15 @@ best-effort deactivates an interrupted driver before synchronous resource
 closure; separately constructed Preview/GPU/driver owners are not closure
 evidence.
 
+The native CPAL A/V qualification entrypoints enter that same residency before
+startup qualification. They use its current A/V opportunity and production
+intervals to prepare the immediate successor, release video Priming, and acquire
+the Audio Device Clock. The controlled device recycle and observation tail keep
+the same driver. Qualification only observes callback, clock, generation, and
+stability evidence; a separate current-frame polling loop cannot start transport
+because it omits the production successor readiness gate. The existing startup
+and recovery deadlines and one-second stable-device requirement remain intact.
+
 Every presentable Preview result carries the ticket captured by the same
 evaluation that produced it. This includes a new GPU output, a CPU raster, an
 already-current registered output, and the semantic transparent canvas.

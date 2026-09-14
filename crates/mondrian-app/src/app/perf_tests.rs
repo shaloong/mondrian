@@ -4630,14 +4630,46 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                 }
                 state.play()?;
                 let stream_generation = {
-                    let (preview_service, gpu_adapter) = realtime.bound_resources()?;
                     wait_for_production_av_qualification(
-                        preview_service,
+                        realtime,
                         state,
-                        gpu_adapter,
                         &mut gpu_summary,
                         Duration::from_secs(30),
                     )?
+                };
+                #[cfg(feature = "validation")]
+                let stream_generation = {
+                    let initial_audio = state.audio_playback_snapshot();
+                    let requested_at = Instant::now();
+                    state.request_controlled_audio_output_recycle(stream_generation)?;
+                    let recovery = wait_for_production_av_recovery(
+                        realtime,
+                        state,
+                        &mut gpu_summary,
+                        initial_audio,
+                        requested_at,
+                    )?;
+                    anyhow::ensure!(
+                        recovery.request_to_loss_us.is_some()
+                            && recovery.request_to_synthetic_us.is_some()
+                            && recovery.request_to_reopen_us.is_some()
+                            && recovery.request_to_recovered_us.is_some(),
+                        "controlled CPAL recycle omitted lifecycle evidence: {recovery:?}",
+                    );
+                    eprintln!(
+                        "MONDRIAN_CPAL_RECOVERY_JSON={}",
+                        serde_json::json!({
+                            "request_to_loss_us": recovery.request_to_loss_us,
+                            "request_to_synthetic_us": recovery.request_to_synthetic_us,
+                            "request_to_reopen_us": recovery.request_to_reopen_us,
+                            "request_to_recovered_us": recovery.request_to_recovered_us,
+                        }),
+                    );
+                    state
+                        .audio_playback_snapshot()
+                        .output
+                        .context("recovered CPAL output disappeared")?
+                        .stream_generation
                 };
                 state.begin_playback_evidence_run(
                     mondrian_playback::PlaybackEvidenceConfig::default(),
@@ -4647,7 +4679,6 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                     ProfessionalProcessMemorySampler::start(observation_started)?;
                 let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
                 let mut readiness = PreviewReadinessCounts::default();
-                realtime.begin_realtime(state, None)?;
                 for _ in 0..frame_count {
                     let sample = realtime.run_production_av_interval(
                         state,
@@ -4828,11 +4859,9 @@ fn run_professional_cpal_av_probe(
             }
             state.play()?;
             let initial_stream_generation = {
-                let (preview_service, gpu_adapter) = realtime.bound_resources()?;
                 wait_for_production_av_qualification(
-                    preview_service,
+                    realtime,
                     state,
-                    gpu_adapter,
                     &mut gpu_summary,
                     ready_timeout,
                 )?
@@ -4851,23 +4880,18 @@ fn run_professional_cpal_av_probe(
                 ProfessionalProcessMemorySampler::start(observation_started)?;
             let recovery_started = Instant::now();
             state.request_controlled_audio_output_recycle(initial_stream_generation)?;
-            let recovery = {
-                let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-                wait_for_production_av_recovery(
-                    preview_service,
-                    state,
-                    gpu_adapter,
-                    &mut gpu_summary,
-                    initial_audio,
-                    recovery_started,
-                )?
-            };
+            let recovery = wait_for_production_av_recovery(
+                realtime,
+                state,
+                &mut gpu_summary,
+                initial_audio,
+                recovery_started,
+            )?;
             gpu_summary = HeadlessViewerGpuExecutionSummary {
                 adapter: Some(realtime.gpu()?.adapter_info().clone()),
                 ..HeadlessViewerGpuExecutionSummary::default()
             };
             let mut readiness = PreviewReadinessCounts::default();
-            realtime.begin_realtime(state, None)?;
             // Qualification proves a healthy starting point, while this bounded tail
             // guarantees that a short startup reactivation cannot shorten the required
             // uninterrupted callback interval. The evaluator still requires a complete
@@ -4988,45 +5012,27 @@ fn run_professional_cpal_av_probe(
 }
 
 fn wait_for_production_av_qualification(
-    preview_service: &HeadlessPreviewRuntime,
+    realtime: &mut HeadlessRealtimePlaybackSession,
     state: &mut AppState,
-    gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
     timeout: Duration,
 ) -> anyhow::Result<u64> {
     let deadline = Instant::now() + timeout;
-    let work_watch = preview_service.work_watch();
-    let mut candidate_binding = None;
-    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
+    realtime.begin_realtime(state, None)?;
+    realtime.complete_current_av_opportunity(
+        state,
+        gpu_summary,
+        deadline.saturating_duration_since(Instant::now()),
+    )?;
     let mut stable_qualification: Option<(u64, Instant)> = None;
     const QUALIFICATION_STABILITY: Duration = Duration::from_secs(1);
     loop {
-        let drain_target_revision = work_watch.revision();
-        state.pump_audio_output()?;
+        realtime.run_production_av_interval(
+            state,
+            gpu_summary,
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
         let now = Instant::now();
-        state.advance_playback_clock_at(now);
-        let pump_outcome = apply_headless_preview_outcome(preview_service, state);
-        let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-        if should_attempt_headless_gpu_candidate(
-            candidate_status,
-            candidate_binding,
-            current_intent,
-            pump_outcome,
-        ) {
-            let attempt = execute_headless_gpu_candidate(
-                preview_service,
-                state,
-                gpu_adapter,
-                gpu_summary,
-                HeadlessGpuCompletionDeadline::at(deadline),
-            )?;
-            candidate_status = attempt.status;
-            apply_headless_candidate_binding(
-                &mut candidate_binding,
-                current_intent,
-                attempt.binding,
-            );
-        }
         let audio = state.audio_playback_snapshot();
         let qualified_output = (!state.is_playback_priming()
             && state.playback_clock_master() == Some(mondrian_playback::ClockMaster::AudioDevice)
@@ -5056,24 +5062,17 @@ fn wait_for_production_av_qualification(
         }
         anyhow::ensure!(
             now < deadline,
-            "timed out qualifying real CPAL callback consumption and headless video presentation; audio={audio:?}, clock={:?}, preview={:?}",
+            "timed out qualifying real CPAL callback consumption and headless video presentation; audio={audio:?}, clock={:?}, transport={:?}",
             state.playback_clock_master(),
-            preview_service.diagnostics()
-        );
-        wait_for_headless_preview_revision(
-            &work_watch,
-            drain_target_revision,
-            deadline,
-            pump_outcome.needs_follow_up_poll && !candidate_status.requires_bounded_wait(),
+            state.playback_engine.snapshot(),
         );
     }
 }
 
 #[cfg(feature = "validation")]
 fn wait_for_production_av_recovery(
-    preview_service: &HeadlessPreviewRuntime,
+    realtime: &mut HeadlessRealtimePlaybackSession,
     state: &mut AppState,
-    gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
     initial_audio: AudioPlaybackSnapshot,
     requested_at: Instant,
@@ -5087,46 +5086,18 @@ fn wait_for_production_av_recovery(
         .output
         .context("controlled recycle requires a qualified initial CPAL output")?;
     let initial_lifecycle = initial_audio.output_lifecycle;
-    let work_watch = preview_service.work_watch();
-    let mut candidate_binding = None;
-    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
     let mut request_to_loss_us = None;
     let mut request_to_synthetic_us = None;
     let mut request_to_reopen_us = None;
     let mut stable_recovery: Option<(u64, Instant)> = None;
 
     loop {
-        let drain_target_revision = work_watch.revision();
         state.pump_audio_output()?;
         let now = Instant::now();
         let elapsed_us = now
             .saturating_duration_since(requested_at)
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
-        state.advance_playback_clock_at(now);
-        let pump_outcome = apply_headless_preview_outcome(preview_service, state);
-        let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-        if should_attempt_headless_gpu_candidate(
-            candidate_status,
-            candidate_binding,
-            current_intent,
-            pump_outcome,
-        ) {
-            let attempt = execute_headless_gpu_candidate(
-                preview_service,
-                state,
-                gpu_adapter,
-                gpu_summary,
-                HeadlessGpuCompletionDeadline::at(deadline),
-            )?;
-            candidate_status = attempt.status;
-            apply_headless_candidate_binding(
-                &mut candidate_binding,
-                current_intent,
-                attempt.binding,
-            );
-        }
-
         let audio = state.audio_playback_snapshot();
         let lifecycle = audio.output_lifecycle;
         if request_to_loss_us.is_none() && lifecycle.lost_count > initial_lifecycle.lost_count {
@@ -5189,12 +5160,11 @@ fn wait_for_production_av_recovery(
             "controlled CPAL recovery did not reach one-second stable Audio Device Clock/Active residency; audio={audio:?}, clock={:?}",
             state.playback_clock_master()
         );
-        wait_for_headless_preview_revision(
-            &work_watch,
-            drain_target_revision,
-            deadline,
-            pump_outcome.needs_follow_up_poll && !candidate_status.requires_bounded_wait(),
-        );
+        realtime.run_production_av_interval(
+            state,
+            gpu_summary,
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
     }
 }
 
@@ -7206,7 +7176,8 @@ fn run_headless_playback_resize_probe(
     );
     anyhow::ensure!(
         evidence.passed,
-        "playback-resize gate failed: {evidence:?}; coordinator={:?}",
+        "playback-resize gate failed: {evidence:?}; authored_extent={authored_full_extent:?}; observed_gpu_extents={:?}; coordinator={:?}",
+        gpu_summary.output_extents,
         coordinator_timing,
     );
     Ok(evidence)
