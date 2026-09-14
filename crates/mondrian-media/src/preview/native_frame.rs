@@ -400,6 +400,11 @@ impl Drop for FfmpegNativeDecodedFrameResource {
     fn drop(&mut self) {
         let mut frame = self.frame.as_ptr();
         let started = std::time::Instant::now();
+        // Consume the mapped child while the source and its output lease are
+        // still live. Automatic field drop would retire the lease before the
+        // later DRM cache field finishes its foreign release callback.
+        #[cfg(target_os = "linux")]
+        drop(self.drm_prime_frame.take());
         // SAFETY: retain obtained sole ownership of this AVFrame allocation from
         // av_frame_clone. Drop runs exactly once and av_frame_free accepts &mut.
         unsafe { ffmpeg::ffi::av_frame_free(&mut frame) };
@@ -1100,6 +1105,99 @@ mod session_output_lease_tests {
 mod drm_descriptor_tests {
     use super::*;
     use std::os::fd::AsRawFd;
+
+    struct ReleaseObservation {
+        family: PreviewNativeOutputTracker,
+        session: PreviewNativeOutputTracker,
+        seen_family: Arc<AtomicUsize>,
+        seen_session: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn observe_mapping_release(opaque: *mut c_void, data: *mut u8) {
+        let observation = unsafe { Box::from_raw(opaque.cast::<ReleaseObservation>()) };
+        observation
+            .seen_family
+            .store(observation.family.outstanding(), Ordering::Release);
+        observation
+            .seen_session
+            .store(observation.session.outstanding(), Ordering::Release);
+        unsafe { ffmpeg::ffi::av_free(data.cast()) };
+    }
+
+    #[test]
+    fn mapped_frame_release_finishes_before_native_output_lease_retires() {
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let seen_family = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen_session = Arc::new(AtomicUsize::new(usize::MAX));
+        let source_fd = std::fs::File::open("/dev/null").expect("descriptor owner");
+        let mut mapped = ffmpeg::util::frame::video::Video::empty();
+        // A real AVBuffer free callback observes the production destructor's
+        // lease order. No VA-API device or driver completion is manufactured.
+        unsafe {
+            let size = std::mem::size_of::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            let data = ffmpeg::ffi::av_mallocz(size).cast::<u8>();
+            assert!(!data.is_null(), "descriptor allocation");
+            let observation = Box::new(ReleaseObservation {
+                family: family.clone(),
+                session: session.clone(),
+                seen_family: Arc::clone(&seen_family),
+                seen_session: Arc::clone(&seen_session),
+            });
+            let buffer = ffmpeg::ffi::av_buffer_create(
+                data,
+                size,
+                Some(observe_mapping_release),
+                Box::into_raw(observation).cast(),
+                0,
+            );
+            assert!(!buffer.is_null(), "observed buffer");
+            (*mapped.as_mut_ptr()).buf[0] = buffer;
+            (*mapped.as_mut_ptr()).data[0] = data;
+            let descriptor = &mut *data.cast::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            descriptor.nb_objects = 1;
+            descriptor.objects[0].fd = source_fd.as_raw_fd();
+            descriptor.objects[0].size = 4096;
+            descriptor.nb_layers = 1;
+            descriptor.layers[0].nb_planes = 1;
+            descriptor.layers[0].planes[0].pitch = 64;
+        }
+        let retained = NonNull::new(unsafe { ffmpeg::ffi::av_frame_clone(mapped.as_ptr()) })
+            .expect("retained mapping");
+        let mapping = FfmpegDrmPrimeFrame::from_mapped_frame(retained).expect("mapping descriptor");
+        drop(mapped);
+
+        let mut source = ffmpeg::util::frame::video::Video::empty();
+        source.set_format(ffmpeg::util::format::pixel::Pixel::VAAPI);
+        unsafe {
+            let buffer = ffmpeg::ffi::av_buffer_alloc(1);
+            assert!(!buffer.is_null(), "source reference");
+            (*source.as_mut_ptr()).buf[0] = buffer;
+            (*source.as_mut_ptr()).data[0] = (*buffer).data;
+        }
+        let resource = FfmpegNativeDecodedFrameResource::retain_with_session_output_lease(
+            &source,
+            Some(
+                PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("output lease"),
+            ),
+        )
+        .expect("retained source");
+        drop(source);
+        resource.drm_prime_frame.set(Ok(mapping)).expect("single cached mapping");
+        drop(resource);
+        assert_eq!(
+            seen_family.load(Ordering::Acquire),
+            1,
+            "mapping release must remain charged to its family"
+        );
+        assert_eq!(
+            seen_session.load(Ordering::Acquire),
+            1,
+            "mapping release must remain charged to its Session"
+        );
+        assert!(family.is_released());
+        assert!(session.is_released());
+    }
 
     #[test]
     fn duplicated_drm_object_is_close_on_exec() {

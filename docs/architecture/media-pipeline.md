@@ -4015,6 +4015,14 @@ owner. Setting the flag after `dup` would leave a spawn race. Duplication
 failure retains the existing structured error and original mapping ownership;
 the native FD regression does not constitute VA-API device qualification.
 
+Final native-resource destruction explicitly consumes any cached DRM mapping
+before the original AVFrame and Session/family output lease retire. Automatic
+field destruction must not let a zero output count precede a mapped frame's
+foreign release callback. The real FFmpeg buffer-release regression observes
+both counters during that callback and verifies zero only after destruction
+returns. Native-release timing includes this mapped-child release as well as
+the original AVFrame; slow unmapping cannot disappear from lifecycle evidence.
+
 A preferred native representation that receives supported software YUV or a
 hardware download can retain compact CPU planes for the same GPU consumer.
 Its diagnostics still report CPU residency and the actual decode execution.
