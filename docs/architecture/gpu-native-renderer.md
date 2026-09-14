@@ -312,9 +312,9 @@ negative values, and values above one in RGBA32F before OCIO. No current FFmpeg
 platform Adapter advertises that RGB route, so the execution Seam is qualified
 but physical decoder support remains fail-closed. The native import plan owns distinct encoded-source and
 linear-working handles so a
-backend cannot skip, reorder, or mislabel either pass.
+backend cannot skip, reorder, or mislabel either semantic stage.
 
-Compact CPU YUV materialization fuses these two semantic stages into one
+Compact CPU YUV and shared direct native materialization fuse these two semantic stages into one
 physical draw. The shared YUV reconstruction function returns encoded Float32
 RGB directly to the existing OCIO-generated input callable, preserving alpha;
 only the Working Float32 texture is allocated. OCIO lowering, processor identity,
@@ -322,8 +322,8 @@ LUT/uniform uploads and refresh remain owned by the same color runtime. Its
 bounded device-owned pipeline cache keys the fused shader by the complete OCIO
 identity and input source, and retires with that runtime. The GLSL frontend's
 required dummy entry is removed from validated IR before callable WGSL emission;
-no custom transfer function or color-engine fallback is introduced. Native
-import currently retains the explicit two-pass physical path described above.
+no custom transfer function or color-engine fallback is introduced. The Windows
+D3D12-specific import backend retains its explicit two-pass physical path.
 
 The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
 observes exact UHD frames through the production decoder and Viewer using the
@@ -1641,6 +1641,21 @@ The producer contracts are documented by
 [libva's DRM PRIME descriptor](https://github.com/intel/libva/blob/master/va/va_drmcommon.h)
 and [FFmpeg 6.1 VA-API mapping](https://ffmpeg.org/doxygen/6.1/hwcontext__vaapi_8c_source.html).
 
+The shared direct native Adapter now uses the same fused YUV + compiled OCIO
+input pass as CPU YUV materialization. Texture-backed VA-API/Metal and CUDA
+storage-buffer inputs differ only in physical sample fetching. The logical
+encoded-source handle still validates the original color contract, but no
+full-raster encoded RGB texture is allocated. The output remains the original
+Float32 working contract. Native synchronization, queue submission and source
+retirement are unchanged. Buffer and texture shaders have distinct canonical
+pipeline identities; both consume the same YUV math and OCIO callable.
+The fused pass is prewarmed through the original native import preparation.
+CPU attribution records the combined pass in `yuv_record_us`; separate color
+recording and frame-table extraction are absent (zero), not unmeasured work.
+Real GPU parity compares both physical fetch routes against the original two
+passes for SDR/PQ/HLG, full/limited range and scaled sampling. This removes one
+126.6 MiB UHD intermediate without raising idle or active grants.
+
 ## Linux CUDA storage-buffer import
 
 The shared production device creation entry adds external-memory and external-
@@ -1717,14 +1732,15 @@ zero retained transfers. Rust field destruction after the destructor body is
 not sufficient ordering for this counter: the source can still execute native
 release work. Other Viewer and Media owner counts remain independent barriers.
 
-Direct native import acquires its encoded RGB intermediate from the same
-exact-contract color-frame texture pool as CPU YUV and working/output stages.
-The intermediate returns only after successful production-queue submission;
-unsubmitted/error paths cannot publish it for reuse. This removes per-frame
-full-resolution float-texture allocation without changing color precision,
-materialization extent, pool budget, or native source completion ownership.
-The real CUDA import regression checks the pool return alongside GPU output
-readback and zero retained native owners.
+Shared direct native import acquires only its working output from the existing
+exact-contract color-frame texture pool. Merely pooling an encoded RGB
+intermediate still churned at the 128 MiB idle grant: one UHD Float32 texture
+fits, but two do not. Fusing the semantic stages removes that intermediate
+without changing color precision, materialization extent, pool budget or native
+source completion ownership. The real CUDA import regression checks exactly one
+working acquisition and no intermediate return, alongside GPU output readback
+and zero retained native owners. The general Viewer admission estimate remains
+a conservative two-pass upper bound for backend compatibility.
 
 A failed CUDA cleanup also poisons subsequent transfer admission in that
 adapter's existing lifecycle. Rejected requests acquire no additional native

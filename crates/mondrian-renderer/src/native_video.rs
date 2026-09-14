@@ -24,11 +24,12 @@ pub struct NativeVideoImportCpuTimings {
     /// Native-surface physical-handle validation, synchronization, and adoption,
     /// including a bridge copy only when the reported import mode requires one.
     pub bridge_acquire_us: u64,
-    /// Cached YUV pass preparation, intermediate acquisition, and encoder creation.
+    /// Cached input pipeline preparation, output/intermediate acquisition, and encoder creation.
     pub pipeline_prepare_us: u64,
-    /// Native YUV-to-encoded-RGB command recording.
+    /// Native YUV command recording, including OCIO when the input pass is fused.
     pub yuv_record_us: u64,
-    /// Source-to-working color-stage preparation, allocation, and command recording.
+    /// Separate source-to-working color-stage preparation, allocation, and recording.
+    /// Zero when fused into the input pipeline preparation and YUV recording brackets.
     pub color_stage_us: u64,
     /// Typed resource-table extraction after command recording.
     pub resource_extract_us: u64,

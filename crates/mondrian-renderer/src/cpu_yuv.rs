@@ -784,7 +784,7 @@ pub(crate) fn record_cpu_yuv_frame(
             input_transform,
             &encoded_source,
             &working,
-            decoder,
+            decoder.fused_texture_input(),
             device,
             queue,
         )

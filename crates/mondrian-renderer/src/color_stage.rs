@@ -1550,7 +1550,7 @@ impl RenderGpuOutputBoundaryRuntime {
         transform: &RenderInputTransform,
         input: &GpuColorFrameHandle,
         output: &GpuColorFrameHandle,
-        decoder: &crate::GpuNativeYuvDecoder,
+        source: (&str, &wgpu::BindGroupLayout),
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
@@ -1582,8 +1582,8 @@ impl RenderGpuOutputBoundaryRuntime {
             device,
             &shader_plan,
             &backend,
-            crate::GpuNativeYuvDecoder::fused_texture_source(),
-            decoder.texture_input_layout(),
+            source.0,
+            source.1,
         )?;
         Ok(RenderGpuFusedInputBackend { pipeline, objects: backend })
     }

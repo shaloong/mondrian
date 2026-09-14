@@ -830,6 +830,24 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         &SOURCE
     }
 
+    pub(crate) fn fused_texture_input(&self) -> (&'static str, &wgpu::BindGroupLayout) {
+        (Self::fused_texture_source(), self.texture_input_layout())
+    }
+
+    pub(crate) fn fused_buffer_input(&self) -> Option<(&'static str, &wgpu::BindGroupLayout)> {
+        static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            // Substitute only the physical fetch. Sampling, range, matrix and
+            // the canonical OCIO callable remain identical to texture input.
+            GpuNativeYuvDecoder::fused_texture_source().replace(
+                &YUV_TEXTURE_SOURCE.replace("@group(0)", "@group(1)"),
+                &YUV_BUFFER_SOURCE.replace("@group(0)", "@group(1)"),
+            )
+        });
+        self.buffer
+            .as_ref()
+            .map(|pipeline| (SOURCE.as_str(), &pipeline.bind_group_layout))
+    }
+
     /// Allocate the encoded-float output resource declared by a plan.
     pub fn allocate_output(
         device: &wgpu::Device,

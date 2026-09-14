@@ -12,13 +12,12 @@ use std::time::Instant;
 use mondrian_media::PreviewNativeDecodedFrame;
 
 use crate::{
-    ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameResource,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
+    GpuColorFrameAllocationPlan, GpuColorFrameResource, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportSupport, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, NativeVideoImportCpuTimings,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntime,
 };
 
 /// Shader-readable planes plus any platform ownership retained by their wgpu
@@ -224,22 +223,25 @@ where
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
     ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        let source = if self.adapter.supports_buffer_source() {
+            self.yuv_decoder.fused_buffer_input().ok_or_else(|| {
+                backend_rejected("native buffer sampling pipeline is unavailable".to_owned())
+            })?
+        } else {
+            self.yuv_decoder.fused_texture_input()
+        };
         self.color_runtime
-            .prepare_wgpu_input_stage_gpu_frame_backend_objects(
+            .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
                 &plan.working_frame,
-                RenderColorTransformGpuOptions {
-                    output_residency: ColorFrameResidency::Gpu,
-                    ..RenderColorTransformGpuOptions::default()
-                },
+                source,
                 &self.device,
                 &self.queue,
             )
+            .map(|_| ())
             .map_err(|error| {
-                backend_rejected(format!(
-                    "source-to-working color backend preparation failed: {error:?}"
-                ))
+                backend_rejected(format!("native fused input preparation failed: {error}"))
             })
     }
 
@@ -310,78 +312,61 @@ where
                 )
                 .map_err(|error| backend_rejected(error.to_string()))?,
         };
+        let source = match &input {
+            DirectNativeYuvInput::Textures(_) => self.yuv_decoder.fused_texture_input(),
+            DirectNativeYuvInput::Buffer(_) => {
+                self.yuv_decoder.fused_buffer_input().ok_or_else(|| {
+                    backend_rejected("native buffer sampling pipeline is unavailable".to_owned())
+                })?
+            }
+        };
+        let backend = self
+            .color_runtime
+            .prepare_fused_yuv_input(
+                &plan.input_transform,
+                &plan.encoded_source_frame,
+                &plan.working_frame,
+                source,
+                &self.device,
+                &self.queue,
+            )
+            .map_err(|error| {
+                backend_rejected(format!("native fused input preparation failed: {error}"))
+            })?;
         let resource_pool = self.color_runtime.resource_pool();
-        let encoded_resource = resource_pool.acquire(
+        let working = resource_pool.acquire(
             &self.device,
-            &GpuColorFrameAllocationPlan::for_handle(plan.encoded_source_frame.clone()),
+            &GpuColorFrameAllocationPlan::for_handle(plan.working_frame.clone()),
         );
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.native-video.direct-import"),
         });
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
-
         let yuv_record_started = Instant::now();
-        self.yuv_decoder
-            .record(&mut encoder, &yuv_plan, &prepared_yuv, &encoded_resource)
-            .map_err(|error| backend_rejected(error.to_string()))?;
-        let yuv_record_us = elapsed_us(yuv_record_started);
-
-        let color_stage_started = Instant::now();
-        if let Some(previous) =
-            self.color_runtime.frame_table_mut().insert(encoded_resource).map_err(|error| {
-                backend_rejected(format!("encoded source insertion failed: {error:?}"))
-            })?
         {
-            let _new_entry =
-                self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
-            let restore_result = self.color_runtime.frame_table_mut().insert(previous);
-            debug_assert!(
-                restore_result.is_ok(),
-                "failed to restore collided GPU resource"
-            );
-            return Err(backend_rejected(
-                "encoded source id replaced a live native-video resource".to_owned(),
-            ));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mondrian.native-video.fused-working-input"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &working.resource().texture_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&backend.pipeline);
+            pass.set_bind_group(0, &backend.objects.ocio_bind_group.bind_group, &[]);
+            pass.set_bind_group(1, &prepared_yuv.bind_group, &[]);
+            pass.draw(0..4, 0..1);
         }
-        if let Err(error) = self.color_runtime.record_wgpu_input_stage_gpu_frame_owned_backend(
-            &plan.input_transform,
-            &plan.encoded_source_frame,
-            &plan.working_frame,
-            RenderColorTransformGpuOptions {
-                output_residency: ColorFrameResidency::Gpu,
-                ..RenderColorTransformGpuOptions::default()
-            },
-            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                device: &self.device,
-                queue: &self.queue,
-                encoder: &mut encoder,
-                load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            },
-        ) {
-            self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
-            self.color_runtime.frame_table_mut().remove(plan.working_frame.id());
-            return Err(backend_rejected(format!(
-                "source-to-working color stage failed: {error:?}"
-            )));
-        }
-        let color_stage_us = elapsed_us(color_stage_started);
-
-        let resource_extract_started = Instant::now();
-        let Some(working) = self.color_runtime.frame_table_mut().remove(plan.working_frame.id())
-        else {
-            self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
-            return Err(backend_rejected(
-                "color stage did not retain its working output".to_owned(),
-            ));
-        };
-        let Some(encoded_resource) =
-            self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id())
-        else {
-            return Err(backend_rejected(
-                "color stage lost its encoded input".to_owned(),
-            ));
-        };
-        let resource_extract_us = elapsed_us(resource_extract_started);
+        // This bracket records the fused YUV + OCIO pass. No separate color
+        // pass or frame-table extraction remains to time.
+        let yuv_record_us = elapsed_us(yuv_record_started);
+        let color_stage_us = 0;
+        let resource_extract_us = 0;
 
         let submit_started = Instant::now();
         // Buffer inputs retain their decoder source in the native allocation
@@ -408,10 +393,6 @@ where
             }
             return Err(error);
         }
-        // A shared-pool checkout may immediately record a successor. Publish
-        // this intermediate only after its previous read is ordered on the
-        // production queue; failed/unsubmitted imports drop it instead.
-        resource_pool.release(encoded_resource);
         if let Some(retained_source) = retained_source {
             let retained_sources = Arc::clone(&self.retained_sources);
             self.queue.on_submitted_work_done(move || {

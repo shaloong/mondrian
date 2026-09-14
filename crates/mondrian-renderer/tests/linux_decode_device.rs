@@ -151,8 +151,14 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
             );
             assert_eq!(
                 pool.diagnostics().releases,
-                before_pool.releases + 1,
-                "the submitted native RGB intermediate must return to the production pool"
+                before_pool.releases,
+                "fused native import must not allocate and return an encoded RGB intermediate"
+            );
+            let after_pool = pool.diagnostics();
+            assert_eq!(
+                after_pool.hits + after_pool.misses,
+                before_pool.hits + before_pool.misses + 1,
+                "native input must acquire only the exact working output"
             );
             drop(frame);
             let plan = GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
@@ -186,7 +192,7 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
             assert!(pixels.chunks_exact(4).any(|p| p[1] > 0.1));
             drop(mapped);
             buffer.unmap();
-            drop(output);
+            pool.release(output);
             while runtime.retained_source_count() != 0 {
                 assert!(
                     std::time::Instant::now() < deadline,

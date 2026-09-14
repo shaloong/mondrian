@@ -701,9 +701,9 @@ fn estimate_source(
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 // The media Frame Store governs the adopted decoder surface.
-                // Every route materializes one product-precision encoded-RGB
-                // output before OCIO, then one working output. The media Frame
-                // Store separately governs the adopted decoder surface.
+                // Keep the conservative two-pass bound for backends that
+                // materialize encoded RGB before OCIO. Fused direct inputs
+                // need only the working output, but do not expand this grant.
                 let bytes = encoded_rgb_bytes.checked_add(working_bytes).ok_or(
                     ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
