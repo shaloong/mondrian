@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use mondrian_media::{
-    DecodedGpuFrameHandleKind, FfmpegDrmPrimeFrame, FfmpegDrmPrimePlane,
+    DecodedGpuFrameHandleKind, FfmpegDrmPrimeFrame, FfmpegDrmPrimeLayer, FfmpegDrmPrimePlane,
     FfmpegNativeDecodedFrameResource, PreviewNativeDecodedFrame,
 };
 
@@ -21,6 +21,11 @@ use crate::{
 const DRM_FORMAT_NV12: u32 = fourcc(b'N', b'V', b'1', b'2');
 const DRM_FORMAT_P010: u32 = fourcc(b'P', b'0', b'1', b'0');
 const DRM_FORMAT_P012: u32 = fourcc(b'P', b'0', b'1', b'2');
+const DRM_FORMAT_R8: u32 = fourcc(b'R', b'8', b' ', b' ');
+const DRM_FORMAT_R16: u32 = fourcc(b'R', b'1', b'6', b' ');
+const DRM_FORMAT_RG88: u32 = fourcc(b'R', b'G', b'8', b'8');
+const DRM_FORMAT_GR88: u32 = fourcc(b'G', b'R', b'8', b'8');
+const DRM_FORMAT_RG1616: u32 = fourcc(b'R', b'G', b'3', b'2');
 
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     u32::from_le_bytes([a, b, c, d])
@@ -291,7 +296,7 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
             .resource::<FfmpegNativeDecodedFrameResource>()
             .ok_or_else(|| rejected("VA-API frame has no retained FFmpeg resource".to_owned()))?;
         let drm_frame = resource.drm_prime_frame().map_err(|error| rejected(error.to_string()))?;
-        let planes = validate_drm_layout(drm_frame, plan.source_texture_format)?;
+        let planes = validate_drm_layout(drm_frame.layers(), plan.source_texture_format)?;
         let (luma_format, chroma_format) = plane_formats(plan.source_texture_format);
         let luma = import_plane(
             device,
@@ -334,7 +339,7 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
 }
 
 fn validate_drm_layout(
-    frame: &FfmpegDrmPrimeFrame,
+    layers: &[FfmpegDrmPrimeLayer],
     source: GpuNativeDecodedFrameTextureFormat,
 ) -> Result<[FfmpegDrmPrimePlane; 2], GpuNativeDecodedFrameImportError> {
     let expected_fourcc = match source {
@@ -347,13 +352,41 @@ fn validate_drm_layout(
             )))
         }
     };
-    if frame.layers().len() != 1 {
+    if let [luma, chroma] = layers {
+        // FFmpeg requests VA_EXPORT_SURFACE_SEPARATE_LAYERS. Its NV12
+        // mapping accepts R8 + GR88/RG88, and P010/P012 use R16 + RG1616.
+        // These are plane-storage formats; UV order and effective bit depth
+        // remain the admitted decoder surface contract, not RGB semantics.
+        let formats_match = match source {
+            GpuNativeDecodedFrameTextureFormat::Nv12 => {
+                luma.format == DRM_FORMAT_R8
+                    && matches!(chroma.format, DRM_FORMAT_GR88 | DRM_FORMAT_RG88)
+            }
+            GpuNativeDecodedFrameTextureFormat::P010 | GpuNativeDecodedFrameTextureFormat::P012 => {
+                luma.format == DRM_FORMAT_R16 && chroma.format == DRM_FORMAT_RG1616
+            }
+            _ => false,
+        };
+        if !formats_match {
+            return Err(rejected(format!(
+                "DRM PRIME separate layer formats 0x{:08x}/0x{:08x} do not match {source:?}",
+                luma.format, chroma.format
+            )));
+        }
+        let ([luma], [chroma]) = (luma.planes.as_slice(), chroma.planes.as_slice()) else {
+            return Err(rejected(format!(
+                "DRM PRIME {source:?} separate layers must each contain exactly one plane"
+            )));
+        };
+        return Ok([*luma, *chroma]);
+    }
+    if layers.len() != 1 {
         return Err(rejected(format!(
-            "DRM PRIME frame must expose one typed two-plane YCbCr layer, got {}",
-            frame.layers().len()
+            "DRM PRIME frame requires one composed or two separate layers, got {}",
+            layers.len()
         )));
     }
-    let layer = &frame.layers()[0];
+    let layer = &layers[0];
     if layer.format != expected_fourcc {
         return Err(rejected(format!(
             "DRM PRIME FourCC 0x{:08x} does not match {source:?}",
@@ -461,4 +494,105 @@ fn import_plane(
 
 fn rejected(reason: String) -> GpuNativeDecodedFrameImportError {
     GpuNativeDecodedFrameImportError::BackendRejected { reason }
+}
+
+#[cfg(test)]
+mod drm_layout_tests {
+    use super::*;
+
+    fn planes() -> [FfmpegDrmPrimePlane; 2] {
+        [
+            FfmpegDrmPrimePlane { object_index: 0, offset: 128, pitch: 512 },
+            FfmpegDrmPrimePlane { object_index: 1, offset: 256, pitch: 512 },
+        ]
+    }
+
+    #[test]
+    fn ffmpeg_vaapi_separate_layers_preserve_exact_plane_identity() {
+        // libva's normal separate-layer NV12 export and FFmpeg's P010/P012
+        // DRM mappings. These are descriptor contracts, not device qualification.
+        for (source, luma, chroma) in [
+            (
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                fourcc(b'R', b'8', b' ', b' '),
+                fourcc(b'G', b'R', b'8', b'8'),
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                fourcc(b'R', b'8', b' ', b' '),
+                fourcc(b'R', b'G', b'8', b'8'),
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::P010,
+                fourcc(b'R', b'1', b'6', b' '),
+                fourcc(b'R', b'G', b'3', b'2'),
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::P012,
+                fourcc(b'R', b'1', b'6', b' '),
+                fourcc(b'R', b'G', b'3', b'2'),
+            ),
+        ] {
+            let expected = planes();
+            let layers = [
+                FfmpegDrmPrimeLayer { format: luma, planes: vec![expected[0]] },
+                FfmpegDrmPrimeLayer { format: chroma, planes: vec![expected[1]] },
+            ];
+            assert_eq!(
+                validate_drm_layout(&layers, source).expect("valid FFmpeg split layers"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn composed_layers_remain_exact_and_malformed_layers_are_rejected() {
+        let expected = planes();
+        for (source, format) in [
+            (GpuNativeDecodedFrameTextureFormat::Nv12, DRM_FORMAT_NV12),
+            (GpuNativeDecodedFrameTextureFormat::P010, DRM_FORMAT_P010),
+            (GpuNativeDecodedFrameTextureFormat::P012, DRM_FORMAT_P012),
+        ] {
+            let layers = [FfmpegDrmPrimeLayer { format, planes: expected.to_vec() }];
+            assert_eq!(
+                validate_drm_layout(&layers, source).expect("composed layer"),
+                expected
+            );
+            assert!(validate_drm_layout(
+                &[FfmpegDrmPrimeLayer { format, planes: vec![expected[0]] }],
+                source
+            )
+            .is_err());
+        }
+        let source = GpuNativeDecodedFrameTextureFormat::Nv12;
+        let luma = FfmpegDrmPrimeLayer {
+            format: fourcc(b'R', b'8', b' ', b' '),
+            planes: vec![expected[0]],
+        };
+        let chroma = FfmpegDrmPrimeLayer {
+            format: fourcc(b'G', b'R', b'8', b'8'),
+            planes: vec![expected[1]],
+        };
+        assert!(validate_drm_layout(&[], source).is_err());
+        assert!(validate_drm_layout(&[chroma.clone(), luma.clone()], source).is_err());
+        assert!(validate_drm_layout(
+            &[luma.clone(), chroma.clone()],
+            GpuNativeDecodedFrameTextureFormat::P010
+        )
+        .is_err());
+        assert!(
+            validate_drm_layout(&[luma.clone(), chroma.clone(), chroma.clone()], source).is_err()
+        );
+        let mut extra_plane = chroma.clone();
+        extra_plane.planes.push(expected[0]);
+        assert!(validate_drm_layout(&[luma.clone(), extra_plane], source).is_err());
+        let mut missing_plane = chroma;
+        missing_plane.planes.clear();
+        assert!(validate_drm_layout(&[luma, missing_plane], source).is_err());
+        assert!(validate_drm_layout(
+            &[FfmpegDrmPrimeLayer { format: DRM_FORMAT_P010, planes: expected.to_vec() }],
+            source
+        )
+        .is_err());
+    }
 }

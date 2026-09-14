@@ -1621,6 +1621,26 @@ create-new JSON artifact; GPU absence and readback deadlines are errors, while
 observed pixel differences remain diagnostic facts with `qualified: false`.
 The test changes neither production quantization nor qualification tolerances.
 
+## Linux VA-API DRM PRIME plane layout
+
+The VA-API Vulkan plane Adapter accepts both one composed NV12/P010/P012
+layer and FFmpeg's normal separate-layer DRM PRIME export. Separate NV12
+uses R8 with GR88/RG88; P010/P012 use R16 with RG1616, matching FFmpeg's
+VA-API DRM mappings. Each separate layer must contain exactly one plane in
+luma/chroma order. The existing decoder surface contract supplies effective
+bit depth and UV order; the Adapter does not infer color semantics from the
+generic DRM channel names. Object indices, offsets, pitches, modifiers and
+retained frame ownership flow unchanged into the existing Vulkan imports.
+Wrong formats, missing or extra planes and unsupported auxiliary-plane layouts
+remain explicit errors. This normalizes a legal descriptor representation,
+without repacking pixels, CPU download or a second color path. Descriptor
+regressions prove this contract only; real VA-API import still requires a
+compatible device, driver, modifier and independent native qualification.
+
+The producer contracts are documented by
+[libva's DRM PRIME descriptor](https://github.com/intel/libva/blob/master/va/va_drmcommon.h)
+and [FFmpeg 6.1 VA-API mapping](https://ffmpeg.org/doxygen/6.1/hwcontext__vaapi_8c_source.html).
+
 ## Linux CUDA storage-buffer import
 
 The shared production device creation entry adds external-memory and external-
