@@ -1401,6 +1401,51 @@ fn professional_frame_count_covers_duration_terminal_and_measurement_guard() {
 }
 
 #[test]
+fn external_playback_does_not_author_unproven_startup_headroom() {
+    assert_eq!(
+        default_external_playback_sequence_frame_count(
+            60,
+            Duration::from_secs(30),
+            33_366_667,
+            None,
+        ),
+        60,
+        "29.97 fps media without an exact frame count must stop at the requested window"
+    );
+    assert_eq!(
+        default_external_playback_sequence_frame_count(
+            120,
+            Duration::from_secs(30),
+            16_683_350,
+            None,
+        ),
+        120,
+        "59.94 fps media without an exact frame count must stop at the requested window"
+    );
+}
+
+#[test]
+fn external_playback_headroom_is_bounded_by_exact_source_frames() {
+    assert_eq!(
+        default_external_playback_sequence_frame_count(
+            60,
+            Duration::from_secs(30),
+            33_333_333,
+            Some(75),
+        ),
+        75
+    );
+    assert!(
+        default_external_playback_sequence_frame_count(
+            60,
+            Duration::from_secs(30),
+            33_333_333,
+            Some(10_000),
+        ) > 60
+    );
+}
+
+#[test]
 fn continuous_playback_observation_plan_rejects_an_empty_window() {
     assert!(continuous_playback_observation_plan(0).is_err());
 }
@@ -5737,11 +5782,6 @@ fn run_external_continuous_playback_gate(
     } else {
         env_u128("MONDRIAN_PREVIEW_EXTERNAL_SEEK_MS", 3_000)
     };
-    let source_frame_count = media_info
-        .primary_video()
-        .and_then(|video| video.total_frames)
-        .and_then(|frames| usize::try_from(frames).ok())
-        .map(|frames| frames.saturating_sub((video_layer_count - 1) as usize));
     let resume_probe_frames = if seek_probe_count == 0 {
         0
     } else if professional {
@@ -5749,9 +5789,17 @@ fn run_external_continuous_playback_gate(
     } else {
         env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_RESUME_FRAMES", 12, 4, 60)
     };
-    let default_sequence_frame_count = frame_count
-        .saturating_add(startup_headroom_frames(ready_timeout, frame_interval_ns))
-        .min(source_frame_count.unwrap_or(usize::MAX));
+    let source_frame_count = media_info
+        .primary_video()
+        .and_then(|video| video.total_frames)
+        .and_then(|frames| usize::try_from(frames).ok())
+        .map(|frames| frames.saturating_sub((video_layer_count - 1) as usize));
+    let default_sequence_frame_count = default_external_playback_sequence_frame_count(
+        frame_count,
+        ready_timeout,
+        frame_interval_ns,
+        source_frame_count,
+    );
     let sequence_frame_count = if professional {
         default_sequence_frame_count
     } else {
@@ -5911,6 +5959,20 @@ fn run_external_continuous_playback_gate(
     }
 
     Ok(())
+}
+
+fn default_external_playback_sequence_frame_count(
+    observation_frames: usize,
+    ready_timeout: Duration,
+    frame_interval_ns: u64,
+    exact_source_frames: Option<usize>,
+) -> usize {
+    let observation_with_startup_headroom = observation_frames
+        .saturating_add(startup_headroom_frames(ready_timeout, frame_interval_ns));
+    match exact_source_frames {
+        Some(source_frames) => observation_with_startup_headroom.min(source_frames),
+        None => observation_frames,
+    }
 }
 
 fn evaluate_external_playback_gates(

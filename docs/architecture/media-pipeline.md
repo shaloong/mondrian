@@ -1949,6 +1949,12 @@ External smoke media is always registered from one real `probe_media_info`;
 the harness does not synthesize codec, profile, resolution, bit depth, duration,
 frame count, or color facts from a filename. It builds the sequence at the
 probed rational frame rate and advances 1× using a nanosecond frame interval.
+When the provider does not prove an exact video-frame count, the harness authors
+only the explicitly requested observation window. It may add startup headroom
+only when an exact provider frame count bounds that headroom. Container duration
+and average frame rate remain useful coverage diagnostics, but their product is
+not promoted into a second frame-count authority and cannot make the harness
+request a synthetic frame beyond EOF.
 The media probe canonicalizes positive FFmpeg average rates that fall within
 100 ppm of a standard nominal cinema/broadcast rate. This removes container
 time-base quantization (for example, an 11 ppm drift around `24000/1001`)
