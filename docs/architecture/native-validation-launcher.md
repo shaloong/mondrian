@@ -83,5 +83,11 @@ toolchain's bundled LLD to one internal thread. Cargo `-j 1` alone does not
 constrain LLD's default all-CPU worker pool. This is a build-time resource bound
 only and does not change production code generation, admission, or
 qualification status.
+The workspace test profile also omits dependency DWARF/PDB data by default;
+assertions, structured receipts, symbol names, and panic locations remain the
+test evidence, while `CARGO_PROFILE_TEST_DEBUG=1` provides an explicit local
+debug build when a debugger requires full line/type information. This prevents
+the App test artifact from embedding hundreds of megabytes of dependency debug
+sections that are unrelated to runtime qualification.
 Validation executables continue to use the dedicated `validation` profile and
 its production runtime semantics.

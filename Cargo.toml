@@ -179,13 +179,17 @@ zstd             = "0.11"
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验
 
-# The App lib-test links the complete product and validation harness. Avoiding a
-# full App PDB keeps that monolithic MSVC link practical on 16 GiB machines;
-# domain crates retain normal test debuginfo and App incremental builds stay on.
-[profile.test.package.mondrian-app]
+# Workspace tests report failures through assertions and structured receipts.
+# Do not merge dependency DWARF/PDB data into every test executable by default:
+# the App lib-test alone otherwise carries more than 770 MiB of debug sections
+# and exceeds a bounded Linux link envelope. Developers can opt into a debug
+# test build with CARGO_PROFILE_TEST_DEBUG=1.
+[profile.test]
 debug = 0
+
 # Keep the expanded App harness within local commit limits. Domain/media code
 # stays optimized; performance acceptance uses separately linked dev/release runs.
+[profile.test.package.mondrian-app]
 opt-level = 0
 
 [profile.release]
