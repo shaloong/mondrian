@@ -8,6 +8,7 @@ const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AudioOutputClockCommit {
     Observe,
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     Hold,
 }
 
@@ -1770,6 +1771,7 @@ impl AppState {
     }
 
     /// Reissue the exact current playback picture against one bounded recovery deadline.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     pub(crate) fn reissue_current_frame_demand_for_recovery_until(
         &mut self,
         recovery_deadline: Instant,
@@ -1777,6 +1779,7 @@ impl AppState {
         self.reissue_current_frame_demand_for_recovery_at(Instant::now(), recovery_deadline)
     }
 
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     fn reissue_current_frame_demand_for_recovery_at(
         &mut self,
         observed_at: Instant,

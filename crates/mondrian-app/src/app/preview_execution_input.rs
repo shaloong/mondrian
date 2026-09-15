@@ -81,6 +81,7 @@ impl AppState {
 
     /// Capture ticketless CPU/GPU preparation for an exact farther playback
     /// coordinate returned by the cold-activation planner.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     pub(crate) fn preview_cold_activation_execution_request(
         &self,
         sampled_at: Instant,

@@ -42,6 +42,7 @@ pub(crate) enum PreviewFrameExecutionPurpose {
     LookaheadPreparation,
     /// Prepare backend objects for one farther cold source activation without
     /// retaining its frame evaluation in the ordinary four-entry LRU.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     ColdActivationPreparation,
 }
 
@@ -487,6 +488,7 @@ impl<'a> PreviewFrameExecutionRequest<'a> {
 
     /// Bind one exact farther playback coordinate already discovered by the
     /// bounded cold-activation planner.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     pub(crate) fn lookahead_frame(
         snapshot: PreviewExecutionSnapshot<'a>,
         proxy_demands: &'a dyn PreviewProxyDemandSink,

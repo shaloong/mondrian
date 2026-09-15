@@ -524,6 +524,7 @@ impl PreviewGpuFrameStaging {
 
     /// Release speculative owners invalidated by transport or quality changes.
     /// Keep the exact current frame available for promotion at natural end.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
     pub(crate) fn retain_current_generation(
         &mut self,
         current: PreviewPlaybackIntent,

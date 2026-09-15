@@ -91,3 +91,10 @@ the App test artifact from embedding hundreds of megabytes of dependency debug
 sections that are unrelated to runtime qualification.
 Validation executables continue to use the dedicated `validation` profile and
 its production runtime semantics.
+Validation drivers retain narrow controls for holding an audio-clock commit,
+reissuing a bounded recovery demand, pruning staged GPU successors, and naming
+an exact cold-activation coordinate. These controls remain methods and variants
+of the production App/Preview types so validation cannot acquire a parallel
+transport, queue, or color authority. Default product builds explicitly permit
+those individual controls to be unused; the allowance is scoped to each seam
+and does not disable dead-code diagnostics for either crate or module.
