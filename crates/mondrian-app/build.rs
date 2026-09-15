@@ -23,12 +23,11 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn emit_linux_test_link_resource_policy() {
-    // The App lib-test links the complete product and validation harness. GNU
-    // ld otherwise retains every input symbol table until exit, which can exceed
-    // the qualification host's bounded build envelope. Re-reading those
-    // tables is slower but keeps the final link inside the same hard memory
-    // boundary without changing code generation or runtime behavior.
-    println!("cargo:rustc-link-arg-tests=-Wl,--no-keep-memory");
+    // Rust 1.97's Linux GNU target uses bundled lld, whose default is every
+    // available hardware thread. The App lib-test links the complete product
+    // and validation harness, so bound lld itself in addition to Cargo's job
+    // count. This changes neither code generation nor runtime behavior.
+    println!("cargo:rustc-link-arg-tests=-Wl,--threads=1");
 }
 
 fn emit_cargo_build_attestation() {
