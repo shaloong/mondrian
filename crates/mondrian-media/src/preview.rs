@@ -968,7 +968,8 @@ pub enum PreviewTemporalExtentSource {
 /// identity without depending on the complete decoder implementation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDecodeTemporalSelection {
-    /// Requested stream-local PTS after exact source-target lowering.
+    /// Requested decode-selection PTS after exact source-target lowering.
+    /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     pub requested_pts: i64,
     /// First PTS of the selected presentation interval.
     pub selected_pts: i64,
@@ -1284,13 +1285,14 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the decoder had to seek before producing this frame.
     #[serde(default)]
     pub seek_performed: bool,
-    /// Requested stream timestamp before any interactive approximation.
+    /// Requested decode-selection timestamp before any interactive approximation.
+    /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     #[serde(default)]
     pub requested_pts: Option<i64>,
-    /// Stream timestamp actually selected for presentation.
+    /// Decode-selection timestamp actually selected for presentation.
     #[serde(default)]
     pub selected_pts: Option<i64>,
-    /// Positive stream-tick duration of the selected frame's proven presentation interval.
+    /// Positive selection-tick duration of the selected frame's proven presentation interval.
     #[serde(default)]
     pub selected_duration_pts: Option<i64>,
     /// Evidence source that established the selected frame's presentation interval.
@@ -1857,6 +1859,45 @@ pub(super) fn source_sample_to_stream_pts(
     stream_start_pts.checked_add(relative).ok_or_else(|| {
         format!(
             "source target PTS overflow: target={source_sample:?} stream_time_base={}/{} start_pts={stream_start_pts}",
+            stream_tb.numerator(),
+            stream_tb.denominator()
+        )
+    })
+}
+
+pub(super) fn source_sample_to_selection_pts(
+    source_sample: SourceSampleTarget,
+    stream_tb: ffmpeg::Rational,
+    stream_start_pts: i64,
+    selection_scale: i64,
+) -> std::result::Result<i64, String> {
+    if selection_scale <= 0 {
+        return Err(format!(
+            "invalid decoded selection scale {selection_scale} for source target {source_sample:?}"
+        ));
+    }
+    let selection_den = i64::from(stream_tb.denominator())
+        .checked_mul(selection_scale)
+        .ok_or_else(|| {
+            format!(
+                "decoded selection time-base overflow: stream_time_base={}/{} scale={selection_scale}",
+                stream_tb.numerator(),
+                stream_tb.denominator()
+            )
+        })?;
+    let relative = source_sample_to_time_base_ticks(
+        source_sample,
+        i64::from(stream_tb.numerator()),
+        selection_den,
+    )?;
+    let selection_start = stream_start_pts.checked_mul(selection_scale).ok_or_else(|| {
+        format!(
+            "decoded selection start PTS overflow: start_pts={stream_start_pts} scale={selection_scale}"
+        )
+    })?;
+    selection_start.checked_add(relative).ok_or_else(|| {
+        format!(
+            "decoded selection target PTS overflow: target={source_sample:?} stream_time_base={}/{} start_pts={stream_start_pts} scale={selection_scale}",
             stream_tb.numerator(),
             stream_tb.denominator()
         )

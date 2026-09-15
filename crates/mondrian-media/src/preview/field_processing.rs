@@ -47,6 +47,30 @@ impl PreviewFieldProcessingSession {
         self.observed = None;
     }
 
+    /// Selection uses half-picture ticks whenever decoded-frame inspection or
+    /// field-rate output can be required. Demux and seek remain in the source
+    /// stream time base; this finer domain exists only after decoded frames
+    /// enter the field processor.
+    pub(super) const fn selection_scale(&self) -> i64 {
+        match self.requested {
+            Progressive => 1,
+            Automatic | MotionAdaptiveFieldRate { .. } => 2,
+        }
+    }
+
+    pub(super) fn selection_pts(&self, stream_pts: i64) -> Result<i64> {
+        stream_pts.checked_mul(self.selection_scale()).ok_or_else(|| {
+            field_error(
+                &self.path,
+                "field-rate selection timestamp exceeds the exact integer range",
+            )
+        })
+    }
+
+    pub(super) fn selection_duration_pts(&self, stream_duration_pts: i64) -> i64 {
+        stream_duration_pts.saturating_mul(self.selection_scale())
+    }
+
     /// Process one decoded frame and return zero or more canonical progressive
     /// field-time frames. BWDIF is delayed by its temporal neighborhood, so zero
     /// output for an individual input is ordinary.
@@ -66,7 +90,11 @@ impl PreviewFieldProcessingSession {
         };
         let effective = self.admit(frame_scan)?;
         match effective {
-            ObservedScan::Progressive => Ok(vec![clone_decoded_frame(frame, pts, &self.path)?]),
+            ObservedScan::Progressive => Ok(vec![clone_decoded_frame(
+                frame,
+                self.selection_pts(pts)?,
+                &self.path,
+            )?]),
             ObservedScan::Interlaced(dominance) => {
                 if self.graph.is_none() {
                     self.graph = Some(BwdifGraph::open(
@@ -142,8 +170,6 @@ impl BwdifGraph {
             .ok_or_else(|| field_error(path, "linked FFmpeg runtime has no bwdif filter"))?;
         let buffersink = ffmpeg::filter::find("buffersink")
             .ok_or_else(|| field_error(path, "linked FFmpeg runtime has no buffersink filter"))?;
-        let settb = ffmpeg::filter::find("settb")
-            .ok_or_else(|| field_error(path, "linked FFmpeg runtime has no settb filter"))?;
         let mut graph = ffmpeg::filter::Graph::new();
         // Filtering executes inside the already-admitted media worker. Codec
         // threads may still be decoding ahead, so an automatic filter pool
@@ -173,20 +199,14 @@ impl BwdifGraph {
                 &format!("mode=send_field:parity={parity}:deint=all"),
             )
             .map_err(|error| field_error(path, format!("BWDIF setup failed: {error}")))?;
-        // BWDIF send_field halves the link time base while doubling PTS. Restore
-        // the physical stream time base so the existing exact PTS selector can
-        // compare filtered outputs with the caller's SourceSampleTarget. Sources
-        // whose original tick grid cannot represent a half-picture instant will
-        // produce duplicate PTS and are rejected by the candidate window.
-        let mut restore_time_base = graph
-            .add(&settb, "mondrian_field_time_base", "expr=2*intb")
-            .map_err(|error| field_error(path, format!("BWDIF time-base setup failed: {error}")))?;
         let mut sink = graph
             .add(&buffersink, "mondrian_field_output", "")
             .map_err(|error| field_error(path, format!("BWDIF output setup failed: {error}")))?;
         source.link(0, &mut processor, 0);
-        processor.link(0, &mut restore_time_base, 0);
-        restore_time_base.link(0, &mut sink, 0);
+        // `send_field` owns the half-picture time base and emits distinct PTS
+        // `2*p` and `2*p+1`. Keep those exact ticks: rescaling them back onto a
+        // coarse source grid (commonly 1/25 for 25i) aliases adjacent fields.
+        processor.link(0, &mut sink, 0);
         graph.validate().map_err(|error| {
             field_error(path, format!("BWDIF graph validation failed: {error}"))
         })?;

@@ -2071,19 +2071,31 @@ impl PreviewDecodeSession {
             ));
         }
 
-        let target_pts =
+        let stream_target_pts =
             source_sample_to_stream_pts(source_sample, self.stream_tb, self.stream_start_pts)
                 .map_err(|reason| MondrianError::DecodeFailed {
                     asset_id: self.path.display().to_string(),
                     reason,
                 })?;
+        let target_pts = source_sample_to_selection_pts(
+            source_sample,
+            self.stream_tb,
+            self.stream_start_pts,
+            self.field_processor.selection_scale(),
+        )
+        .map_err(|reason| MondrianError::DecodeFailed {
+            asset_id: self.path.display().to_string(),
+            reason,
+        })?;
         let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode).adapt_for_request(
             &self.seek_index,
-            target_pts,
+            stream_target_pts,
             self.frame_duration_pts,
             adaptive_hints,
         );
-        let decode_target_pts = policy.decode_target_pts(target_pts);
+        let decode_target_pts = policy.decode_target_pts(stream_target_pts);
+        let selection_frame_duration_pts =
+            self.field_processor.selection_duration_pts(self.frame_duration_pts);
         self.decoder.skip_frame(if policy.keyframe_only {
             ffmpeg::codec::discard::Discard::NonKey
         } else {
@@ -2147,8 +2159,8 @@ impl PreviewDecodeSession {
                 .map(|last| {
                     policy.can_continue_forward(
                         last,
-                        decode_target_pts,
-                        self.frame_duration_pts,
+                        target_pts,
+                        selection_frame_duration_pts,
                         self.reached_eof,
                     )
                 })
@@ -2206,6 +2218,7 @@ impl PreviewDecodeSession {
             reason: error.to_string(),
         })?;
         let mut result = self.decode_forward_until(
+            target_pts,
             decode_target_pts,
             policy,
             adaptive_hints.playback_direction,
@@ -2583,6 +2596,7 @@ impl PreviewDecodeSession {
     fn decode_forward_until(
         &mut self,
         target_pts: i64,
+        stream_target_pts: i64,
         policy: PreviewDecodeAccessPolicy,
         playback_direction: PreviewPlaybackDirection,
         session_output_lease: &PreviewDecodeSessionOutputLease,
@@ -2614,21 +2628,32 @@ impl PreviewDecodeSession {
         }
         let mut frames_decoded: usize = 0;
         let mut video_packets_submitted: usize = 0;
-        let mut non_reference_discard_until_pts =
-            exact_seek_non_reference_discard_until_pts(policy, target_pts, self.frame_duration_pts);
+        let mut non_reference_discard_until_pts = exact_seek_non_reference_discard_until_pts(
+            policy,
+            stream_target_pts,
+            self.frame_duration_pts,
+        );
         self.decoder.skip_frame(
             non_reference_discard_until_pts
                 .map_or(ffmpeg::codec::discard::Discard::Default, |_| {
                     ffmpeg::codec::discard::Discard::NonReference
                 }),
         );
-        let exact_select_distance_pts =
-            self.frame_duration_pts.saturating_mul(2).max(1).min(
-                seconds_to_stream_pts(PREVIEW_MAX_SELECT_DISTANCE_SECS, self.stream_tb).max(1),
+        let selection_scale = self.field_processor.selection_scale();
+        let exact_select_distance_pts = self
+            .field_processor
+            .selection_duration_pts(self.frame_duration_pts)
+            .saturating_mul(2)
+            .max(1)
+            .min(
+                seconds_to_stream_pts(PREVIEW_MAX_SELECT_DISTANCE_SECS, self.stream_tb)
+                    .saturating_mul(selection_scale)
+                    .max(1),
             );
         let max_select_distance_pts = if policy.keyframe_only {
             self.seek_index
-                .adjacent_keyframe_radius(target_pts)
+                .adjacent_keyframe_radius(stream_target_pts)
+                .map(|radius| radius.saturating_mul(selection_scale))
                 .unwrap_or(exact_select_distance_pts)
                 .max(exact_select_distance_pts)
         } else {
@@ -2844,7 +2869,7 @@ impl PreviewDecodeSession {
                 && frames_decoded == 0
                 && candidates.before().is_none()
                 && packet.is_key()
-                && packet.pts().is_some_and(|pts| pts > target_pts)
+                && packet.pts().is_some_and(|pts| pts > stream_target_pts)
                 && let Some(earlier) = packet
                     .dts()
                     .or_else(|| packet.pts())

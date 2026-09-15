@@ -142,6 +142,16 @@ uses one Session-owned linked-FFmpeg BWDIF graph in `send_field` mode and emits
 full-height progressive frames at exact field timestamps before scaling, color
 conversion, Effects, or compositing. Automatic mode observes decoded AVFrame
 flags; mixed progressive/interlaced content or changing dominance fails closed.
+Demux, packet indexing, and seek remain in the source stream PTS domain. After
+decode, Automatic and field-rate Sessions select on a two-tick-per-stream-tick
+domain derived directly from the exact `SourceSampleTarget`. BWDIF's native
+half-picture time base is retained, so a common 25i stream with a coarse 1/25
+container time base still represents the two fields as distinct ticks instead
+of aliasing them during a lossy rescale. Progressive-only Sessions retain the
+original one-to-one stream tick domain. Decode diagnostics report
+`requested_pts`, `selected_pts`, and `selected_duration_pts` in this immutable
+selection domain; the decode key's field-processing contract determines its
+scale.
 Seek, cancellation recovery, decoder flush, and Session replacement discard the
 temporal filter graph. Unknown scan requires CPU-addressable decode evidence and
 is never silently treated as progressive. Residual interlaced frames after the

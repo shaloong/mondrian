@@ -639,6 +639,34 @@ fn source_sample_boundary_controls_half_open_grid_lowering() {
 }
 
 #[test]
+fn field_rate_selection_keeps_half_picture_times_distinct_on_coarse_stream_grid() {
+    let second_field =
+        SourceSampleTarget::covering(TimelineTime::new(1, 50).expect("exact second-field time"));
+    assert_eq!(
+        super::source_sample_to_stream_pts(second_field, ffmpeg::Rational(1, 25), 0)
+            .expect("coarse demux target"),
+        0
+    );
+    assert_eq!(
+        super::source_sample_to_selection_pts(second_field, ffmpeg::Rational(1, 25), 0, 2)
+            .expect("exact field-rate target"),
+        1
+    );
+    assert_eq!(
+        super::source_sample_to_selection_pts(
+            SourceSampleTarget::covering(
+                TimelineTime::new(1, 25).expect("exact next-picture time")
+            ),
+            ffmpeg::Rational(1, 25),
+            0,
+            2,
+        )
+        .expect("exact next-picture target"),
+        2
+    );
+}
+
+#[test]
 fn exact_source_time_preserves_long_duration_without_float_drift() {
     assert_eq!(
         super::source_sample_to_stream_pts(
@@ -3613,8 +3641,8 @@ fn reverse_playback_replays_the_bounded_decoded_gop_tail_without_reseeking() {
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("software reverse fixture must return an RGBA frame");
         };
-        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 512));
-        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
         if request_index > 0 {
             assert!(!frame.diagnostics.seek_performed);
             assert_eq!(
@@ -3654,8 +3682,8 @@ fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU exact fixture must return an RGBA frame");
         };
-        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 512));
-        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
         assert!(!frame.diagnostics.temporal_approximation);
         assert_eq!(
             frame.diagnostics.session_disposition,
@@ -4505,6 +4533,60 @@ fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
         );
     }
     clear_thread_local_preview_decode_session();
+}
+
+#[test]
+#[ignore = "requires a tagged 25i interlaced fixture and packaged demux worker"]
+fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_INTERLACED_DECODE_FIXTURE")
+            .expect("explicit interlaced fixture is required"),
+    );
+    let demux_worker = PathBuf::from(
+        std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+            .expect("explicit packaged demux worker is required"),
+    );
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    for field_processing in [
+        super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+            dominance: mondrian_core::PictureFieldDominance::TopFirst,
+        },
+        super::PreviewSourceFieldProcessing::Automatic,
+    ] {
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(demux_worker.clone());
+        let mut decoder = bootstrap.build();
+        for field_index in 0..16 {
+            let source_time = TimelineTime::new(field_index, 50).expect("exact 25i field time");
+            let mut request = covering_decode_request(
+                &path,
+                source_time,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            )
+            .with_fingerprint(fingerprint)
+            .with_field_processing(field_processing);
+            request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+            let outcome = decoder.decode_cancellable(request, || false).unwrap_or_else(|error| {
+                panic!("{field_processing:?} field {field_index}: {error}")
+            });
+            let PreviewDecodeOutcome::CpuYuvFrame(frame) = outcome else {
+                panic!("interlaced software decode must retain compact YUV");
+            };
+            let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
+            assert_eq!(selection.requested_pts, field_index);
+            assert_eq!(selection.selected_pts, field_index);
+            assert_eq!(selection.selected_duration_pts, 1);
+            assert!(!selection.temporal_approximation);
+        }
+
+        decoder.clear();
+        let demux = observer.snapshot().isolated_demux;
+        assert!(
+            demux.completed_reads > 0 && demux.clean_closes > 0 && demux.active_sessions == 0,
+            "{field_processing:?} did not close the isolated demux owner: {demux:?}"
+        );
+    }
 }
 
 #[test]
