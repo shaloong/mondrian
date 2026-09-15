@@ -1,5 +1,13 @@
 # Color Management
 
+Bundled OpenColorIO and its native dependencies build under Cargo's default
+`CMAKE_BUILD_PARALLEL_LEVEL=1`. OpenColorIO's nested `ExternalProject` commands
+invoke `cmake --build --parallel` without a numeric limit and do not reliably
+inherit Cargo's `-j` jobserver bound on Linux. The repository default therefore
+prevents a clean color-engine build from creating an unbounded native compiler
+fan-out. A qualification host may explicitly override the environment variable
+when its CPU, memory, and process limits have been independently provisioned.
+
 Preview timing reports distinguish a measured CPU output bottleneck from GPU
 route eligibility. The recommendation first profiles processor, allocation and
 memory costs while preserving mandatory CPU working-frame cache publication.

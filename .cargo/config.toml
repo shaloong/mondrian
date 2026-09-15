@@ -1,0 +1,5 @@
+[env]
+# Bundled native dependencies can invoke `cmake --build --parallel` from nested
+# ExternalProject steps, bypassing Cargo's jobserver. Keep the default bounded;
+# a qualified build host may explicitly override this environment variable.
+CMAKE_BUILD_PARALLEL_LEVEL = { value = "1", force = false }
