@@ -579,7 +579,7 @@ fn advance_headless_execution_resource_policy(
 
 /// Bind exact GPU-generation facts through the product coordinator before any
 /// current or speculative request freezes its runtime scale.
-fn apply_headless_gpu_resource_facts(
+pub(crate) fn apply_headless_gpu_resource_facts(
     preview: &HeadlessPreviewRuntime,
     state: &AppState,
     gpu: &mut HeadlessViewerGpuAdapter,

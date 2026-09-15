@@ -1353,9 +1353,16 @@ External real-media playback validation authors the Sequence to the probed
 primary-video extent at preview scale `1.0`. A near-standard probed average
 rate is mapped to the nearest supported exact Sequence grid only within 0.1%;
 other rates fail instead of creating an invalid authoring state or silently
-changing cadence. The report records that authored resolution, scale, and Full
-extent, and the gate requires the continuous GPU window to execute that exact
-Full extent before runtime Half/Quarter recovery can count as valid evidence.
+changing cadence. The report records the authored resolution and Full extent
+separately from the runtime minimum scale and extent selected by the production
+resource coordinator. A developer smoke gate must execute that selected extent
+and reports whether Full actually ran; it cannot promote capacity-scaled work
+to Full qualification. A professional authored-Full gate admits playback work
+only when the same coordinator selects Full, so a capacity-limited GPU is an
+explicit admission-time `NotRun` rather than a late failure or a false pass.
+Once admitted, the professional continuous GPU window must execute the exact
+authored Full extent before later Half/Quarter recovery can count as valid
+evidence.
 
 The Engine must never silently:
 

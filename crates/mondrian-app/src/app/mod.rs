@@ -1295,5 +1295,8 @@ mod perf_tests;
 /// Bounded validation of the actual App/Preview performance owner protocol.
 #[cfg(any(test, feature = "validation"))]
 pub mod performance_owner_closure;
+/// Qualification admission for production-selected Viewer execution scale.
+#[cfg(any(test, feature = "validation"))]
+pub mod preview_validation_extent;
 #[cfg(test)]
 mod timeline_edit_tests;
