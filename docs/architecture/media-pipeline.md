@@ -1386,7 +1386,12 @@ resource; App Frame Store clones and renderer copy-fence clones share that token
 instead of incrementing it again. The token charges both one strongly retained
 worker-family counter and the originating Session's local counter. An
 Interactive slot may seek/flush or cross between Scrub and native exact Still
-only after its local count reaches zero. Released slots are reused first. When
+only after its local count reaches zero. Among released slots, an exact decoder
+contract match is selected before an unrelated free slot: a later matching
+source must not be reopened merely because an earlier slot became idle. This
+uses the same source revision, stream, device generation, color and field-processing
+contract as decoder admission and never permits reuse of a live native output.
+When
 all existing outputs remain owned, the worker may add another Session only up
 to its share of the App-owned current-media resource-unit grant; further work
 waits at the same cooperatively cancellable `OutputLease` checkpoint. A policy

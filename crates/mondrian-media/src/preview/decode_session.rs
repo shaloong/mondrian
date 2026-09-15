@@ -693,16 +693,17 @@ impl PreviewDecodeSessions {
         access_mode: PreviewDecodeAccessMode,
         hardware_decode_request: PreviewHardwareDecodeRequest,
         interactive_capacity: usize,
+        contract_matches: impl FnMut(&PreviewDecodeSession) -> bool,
     ) -> Option<PreviewDecodeSessionSlot> {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => None,
             PreviewDecodeAccessMode::ScrubCursor => {
-                self.available_interactive_slot(interactive_capacity)
+                self.available_interactive_slot(interactive_capacity, contract_matches)
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame
                 if hardware_decode_request.prefers_gpu_residency() =>
             {
-                self.available_interactive_slot(interactive_capacity)
+                self.available_interactive_slot(interactive_capacity, contract_matches)
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 Some(PreviewDecodeSessionSlot::CpuStill)
@@ -749,6 +750,7 @@ impl PreviewDecodeSessions {
     fn available_interactive_slot(
         &mut self,
         interactive_capacity: usize,
+        mut contract_matches: impl FnMut(&PreviewDecodeSession) -> bool,
     ) -> Option<PreviewDecodeSessionSlot> {
         let interactive_capacity = interactive_capacity.max(1);
         while self.interactive.len() > interactive_capacity {
@@ -758,6 +760,16 @@ impl PreviewDecodeSessions {
                 break;
             };
             self.interactive.remove(released);
+        }
+        // A released matching decoder retains useful source/codec locality.
+        // Only replacement needs an arbitrary free slot; matching never waives
+        // the Interactive family's native-output release barrier.
+        if let Some(index) = self.interactive.iter().position(|session| {
+            session.as_ref().is_some_and(|session| {
+                session.native_output_released() && contract_matches(session)
+            })
+        }) {
+            return Some(PreviewDecodeSessionSlot::Interactive(index));
         }
         let selected = select_interactive_session_slot(
             self.interactive.iter().map(|session| {
@@ -3142,6 +3154,7 @@ fn decode_preview_frame_outcome_in_sessions(
                 access_mode,
                 hardware_decode_request,
                 residency_config.max_interactive_sessions_per_worker(),
+                |session| session.matches_decoder_contract(&open_request, demux_worker.is_some()),
             )
         };
         if let Some(slot) = available {
@@ -3694,13 +3707,90 @@ mod session_topology_tests {
         let request = PreviewHardwareDecodeRequest::PreferGpuResident;
 
         assert_eq!(
-            sessions.available_slot(PreviewDecodeAccessMode::ScrubCursor, request, 4),
+            sessions.available_slot(PreviewDecodeAccessMode::ScrubCursor, request, 4, |_| false),
             Some(PreviewDecodeSessionSlot::Interactive(0))
         );
         assert_eq!(
-            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request, 4),
+            sessions.available_slot(
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                request,
+                4,
+                |_| false,
+            ),
             Some(PreviewDecodeSessionSlot::Interactive(0))
         );
+    }
+
+    #[test]
+    fn interactive_reuses_matching_idle_session_before_replacing_another_source() {
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = root.path().join("first.mp4");
+        let second = root.path().join("second.mp4");
+        for path in [&first, &second] {
+            std::fs::write(path, FIXTURE).expect("write fixture");
+        }
+        let mut context = PreviewDecodeSessionContext::new();
+        let mut first_output = None;
+        for index in 0..3 {
+            let path = if index == 0 { &first } else { &second };
+            let request = PreviewDecodeRequest::new(
+                path,
+                SourceSampleTarget::covering(TimelineTime::new(index + 2, 25).expect("time")),
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                ),
+            )
+            .with_max_size(Some(64), Some(64));
+            let outcome = context.decode_cancellable(request, || false).expect("decode");
+            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+                panic!("software fixture must produce a frame");
+            };
+            if index == 2 {
+                assert_eq!(
+                    frame.diagnostics.session_disposition,
+                    PreviewDecodeSessionDisposition::Reused
+                );
+            }
+            drop(frame);
+            if index == 0 {
+                // Exercise the production output counter, without claiming a
+                // physical GPU lease: the first slot is occupied at B admission.
+                let session = context.sessions.interactive[0].as_ref().expect("first session");
+                first_output = Some(
+                    PreviewDecodeSessionOutputLease::acquire(
+                        context.resources.native_output_tracker(),
+                        &session.session_native_outputs,
+                    )
+                    .expect("output lease"),
+                );
+            } else if index == 1 {
+                assert_eq!(context.resident_session_count(), 2);
+                drop(first_output.take());
+            }
+        }
+        let matching_session = context.sessions.interactive[1].as_ref().expect("second session");
+        assert_eq!(matching_session.path, second);
+        let matching_output = PreviewDecodeSessionOutputLease::acquire(
+            context.resources.native_output_tracker(),
+            &matching_session.session_native_outputs,
+        )
+        .expect("matching output lease");
+        assert_eq!(
+            context.sessions.available_slot(
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewHardwareDecodeRequest::Auto,
+                8,
+                |session| session.path == second,
+            ),
+            Some(PreviewDecodeSessionSlot::Interactive(0)),
+            "a contract match must not bypass an outstanding native output"
+        );
+        drop(matching_output);
+        context.clear();
+        assert!(context.native_outputs_released());
     }
 
     #[test]
@@ -3727,6 +3817,7 @@ mod session_topology_tests {
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
                 PreviewHardwareDecodeRequest::Auto,
                 4,
+                |_| false,
             )
             .expect("CPU still slot should be available");
         assert_eq!(cpu_slot, PreviewDecodeSessionSlot::CpuStill);
@@ -3748,6 +3839,7 @@ mod session_topology_tests {
                 PreviewDecodeAccessMode::ScrubCursor,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 4,
+                |_| false,
             ),
             Some(PreviewDecodeSessionSlot::Interactive(0))
         );
