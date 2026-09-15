@@ -10394,6 +10394,7 @@ mod tests {
                 stdout_error: Some("worker remains active".to_owned()),
                 stderr_error: None,
             }),
+            termination: Box::default(),
         };
         assert!(matches!(
             super::process_supervision_failure("encoder", error),

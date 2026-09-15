@@ -146,7 +146,7 @@ pub use process_supervisor::{
     run_supervised_command, run_supervised_command_streaming_stdout, run_supervised_command_while,
     SupervisedChild, SupervisedProcessCleanupReceipt, SupervisedProcessError,
     SupervisedProcessOutput, SupervisedProcessPolicy, SupervisedProcessStage,
-    SupervisedProcessStream, SupervisedStreamCapture,
+    SupervisedProcessStream, SupervisedProcessTerminationEvidence, SupervisedStreamCapture,
 };
 pub use proxy::{
     ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract,

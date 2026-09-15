@@ -895,6 +895,14 @@ stages. Every abnormal path performs kill → wait and joins all pipe/pump
 threads; dropping an unfinished supervised child has the same fail-safe
 ownership rule.
 
+If a child exits while the stdin pump is delivering a frame, the consuming
+failure path retains the observed native exit status and the configured bounded
+stderr tail before releasing the drain owners. That terminal evidence is
+attached to the original typed pipe error; a raw `BrokenPipe` therefore cannot
+erase the encoder, decoder, or provider reason that made the child stop reading.
+The evidence remains diagnostic only and does not change cancellation,
+deadline, cleanup, retry, or qualification classification.
+
 `SupervisedProcessError::has_cleanup_failure` derives the independent closure
 failure from the existing cleanup receipt and worker terminal errors, including
 nested causes. A canceled or timed-out operation with fully consumed resources

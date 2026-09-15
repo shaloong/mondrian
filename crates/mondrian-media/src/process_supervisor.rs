@@ -75,13 +75,15 @@ impl fmt::Display for SupervisedProcessStream {
 #[derive(Debug, Error)]
 pub enum SupervisedProcessError {
     /// The original operation failed and native cleanup independently failed.
-    #[error("{primary}; external process cleanup: {cleanup:?}")]
+    #[error("{primary}; external process cleanup: {cleanup:?}{termination}")]
     Cleanup {
         /// Original operation error, retained without string conversion.
         #[source]
         primary: Box<SupervisedProcessError>,
         /// Native process and pipe-worker closure facts.
         cleanup: Box<SupervisedProcessCleanupReceipt>,
+        /// Exit status and bounded stderr retained while consuming the failed owner.
+        termination: Box<SupervisedProcessTerminationEvidence>,
     },
     /// A pipe worker could not be consumed within the original deadline.
     #[error("external media process worker did not settle during {stage}: {detail}")]
@@ -146,7 +148,7 @@ impl SupervisedProcessError {
     /// cancellation or trying another execution route.
     pub fn has_cleanup_failure(&self) -> bool {
         match self {
-            Self::Cleanup { primary, cleanup } => {
+            Self::Cleanup { primary, cleanup, .. } => {
                 !cleanup.all_resources_released() || primary.has_cleanup_failure()
             }
             Self::WorkerClosure { .. } | Self::WorkerPanicked { .. } => true,
@@ -195,6 +197,35 @@ pub struct SupervisedProcessCleanupReceipt {
     pub stdout_error: Option<String>,
     /// Stderr worker cleanup failure.
     pub stderr_error: Option<String>,
+}
+
+/// Bounded diagnostic output retained while consuming a failed native process owner.
+#[derive(Debug, Default)]
+pub struct SupervisedProcessTerminationEvidence {
+    /// Native exit status when it was observable after termination and reap.
+    pub exit_status: Option<String>,
+    /// Latest configured stderr bytes drained before the child owner closed.
+    pub stderr_tail: Vec<u8>,
+    /// Whether earlier stderr bytes were omitted by the configured tail bound.
+    pub stderr_truncated: bool,
+}
+
+impl fmt::Display for SupervisedProcessTerminationEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(status) = &self.exit_status {
+            write!(formatter, "; child {status}")?;
+        }
+        if !self.stderr_tail.is_empty() {
+            let stderr = String::from_utf8_lossy(&self.stderr_tail);
+            write!(
+                formatter,
+                "; child stderr{}: {}",
+                if self.stderr_truncated { " (tail)" } else { "" },
+                stderr.trim()
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl SupervisedProcessCleanupReceipt {
@@ -378,6 +409,7 @@ impl SupervisedChild {
                 return SupervisedProcessError::Cleanup {
                     primary: Box::new(primary),
                     cleanup: Box::new(cleanup),
+                    termination: Box::default(),
                 };
             }
             primary
@@ -713,6 +745,7 @@ impl SupervisedChild {
                 return Err(SupervisedProcessError::Cleanup {
                     primary: Box::new(primary),
                     cleanup: Box::new(cleanup),
+                    termination: Box::default(),
                 });
             }
             (None, Ok(stdout), Ok(stderr)) => (stdout, stderr),
@@ -723,6 +756,7 @@ impl SupervisedChild {
                     stage: SupervisedProcessStage::Wait,
                 }),
                 cleanup: Box::new(cleanup),
+                termination: Box::default(),
             });
         }
         if self.policy.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -731,6 +765,7 @@ impl SupervisedChild {
                     stage: SupervisedProcessStage::Wait,
                 }),
                 cleanup: Box::new(cleanup),
+                termination: Box::default(),
             });
         }
         for (stream, capture, exceeded) in [
@@ -756,6 +791,7 @@ impl SupervisedChild {
                         limit_bytes,
                     }),
                     cleanup: Box::new(cleanup),
+                    termination: Box::default(),
                 });
             }
         }
@@ -857,14 +893,20 @@ impl SupervisedChild {
     }
 
     fn fail(&mut self, primary: SupervisedProcessError) -> SupervisedProcessError {
-        let cleanup = self.abort_and_settle();
+        let (cleanup, termination) = self.abort_and_settle();
         SupervisedProcessError::Cleanup {
             primary: Box::new(primary),
             cleanup: Box::new(cleanup),
+            termination: Box::new(termination),
         }
     }
 
-    fn abort_and_settle(&mut self) -> SupervisedProcessCleanupReceipt {
+    fn abort_and_settle(
+        &mut self,
+    ) -> (
+        SupervisedProcessCleanupReceipt,
+        SupervisedProcessTerminationEvidence,
+    ) {
         // Unblock the bounded stdout sender before joining or terminating the child.
         self.stdout_chunks.take();
         let deadline = self.cleanup_deadline();
@@ -880,30 +922,49 @@ impl SupervisedChild {
         {
             receipt.stdin_error = Some(error);
         }
-        for (drain, error) in [
-            (&mut self.stdout, &mut receipt.stdout_error),
-            (&mut self.stderr, &mut receipt.stderr_error),
-        ] {
-            if let Some(handle) = drain.handle.take() {
-                match join_worker_until(handle, deadline) {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(failure)) => *error = Some(failure.to_string()),
-                    Err(failure) => *error = Some(failure),
-                }
-            }
-        }
+        let _ = settle_failed_pipe(&mut self.stdout, deadline, &mut receipt.stdout_error);
+        let stderr = settle_failed_pipe(&mut self.stderr, deadline, &mut receipt.stderr_error);
+        let exit_status = self
+            .child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok().flatten())
+            .map(|status| status.to_string());
         if let Some(child) = self.child.as_ref() {
             crate::ffmpeg_command::record_native_cleanup(child.id(), &receipt);
         }
         self.child.take();
-        receipt
+        let termination = SupervisedProcessTerminationEvidence {
+            exit_status,
+            stderr_tail: stderr.as_ref().map_or_else(Vec::new, |capture| capture.retained.clone()),
+            stderr_truncated: stderr.is_some_and(|capture| capture.exceeded),
+        };
+        (receipt, termination)
     }
 }
 
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         if self.child.is_some() {
-            self.abort_and_settle();
+            let _ = self.abort_and_settle();
+        }
+    }
+}
+
+fn settle_failed_pipe(
+    drain: &mut PipeDrain,
+    deadline: Instant,
+    error: &mut Option<String>,
+) -> Option<CapturedPipe> {
+    let handle = drain.handle.take()?;
+    match join_worker_until(handle, deadline) {
+        Ok(Ok(capture)) => Some(capture),
+        Ok(Err(failure)) => {
+            *error = Some(failure.to_string());
+            None
+        }
+        Err(failure) => {
+            *error = Some(failure);
+            None
         }
     }
 }
@@ -1193,6 +1254,7 @@ mod tests {
                 let error = super::SupervisedProcessError::Cleanup {
                     primary: Box::new(primary),
                     cleanup: Box::new(cleanup),
+                    termination: Box::default(),
                 };
                 assert_eq!(error.has_cleanup_failure(), failed);
                 assert_eq!(error.is_canceled(), canceled);
@@ -1200,6 +1262,7 @@ mod tests {
                 let nested = super::SupervisedProcessError::Cleanup {
                     primary: Box::new(error),
                     cleanup: Box::new(super::SupervisedProcessCleanupReceipt::empty()),
+                    termination: Box::default(),
                 };
                 assert_eq!(nested.has_cleanup_failure(), failed);
             }
@@ -1253,8 +1316,27 @@ mod tests {
                 std::io::stdout().write_all(&output).expect("write stdout");
                 std::io::stdout().flush().expect("flush stdout");
             }
+            "stderr-exit" => {
+                std::io::stderr().write_all(b"fatal encoder detail\n").expect("write stderr");
+                std::io::stderr().flush().expect("flush stderr");
+                std::process::exit(17);
+            }
             other => panic!("unknown supervisor child mode {other}"),
         }
+    }
+
+    #[test]
+    fn stdin_failure_retains_child_exit_and_stderr_evidence() {
+        let mut command = child_command("stderr-exit");
+        let mut child =
+            SupervisedChild::spawn(&mut command, test_policy(true)).expect("spawn failing child");
+        let error = child
+            .write_owned(vec![b'i'; 1024 * 1024], &ExecutionCancellationToken::new())
+            .expect_err("closed child stdin must fail");
+        let detail = error.to_string();
+
+        assert!(detail.contains("exit status: 17"), "{detail}");
+        assert!(detail.contains("fatal encoder detail"), "{detail}");
     }
 
     #[test]
@@ -1345,6 +1427,7 @@ mod tests {
         let wrapped = SupervisedProcessError::Cleanup {
             primary: Box::new(canceled),
             cleanup: Box::new(SupervisedProcessCleanupReceipt::empty()),
+            termination: Box::default(),
         };
         assert!(wrapped.is_canceled());
         assert!(matches!(
