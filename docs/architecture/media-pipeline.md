@@ -829,6 +829,14 @@ and resolves the concrete backend, it derives one private immutable Session
 open contract. Session-reuse matching and replacement Session construction
 consume that same value, so stream, geometry, hardware-device, and source-color
 identity cannot drift between parallel positional argument lists.
+Playback and Interactive remain distinct scheduling lanes, but they are not
+separate physical decoder authorities. When access changes between Playback,
+Scrub, and GPU-resident exact still, the worker transfers an idle Session with
+the same immutable open contract into the destination lane. A matching Session
+with an outstanding native output blocks destination admission until that
+output is released; the worker must not open a duplicate codec/DPB/surface pool
+to bypass the release barrier. A different source or decoder contract may still
+use another granted slot, preserving valid multi-layer and edit-boundary work.
 The App's bounded physical-source worker assignment survives in-family decoded
 frame and cache-pressure trims. Those trims may reclaim Frame Store and
 cold-lookahead surface owners, but they cannot move the next request to another

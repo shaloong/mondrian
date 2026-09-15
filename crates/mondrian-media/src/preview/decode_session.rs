@@ -735,16 +735,39 @@ impl PreviewDecodeSessions {
             self.playback.push(matched);
             return Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1));
         }
+
+        if let Some(index) = self
+            .interactive
+            .iter()
+            .position(|session| session.as_ref().is_some_and(&mut contract_matches))
+        {
+            let released = self.interactive[index]
+                .as_ref()
+                .is_some_and(PreviewDecodeSession::native_output_released);
+            if !released {
+                return None;
+            }
+            let destination = self.available_empty_playback_slot(playback_capacity)?;
+            let transferred = self.interactive[index].take();
+            self.playback[destination] = transferred;
+            return Some(PreviewDecodeSessionSlot::Playback(destination));
+        }
+
+        self.available_empty_playback_slot(playback_capacity)
+            .map(PreviewDecodeSessionSlot::Playback)
+    }
+
+    fn available_empty_playback_slot(&mut self, playback_capacity: usize) -> Option<usize> {
         if self.playback.len() < playback_capacity {
             self.playback.push(None);
-            return Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1));
+            return Some(self.playback.len() - 1);
         }
         let released = self.playback.iter().position(|session| {
             session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
         })?;
         self.playback.remove(released);
         self.playback.push(None);
-        Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1))
+        Some(self.playback.len() - 1)
     }
 
     fn available_interactive_slot(
@@ -771,6 +794,33 @@ impl PreviewDecodeSessions {
         }) {
             return Some(PreviewDecodeSessionSlot::Interactive(index));
         }
+
+        if let Some(index) = self
+            .playback
+            .iter()
+            .position(|session| session.as_ref().is_some_and(&mut contract_matches))
+        {
+            let released = self.playback[index]
+                .as_ref()
+                .is_some_and(PreviewDecodeSession::native_output_released);
+            if !released {
+                return None;
+            }
+            let selected = self.available_empty_interactive_slot(interactive_capacity)?;
+            let PreviewDecodeSessionSlot::Interactive(destination) = selected else {
+                return None;
+            };
+            self.interactive[destination] = self.playback[index].take();
+            return Some(selected);
+        }
+
+        self.available_empty_interactive_slot(interactive_capacity)
+    }
+
+    fn available_empty_interactive_slot(
+        &mut self,
+        interactive_capacity: usize,
+    ) -> Option<PreviewDecodeSessionSlot> {
         let selected = select_interactive_session_slot(
             self.interactive.iter().map(|session| {
                 session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
@@ -3791,6 +3841,96 @@ mod session_topology_tests {
         drop(matching_output);
         context.clear();
         assert!(context.native_outputs_released());
+    }
+
+    #[test]
+    fn scrub_reuses_released_matching_playback_session() {
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("playback-to-scrub.mp4");
+        std::fs::write(&path, FIXTURE).expect("write fixture");
+        let mut context = PreviewDecodeSessionContext::new();
+        let source_color =
+            PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited);
+
+        let playback = context
+            .decode_cancellable(
+                PreviewDecodeRequest::new(
+                    &path,
+                    SourceSampleTarget::covering(TimelineTime::new(2, 25).expect("time")),
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    source_color,
+                )
+                .with_max_size(Some(64), Some(64)),
+                || false,
+            )
+            .expect("playback decode");
+        drop(playback);
+        assert_eq!(context.resident_session_count(), 1);
+        let playback_session = context.sessions.playback[0].as_ref().expect("playback session");
+        let outstanding_playback = PreviewDecodeSessionOutputLease::acquire(
+            context.resources.native_output_tracker(),
+            &playback_session.session_native_outputs,
+        )
+        .expect("output lease");
+        assert_eq!(
+            context.sessions.available_slot(
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewHardwareDecodeRequest::Auto,
+                8,
+                |session| session.path == path,
+            ),
+            None,
+            "an access-mode transition must wait for the matching decoder output"
+        );
+        drop(outstanding_playback);
+
+        let scrub = context
+            .decode_cancellable(
+                PreviewDecodeRequest::new(
+                    &path,
+                    SourceSampleTarget::covering(TimelineTime::new(4, 25).expect("time")),
+                    PreviewDecodeAccessMode::ScrubCursor,
+                    source_color,
+                )
+                .with_max_size(Some(64), Some(64)),
+                || false,
+            )
+            .expect("scrub decode");
+        let PreviewDecodeOutcome::Frame(frame) = scrub else {
+            panic!("software fixture must produce a frame");
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Reused
+        );
+        assert_eq!(
+            context.resident_session_count(),
+            1,
+            "an access-mode transition must not open a second matching decoder"
+        );
+        drop(frame);
+
+        let playback_again = context
+            .decode_cancellable(
+                PreviewDecodeRequest::new(
+                    &path,
+                    SourceSampleTarget::covering(TimelineTime::new(5, 25).expect("time")),
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    source_color,
+                )
+                .with_max_size(Some(64), Some(64)),
+                || false,
+            )
+            .expect("second playback decode");
+        let PreviewDecodeOutcome::Frame(frame) = playback_again else {
+            panic!("software fixture must produce a frame");
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Reused
+        );
+        assert_eq!(context.resident_session_count(), 1);
     }
 
     #[test]
