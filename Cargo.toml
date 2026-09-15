@@ -203,8 +203,11 @@ inherits      = "release"
 lto           = false
 codegen-units = 16
 incremental   = true
-debug         = 1
-strip         = false
+# Qualification evidence comes from structured receipts and persisted logs.
+# Keep DWARF out of monolithic native executables so their final link stays
+# bounded on 16 GiB qualification hosts without changing runtime semantics.
+debug         = 0
+strip         = "debuginfo"
 
 # The application composition root is substantially larger than every domain
 # crate. Split only that crate more finely so native validation binaries can be

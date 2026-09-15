@@ -85,6 +85,14 @@ the expanded harness within a 16 GiB Windows host's commit limit. Domain crates
 retain their optimization, and performance acceptance uses separate production
 dev/release executables rather than treating unit-test timings as qualification.
 
+The native `validation` profile also omits DWARF from final executables. Native
+qualification evidence is carried by structured receipts and persisted logs;
+linking debug sections into the monolithic application adds no qualification
+evidence and can exhaust a bounded 16 GiB host during the final link. Release
+optimization, disabled debug assertions, and the production dependency graph
+remain unchanged, so this build-resource bound does not relax a qualification
+gate or alter execution semantics.
+
 The production repeated-export backend schedules the complete terminal job
 snapshot on the phase's capacity-one worker at its first terminal observation.
 Polling remains pending until publication and native thread join finish, before
