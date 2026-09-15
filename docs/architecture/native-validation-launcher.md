@@ -77,3 +77,10 @@ Bootstrap framing uses native ReadFile/WriteFile status under the original deadl
 Rust File read maps ERROR_NO_DATA to zero bytes; native reads preserve that empty-live
 PIPE_NOWAIT condition while rejecting broken/disconnected peers. A delayed-peer native
 regression verifies both eventual transfer and immediate closed-peer rejection.
+
+On Linux, the monolithic `mondrian-app` test target asks the platform's GNU
+linker not to retain every input symbol table. This is a build-time resource
+bound only: it trades additional object-file reads for lower peak linker memory
+and does not change production code generation, admission, or qualification
+status. Validation executables continue to use the dedicated `validation`
+profile and its production runtime semantics.

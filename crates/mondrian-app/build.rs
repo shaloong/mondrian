@@ -7,6 +7,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     emit_cargo_build_attestation();
 
+    #[cfg(target_os = "linux")]
+    emit_linux_test_link_resource_policy();
+
     #[cfg(target_os = "windows")]
     {
         if let Err(err) = embed_windows_icon() {
@@ -16,6 +19,16 @@ fn main() {
             println!("cargo:warning=部署 Windows 媒体运行时失败: {err}");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_linux_test_link_resource_policy() {
+    // The App lib-test links the complete product and validation harness. GNU
+    // ld otherwise retains every input symbol table until exit, which can exceed
+    // the qualification host's bounded build envelope. Re-reading those
+    // tables is slower but keeps the final link inside the same hard memory
+    // boundary without changing code generation or runtime behavior.
+    println!("cargo:rustc-link-arg-tests=-Wl,--no-keep-memory");
 }
 
 fn emit_cargo_build_attestation() {
