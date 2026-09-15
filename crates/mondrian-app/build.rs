@@ -8,7 +8,7 @@ fn main() {
     emit_cargo_build_attestation();
 
     #[cfg(target_os = "linux")]
-    emit_linux_test_link_resource_policy();
+    emit_linux_link_resource_policy();
 
     #[cfg(target_os = "windows")]
     {
@@ -22,12 +22,15 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn emit_linux_test_link_resource_policy() {
+fn emit_linux_link_resource_policy() {
     // Rust 1.97's Linux GNU target uses bundled lld, whose default is every
-    // available hardware thread. The App lib-test links the complete product
-    // and validation harness, so bound lld itself in addition to Cargo's job
-    // count. This changes neither code generation nor runtime behavior.
+    // available hardware thread. App tests, binaries, and examples link the
+    // complete product and validation harness, so bound lld itself in addition
+    // to Cargo's job count. This changes neither code generation nor runtime
+    // behavior.
     println!("cargo:rustc-link-arg-tests=-Wl,--threads=1");
+    println!("cargo:rustc-link-arg-bins=-Wl,--threads=1");
+    println!("cargo:rustc-link-arg-examples=-Wl,--threads=1");
 }
 
 fn emit_cargo_build_attestation() {

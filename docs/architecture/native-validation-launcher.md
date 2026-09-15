@@ -78,10 +78,10 @@ Rust File read maps ERROR_NO_DATA to zero bytes; native reads preserve that empt
 PIPE_NOWAIT condition while rejecting broken/disconnected peers. A delayed-peer native
 regression verifies both eventual transfer and immediate closed-peer rejection.
 
-On Linux, the monolithic `mondrian-app` test target limits the Rust 1.97
-toolchain's bundled LLD to one internal thread. Cargo `-j 1` alone does not
-constrain LLD's default all-CPU worker pool. This is a build-time resource bound
-only and does not change production code generation, admission, or
+On Linux, the monolithic `mondrian-app` tests, binaries, and examples limit the
+Rust 1.97 toolchain's bundled LLD to one internal thread. Cargo `-j 1` alone does
+not constrain LLD's default all-CPU worker pool. This is a build-time resource
+bound only and does not change production code generation, admission, or
 qualification status.
 The workspace test profile also omits dependency DWARF/PDB data by default;
 assertions, structured receipts, symbol names, and panic locations remain the
