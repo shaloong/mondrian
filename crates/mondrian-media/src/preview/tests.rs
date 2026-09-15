@@ -3746,6 +3746,238 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
 
 #[test]
 #[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("family-retirement-h264.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic fixture");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for (mode, frame_index) in [
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, 8),
+        (PreviewDecodeAccessMode::PlaybackCursor, 2),
+    ] {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(frame_index, 25).expect("exact time"),
+            mode,
+            test_source_color(),
+        )
+        .with_fingerprint(fingerprint)
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return an RGBA frame");
+        };
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        drop(frame);
+        if mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
+            context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+            assert_eq!(context.resident_session_count(), 0, "old codec must retire");
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(
+        evidence.active_sessions, 0,
+        "full clear consumes every child"
+    );
+    assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
+    assert_eq!(evidence.failure_terminations, 0);
+    assert_eq!(
+        evidence.session_launches, 1,
+        "family transition must reuse the healthy source without retaining its old codec"
+    );
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("retired-revision.mp4");
+    std::fs::write(&path, FIXTURE).expect("write fixture");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    let original = MediaFileFingerprint::capture(&path);
+    for revision in 0..2 {
+        if revision == 1 {
+            // Replace the inode as well as length: the retired child still owns
+            // the original open file, so reuse would serve a stale revision.
+            let replacement = root.path().join("replacement.mp4");
+            let mut bytes = FIXTURE.to_vec();
+            bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
+            std::fs::write(&replacement, bytes).expect("write replacement");
+            std::fs::rename(&replacement, &path).expect("replace source");
+            assert_ne!(MediaFileFingerprint::capture(&path), original);
+        }
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode revision");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return a frame");
+        };
+        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+        drop(frame);
+        context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        assert_eq!(context.resident_session_count(), 0);
+        let evidence = observer.snapshot().isolated_demux;
+        assert_eq!(evidence.session_launches, revision + 1);
+        assert_eq!(evidence.active_sessions, 1);
+        assert_eq!(evidence.reaped_sessions(), revision);
+    }
+    // No live codecs remain here; clear must still consume the idle child.
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(evidence.clean_closes, 2);
+    assert_eq!(evidence.failure_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_cancellation_reaps_before_retry() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("retired-cancel.mp4");
+    std::fs::write(&path, FIXTURE).expect("write fixture");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for (attempt, mode) in [
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::PlaybackCursor,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            mode,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let cancellation_observer = observer.clone();
+        let outcome = context
+            .decode_cancellable(request, move || {
+                attempt == 1
+                    && cancellation_observer.snapshot().stage == PreviewDecodeExecutionStage::Seek
+            })
+            .expect("decode or cooperative cancellation");
+        if attempt == 1 {
+            let PreviewDecodeOutcome::Canceled(cancellation) = outcome else {
+                panic!("reused source seek must cancel");
+            };
+            assert_eq!(
+                cancellation.source,
+                PreviewDecodeCancellationSource::IsolatedDemuxTermination
+            );
+            let evidence = observer.snapshot().isolated_demux;
+            assert_eq!(evidence.session_launches, 1, "cancel the retained process");
+            assert_eq!(evidence.active_sessions, 0);
+            assert_eq!(evidence.reaped_sessions(), 1);
+        } else {
+            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+                panic!("initial decode and retry must return exact frames");
+            };
+            assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+            drop(frame);
+        }
+        if attempt == 0 {
+            context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(
+        evidence.session_launches, 2,
+        "retry requires a fresh process"
+    );
+    assert_eq!(evidence.cancellation_terminations, 1);
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(evidence.failure_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_sources_obey_reduced_worker_residency() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for index in 0..7 {
+        if index == 4 {
+            context.worker_resources().reconfigure_session_residency(
+                crate::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(1, 1),
+            );
+        }
+        let path = root.path().join(format!("source-{index}.mp4"));
+        std::fs::write(&path, FIXTURE).expect("write distinct source");
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return a frame");
+        };
+        drop(frame);
+        if index >= 4 {
+            // One Playback slot, one Interactive slot, and one CPU-Still slot.
+            // Count active plus retired children before retiring this codec.
+            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+        }
+        context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        assert_eq!(context.resident_session_count(), 0);
+        if index >= 4 {
+            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.session_launches, 7);
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 7);
+    assert_eq!(evidence.clean_closes, 7);
+    assert_eq!(evidence.failure_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
 fn isolated_demux_worker_cancellation_terminates_the_packet_source() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
     let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")

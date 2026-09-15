@@ -73,6 +73,12 @@ impl PreviewDecodeSessionResidencyConfig {
         }
     }
 
+    fn source_capacity(self) -> usize {
+        self.max_playback_sessions_per_worker
+            .saturating_add(self.max_interactive_sessions_per_worker)
+            .saturating_add(1)
+    }
+
     /// Maximum GPU-resident interactive decoder Sessions owned by one worker.
     pub const fn max_interactive_sessions_per_worker(self) -> usize {
         self.max_interactive_sessions_per_worker
@@ -378,6 +384,7 @@ impl PreviewDecodeSessionContext {
                 playback: Vec::new(),
                 interactive: Vec::new(),
                 cpu_still: None,
+                retired_sources: Vec::new(),
             },
             execution_observer,
             demux_worker,
@@ -408,7 +415,9 @@ impl PreviewDecodeSessionContext {
     ///
     /// A shared App worker may own a cold Playback source and interactive
     /// Sessions at different times. Family transitions therefore retire the
-    /// obsolete vector rather than destroying unrelated source locality.
+    /// obsolete codecs rather than destroying unrelated source locality. Healthy
+    /// isolated packet sources may remain within the existing source-slot budget;
+    /// full clearing consumes those sources and their child processes.
     /// Immutable device roots retain only the pool's existing idle allowance;
     /// full context clearing and explicit pressure trimming release those roots.
     pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
@@ -416,7 +425,10 @@ impl PreviewDecodeSessionContext {
         if !self.sessions.family_is_empty(family) {
             self.execution_observer
                 .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-            self.sessions.clear_family(family);
+            self.sessions.clear_family(
+                family,
+                self.resources.session_residency_config().source_capacity(),
+            );
             self.execution_observer.finish_idle();
         }
     }
@@ -438,8 +450,9 @@ impl PreviewDecodeSessionContext {
     /// Number of live decoder Sessions owned by this context.
     ///
     /// This lightweight lifecycle fact lets worker/job owners prove that an
-    /// explicit retirement boundary released codec, DPB, demux, and
-    /// hardware-surface-pool residency. It does not expose decoder internals.
+    /// explicit retirement boundary released codec, DPB, and hardware-surface-pool
+    /// residency. Healthy isolated demux sources can outlive family retirement;
+    /// full context clearing releases those owners. It does not expose decoder internals.
     pub fn resident_session_count(&self) -> usize {
         self.sessions.resident_session_count()
     }
@@ -655,6 +668,16 @@ struct PreviewDecodeSessions {
     /// policies while physical residency follows the worker-family grant.
     interactive: Vec<Option<PreviewDecodeSession>>,
     cpu_still: Option<PreviewDecodeSession>,
+    // These own only healthy isolated demux processes and original stream metadata.
+    // Codec, DPB, decoded frames and hardware contexts have already been consumed.
+    retired_sources: Vec<RetiredPreviewPacketSource>,
+}
+
+struct RetiredPreviewPacketSource {
+    path: PathBuf,
+    fingerprint: MediaFileFingerprint,
+    requested_video_stream_index: Option<u32>,
+    opened: PreviewPacketSourceOpen,
 }
 
 impl PreviewDecodeSessions {
@@ -662,6 +685,7 @@ impl PreviewDecodeSessions {
         self.playback.iter().all(Option::is_none)
             && self.interactive.iter().all(Option::is_none)
             && self.cpu_still.is_none()
+            && self.retired_sources.is_empty()
     }
 
     fn available_slot(
@@ -791,20 +815,54 @@ impl PreviewDecodeSessions {
         }
     }
 
-    fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
-        match family {
-            PreviewDecodeSessionFamily::Playback => self.playback.clear(),
+    fn clear_family(&mut self, family: PreviewDecodeSessionFamily, source_capacity: usize) {
+        let retired = match family {
+            PreviewDecodeSessionFamily::Playback => std::mem::take(&mut self.playback),
             PreviewDecodeSessionFamily::Interactive => {
-                self.interactive.clear();
-                self.cpu_still = None;
+                let mut retired = std::mem::take(&mut self.interactive);
+                retired.push(self.cpu_still.take());
+                retired
+            }
+        };
+        for session in retired.into_iter().flatten() {
+            if let Some(source) = session.retire_into_packet_source() {
+                self.retired_sources.push(source);
             }
         }
+        self.trim_retired_sources(source_capacity.saturating_sub(self.resident_session_count()));
+    }
+
+    fn trim_retired_sources(&mut self, capacity: usize) {
+        let excess = self.retired_sources.len().saturating_sub(capacity);
+        self.retired_sources.drain(..excess);
+    }
+
+    fn take_retired_source(
+        &mut self,
+        request: &PreviewDecodeSessionOpenRequest<'_>,
+        isolated: bool,
+    ) -> Option<PreviewPacketSourceOpen> {
+        // A changed file revision must never regain its old open-file authority.
+        self.retired_sources.retain(|source| {
+            source.opened.source.is_healthy()
+                && (source.path != request.path || source.fingerprint == request.fingerprint)
+        });
+        if !isolated || !request.fingerprint.authorizes_reuse() {
+            return None;
+        }
+        let index = self.retired_sources.iter().rposition(|source| {
+            source.path == request.path
+                && source.fingerprint == request.fingerprint
+                && source.requested_video_stream_index == request.video_stream_index
+        })?;
+        Some(self.retired_sources.remove(index).opened)
     }
 
     fn clear(&mut self) {
         self.playback.clear();
         self.interactive.clear();
         self.cpu_still = None;
+        self.retired_sources.clear();
     }
 }
 
@@ -845,7 +903,9 @@ struct PreviewDecodeSession {
     source_color: PreviewSourceColorContract,
     field_processing: super::PreviewSourceFieldProcessing,
     codec_id: ffmpeg::codec::Id,
-    packet_source: PreviewPacketSource,
+    packet_source: Option<PreviewPacketSource>,
+    source_parameters: ffmpeg::codec::Parameters,
+    source_stream_rate: ffmpeg::Rational,
     // Declared after `packet_source` so a direct AVFormatContext releases its callback use
     // before the callback state is dropped.
     interrupt_state: Arc<PreviewDecodeInterruptState>,
@@ -1518,22 +1578,56 @@ struct PreviewDecodeSessionOpenRequest<'a> {
 }
 
 impl PreviewDecodeSession {
+    fn retire_into_packet_source(mut self) -> Option<RetiredPreviewPacketSource> {
+        if !self.native_output_released()
+            || !self.fingerprint.authorizes_reuse()
+            || !self
+                .packet_source
+                .as_ref()
+                .is_some_and(|source| source.is_isolated() && source.is_healthy())
+        {
+            return None;
+        }
+        let source = self.packet_source.take()?;
+        let retired = RetiredPreviewPacketSource {
+            path: self.path.clone(),
+            fingerprint: self.fingerprint,
+            requested_video_stream_index: self.requested_video_stream_index,
+            opened: PreviewPacketSourceOpen {
+                source,
+                parameters: self.source_parameters.clone(),
+                stream_index: self.stream_index,
+                stream_tb: self.stream_tb,
+                stream_start_pts: self.stream_start_pts,
+                stream_rate: self.source_stream_rate,
+                seek_index: std::mem::take(&mut self.seek_index),
+            },
+        };
+        // Consume all codec/native-frame owners before publishing the idle source.
+        drop(self);
+        Some(retired)
+    }
+
     fn open(
         request: PreviewDecodeSessionOpenRequest<'_>,
         resources: &PreviewDecodeWorkerResources,
         demux_worker: Option<&PreviewDemuxWorkerConfig>,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
         interrupt_state: Arc<PreviewDecodeInterruptState>,
+        retained_source: Option<PreviewPacketSourceOpen>,
     ) -> std::result::Result<Self, PreviewPacketSourceOpenError> {
-        let source = PreviewPacketSource::open(
-            request.path,
-            request.fingerprint,
-            request.video_stream_index,
-            resources.seek_index_cache(),
-            demux_worker,
-            &interrupt_state,
-            should_cancel,
-        )?;
+        let source = match retained_source {
+            Some(source) => source,
+            None => PreviewPacketSource::open(
+                request.path,
+                request.fingerprint,
+                request.video_stream_index,
+                resources.seek_index_cache(),
+                demux_worker,
+                &interrupt_state,
+                should_cancel,
+            )?,
+        };
         Self::from_packet_source(
             source,
             interrupt_state,
@@ -1584,6 +1678,7 @@ impl PreviewDecodeSession {
             stream_rate,
             seek_index,
         } = source;
+        let source_parameters = parameters.clone();
         let codec_id = parameters.id();
 
         let mut hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
@@ -1751,7 +1846,9 @@ impl PreviewDecodeSession {
             source_color,
             field_processing,
             codec_id,
-            packet_source: source,
+            packet_source: Some(source),
+            source_parameters,
+            source_stream_rate: stream_rate,
             interrupt_state,
             decoder,
             scaler,
@@ -1802,12 +1899,13 @@ impl PreviewDecodeSession {
         request: &PreviewDecodeSessionOpenRequest<'_>,
         demux_worker_available: bool,
     ) -> bool {
-        self.packet_source.is_healthy()
-            && packet_source_execution_family_matches(
-                self.packet_source.is_isolated(),
-                demux_worker_available,
-            )
-            && self.path == request.path
+        self.packet_source.as_ref().is_some_and(|source| {
+            source.is_healthy()
+                && packet_source_execution_family_matches(
+                    source.is_isolated(),
+                    demux_worker_available,
+                )
+        }) && self.path == request.path
             && request.fingerprint.authorizes_reuse()
             && self.fingerprint == request.fingerprint
             && self.requested_video_stream_index == request.video_stream_index
@@ -2381,7 +2479,11 @@ impl PreviewDecodeSession {
             }
         };
 
-        let seek = self.packet_source.seek(
+        let source = self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
+            asset_id: self.path.display().to_string(),
+            reason: "retired decoder has no packet source".to_owned(),
+        })?;
+        let seek = source.seek(
             self.stream_index,
             min_ts,
             seek_target_ts,
@@ -2638,7 +2740,12 @@ impl PreviewDecodeSession {
 
         loop {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
-            let packet = match self.packet_source.read_next(&self.path, should_cancel)? {
+            let source =
+                self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
+                    asset_id: self.path.display().to_string(),
+                    reason: "retired decoder has no packet source".to_owned(),
+                })?;
+            let packet = match source.read_next(&self.path, should_cancel)? {
                 PreviewPacketRead::Packet(packet) => packet,
                 PreviewPacketRead::End => break,
                 PreviewPacketRead::DirectCanceled => {
@@ -3054,6 +3161,19 @@ fn decode_preview_frame_outcome_in_sessions(
         std::thread::sleep(Duration::from_micros(250));
     };
     let output_lease_wait_us = duration_us(output_lease_wait_started_at.elapsed());
+    let reuses_decoder = sessions.slot_mut(selected_slot).as_ref().is_some_and(|session| {
+        session.matches_decoder_contract(&open_request, demux_worker.is_some())
+    });
+    let retained_source = if reuses_decoder {
+        None
+    } else {
+        sessions.take_retired_source(&open_request, demux_worker.is_some())
+    };
+    let new_slot = usize::from(sessions.slot_mut(selected_slot).is_none());
+    let idle_capacity = residency_config
+        .source_capacity()
+        .saturating_sub(sessions.resident_session_count().saturating_add(new_slot));
+    sessions.trim_retired_sources(idle_capacity);
     let outcome: Result<PreviewDecodeOutcome> = {
         let slot = sessions.slot_mut(selected_slot);
         let mut session_open_us = 0;
@@ -3098,6 +3218,7 @@ fn decode_preview_frame_outcome_in_sessions(
                 demux_worker,
                 should_cancel.as_ref(),
                 Arc::clone(&interrupt_state),
+                retained_source,
             );
             *slot = match opened {
                 Ok(session) => Some(session),
@@ -3539,6 +3660,7 @@ mod session_topology_tests {
             playback: Vec::new(),
             interactive: Vec::new(),
             cpu_still: None,
+            retired_sources: Vec::new(),
         }
     }
 

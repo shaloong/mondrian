@@ -2474,9 +2474,22 @@ Playback/Interactive family barrier. Sharing the device removes driver device
 teardown/recreation from a transport discontinuity without allowing two native
 surface pools or sharing codec state. Pressure or an idle-family boundary may
 release idle roots, and the next acquisition creates a later generation. A
-transport-family `clear_family` retires codec/demux owners while leaving device
-root eviction to the existing pool policy. It must not force the idle allowance
+transport-family `clear_family` consumes codec, DPB and decoded-frame owners
+before retaining a healthy isolated packet source in the same worker context.
+The retained source contains the original probed stream parameters and exact
+file revision, never decoder/color interpretation or old presentation frames.
+Active plus retained sources stay within the existing Playback, Interactive and
+CPU-Still source-slot extent; oldest retained sources are evicted before new
+admission. Reuse requires the same authorized file revision and requested stream.
+Poisoned or canceled sources are not reusable. Direct sources retain their
+existing callback-bound lifetime. Full context clearing consumes all retained
+children before closure acknowledgement. Device-root eviction follows the
+existing pool policy. It must not force the idle allowance
 to zero: doing so recreates the immutable device on every play/pause transition.
+Packaged-worker regressions cover exact frame selection across family retirement,
+source-inode replacement, cancellation of a retained source followed by retry,
+worker-grant reduction, and full clearing when only idle children remain. These
+process-lifecycle checks do not constitute hardware or playback-latency qualification.
 Full context `clear` still explicitly releases idle roots, and policy reduction
 and device-generation failure retain their existing eviction authority. A
 worker directive retiring all contexts performs this full clear after both
