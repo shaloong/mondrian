@@ -148,6 +148,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
+            decode_execution_resource_unavailable_failures: self
+                .metrics
+                .decode_execution_resource_unavailable_failures
+                .get(),
+            decode_last_execution_resource_unavailable_operation: self
+                .metrics
+                .decode_last_execution_resource_unavailable_operation
+                .get(),
             decode_budget_exhausted_failures: self.metrics.decode_budget_exhausted_failures.get(),
             decode_cancellation,
             decode_cancellation_checkpoints: self.metrics.decode_cancellation_checkpoints.get(),
@@ -644,6 +652,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         match reason {
             MediaPreviewFailureReason::Timeout => {
                 bump(&self.metrics.decode_timeout_failures);
+            }
+            MediaPreviewFailureReason::ExecutionResourceUnavailable { operation } => {
+                bump(&self.metrics.decode_execution_resource_unavailable_failures);
+                self.metrics
+                    .decode_last_execution_resource_unavailable_operation
+                    .set(Some(operation));
             }
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 bump(&self.metrics.decode_budget_exhausted_failures);

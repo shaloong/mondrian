@@ -1565,6 +1565,9 @@ fn media_preview_temporal_failure(
 fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReason {
     match err {
         MondrianError::DecodeTimeout { .. } => MediaPreviewFailureReason::Timeout,
+        MondrianError::MediaExecutionResourceUnavailable { operation, .. } => {
+            MediaPreviewFailureReason::ExecutionResourceUnavailable { operation }
+        }
         MondrianError::DecodeBudgetExhausted { .. } => {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
         }

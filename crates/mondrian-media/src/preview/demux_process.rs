@@ -61,9 +61,36 @@ pub(super) enum IsolatedDemuxRead {
     Canceled,
 }
 
+#[derive(Debug, thiserror::Error)]
 pub(super) enum IsolatedDemuxOpenError {
+    #[error("Preview demux open was canceled")]
     Canceled,
+    #[error("{0}")]
     Failed(String),
+    #[error("{operation}: {source}; cleanup={cleanup:?}")]
+    ExecutionResourceUnavailable {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+        cleanup: Option<String>,
+    },
+}
+
+fn isolated_demux_spawn_error(
+    operation: &'static str,
+    failure_context: String,
+    source: io::Error,
+) -> IsolatedDemuxOpenError {
+    match source.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::OutOfMemory => {
+            IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                operation,
+                source,
+                cleanup: None,
+            }
+        }
+        _ => IsolatedDemuxOpenError::Failed(format!("{failure_context}: {source}")),
+    }
 }
 
 /// A reusable, one-source demux process with one command in flight.
@@ -104,10 +131,11 @@ impl IsolatedDemuxSession {
             .stderr(Stdio::piped());
         command.hide_window();
         let child = command.spawn().map_err(|error| {
-            IsolatedDemuxOpenError::Failed(format!(
-                "start Preview demux worker {}: {error}",
-                config.executable.display()
-            ))
+            isolated_demux_spawn_error(
+                "start Preview demux worker process",
+                format!("start Preview demux worker {}", config.executable.display()),
+                error,
+            )
         })?;
         let lifecycle = config.execution_observer.begin_isolated_demux_session();
         let mut source = Self {
@@ -123,35 +151,64 @@ impl IsolatedDemuxSession {
             cleanup_deadline: None,
             cleanup_receipt: None,
         };
-        let setup = (|| -> Result<(), String> {
-            let mut stdin = source.child.stdin.take().ok_or("Preview demux stdin was not piped")?;
+        let setup = (|| -> Result<(), IsolatedDemuxOpenError> {
+            let mut stdin = source.child.stdin.take().ok_or_else(|| {
+                IsolatedDemuxOpenError::Failed("Preview demux stdin was not piped".to_owned())
+            })?;
             write_worker_request(&mut stdin, nonce, path, source_revision, video_stream_index)
                 .and_then(|()| stdin.flush())
-                .map_err(|error| format!("send Preview demux worker request: {error}"))?;
+                .map_err(|error| {
+                    IsolatedDemuxOpenError::Failed(format!(
+                        "send Preview demux worker request: {error}"
+                    ))
+                })?;
             source.stdin = Some(stdin);
-            let stdout = source.child.stdout.take().ok_or("Preview demux stdout was not piped")?;
-            let stderr = source.child.stderr.take().ok_or("Preview demux stderr was not piped")?;
+            let stdout = source.child.stdout.take().ok_or_else(|| {
+                IsolatedDemuxOpenError::Failed("Preview demux stdout was not piped".to_owned())
+            })?;
+            let stderr = source.child.stderr.take().ok_or_else(|| {
+                IsolatedDemuxOpenError::Failed("Preview demux stderr was not piped".to_owned())
+            })?;
             let (message_tx, message_rx) = mpsc::sync_channel(IPC_QUEUE_CAPACITY);
             source.messages = Some(message_rx);
             source.protocol_reader = Some(
                 thread::Builder::new()
                     .name("mondrian-preview-demux-ipc".to_owned())
                     .spawn(move || read_protocol_stream(stdout, nonce, message_tx))
-                    .map_err(|error| format!("start Preview demux protocol reader: {error}"))?,
+                    .map_err(|error| {
+                        isolated_demux_spawn_error(
+                            "start Preview demux protocol reader",
+                            "start Preview demux protocol reader".to_owned(),
+                            error,
+                        )
+                    })?,
             );
             source.stderr_reader = Some(
                 thread::Builder::new()
                     .name("mondrian-preview-demux-stderr".to_owned())
                     .spawn(move || drain_bounded_stderr(stderr))
-                    .map_err(|error| format!("start Preview demux stderr reader: {error}"))?,
+                    .map_err(|error| {
+                        isolated_demux_spawn_error(
+                            "start Preview demux stderr reader",
+                            "start Preview demux stderr reader".to_owned(),
+                            error,
+                        )
+                    })?,
             );
             Ok(())
         })();
         if let Err(error) = setup {
             let cleanup = source.terminate(PreviewIsolatedDemuxTermination::Failed);
-            return Err(IsolatedDemuxOpenError::Failed(format!(
-                "{error}; cleanup: {cleanup:?}"
-            )));
+            return Err(match error {
+                IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                    operation, source, ..
+                } => IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                    operation,
+                    source,
+                    cleanup: Some(format!("{cleanup:?}")),
+                },
+                error => IsolatedDemuxOpenError::Failed(format!("{error}; cleanup: {cleanup:?}")),
+            });
         }
         let mut open_phases_seen = 0_u8;
         let stream = loop {
@@ -242,6 +299,10 @@ impl IsolatedDemuxSession {
                 self.terminate(PreviewIsolatedDemuxTermination::Failed);
                 Err(message)
             }
+            Err(error @ IsolatedDemuxOpenError::ExecutionResourceUnavailable { .. }) => {
+                self.terminate(PreviewIsolatedDemuxTermination::Failed);
+                Err(error.to_string())
+            }
         }
     }
 
@@ -273,6 +334,10 @@ impl IsolatedDemuxSession {
             Err(IsolatedDemuxOpenError::Failed(message)) => {
                 self.terminate(PreviewIsolatedDemuxTermination::Failed);
                 Err(message)
+            }
+            Err(error @ IsolatedDemuxOpenError::ExecutionResourceUnavailable { .. }) => {
+                self.terminate(PreviewIsolatedDemuxTermination::Failed);
+                Err(error.to_string())
             }
         }
     }
@@ -569,6 +634,38 @@ fn launch_nonce() -> [u8; 16] {
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    #[test]
+    fn demux_spawn_resource_exhaustion_remains_structured() {
+        let failure = isolated_demux_spawn_error(
+            "start Preview demux protocol reader",
+            "start Preview demux protocol reader".to_owned(),
+            io::Error::from(io::ErrorKind::WouldBlock),
+        );
+
+        assert!(matches!(
+            failure,
+            IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                operation: "start Preview demux protocol reader",
+                source,
+                cleanup: None,
+            } if source.kind() == io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn demux_spawn_configuration_failure_is_not_resource_exhaustion() {
+        let failure = isolated_demux_spawn_error(
+            "start Preview demux worker",
+            "start Preview demux worker /restricted/helper".to_owned(),
+            io::Error::from(io::ErrorKind::PermissionDenied),
+        );
+
+        assert!(matches!(failure, IsolatedDemuxOpenError::Failed(message)
+            if message.contains("/restricted/helper")
+                && message.to_ascii_lowercase().contains("permission denied")));
+    }
+
     #[test]
     fn protocol_reader_batches_small_fields_without_changing_failure_contract() {
         use super::super::demux_protocol::{write_error_message, write_protocol_preamble};

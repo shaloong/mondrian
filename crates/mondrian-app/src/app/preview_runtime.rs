@@ -2971,6 +2971,8 @@ struct PreviewMetrics {
     decode_startup_preroll_queue_wait_max_us: Cell<u64>,
     decode_failures: Cell<u64>,
     decode_timeout_failures: Cell<u64>,
+    decode_execution_resource_unavailable_failures: Cell<u64>,
+    decode_last_execution_resource_unavailable_operation: Cell<Option<&'static str>>,
     decode_budget_exhausted_failures: Cell<u64>,
     decode_cancellation: RefCell<mondrian_playback::FrameCancellationEvidenceCollector>,
     decode_cancellation_checkpoints: Cell<mondrian_media::PreviewDecodeCancellationEvidence>,

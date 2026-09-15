@@ -2901,6 +2901,7 @@ fn preview_playback_decode_failures(report: &PreviewDecodePerformanceReport) -> 
             || matches!(
                 check.code,
                 "preview_decode_timeout_failures"
+                    | "preview_decode_execution_resource_unavailable_failures"
                     | "preview_decode_forward_budget_exhausted_failures"
                     | "preview_decode_cancellation_gate"
                     | "preview_decode_broker_clock_regressions"

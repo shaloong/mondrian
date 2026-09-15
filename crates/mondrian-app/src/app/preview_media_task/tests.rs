@@ -83,6 +83,22 @@ fn typed_decode_temporal_mismatch_preserves_retry_suppression_classification() {
     );
 }
 
+#[test]
+fn typed_execution_resource_failure_preserves_the_exact_operation() {
+    let error = MondrianError::MediaExecutionResourceUnavailable {
+        operation: "start Preview demux stderr reader",
+        source: std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        cleanup: Some("child_reaped=true".to_owned()),
+    };
+
+    assert_eq!(
+        media_preview_failure_reason(&error),
+        MediaPreviewFailureReason::ExecutionResourceUnavailable {
+            operation: "start Preview demux stderr reader",
+        }
+    );
+}
+
 fn test_media_job(
     key: MediaPreviewKey,
     priority: MediaPreviewRequestPriority,

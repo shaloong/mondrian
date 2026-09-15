@@ -360,6 +360,10 @@ pub struct PreviewDiagnostics {
     pub decode_failures: u64,
     /// Failed background media decodes caused by a structured decode timeout.
     pub decode_timeout_failures: u64,
+    /// Failed decodes because the OS could not provide a required process or thread.
+    pub decode_execution_resource_unavailable_failures: u64,
+    /// Last exact production operation that could not acquire its OS resource.
+    pub decode_last_execution_resource_unavailable_operation: Option<&'static str>,
     /// Failed background media decodes caused by access-mode forward-scan budget exhaustion.
     pub decode_budget_exhausted_failures: u64,
     /// Playback-owned cancellation evidence from all semantic frame-work classes.
@@ -1727,6 +1731,7 @@ impl PreviewDecodeAccessModeProfile {
                 self.temporal_mismatch_failures = self.temporal_mismatch_failures.saturating_add(1);
             }
             MediaPreviewFailureReason::DecodeError
+            | MediaPreviewFailureReason::ExecutionResourceUnavailable { .. }
             | MediaPreviewFailureReason::WorkerPanicked
             | MediaPreviewFailureReason::ResidencyContractViolation
             | MediaPreviewFailureReason::ResidencyCapacityRejected => {}
@@ -1911,6 +1916,10 @@ pub struct PreviewDecodePerformanceSummary {
     pub decode_failures: u64,
     /// Failed preview decode results caused by structured decode timeouts.
     pub decode_timeout_failures: u64,
+    /// Failed decodes because the OS could not provide a required process or thread.
+    pub decode_execution_resource_unavailable_failures: u64,
+    /// Last exact production operation that could not acquire its OS resource.
+    pub decode_last_execution_resource_unavailable_operation: Option<&'static str>,
     /// Failed preview decode results caused by access-mode forward-scan budget exhaustion.
     pub decode_budget_exhausted_failures: u64,
     /// Playback-owned cancellation evidence used by production and Headless gates.
@@ -2426,6 +2435,10 @@ impl PreviewDiagnostics {
             startup_preroll_queue_wait_max_us: self.decode_startup_preroll_queue_wait_max_us,
             decode_failures: self.decode_failures,
             decode_timeout_failures: self.decode_timeout_failures,
+            decode_execution_resource_unavailable_failures: self
+                .decode_execution_resource_unavailable_failures,
+            decode_last_execution_resource_unavailable_operation: self
+                .decode_last_execution_resource_unavailable_operation,
             decode_budget_exhausted_failures: self.decode_budget_exhausted_failures,
             cancellation: self.decode_cancellation,
             canceled_jobs: self.decode_canceled_jobs,

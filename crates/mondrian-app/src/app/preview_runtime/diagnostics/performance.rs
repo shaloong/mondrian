@@ -191,6 +191,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         );
         push_decode_max_check(
             &mut checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_execution_resource_unavailable_failures",
+            summary.decode_execution_resource_unavailable_failures,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
             PreviewDecodePerformanceArea::RandomAccess,
             "preview_decode_forward_budget_exhausted_failures",
             summary.decode_budget_exhausted_failures,
@@ -2302,6 +2309,22 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "inspect_access_mode_decode_timeout_budget",
             "Inspect access-mode decode strategy, hardware decode residency, proxy readiness, and timeout budget before widening worker concurrency.",
+            PreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if summary.decode_execution_resource_unavailable_failures > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_execution_resource_unavailable",
+            format!(
+                "decode_execution_resource_unavailable_failures={} last_operation={:?}",
+                summary.decode_execution_resource_unavailable_failures,
+                summary.decode_last_execution_resource_unavailable_operation
+            ),
+            "restore_preview_execution_resource_capacity",
+            "Restore process or thread capacity required by the production Preview demux path, then rerun the same workload.",
             PreviewDecodePerformanceSeverity::Fail,
         );
     }

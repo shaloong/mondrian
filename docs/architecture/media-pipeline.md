@@ -881,6 +881,19 @@ ordering; the other modules provide narrow stateful services and cannot publish
 a second decode outcome. The external process module always drains both pipes,
 retains only the exact expected RGBA byte count and 64 KiB of stderr, and on
 cancellation performs kill → wait → reader join before returning `Canceled`.
+
+The isolated Preview demux boundary preserves OS process/thread admission
+failures as a structured `MediaExecutionResourceUnavailable` error when native
+spawn reports `WouldBlock` or `OutOfMemory`. Permission, executable, protocol,
+and media-open failures remain in their existing typed categories. The App maps
+the resource error into the production Preview failure reason and publishes an
+independent diagnostic count, failing the performance/qualification report with
+an execution-resource root cause. Partial-open cleanup remains attached as
+diagnostic detail while the existing lifecycle receipt remains closure
+authority. A process or PID limit therefore cannot be
+misreported as corrupt media or collapsed into an unexplained generic decode
+failure.
+
 That lifecycle is implemented by the crate-level `process_supervisor`, not by a
 Preview-only waiter. Every FFmpeg/FFprobe CLI Adapter that uses this seam starts
 bounded stdout and stderr drains immediately after spawn, before any stdin

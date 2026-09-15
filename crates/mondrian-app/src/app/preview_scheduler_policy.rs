@@ -101,6 +101,11 @@ pub(crate) fn media_preview_residency_reservation(
 pub(crate) enum MediaPreviewFailureReason {
     Timeout,
     DecodeError,
+    /// The operating system could not provide a process or thread required by
+    /// the production media execution path.
+    ExecutionResourceUnavailable {
+        operation: &'static str,
+    },
     ForwardDecodeBudgetExhausted,
     /// An exact Playback or settled still request decoded a different source
     /// timestamp. Only explicitly interactive scrub policy may present a

@@ -4383,6 +4383,36 @@ fn preview_diagnostics_count_decode_failures_by_access_mode() {
 }
 
 #[test]
+fn preview_diagnostics_preserve_execution_resource_failures() {
+    let service = WindowPreviewAdapter::new();
+
+    service.record_preview_decode_failure(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        Some(MediaPreviewFailureReason::ExecutionResourceUnavailable {
+            operation: "start Preview demux protocol reader",
+        }),
+    );
+
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.decode_failures, 1);
+    assert_eq!(
+        diagnostics.decode_execution_resource_unavailable_failures,
+        1
+    );
+    assert_eq!(
+        diagnostics.decode_last_execution_resource_unavailable_operation,
+        Some("start Preview demux protocol reader")
+    );
+    assert_eq!(
+        diagnostics
+            .decode_performance_summary(50_000)
+            .expect("decode evidence")
+            .decode_execution_resource_unavailable_failures,
+        1
+    );
+}
+
+#[test]
 fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
     let service = WindowPreviewAdapter::new();
 
@@ -4689,6 +4719,48 @@ fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
         .actions
         .iter()
         .any(|action| action.code == "restore_scrub_bounded_any_seek_window"));
+}
+
+#[test]
+fn preview_decode_report_fails_with_execution_resource_root_cause() {
+    let diagnostics = PreviewDiagnostics {
+        decode_failures: 1,
+        decode_execution_resource_unavailable_failures: 1,
+        decode_last_execution_resource_unavailable_operation: Some(
+            "start Preview demux protocol reader",
+        ),
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
+                failed_jobs: 1,
+                ..PreviewDecodeAccessModeProfile::default()
+            },
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "test",
+        50_000,
+    );
+
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_execution_resource_unavailable_failures"
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
+            && check.observed == 1
+            && check.limit == Some(0)
+    }));
+    assert!(report.root_causes.iter().any(|root| {
+        root.code == "preview_decode_execution_resource_unavailable"
+            && root.evidence.contains("decode_execution_resource_unavailable_failures=1")
+            && root.evidence.contains("start Preview demux protocol reader")
+    }));
+    assert!(report
+        .actions
+        .iter()
+        .any(|action| action.code == "restore_preview_execution_resource_capacity"));
 }
 
 #[test]

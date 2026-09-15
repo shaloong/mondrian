@@ -113,6 +113,13 @@ impl PreviewPacketSource {
                         MondrianError::MediaOpen { path: path.display().to_string(), reason },
                     ))
                 }
+                Err(IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                    operation,
+                    source,
+                    cleanup,
+                }) => Err(PreviewPacketSourceOpenError::Failed(
+                    MondrianError::MediaExecutionResourceUnavailable { operation, source, cleanup },
+                )),
             };
         }
         match Self::open_direct(
