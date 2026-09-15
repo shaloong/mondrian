@@ -2179,6 +2179,15 @@ authority without releasing the submitted owner; the capacity-one lifecycle
 quarantines it until the exact late callback retires its frame and
 media-protection leases. Headless Preview state retains only cloneable semantic
 output metadata; the Adapter alone owns the move-only presentation lease.
+The execution record also binds frame-resource turnover to that same Adapter
+submission assertion. The next record may reuse exact-contract intermediate
+textures from the preceding frame only after `Queue::submit` has been asserted;
+an unsubmitted predecessor fails closed. Unused turnover resources settle
+through the existing idle limits at the end of the synchronous record scope,
+including error and unwind paths. Detached presentation leases return through
+their generation-checked path and never enter ordered turnover. This preserves
+the active working-set grant without converting the smaller idle grant into a
+second residency budget.
 Before a Headless completed-candidate receipt records zero native decoder
 residency, the Adapter also consumes the already-released platform owner under
 that same absolute completion deadline. This wait does not close native import

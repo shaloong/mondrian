@@ -905,6 +905,12 @@ impl RenderGpuOutputBoundaryRuntime {
         }
     }
 
+    pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
+        for resource in self.frame_table.drain() {
+            self.resource_pool.release_for_ordered_turnover(resource);
+        }
+    }
+
     /// Clone the device-scoped texture pool shared by compatible renderer stages.
     pub fn resource_pool(&self) -> Arc<GpuColorFrameWgpuResourcePool> {
         Arc::clone(&self.resource_pool)

@@ -582,6 +582,18 @@ impl GpuViewerSpatialRuntime {
         }
     }
 
+    pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
+        for resource in self.prefilters.drain(..) {
+            self.resource_pool.release_for_ordered_turnover(resource);
+        }
+        if let Some(resource) = self.horizontal.take() {
+            self.resource_pool.release_for_ordered_turnover(resource);
+        }
+        if let Some(resource) = self.output.take() {
+            self.resource_pool.release_for_ordered_turnover(resource);
+        }
+    }
+
     /// Drop the spatial pipeline and return frame resources to the shared pool.
     /// The device owner is responsible for clearing that pool after all stages
     /// have returned their resources during device replacement.

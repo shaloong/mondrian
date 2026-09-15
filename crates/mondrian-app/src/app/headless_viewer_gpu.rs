@@ -1332,7 +1332,6 @@ impl HeadlessViewerGpuAdapter {
             height: frame.height,
         };
         let heterogeneous = frame.has_heterogeneous_gpu_execution();
-        self.runtime.clear_frame_resources();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
         });
@@ -1416,21 +1415,38 @@ impl HeadlessViewerGpuAdapter {
                 return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
         };
-        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-            ring.finish_frame(&mut encoder, token)
-                .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
+            && let Err(error) = ring.finish_frame(&mut encoder, token)
+        {
+            drop(record);
+            drop(encoder);
+            self.runtime.clear_frame_resources();
+            return Err(HeadlessViewerGpuError::Timestamp(error.to_string()));
         }
         let native_import_gpu_timing_receipt = record.take_native_video_import_timing_receipt();
-        let presentation_lease = self
-            .runtime
-            .take_presentation_output(&mut record)
-            .map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
-        if let Some(terminal) = self.device_progress.generation_terminal() {
-            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-                ring.abandon_frame(token)
-                    .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+        let presentation_lease = match self.runtime.take_presentation_output(&mut record) {
+            Ok(lease) => lease,
+            Err(error) => {
+                drop(record);
+                drop(encoder);
+                self.runtime.clear_frame_resources();
+                return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
+        };
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            let timestamp_error =
+                if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+                    ring.abandon_frame(token).err()
+                } else {
+                    None
+                };
             drop(presentation_lease);
+            drop(record);
+            drop(encoder);
+            self.runtime.clear_frame_resources();
+            if let Some(error) = timestamp_error {
+                return Err(HeadlessViewerGpuError::Timestamp(error.to_string()));
+            }
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         let submission = self.queue.submit(std::iter::once(encoder.finish()));

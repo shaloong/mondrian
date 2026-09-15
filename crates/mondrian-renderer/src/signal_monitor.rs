@@ -162,6 +162,12 @@ impl GpuSignalMonitorRuntime {
         }
     }
 
+    pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
+        if let Some(output) = self.output.take() {
+            self.resource_pool.release_for_ordered_turnover(output);
+        }
+    }
+
     /// Return retained runtime evidence.
     pub const fn diagnostics(&self) -> GpuSignalMonitorRuntimeDiagnostics {
         self.diagnostics

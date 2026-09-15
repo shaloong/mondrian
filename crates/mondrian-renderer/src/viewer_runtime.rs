@@ -8,6 +8,7 @@
 #[path = "viewer_runtime/retirement_tests.rs"]
 mod retirement_tests;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -170,6 +171,7 @@ pub struct ViewerGpuExecutionRuntime {
     program_scopes: GpuProgramScopesRuntime,
     signal_monitor: GpuSignalMonitorRuntime,
     working_compositor: GpuFrameCompositor,
+    current_frame_submission: Option<Arc<AtomicBool>>,
 }
 
 /// Error creating one Viewer GPU execution context.
@@ -270,6 +272,7 @@ impl ViewerGpuExecutionRuntime {
             program_scopes,
             signal_monitor,
             working_compositor,
+            current_frame_submission: None,
         })
     }
 
@@ -291,6 +294,7 @@ impl ViewerGpuExecutionRuntime {
             program_scopes,
             signal_monitor,
             working_compositor,
+            current_frame_submission: _,
         } = self;
         crate::ViewerGpuExecutionRetirement {
             native_video_import,
@@ -670,6 +674,7 @@ impl ViewerGpuExecutionRuntime {
 
     /// Release resources scoped to the current candidate, retaining pipelines.
     pub fn clear_frame_resources(&mut self) {
+        self.current_frame_submission = None;
         self.cpu_yuv_upload.begin_frame();
         self.working_compositor.clear_frame_resources();
         self.color_output.clear_frame_resources();
@@ -702,6 +707,22 @@ impl ViewerGpuExecutionRuntime {
         request: ViewerGpuExecutionRequest<'_>,
         stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        let _turnover = if let Some(submission) = self.current_frame_submission.take() {
+            if !submission.load(Ordering::Acquire) {
+                self.current_frame_submission = Some(submission);
+                return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
+            }
+            let guard = self.resource_pool.begin_ordered_turnover();
+            self.cpu_yuv_upload.begin_frame();
+            self.working_compositor.clear_frame_resources();
+            self.color_output.stage_frame_resources_for_ordered_turnover();
+            self.spatial.stage_frame_resources_for_ordered_turnover();
+            self.display_calibration.stage_frame_resources_for_ordered_turnover();
+            self.signal_monitor.stage_frame_resources_for_ordered_turnover();
+            Some(guard)
+        } else {
+            None
+        };
         let candidate_token = self.native_video_import.begin_viewer_candidate();
         let result =
             self.record_candidate_with_stage_marker(device, queue, encoder, request, stage_marker);
@@ -715,6 +736,9 @@ impl ViewerGpuExecutionRuntime {
         match result {
             Ok(mut record) => {
                 record.native_video_import_timing_receipt = receipt;
+                let submission = Arc::new(AtomicBool::new(false));
+                record.ordered_submission = Some(Arc::clone(&submission));
+                self.current_frame_submission = Some(submission);
                 Ok(record)
             }
             Err(error) => {
@@ -1047,6 +1071,7 @@ impl ViewerGpuExecutionRuntime {
             },
             native_video_import_timing_receipt: None,
             heterogeneous_continuations,
+            ordered_submission: None,
         })
     }
 
@@ -1152,6 +1177,7 @@ impl ViewerGpuExecutionRuntime {
 
     /// Reset all retained execution resources after a device/surface transition.
     pub fn reset(&mut self) {
+        self.current_frame_submission = None;
         self.working_compositor.clear_frame_resources();
         self.spatial.clear();
         self.display_calibration.clear();
@@ -1270,6 +1296,7 @@ pub struct ViewerGpuExecutionRecord {
     pub cpu_stage_timings: ViewerGpuExecutionCpuStageTimings,
     native_video_import_timing_receipt: Option<NativeVideoImportCandidateTimingReceipt>,
     heterogeneous_continuations: Vec<HeterogeneousGpuRecordedContinuation>,
+    ordered_submission: Option<Arc<AtomicBool>>,
 }
 
 impl ViewerGpuExecutionRecord {
@@ -1299,6 +1326,9 @@ impl ViewerGpuExecutionRecord {
         &mut self,
         submission_index: wgpu::SubmissionIndex,
     ) -> ViewerHeterogeneousGpuSubmissionBatch {
+        if let Some(submission) = self.ordered_submission.take() {
+            submission.store(true, Ordering::Release);
+        }
         let continuations = std::mem::take(&mut self.heterogeneous_continuations)
             .into_iter()
             .map(|continuation| continuation.assert_adapter_submission(submission_index.clone()))
@@ -1458,6 +1488,10 @@ pub enum ViewerGpuPresentationOutputTakeError {
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerGpuExecutionError {
+    /// A caller attempted to overwrite resources whose command buffer has no
+    /// exact queue-submission proof.
+    #[error("the previous Viewer GPU frame was not submitted")]
+    PreviousFrameNotSubmitted,
     /// The complete request could not fit this owner's pressure-stable active
     /// texture grant. This is returned before any frame texture is created.
     #[error(transparent)]
@@ -2896,6 +2930,7 @@ mod tests {
                 NativeVideoImportCandidateTimingReceipt::fixture(9, 3, 1, 1, 1),
             ),
             heterogeneous_continuations: Vec::new(),
+            ordered_submission: None,
         };
 
         let receipt = record
@@ -3032,6 +3067,163 @@ mod tests {
                 scopes_signal: ColorSpace::Rec709,
             })
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit GPU allocation-turnover regression; requires a real adapter"]
+    async fn viewer_turnover_reuses_active_textures_without_expanding_idle_grant() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let context = GpuContext::new().await.expect("GPU required for explicit allocator test");
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+        let identity_graph =
+            compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+                .expect("compile identity graph");
+        let identity_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&identity_graph).expect("lower identity plan"));
+        let layers: Vec<_> = [0.18, 0.36]
+            .into_iter()
+            .map(|value| {
+                ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
+                    frame: None,
+                    is_data_texture: false,
+                    gpu_source: Some(ViewerGpuMediaSource {
+                        source: Arc::new(CpuSourceColorFrame::from(
+                            CpuEncodedColorFrame::source_rgba8(
+                                64,
+                                64,
+                                ColorSpace::Rec709,
+                                [(value * 255.0) as u8, 48, 20, 255].repeat(64 * 64),
+                            ),
+                        )),
+                        input_transform: RenderInputTransform::to_working_gpu(
+                            WorkingColorSpace::LinearRec709,
+                            false,
+                            ColorEngine::mondrian_standard(),
+                        ),
+                        decoder_residency: DecodedFrameResidency::CpuRgba,
+                        decoder_handle_kind: None,
+                        decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
+                        decoded_video_sampling: DecodedVideoSampling::default(),
+                    }),
+                    native_source: None,
+                    cpu_yuv_source: None,
+                    heterogeneous_input: None,
+                    opacity: 0.5,
+                    blend_mode: BlendMode::Normal,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Arc::clone(&identity_plan),
+                    frame_seed: 9,
+                }))
+            })
+            .collect();
+        macro_rules! request {
+            ($timeline_frame:expr) => {
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: $timeline_frame,
+                    width: 64,
+                    height: 64,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                    heterogeneous_inputs: Vec::new(),
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 64,
+                    output_height: 64,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                    program_scopes: None,
+                    signal_monitoring: None,
+                }
+            };
+        }
+
+        let mut abandoned_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewer-resource-turnover-abandoned"),
+            });
+        let abandoned_record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut abandoned_encoder,
+                request!(-2),
+            )
+            .expect("first unsubmitted frame records");
+        let mut premature_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewer-resource-turnover-premature-successor"),
+            });
+        assert!(matches!(
+            runtime.record(
+                &context.device,
+                &context.queue,
+                &mut premature_encoder,
+                request!(-1),
+            ),
+            Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted)
+        ));
+        drop(abandoned_record);
+        drop(abandoned_encoder);
+        drop(premature_encoder);
+        runtime.clear_frame_resources();
+
+        let record_frame = |runtime: &mut ViewerGpuExecutionRuntime, timeline_frame| {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewer-resource-turnover-integration"),
+                });
+            let mut record = runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    request!(timeline_frame),
+                )
+                .expect("Viewer GPU frame");
+            let submission = context.queue.submit(std::iter::once(encoder.finish()));
+            let _submitted = record.assert_adapter_submission(submission.clone());
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(std::time::Duration::from_secs(2)),
+                })
+                .expect("bounded exact submission completion");
+        };
+
+        runtime.reconfigure_resource_grant(
+            ViewerGpuExecutionResourceGrant::default().with_idle_limits(3, 2 * 64 * 64 * 16),
+        );
+        let mut warmed_misses = None;
+        for frame in 0..16 {
+            record_frame(&mut runtime, frame);
+            let pool = runtime.resource_pool_diagnostics();
+            assert!(pool.retained_bytes <= 2 * 64 * 64 * 16);
+            if frame == 7 {
+                warmed_misses = Some(pool.misses);
+            } else if frame > 7 {
+                assert_eq!(
+                    Some(pool.misses),
+                    warmed_misses,
+                    "unchanged active working set allocated again: {pool:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3379,7 +3571,7 @@ mod tests {
             label: Some("viewer-monitor-adaptation-integration"),
         });
 
-        let record = runtime
+        let mut record = runtime
             .record(
                 &context.device,
                 &context.queue,
@@ -3412,7 +3604,8 @@ mod tests {
                 },
             )
             .expect("Viewer GPU monitor adaptation frame");
-        context.queue.submit(std::iter::once(encoder.finish()));
+        let submission = context.queue.submit(std::iter::once(encoder.finish()));
+        let _submitted = record.assert_adapter_submission(submission);
 
         assert_eq!(
             record.program_output.descriptor().color_space,
@@ -3437,7 +3630,7 @@ mod tests {
             context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("viewer-monitor-scopes-integration"),
             });
-        let monitor_scopes_record = runtime
+        let mut monitor_scopes_record = runtime
             .record(
                 &context.device,
                 &context.queue,
@@ -3472,7 +3665,8 @@ mod tests {
                 },
             )
             .expect("Viewer GPU Monitor Output scopes frame");
-        context.queue.submit(std::iter::once(monitor_scopes_encoder.finish()));
+        let submission = context.queue.submit(std::iter::once(monitor_scopes_encoder.finish()));
+        let _submitted = monitor_scopes_record.assert_adapter_submission(submission);
         let monitor_scopes =
             monitor_scopes_record.program_scopes.as_ref().expect("Monitor Output scopes");
         assert_eq!(

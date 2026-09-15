@@ -765,6 +765,8 @@ struct PooledGpuColorFrameWgpuResource {
 struct GpuColorFrameWgpuResourcePoolState {
     options: GpuColorFrameWgpuResourcePoolOptions,
     idle: VecDeque<PooledGpuColorFrameWgpuResource>,
+    ordered_turnover: VecDeque<PooledGpuColorFrameWgpuResource>,
+    ordered_turnover_active: bool,
     retained_bytes: u64,
     hits: u64,
     misses: u64,
@@ -793,6 +795,8 @@ impl Default for GpuColorFrameWgpuResourcePoolState {
         Self {
             options: GpuColorFrameWgpuResourcePoolOptions::default(),
             idle: VecDeque::new(),
+            ordered_turnover: VecDeque::new(),
+            ordered_turnover_active: false,
             retained_bytes: 0,
             hits: 0,
             misses: 0,
@@ -873,6 +877,14 @@ impl GpuColorFrameWgpuResourcePool {
         let key = GpuColorFrameWgpuResourcePoolKey::from_plan(plan);
         let reused = {
             let mut state = self.state.lock();
+            let turnover_position =
+                state.ordered_turnover.iter().position(|entry| entry.key == key);
+            if let Some(position) = turnover_position
+                && let Some(entry) = state.ordered_turnover.remove(position)
+            {
+                state.hits = state.hits.saturating_add(1);
+                return GpuColorFrameResource::new(plan.handle.clone(), entry.payload);
+            }
             let position = state.idle.iter().position(|entry| entry.key == key);
             if let Some(position) = position {
                 if let Some(entry) = state.idle.remove(position) {
@@ -898,6 +910,33 @@ impl GpuColorFrameWgpuResourcePool {
     pub fn release(&self, resource: GpuColorFrameResource<GpuColorFrameWgpuResource>) {
         let mut state = self.state.lock();
         release_gpu_color_frame_resource(&mut state, resource);
+    }
+
+    /// Begin one synchronous reuse scope for resources from an exactly submitted frame.
+    pub(crate) fn begin_ordered_turnover(
+        self: &Arc<Self>,
+    ) -> GpuColorFrameWgpuOrderedTurnoverGuard {
+        let mut state = self.state.lock();
+        debug_assert!(!state.ordered_turnover_active);
+        debug_assert!(state.ordered_turnover.is_empty());
+        state.ordered_turnover_active = true;
+        drop(state);
+        GpuColorFrameWgpuOrderedTurnoverGuard { pool: Arc::clone(self) }
+    }
+
+    /// Stage one resource whose preceding queue use has exact submission proof.
+    pub(crate) fn release_for_ordered_turnover(
+        &self,
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) {
+        let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
+        let (_, payload) = resource.into_parts();
+        let mut state = self.state.lock();
+        debug_assert!(state.ordered_turnover_active);
+        state.releases = state.releases.saturating_add(1);
+        state
+            .ordered_turnover
+            .push_back(PooledGpuColorFrameWgpuResource { key, payload });
     }
 
     /// Register one presentation allocation and atomically capture its return generation.
@@ -988,7 +1027,10 @@ impl GpuColorFrameWgpuResourcePool {
             None => state.accepts_generation_returns = false,
         }
         state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.evictions = state.evictions.saturating_add(state.ordered_turnover.len() as u64);
         state.idle.clear();
+        state.ordered_turnover.clear();
+        state.ordered_turnover_active = false;
         state.retained_bytes = 0;
     }
 
@@ -1036,8 +1078,25 @@ impl GpuColorFrameWgpuResourcePool {
     pub fn clear(&self) {
         let mut state = self.state.lock();
         state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.evictions = state.evictions.saturating_add(state.ordered_turnover.len() as u64);
         state.idle.clear();
+        state.ordered_turnover.clear();
+        state.ordered_turnover_active = false;
         state.retained_bytes = 0;
+    }
+}
+
+pub(crate) struct GpuColorFrameWgpuOrderedTurnoverGuard {
+    pool: Arc<GpuColorFrameWgpuResourcePool>,
+}
+
+impl Drop for GpuColorFrameWgpuOrderedTurnoverGuard {
+    fn drop(&mut self) {
+        let mut state = self.pool.state.lock();
+        state.ordered_turnover_active = false;
+        while let Some(entry) = state.ordered_turnover.pop_front() {
+            retain_gpu_color_frame_pool_entry(&mut state, entry);
+        }
     }
 }
 
@@ -1160,9 +1219,17 @@ fn release_gpu_color_frame_resource(
     resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
 ) {
     let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
-    let byte_len = key.byte_len();
     let (_, payload) = resource.into_parts();
     state.releases = state.releases.saturating_add(1);
+    retain_gpu_color_frame_pool_entry(state, PooledGpuColorFrameWgpuResource { key, payload });
+}
+
+fn retain_gpu_color_frame_pool_entry(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    entry: PooledGpuColorFrameWgpuResource,
+) {
+    let key = entry.key;
+    let byte_len = key.byte_len();
     if state.options.max_per_contract == 0 || byte_len > state.options.max_retained_bytes {
         state.evictions = state.evictions.saturating_add(1);
         return;
@@ -1178,7 +1245,7 @@ fn release_gpu_color_frame_resource(
             state.evictions = state.evictions.saturating_add(1);
         }
     }
-    state.idle.push_back(PooledGpuColorFrameWgpuResource { key, payload });
+    state.idle.push_back(entry);
     state.retained_bytes = state.retained_bytes.saturating_add(byte_len);
     enforce_gpu_color_frame_pool_byte_limit(state);
 }

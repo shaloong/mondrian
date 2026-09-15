@@ -6991,8 +6991,6 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         finish_prepare!();
     };
-    session.viewer_gpu_execution.clear_frame_resources();
-
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
@@ -7185,6 +7183,7 @@ fn prepare_viewer_gpu_preview(
         );
         drop(record);
         drop(encoder);
+        session.viewer_gpu_execution.clear_frame_resources();
         drop(progress_permit);
         fail_viewer_gpu_frame(host, &mut frame);
         unregister_program_scopes_textures(session);
