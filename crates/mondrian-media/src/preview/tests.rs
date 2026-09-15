@@ -764,6 +764,26 @@ fn hardware_decode_plan_can_prefer_cpu_transfer_without_requiring_native_residen
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn hardware_decode_plan_reason_tracks_the_renderer_selected_cuda_backend() {
+    let plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        Some(crate::HwAccelDeviceSelector::CudaDeviceOrdinal(0)),
+    );
+
+    assert_eq!(plan.probe.candidate_backend, Some(HwAccelBackend::Cuda));
+    assert!(
+        plan.probe.reason.contains(HwAccelBackend::Cuda.as_str()),
+        "selected CUDA plan reported an unrelated backend: {}",
+        plan.probe.reason
+    );
+    assert!(!plan.probe.reason.contains("VA-API"));
+}
+
 #[test]
 fn hardware_decode_plan_configures_required_gpu_without_cpu_transfer_fallback() {
     let plan = PreviewHardwareDecodePlan::resolve(

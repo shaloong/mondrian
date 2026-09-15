@@ -307,7 +307,7 @@ impl ViewerNativeVideoImportRuntime {
                 Err(error) => Self {
                     support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
                         format!("{:?}", adapter.get_info().backend),
-                        format!("native VA-API Vulkan + OCIO backend unavailable: {error}"),
+                        format!("native Vulkan video import + OCIO backend unavailable: {error}"),
                     ),
                     cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: None,

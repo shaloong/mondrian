@@ -182,6 +182,7 @@ impl PreviewHardwareDecodePlan {
         }
 
         let selected = candidates.first().cloned();
+        let selected_candidate = selected.is_some();
         let (candidate, codec_config, device_context) = selected
             .map(|candidate| {
                 (
@@ -210,6 +211,17 @@ impl PreviewHardwareDecodePlan {
         probe.candidate_handle_kind = candidate.native_handle_kind();
         probe.candidate_surface_formats = candidate.preferred_surface_formats();
         probe.decoder_adapter_available = ffmpeg_native_resource_adapter_available(&codec_config);
+        probe.reason = if selected_candidate {
+            format!(
+                "{} is the selected hardware-decode candidate; active execution remains unproven until the decode Session observes a hardware frame",
+                candidate.as_str()
+            )
+        } else {
+            format!(
+                "no statically compatible hardware-decode candidate was admitted; codec probe: {}; device probe: {}",
+                codec_config.reason, device_context.reason
+            )
+        };
         (probe, codec_config, device_context, candidates)
     }
 

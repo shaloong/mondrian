@@ -4084,6 +4084,15 @@ Required native requests cannot select a CPU download. Explicit hardware decode
 for CPU consumers keeps its separately reported download path. Backend enumeration
 never proves successful decoding, GPU residency, or renderer import.
 
+The pre-execution diagnostic follows the backend selected by the renderer-bound
+plan. In particular, a CUDA selector cannot inherit the platform candidate's
+VA-API explanation. It reports the selected backend while keeping execution
+unproven until the owning decode Session observes a hardware frame. If no
+candidate is admitted, the diagnostic preserves the concrete codec and device
+probe reasons. Linux renderer construction failures use a backend-neutral
+Vulkan native-video label because the attempted route may be VA-API/DRM PRIME
+or the NVIDIA CUDA buffer bridge.
+
 The Vulkan native-video Adapter obtains DRM identity from the exact renderer
 physical device using `VK_EXT_physical_device_drm`, validates the character
 render node, and publishes the selector through the existing coherent renderer
