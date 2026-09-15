@@ -1,12 +1,14 @@
 # Color Management
 
-Bundled OpenColorIO and its native dependencies build under Cargo's default
-`CMAKE_BUILD_PARALLEL_LEVEL=1`. OpenColorIO's nested `ExternalProject` commands
-invoke `cmake --build --parallel` without a numeric limit and do not reliably
-inherit Cargo's `-j` jobserver bound on Linux. The repository default therefore
-prevents a clean color-engine build from creating an unbounded native compiler
-fan-out. A qualification host may explicitly override the environment variable
-when its CPU, memory, and process limits have been independently provisioned.
+Bundled OpenColorIO and its native dependencies build under a repository-owned
+Linux Make launcher. OpenColorIO's nested `ExternalProject` commands invoke
+`cmake --build --parallel` without a numeric limit; CMake specifies that this
+uses the native build tool's default and ignores `CMAKE_BUILD_PARALLEL_LEVEL`.
+The inherited Linux toolchain therefore selects `linux-bounded-make.sh` for Unix
+Makefiles, and the launcher applies an exact final `-j1` at every native Make
+boundary. `CMAKE_BUILD_PARALLEL_LEVEL=1` remains the bound for CMake calls that
+do not provide `--parallel`. A provisioned qualification host may set
+`MONDRIAN_CMAKE_BUILD_JOBS` or supply its own toolchain explicitly.
 
 Preview timing reports distinguish a measured CPU output bottleneck from GPU
 route eligibility. The recommendation first profiles processor, allocation and

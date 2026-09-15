@@ -1,5 +1,7 @@
 [env]
-# Bundled native dependencies can invoke `cmake --build --parallel` from nested
-# ExternalProject steps, bypassing Cargo's jobserver. Keep the default bounded;
-# a qualified build host may explicitly override this environment variable.
+# Bound ordinary CMake builds that do not pass an explicit parallel level.
 CMAKE_BUILD_PARALLEL_LEVEL = { value = "1", force = false }
+# OpenColorIO also invokes nested `cmake --build --parallel` commands, for which
+# CMake deliberately ignores CMAKE_BUILD_PARALLEL_LEVEL. On Linux Unix Makefiles,
+# use a make launcher that applies the same bound at the native tool boundary.
+CMAKE_TOOLCHAIN_FILE = { value = ".cargo/cmake/linux-bounded-make.cmake", relative = true, force = false }
