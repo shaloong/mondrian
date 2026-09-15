@@ -10,6 +10,17 @@ pub(crate) fn apply_video_codec_args(
     crate::hardware_encoding::apply_video_encoder_args(cmd, codec, coding, encoder);
 }
 
+pub(crate) fn apply_external_filter_thread_args(
+    cmd: &mut Command,
+    policy: service::ExportExecutionResourcePolicy,
+) {
+    let threads = policy.ffmpeg_filter_threads.max(1).to_string();
+    cmd.arg("-filter_threads")
+        .arg(&threads)
+        .arg("-filter_complex_threads")
+        .arg(threads);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportYuvMatrix {
     Bt709,

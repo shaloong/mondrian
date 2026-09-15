@@ -1849,7 +1849,12 @@ fn derive_decision(
         },
         export: ExportExecutionDecision {
             dispatch_enabled: export_dispatch,
-            resource_policy: export_resource_policy(profile.class, cache_divisor, realtime),
+            resource_policy: export_resource_policy(
+                profile.class,
+                cache_divisor,
+                realtime,
+                cpu_parallelism,
+            ),
         },
         ui: UiExecutionDecision {
             vector_icon_cache_entries: (vector_icon_entries / cache_divisor).max(1),
@@ -2045,6 +2050,7 @@ fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
     realtime: bool,
+    cpu_parallelism: usize,
 ) -> ExportExecutionResourcePolicy {
     let (
         visual_program_entries,
@@ -2158,6 +2164,7 @@ fn export_resource_policy(
         // Export remains live, but equivalent CPU-capable visual work must not
         // continuously submit a second GPU queue beside the realtime Session.
         opportunistic_gpu_acceleration: !realtime,
+        ffmpeg_filter_threads: cpu_parallelism.clamp(1, 8),
         // Reachable-closure and per-frame working limits are correctness
         // admission grants, not optional residency. Pressure may delay the
         // next attempt and trim caches, but cannot make the same valid Export

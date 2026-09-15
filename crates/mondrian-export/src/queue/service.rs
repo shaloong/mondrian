@@ -54,6 +54,12 @@ pub struct ExportExecutionResourcePolicy {
     /// closure has no exact CPU Float32 route, so scheduling policy never
     /// reinterprets an authored Effect contract.
     pub opportunistic_gpu_acceleration: bool,
+    /// Maximum FFmpeg filter workers admitted for the external encoding
+    /// process owned by this attempt.
+    ///
+    /// FFmpeg otherwise expands filter pools from the host CPU topology, which
+    /// can exceed a container or qualification process task grant.
+    pub ffmpeg_filter_threads: usize,
     /// Maximum prepared Sequence visual programs in the frozen reachable closure.
     pub visual_program_entries: usize,
     /// Maximum aggregate conservative logical bytes for that visual closure.
@@ -121,6 +127,7 @@ impl Default for ExportExecutionResourcePolicy {
     fn default() -> Self {
         Self {
             opportunistic_gpu_acceleration: true,
+            ffmpeg_filter_threads: 1,
             visual_program_entries: 32,
             visual_program_bytes: 64 * 1024 * 1024,
             lut_cache_entries: 8,

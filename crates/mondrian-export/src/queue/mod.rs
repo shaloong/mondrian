@@ -4374,11 +4374,9 @@ fn execute_timeline_export(
         };
         let frame_contract = export_frame_contract(&delivery);
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
-        cmd.arg("-y")
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-f")
+        cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
+        apply_external_filter_thread_args(&mut cmd, resource_policy);
+        cmd.arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
             .arg(pix_fmt)
@@ -10413,6 +10411,25 @@ mod tests {
             ),
             super::JobExecutionResult::Cancelled
         ));
+    }
+
+    #[test]
+    fn external_encoder_filter_threads_follow_the_frozen_attempt_policy() {
+        let mut command = mondrian_media::FfmpegCommand::new("ffmpeg");
+        let policy = service::ExportExecutionResourcePolicy {
+            ffmpeg_filter_threads: 2,
+            ..service::ExportExecutionResourcePolicy::default()
+        };
+        super::apply_external_filter_thread_args(&mut command, policy);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            arguments,
+            ["-filter_threads", "2", "-filter_complex_threads", "2"]
+        );
     }
 
     fn ffmpeg_is_available_for_test() -> bool {

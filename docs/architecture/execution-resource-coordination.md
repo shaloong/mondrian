@@ -50,7 +50,14 @@ Proxy receives global/automatic dispatch plus requested parallelism. Thumbnail
 and Waveform receive automatic admission, dispatch, and their own cache grant.
 Media Import receives dispatch plus requested parallelism. Existing-Asset
 mutation receives only dispatch. Export receives dispatch plus one complete
-resource grant that its queue freezes for each dispatched attempt. Preview
+resource grant that its queue freezes for each dispatched attempt. That grant
+includes the maximum FFmpeg filter and filter-complex worker count derived from
+the same observed logical CPU capacity and capped at eight. The external
+encoder command consumes this value before opening its rawvideo input, so
+FFmpeg cannot expand pools from the host topology beyond a container or
+qualification task grant. This bounds process resources without changing codec
+quality, GOP structure, color conversion, hardware selection, or fallback
+classification. Preview
 receives its runtime scale, Frame Store limits, trim request, Basic Title cache
 grant, and instance-owned Effect pixel-cache/GPU-plan-cache grants, plus an
 independent Viewer GPU idle-retention/active-working-set grant and one atomic
