@@ -2165,6 +2165,7 @@ fn export_resource_policy(
         // continuously submit a second GPU queue beside the realtime Session.
         opportunistic_gpu_acceleration: !realtime,
         ffmpeg_filter_threads: cpu_parallelism.clamp(1, 8),
+        ffmpeg_codec_threads: cpu_parallelism.clamp(1, 8),
         // Reachable-closure and per-frame working limits are correctness
         // admission grants, not optional residency. Pressure may delay the
         // next attempt and trim caches, but cannot make the same valid Export
@@ -2603,6 +2604,18 @@ mod tests {
         assert_eq!(
             elevated.export.resource_policy.audio_runtime_grant,
             nominal.export.resource_policy.audio_runtime_grant
+        );
+        assert_eq!(
+            elevated.export.resource_policy.ffmpeg_filter_threads,
+            nominal.export.resource_policy.ffmpeg_filter_threads
+        );
+        assert_eq!(
+            elevated.export.resource_policy.ffmpeg_codec_threads,
+            nominal.export.resource_policy.ffmpeg_codec_threads
+        );
+        assert_eq!(
+            nominal.export.resource_policy.ffmpeg_codec_threads,
+            nominal.export.resource_policy.ffmpeg_filter_threads
         );
         assert_eq!(elevated.audio.runtime_grant, nominal.audio.runtime_grant);
         assert!(

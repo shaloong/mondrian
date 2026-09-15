@@ -60,6 +60,8 @@ pub struct ExportExecutionResourcePolicy {
     /// FFmpeg otherwise expands filter pools from the host CPU topology, which
     /// can exceed a container or qualification process task grant.
     pub ffmpeg_filter_threads: usize,
+    /// Maximum FFmpeg codec workers admitted for each input or output codec.
+    pub ffmpeg_codec_threads: usize,
     /// Maximum prepared Sequence visual programs in the frozen reachable closure.
     pub visual_program_entries: usize,
     /// Maximum aggregate conservative logical bytes for that visual closure.
@@ -128,6 +130,7 @@ impl Default for ExportExecutionResourcePolicy {
         Self {
             opportunistic_gpu_acceleration: true,
             ffmpeg_filter_threads: 1,
+            ffmpeg_codec_threads: 1,
             visual_program_entries: 32,
             visual_program_bytes: 64 * 1024 * 1024,
             lut_cache_entries: 8,

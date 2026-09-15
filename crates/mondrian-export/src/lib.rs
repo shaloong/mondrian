@@ -28,10 +28,10 @@ pub mod video_encoding;
 
 pub use artifact_verifier::{
     verify_export_artifact, verify_export_artifact_cancellable, verify_export_artifact_until,
-    IndependentArtifactNativeObservation, IndependentExportArtifactFailureEvidence,
-    IndependentExportArtifactPolicy, IndependentExportArtifactReceipt,
-    IndependentExportArtifactReport, IndependentExportArtifactVerificationError,
-    INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
+    verify_export_artifact_with_policy_until, IndependentArtifactNativeObservation,
+    IndependentExportArtifactFailureEvidence, IndependentExportArtifactPolicy,
+    IndependentExportArtifactReceipt, IndependentExportArtifactReport,
+    IndependentExportArtifactVerificationError, INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
 };
 pub use broadcast_artifact_qc::{
     verify_finished_broadcast_artifact, FinishedBroadcastArtifactError,

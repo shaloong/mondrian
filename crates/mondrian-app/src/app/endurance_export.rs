@@ -19,7 +19,8 @@ use mondrian_export::queue::{
     ExportPublicationState, ExportQueueDiagnostics, JobStatus, RenderJob, RenderQueue,
 };
 use mondrian_export::{
-    verify_export_artifact_until, IndependentExportArtifactPolicy, IndependentExportArtifactReceipt,
+    verify_export_artifact_with_policy_until, IndependentExportArtifactPolicy,
+    IndependentExportArtifactReceipt,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -71,10 +72,16 @@ struct FrozenExportPlan {
 impl FrozenExportPlan {
     fn capture(
         app: &AppState,
-        request: FrozenRepeatedExportRequest,
+        mut request: FrozenRepeatedExportRequest,
     ) -> Result<(Self, ProductionFrozenExportBackend), FrozenRepeatedExportError> {
         validate_single_file_preset(&request.preset)?;
         validate_artifact_prefix(&request.artifact_prefix)?;
+        request.verification_policy = request
+            .verification_policy
+            .with_ffmpeg_codec_threads(
+                app.execution_resource_decision().export.resource_policy.ffmpeg_codec_threads,
+            )
+            .map_err(|error| FrozenRepeatedExportError::InvalidPlan(error.to_string()))?;
         let output_directory = canonical_existing_directory(&request.output_directory)?;
         let extension = export_preset_extension(&request.preset);
         let first_output = artifact_path(&output_directory, &request.artifact_prefix, extension, 1);
@@ -928,10 +935,10 @@ fn verify_frozen_artifact(
     if let Some(owner) = ancillary {
         request["ancillary_program_sha256"] = serde_json::json!(owner.sha256());
     }
-    let result = verify_export_artifact_until(
+    let result = verify_export_artifact_with_policy_until(
         output_path,
         artifact_id,
-        policy.maximum_artifact_bytes(),
+        policy,
         deadline,
         cancellation,
     );

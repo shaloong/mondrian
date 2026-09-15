@@ -30,6 +30,8 @@ pub struct IndependentExportArtifactPolicy {
     maximum_artifact_bytes: u64,
     /// Maximum wall time for snapshot, probes, full decode, identity recheck and cleanup.
     decode_timeout: Duration,
+    /// Maximum FFmpeg workers for each input decoder and output hash codec.
+    ffmpeg_codec_threads: usize,
 }
 
 impl IndependentExportArtifactPolicy {
@@ -48,7 +50,11 @@ impl IndependentExportArtifactPolicy {
                 "decode timeout must be nonzero",
             ));
         }
-        Ok(Self { maximum_artifact_bytes, decode_timeout })
+        Ok(Self {
+            maximum_artifact_bytes,
+            decode_timeout,
+            ffmpeg_codec_threads: 1,
+        })
     }
 
     /// Largest regular file admitted for hashing and full decode.
@@ -59,6 +65,25 @@ impl IndependentExportArtifactPolicy {
     /// Maximum wall time for the complete verification and consuming cleanup.
     pub const fn decode_timeout(self) -> Duration {
         self.decode_timeout
+    }
+
+    /// Return this policy with the frozen FFmpeg codec worker grant.
+    pub fn with_ffmpeg_codec_threads(
+        mut self,
+        ffmpeg_codec_threads: usize,
+    ) -> Result<Self, IndependentExportArtifactVerificationError> {
+        if !(1..=64).contains(&ffmpeg_codec_threads) {
+            return Err(IndependentExportArtifactVerificationError::InvalidPolicy(
+                "FFmpeg codec threads must be in 1..=64",
+            ));
+        }
+        self.ffmpeg_codec_threads = ffmpeg_codec_threads;
+        Ok(self)
+    }
+
+    /// Maximum workers admitted for each FFmpeg input or output codec.
+    pub const fn ffmpeg_codec_threads(self) -> usize {
+        self.ffmpeg_codec_threads
     }
 }
 
@@ -186,10 +211,22 @@ pub fn verify_export_artifact_cancellable(
     let deadline = Instant::now()
         .checked_add(policy.decode_timeout)
         .ok_or(IndependentExportArtifactVerificationError::DeadlineOverflow)?;
-    verify_export_artifact_until(
+    verify_export_artifact_with_policy_until(path, artifact_id, policy, deadline, cancellation)
+}
+
+/// Verify and consume one artifact snapshot under a complete frozen policy and deadline.
+pub fn verify_export_artifact_with_policy_until(
+    path: &Path,
+    artifact_id: impl Into<String>,
+    policy: IndependentExportArtifactPolicy,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<IndependentExportArtifactReceipt, IndependentExportArtifactVerificationError> {
+    verify_export_artifact_inner_until(
         path,
         artifact_id,
         policy.maximum_artifact_bytes,
+        policy.ffmpeg_codec_threads,
         deadline,
         cancellation,
     )
@@ -200,6 +237,24 @@ pub fn verify_export_artifact_until(
     path: &Path,
     artifact_id: impl Into<String>,
     maximum_artifact_bytes: u64,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<IndependentExportArtifactReceipt, IndependentExportArtifactVerificationError> {
+    verify_export_artifact_inner_until(
+        path,
+        artifact_id,
+        maximum_artifact_bytes,
+        1,
+        deadline,
+        cancellation,
+    )
+}
+
+fn verify_export_artifact_inner_until(
+    path: &Path,
+    artifact_id: impl Into<String>,
+    maximum_artifact_bytes: u64,
+    ffmpeg_codec_threads: usize,
     deadline: Instant,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<IndependentExportArtifactReceipt, IndependentExportArtifactVerificationError> {
@@ -246,6 +301,7 @@ pub fn verify_export_artifact_until(
         }
         let decode = full_decode(
             &snapshot_path,
+            ffmpeg_codec_threads,
             deadline,
             cancellation,
             &mut decode_execution,
@@ -539,32 +595,14 @@ struct FullDecodeEvidence {
 
 fn full_decode(
     path: &Path,
+    ffmpeg_codec_threads: usize,
     deadline: Instant,
     cancellation: &ExecutionCancellationToken,
     observed: &mut Option<IndependentArtifactNativeObservation>,
 ) -> Result<FullDecodeEvidence, IndependentExportArtifactVerificationError> {
     check_artifact_boundary(cancellation, Some(deadline))?;
-    let mut command = mondrian_media::ffmpeg_command()
+    let mut command = full_decode_command(path, ffmpeg_codec_threads)
         .map_err(IndependentExportArtifactVerificationError::CommandAdmission)?;
-    command
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-xerror",
-            "-err_detect",
-            "explode",
-            "-nostats",
-            "-stats_period",
-            "86400",
-            "-progress",
-            "pipe:2",
-            "-i",
-        ])
-        .arg(path)
-        .args([
-            "-map", "0:v?", "-map", "0:a?", "-sn", "-dn", "-f", "hash", "-hash", "sha256", "pipe:1",
-        ]);
     let policy = SupervisedProcessPolicy {
         pipe_stdin: false,
         stdout: SupervisedStreamCapture::Head {
@@ -601,6 +639,36 @@ fn full_decode(
     let (video_frames, duration_us) = parse_final_progress(&output.stderr)?;
     check_artifact_boundary(cancellation, Some(deadline))?;
     Ok(FullDecodeEvidence { video_frames, duration_us, content_sha256 })
+}
+
+fn full_decode_command(
+    path: &Path,
+    ffmpeg_codec_threads: usize,
+) -> Result<mondrian_media::FfmpegCommand, mondrian_media::FfmpegCommandError> {
+    let threads = ffmpeg_codec_threads.max(1).to_string();
+    let mut command = mondrian_media::ffmpeg_command()?;
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-nostats",
+            "-stats_period",
+            "86400",
+            "-progress",
+            "pipe:2",
+            "-threads",
+        ])
+        .arg(&threads)
+        .arg("-i")
+        .arg(path)
+        .args(["-map", "0:v?", "-map", "0:a?", "-sn", "-dn", "-threads"])
+        .arg(threads)
+        .args(["-f", "hash", "-hash", "sha256", "pipe:1"]);
+    Ok(command)
 }
 
 fn parse_hash_output(bytes: &[u8]) -> Result<String, IndependentExportArtifactVerificationError> {
@@ -833,6 +901,32 @@ impl IndependentExportArtifactVerificationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_decode_bounds_input_and_output_codec_threads() {
+        let policy = IndependentExportArtifactPolicy::new(1024, Duration::from_secs(1))
+            .expect("base policy")
+            .with_ffmpeg_codec_threads(2)
+            .expect("bounded codec workers");
+        assert_eq!(policy.ffmpeg_codec_threads(), 2);
+        assert!(
+            policy.with_ffmpeg_codec_threads(0).is_err(),
+            "a zero-worker policy must fail admission"
+        );
+        let command = full_decode_command(Path::new("artifact.mp4"), 2)
+            .expect("admit independent decode command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args.windows(2)
+                .filter(|pair| *pair == ["-threads", "2"])
+                .count(),
+            2,
+            "the input decoder and hash/rawvideo output encoder need separate codec thread bounds: {args:?}"
+        );
+    }
 
     #[test]
     fn expired_artifact_deadline_precedes_snapshot_or_source_open() {
