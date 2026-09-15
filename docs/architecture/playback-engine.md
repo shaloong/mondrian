@@ -2164,6 +2164,16 @@ and the capacity-one current-output replacement reserve. This is a correctness
 floor, not an 8 GiB realtime-4K promise; monitor conversion, calibration,
 scopes, transitions, spatial filtering, and non-identity Effects enter their
 larger explicit working-set contracts and may require quality/proxy fallback.
+On Linux Vulkan, the active Device generation additionally reports its physical
+device-local heap capacity to the same App resource coordinator before Viewer
+work. That coordinator reserves five eighths for decoder, display, driver,
+pipeline, allocator, and other non-Viewer residency; it grants the Viewer five
+sixteenths for the active closure and one sixteenth for idle reuse. Devices
+below 3 GiB request Half runtime Preview resolution and devices below 2 GiB
+request Quarter without changing Float32 working semantics. An unavailable
+capacity observation remains explicit and receives the conservative Half-scale,
+384 MiB active policy. Window and Headless validation use the same observation
+and decision path, including device reopen.
 
 Frame-scoped renderer resources clear through one Interface while pipelines and
 device capability state remain resident. On device/display invalidation, the
@@ -2188,6 +2198,10 @@ including error and unwind paths. Detached presentation leases return through
 their generation-checked path and never enter ordered turnover. This preserves
 the active working-set grant without converting the smaller idle grant into a
 second residency budget.
+The first exact-contract miss drops every unmatched turnover predecessor before
+allocating the new texture. Quality or source-extent changes therefore cannot
+retain any optional part of the old working set while building the new one.
+An all-matching steady-state successor still reuses the complete submitted set.
 Before a Headless completed-candidate receipt records zero native decoder
 residency, the Adapter also consumes the already-released platform owner under
 that same absolute completion deadline. This wait does not close native import

@@ -173,6 +173,7 @@ pub(crate) fn present_headless_preview_candidate_at(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     already_visible_at: Option<Instant>,
 ) -> anyhow::Result<HeadlessPreviewCandidate> {
+    apply_headless_gpu_resource_facts(preview, state, gpu)?;
     let observation_started = Instant::now();
     let observed_frame = state.current_frame();
     let candidate = present_headless_preview_candidate_inner(
@@ -576,6 +577,24 @@ fn advance_headless_execution_resource_policy(
     resource_decision.preview.viewer_gpu
 }
 
+/// Bind exact GPU-generation facts through the product coordinator before any
+/// current or speculative request freezes its runtime scale.
+fn apply_headless_gpu_resource_facts(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let decision = state.observe_viewer_gpu_device_local_bytes(gpu.device_local_memory_bytes());
+    #[cfg(not(target_os = "linux"))]
+    let decision = state.execution_resource_decision();
+    preview.apply_resource_decision(&decision.preview);
+    if !gpu.has_submission_in_flight() {
+        gpu.apply_resource_decision(&decision.preview.viewer_gpu)?;
+    }
+    Ok(())
+}
+
 /// Opportunistically prepare the exact immediate successor through the same
 /// production Viewer Runtime and physical GPU Adapter.
 ///
@@ -590,6 +609,7 @@ pub(crate) fn prepare_headless_preview_successor(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     publish_preroll_readiness: bool,
 ) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
+    apply_headless_gpu_resource_facts(preview, state, gpu)?;
     let successor_started = Instant::now();
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
         return Ok(None);
@@ -698,6 +718,7 @@ fn maintain_headless_preview_lookahead(
     gpu: &mut HeadlessViewerGpuAdapter,
     stage_missing: bool,
 ) -> anyhow::Result<bool> {
+    apply_headless_gpu_resource_facts(preview, state, gpu)?;
     const FIRST_LOOKAHEAD_OFFSET: usize = 2;
     const LAST_LOOKAHEAD_OFFSET: usize = 6;
     let mut expected = Vec::with_capacity(LAST_LOOKAHEAD_OFFSET);

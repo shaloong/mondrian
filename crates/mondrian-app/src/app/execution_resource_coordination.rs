@@ -75,6 +75,10 @@ pub(crate) enum MachineResourceClass {
 pub(crate) struct MachineResourceProfile {
     pub(crate) class: MachineResourceClass,
     pub(crate) installed_memory_bytes: Option<u64>,
+    /// Whether the active Viewer generation supplied a capacity observation.
+    pub(crate) viewer_gpu_capacity_observed: bool,
+    /// Total bytes in device-local heaps for the active Viewer GPU generation.
+    pub(crate) viewer_gpu_device_local_bytes: Option<u64>,
     pub(crate) logical_cpu_count: usize,
 }
 
@@ -94,6 +98,8 @@ impl MachineResourceProfile {
         Self {
             class,
             installed_memory_bytes,
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: logical_cpu_count.max(1),
         }
     }
@@ -774,6 +780,29 @@ impl ExecutionResourceCoordinator {
         Arc::clone(&self.state.lock().decision)
     }
 
+    /// Publish immutable capacity for the exact active Viewer GPU generation.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn observe_viewer_gpu_device_local_bytes(
+        &self,
+        device_local_bytes: Option<u64>,
+    ) -> Arc<ExecutionResourceDecisionSnapshot> {
+        let mut state = self.state.lock();
+        let measured = device_local_bytes.filter(|bytes| *bytes > 0);
+        if !state.profile.viewer_gpu_capacity_observed
+            || state.profile.viewer_gpu_device_local_bytes != measured
+        {
+            state.profile.viewer_gpu_capacity_observed = true;
+            state.profile.viewer_gpu_device_local_bytes = measured;
+            refresh_heavy_slots(
+                &mut state,
+                Instant::now(),
+                ExecutionResourceSlotDomains::empty(),
+            );
+            publish_decision(&mut state);
+        }
+        Arc::clone(&state.decision)
+    }
+
     fn acknowledge_heavy_slot_close(
         &self,
         decision: &ExecutionResourceDecisionSnapshot,
@@ -1164,6 +1193,17 @@ impl Default for ExecutionResourceCoordinator {
 }
 
 impl AppState {
+    /// Bind immutable capacity from the exact active Viewer GPU generation to
+    /// the existing product resource authority.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observe_viewer_gpu_device_local_bytes(
+        &self,
+        device_local_bytes: Option<u64>,
+    ) -> Arc<ExecutionResourceDecisionSnapshot> {
+        self.execution_resources
+            .observe_viewer_gpu_device_local_bytes(device_local_bytes)
+    }
+
     /// Apply optional whole-process pressure and immediately propagate the
     /// resulting policy to AppState-owned execution Modules.
     pub fn observe_execution_resource_pressure(&self, pressure: ExecutionResourcePressure) {
@@ -1564,7 +1604,7 @@ fn derive_decision(
     } else {
         ResourceTrimRequest::None
     };
-    let minimum_runtime_scale = if critical
+    let pressure_runtime_scale = if critical
         || (realtime && profile.class == MachineResourceClass::BelowMinimum)
     {
         PreviewResolutionScale::Quarter
@@ -1579,6 +1619,21 @@ fn derive_decision(
     } else {
         PreviewResolutionScale::Full
     };
+    let gpu_runtime_scale = match (
+        profile.viewer_gpu_capacity_observed,
+        profile.viewer_gpu_device_local_bytes,
+    ) {
+        (true, Some(bytes)) if bytes < 2 * 1024 * MIB as u64 => PreviewResolutionScale::Quarter,
+        (true, Some(bytes)) if bytes < 3 * 1024 * MIB as u64 => PreviewResolutionScale::Half,
+        (true, None) => PreviewResolutionScale::Half,
+        (true, Some(_)) | (false, _) => PreviewResolutionScale::Full,
+    };
+    let minimum_runtime_scale =
+        if pressure_runtime_scale.dimension_divisor() >= gpu_runtime_scale.dimension_divisor() {
+            pressure_runtime_scale
+        } else {
+            gpu_runtime_scale
+        };
     let (
         title_cache,
         thumbnail_cache,
@@ -1731,7 +1786,7 @@ fn derive_decision(
             trim,
             frame_store,
             viewer_gpu: PreviewViewerGpuExecutionDecision {
-                grant: preview_viewer_gpu_resource_grant(profile.class, trim),
+                grant: preview_viewer_gpu_resource_grant(profile, trim),
                 clear_idle: trim == ResourceTrimRequest::Aggressive,
             },
             title_cache_budget_bytes: (title_cache / cache_divisor).max(1),
@@ -1884,39 +1939,62 @@ fn cpu_composite_working_set_grant(class: MachineResourceClass) -> TimelineCpuWo
 }
 
 fn preview_viewer_gpu_resource_grant(
-    class: MachineResourceClass,
+    profile: MachineResourceProfile,
     trim: ResourceTrimRequest,
 ) -> ViewerGpuExecutionResourceGrant {
-    if class == MachineResourceClass::Professional {
-        let professional = ViewerGpuExecutionResourceGrant::professional_realtime();
-        return match trim {
-            ResourceTrimRequest::None => professional,
-            ResourceTrimRequest::Speculative => {
-                professional.with_idle_limits(1, professional.max_idle_bytes())
-            }
-            ResourceTrimRequest::Aggressive => professional.with_idle_limits(0, 0),
-        };
-    }
-    let (max_idle_per_contract, max_idle_bytes) = match class {
-        MachineResourceClass::BelowMinimum => (1, 48 * MIB),
-        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (2, 128 * MIB)
-        }
-        MachineResourceClass::Standard => (3, 256 * MIB),
-        MachineResourceClass::Professional => unreachable!("handled above"),
-    };
-    let (max_active_texture_bytes, max_active_textures) = match class {
-        MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
-        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (768 * MIB as u64, 64)
-        }
-        MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
-        MachineResourceClass::Professional => unreachable!("handled above"),
-    };
-    let idle_grant = match trim {
-        ResourceTrimRequest::None => {
+    let class_grant =
+        if profile.class == MachineResourceClass::Professional {
+            ViewerGpuExecutionResourceGrant::professional_realtime()
+        } else {
+            let (max_idle_per_contract, max_idle_bytes) = match profile.class {
+                MachineResourceClass::BelowMinimum => (1, 48 * MIB),
+                MachineResourceClass::UnknownConservative
+                | MachineResourceClass::MinimumSupported => (2, 128 * MIB),
+                MachineResourceClass::Standard => (3, 256 * MIB),
+                MachineResourceClass::Professional => unreachable!("handled above"),
+            };
+            let (max_active_texture_bytes, max_active_textures) = match profile.class {
+                MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
+                MachineResourceClass::UnknownConservative
+                | MachineResourceClass::MinimumSupported => (768 * MIB as u64, 64),
+                MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
+                MachineResourceClass::Professional => unreachable!("handled above"),
+            };
             ViewerGpuExecutionResourceGrant::new(max_idle_per_contract, max_idle_bytes as u64)
+                .with_active_limits(max_active_texture_bytes, max_active_textures)
+        };
+    let capacity_bounded = match profile.viewer_gpu_device_local_bytes {
+        Some(device_local_bytes) => {
+            // The Viewer may consume at most three eighths of physical device-local
+            // memory: five sixteenths for one active closure and one sixteenth for
+            // reusable idle textures. The remaining five eighths belongs to the
+            // decoder surface pool, display compositor, driver, pipelines, and
+            // allocator fragmentation that are outside the Viewer texture table.
+            let active_capacity = (device_local_bytes / 16).saturating_mul(5);
+            let idle_capacity = device_local_bytes / 16;
+            class_grant
+                .with_active_limits(
+                    class_grant.max_active_texture_bytes().min(active_capacity),
+                    class_grant.max_active_textures(),
+                )
+                .with_idle_limits(
+                    class_grant.max_idle_per_contract(),
+                    class_grant.max_idle_bytes().min(idle_capacity),
+                )
         }
+        None if profile.viewer_gpu_capacity_observed => class_grant
+            .with_active_limits(
+                class_grant.max_active_texture_bytes().min(384 * MIB as u64),
+                class_grant.max_active_textures().min(48),
+            )
+            .with_idle_limits(
+                class_grant.max_idle_per_contract().min(1),
+                class_grant.max_idle_bytes().min(48 * MIB as u64),
+            ),
+        None => class_grant,
+    };
+    match trim {
+        ResourceTrimRequest::None => capacity_bounded,
         ResourceTrimRequest::Speculative => {
             // Speculative pressure may retire duplicate textures, but the
             // byte grant must still hold one complete steady-state contract
@@ -1926,11 +2004,10 @@ fn preview_viewer_gpu_resource_grant(
             // into successor preparation. `max_per_contract = 1` removes the
             // optional duplicates without turning frame-to-frame reuse into a
             // disposable cache.
-            ViewerGpuExecutionResourceGrant::new(1, max_idle_bytes as u64)
+            capacity_bounded.with_idle_limits(1, capacity_bounded.max_idle_bytes())
         }
-        ResourceTrimRequest::Aggressive => ViewerGpuExecutionResourceGrant::new(0, 0),
-    };
-    idle_grant.with_active_limits(max_active_texture_bytes, max_active_textures)
+        ResourceTrimRequest::Aggressive => capacity_bounded.with_idle_limits(0, 0),
+    }
 }
 
 fn export_gpu_output_active_grant(
@@ -2283,6 +2360,8 @@ mod tests {
         MachineResourceProfile {
             class,
             installed_memory_bytes: None,
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: 8,
         }
     }
@@ -2323,6 +2402,50 @@ mod tests {
                 .effect_cache
                 .max_working_bytes,
             128 * MIB
+        );
+    }
+
+    #[test]
+    fn two_gib_viewer_gpu_forces_half_scale_and_bounds_its_complete_texture_envelope() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MIB_U64: u64 = 1024 * 1024;
+        let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile::from_capacity(
+            Some(16 * GIB),
+            8,
+        ));
+        let baseline = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert_eq!(
+            baseline.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Full
+        );
+        let decision = coordinator.observe_viewer_gpu_device_local_bytes(Some(2 * GIB));
+
+        assert_eq!(
+            decision.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Half
+        );
+        assert_eq!(
+            decision.preview.viewer_gpu.grant.max_active_texture_bytes(),
+            640 * MIB_U64
+        );
+        assert_eq!(
+            decision.preview.viewer_gpu.grant.max_idle_bytes(),
+            128 * MIB_U64
+        );
+        let same = coordinator.observe_viewer_gpu_device_local_bytes(Some(2 * GIB));
+        assert_eq!(same.revision, decision.revision);
+        let unavailable = coordinator.observe_viewer_gpu_device_local_bytes(None);
+        assert!(unavailable.revision > same.revision);
+        assert_eq!(
+            unavailable.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Half
+        );
+        assert_eq!(
+            unavailable.preview.viewer_gpu.grant.max_active_texture_bytes(),
+            384 * MIB_U64
         );
     }
 
@@ -2393,7 +2516,8 @@ mod tests {
             MachineResourceClass::MinimumSupported,
             MachineResourceClass::Standard,
         ] {
-            let grant = preview_viewer_gpu_resource_grant(class, ResourceTrimRequest::None);
+            let grant =
+                preview_viewer_gpu_resource_grant(profile(class), ResourceTrimRequest::None);
             assert!(
                 grant.max_active_texture_bytes() >= REQUIRED_BYTES,
                 "{class:?} must admit the basic UHD Main10 Float16 steady state"
@@ -3290,6 +3414,8 @@ mod tests {
         let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile {
             class: MachineResourceClass::Standard,
             installed_memory_bytes: Some(16 * GIB),
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: 8,
         });
         let probe = CountingMemoryProbe {

@@ -337,6 +337,7 @@ pub(crate) struct HeadlessViewerGpuAdapterInfo {
     pub backend: String,
     pub driver: String,
     pub driver_info: String,
+    pub device_local_memory_bytes: Option<u64>,
 }
 
 /// Fixed-size inventory of move-only Headless GPU owners at a settled boundary.
@@ -937,6 +938,9 @@ impl HeadlessViewerGpuAdapter {
                     ),
                 )
                 .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
+                let device_local_memory_bytes =
+                    mondrian_renderer::query_gpu_device_memory_capacity(&device)
+                        .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes);
                 // CPU-only fallible state must precede progress/Renderer worker creation.
                 let native_import_gpu_timing =
                     HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
@@ -948,6 +952,7 @@ impl HeadlessViewerGpuAdapter {
                     backend: format!("{:?}", raw_adapter_info.backend),
                     driver: raw_adapter_info.driver,
                     driver_info: raw_adapter_info.driver_info,
+                    device_local_memory_bytes,
                 };
                 // Retain partial ownership through every subsequent error and unwind.
                 startup = Some(ViewerGpuStartupOwner::new(
@@ -1112,6 +1117,12 @@ impl HeadlessViewerGpuAdapter {
     /// Adapter identity bound to this execution device.
     pub(crate) fn adapter_info(&self) -> &HeadlessViewerGpuAdapterInfo {
         &self.adapter_info
+    }
+
+    /// Immutable device-local capacity for this exact GPU generation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn device_local_memory_bytes(&self) -> Option<u64> {
+        self.adapter_info.device_local_memory_bytes
     }
 
     /// Snapshot exact GPU ownership without polling or changing publication state.
@@ -1434,6 +1445,14 @@ impl HeadlessViewerGpuAdapter {
             }
         };
         if let Some(terminal) = self.device_progress.generation_terminal() {
+            tracing::error!(
+                ?terminal,
+                resource_pool = ?self.runtime.resource_pool_diagnostics(),
+                active_working_set = ?self.runtime.active_working_set_diagnostics(),
+                native_import_retained_sources = self.runtime.native_import_retained_source_count(),
+                native_import_pool_residency = ?self.runtime.native_import_pool_residency(),
+                "Headless Viewer GPU generation became terminal during candidate recording"
+            );
             let timestamp_error =
                 if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
                     ring.abandon_frame(token).err()

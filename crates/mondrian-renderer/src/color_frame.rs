@@ -885,6 +885,14 @@ impl GpuColorFrameWgpuResourcePool {
                 state.hits = state.hits.saturating_add(1);
                 return GpuColorFrameResource::new(plan.handle.clone(), entry.payload);
             }
+            // A contract miss proves that the incoming frame is not an exact
+            // physical successor of the staged set. Drop every unmatched
+            // predecessor before allocating the new contract. Sending them
+            // through the optional idle grant would still keep part of the old
+            // working set alive while the new one is created, which can exhaust
+            // device-local memory during quality or extent changes even though
+            // each request independently fits its active grant.
+            evict_gpu_color_frame_ordered_turnover(&mut state);
             let position = state.idle.iter().position(|entry| entry.key == key);
             if let Some(position) = position {
                 if let Some(entry) = state.idle.remove(position) {
@@ -1094,10 +1102,21 @@ impl Drop for GpuColorFrameWgpuOrderedTurnoverGuard {
     fn drop(&mut self) {
         let mut state = self.pool.state.lock();
         state.ordered_turnover_active = false;
-        while let Some(entry) = state.ordered_turnover.pop_front() {
-            retain_gpu_color_frame_pool_entry(&mut state, entry);
-        }
+        settle_gpu_color_frame_ordered_turnover(&mut state);
     }
+}
+
+fn settle_gpu_color_frame_ordered_turnover(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    while let Some(entry) = state.ordered_turnover.pop_front() {
+        retain_gpu_color_frame_pool_entry(state, entry);
+    }
+}
+
+fn evict_gpu_color_frame_ordered_turnover(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    state.evictions = state
+        .evictions
+        .saturating_add(state.ordered_turnover.len().min(u64::MAX as usize) as u64);
+    state.ordered_turnover.clear();
 }
 
 fn register_detached_presentation_demand(

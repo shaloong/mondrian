@@ -543,6 +543,15 @@ impl AppUiHost {
         apply_preview_viewer_gpu_resource_decision(runtime, &decision.preview.viewer_gpu);
     }
 
+    /// Publish immutable capacity from the exact Window Viewer GPU generation
+    /// through the App's single execution-resource authority.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observe_viewer_gpu_device_local_bytes(&self, device_local_bytes: Option<u64>) {
+        self.app_state
+            .borrow()
+            .observe_viewer_gpu_device_local_bytes(device_local_bytes);
+    }
+
     /// Bind a replacement Window to a fresh still ticket after retiring its old carrier.
     pub(crate) fn renew_still_frame_demand_after_output_retirement(
         &self,

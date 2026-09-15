@@ -24,6 +24,7 @@ pub mod cross_application_qualification;
 pub mod display_calibration;
 pub mod gpu_composite_execution;
 pub mod gpu_compositor;
+pub mod gpu_memory_capacity;
 pub mod gpu_output_working_set;
 pub mod gpu_qualification;
 pub mod gpu_visual_frame;
@@ -66,6 +67,8 @@ pub use heterogeneous_cpu::{
     HeterogeneousCpuPrefixSource, PreparedHeterogeneousEffectRoute,
 };
 pub mod viewer_spatial;
+
+pub use gpu_memory_capacity::{query_gpu_device_memory_capacity, GpuDeviceMemoryCapacity};
 
 pub use color_accuracy::{
     compare_code_values, compare_linear_rgba, compare_pq_hdr_display_rgba,

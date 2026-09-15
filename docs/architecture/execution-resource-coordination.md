@@ -313,7 +313,8 @@ grant. Window and Headless therefore share one renderer Interface and one
 policy projection without moving GPU resource ownership into UI or App state.
 
 The same renderer grant independently admits one complete active Viewer
-request. Below-minimum/8/16/32 GiB classes permit respectively
+request. Before an active GPU generation is bound, below-minimum/8/16/32 GiB
+system-memory classes permit respectively
 384 MiB/48, 768 MiB/64, 2 GiB/96, and 4 GiB/160 active logical texture
 bytes/resources; unknown capacity uses the conservative 8 GiB values while
 remaining distinguishable evidence. These active limits derive only from
@@ -321,6 +322,24 @@ machine class and remain identical across Nominal, Elevated, Critical,
 transport-active, Speculative, and Aggressive decisions. Pressure can reduce
 resolution only by causing Preview to issue a new explicit quality request; it
 cannot shrink the grant beneath a frozen candidate or change its precision.
+
+Linux Vulkan startup also queries the exact selected physical device's primary
+device-local heap. A separately mapped host-visible device-local aperture is
+not added to that heap because it does not increase the physical allocation
+budget; unified-memory adapters fall back to their largest device-local heap.
+The existing `ExecutionResourceCoordinator` records that
+immutable generation fact and bounds its class grant to five sixteenths of the
+device-local bytes for one active Viewer closure plus one sixteenth for idle
+reuse. The remaining five eighths is reserved for decoder surfaces, the display
+compositor, driver and pipeline state, allocator fragmentation, and other GPU
+owners outside the Viewer texture table. A measured device below 3 GiB requests
+Half runtime Preview resolution; below 2 GiB requests Quarter. If an active
+generation cannot expose capacity, the observation remains explicitly absent
+and receives the Half/384 MiB conservative policy. Device reopen replaces this
+fact before the successor generation can allocate Viewer work. This is one
+projection of the product resource authority, not a renderer-local quality
+policy, and it never changes working precision or color semantics.
+
 The renderer estimates and admits the complete request before texture
 creation. Idle pool limits, active Viewer limits, and the inner heterogeneous
 continuation grant are three different authorities and may not substitute for
@@ -708,8 +727,10 @@ frame semantics.
 
 Lower machine classes retain their smaller product grants and are not implied
 to satisfy the 8K qualification profile. Machine classification from system
-RAM also does not prove GPU capacity; the coordinated matrix records and
-checks the reference-machine GPU inventory and the real Renderer workload.
+RAM also does not prove GPU capacity; runtime admission consumes the active
+generation's device-local capacity independently, while the coordinated matrix
+still records and checks the reference-machine GPU inventory and real Renderer
+workload.
 
 ### CUDA import storage within SourcePreparation
 
