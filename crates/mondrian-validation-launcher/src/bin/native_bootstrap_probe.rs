@@ -22,6 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if request["fixture_mode"] == "refuse" {
             return Err("fixture refuses bootstrap".into());
         }
+        // A hidden console still has a host process. Require the launcher to
+        // avoid creating that asynchronous owner, not merely hide its window.
+        if !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null() {
+            return Err("native bootstrap unexpectedly owns a console".into());
+        }
         let machine: FileBinding = serde_json::from_value(request["machine_plan"].clone())?;
         let machine_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&machine.path)?)?;
