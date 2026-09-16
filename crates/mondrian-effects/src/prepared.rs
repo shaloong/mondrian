@@ -1821,13 +1821,26 @@ mod tests {
         }
 
         let path = temporary_cube("mondrian-prepared-grade-lut");
-        let grade = PreparedGradeGraph::prepare(
-            &serial_grade(bound_lut_effect(&path)),
-            WorkingColorSpace::LinearRec709,
-        )
-        .expect("prepare grade LUT");
+        let grade = (0..32)
+            .find_map(|_| {
+                // Other unit tests register plugins in this process. A registry
+                // edit legitimately invalidates a prepared graph; only assert
+                // LUT freshness across a coherent registry observation.
+                let revision = effect_registry_revision();
+                let prepared = PreparedGradeGraph::prepare(
+                    &serial_grade(bound_lut_effect(&path)),
+                    WorkingColorSpace::LinearRec709,
+                );
+                let current = prepared.as_ref().map(|grade| grade.dependencies_are_current());
+                if effect_registry_revision() != revision {
+                    std::thread::yield_now();
+                    return None;
+                }
+                assert!(current.expect("prepare grade LUT").expect("check grade LUT"));
+                Some(prepared.expect("prepare grade LUT"))
+            })
+            .expect("effect registry must stabilize during LUT freshness check");
         assert!(grade.has_external_dependencies());
-        assert!(grade.dependencies_are_current().expect("check grade LUT"));
         assert!(grade.retained_bytes_estimate() > std::mem::size_of::<PreparedGradeGraph>());
         let _ = std::fs::remove_file(path);
     }
