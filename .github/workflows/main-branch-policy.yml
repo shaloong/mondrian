@@ -1,0 +1,26 @@
+name: Main branch policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    name: main-source-develop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require this repository's develop branch
+        env:
+          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "$SOURCE_REPOSITORY" != "$TARGET_REPOSITORY" ] || [ "$SOURCE_BRANCH" != "develop" ]; then
+            echo '::error::main only accepts pull requests from this repository develop branch.'
+            exit 1
+          fi
+          echo 'Source branch policy passed.'
