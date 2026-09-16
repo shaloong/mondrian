@@ -1,6 +1,6 @@
 # Mondrian
 
-[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later%20%2F%20Commercial-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
