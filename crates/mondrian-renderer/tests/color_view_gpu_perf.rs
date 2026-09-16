@@ -1237,7 +1237,7 @@ fn record_transform_sample(
                     domain: ColorFrameDomain::Working,
                     encoding: ColorFrameEncoding::LinearFloat,
                     residency: ColorFrameResidency::Gpu,
-                    alpha: mondrian_renderer::ColorFrameAlpha::StraightCoverage,
+                    alpha: input.descriptor().alpha,
                 },
                 GpuColorFrameTextureFormat::Rgba32Float,
                 format!("mondrian-color-transform-{}-output", case.mode),
