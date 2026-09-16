@@ -1,5 +1,15 @@
 # 贡献指南
 
+## 贡献授权 / Contribution authorization
+
+项目使用[贡献者许可协议（CLA）](legal/CLA.md)取得贡献的许可，包含协议明示的商业再许可权限；贡献者保留其著作权。仅使用项目、维护自己的分支或独立发布插件，不要求签署 CLA。CLA 不改变现有代码所适用的许可证。
+
+The [Contributor License Agreement](legal/CLA.md) grants the stated rights in Contributions, including commercial relicensing; contributors retain their copyright. Merely using the project, maintaining a fork or independently publishing a plugin does not require a CLA. The CLA does not change the licenses applicable to existing code.
+
+签署前请阅读[隐私告知](legal/CLA-PRIVACY.md)。在线入口、当前验收状态及记录方式见[接入说明](legal/CLA-SERVICE.md)。目前合并检查尚未强制启用；维护者不得仅凭页面可访问就认定授权核验完成。私人授权材料通过 contact@shaloong.com 联系，不放公开 PR。
+
+Read the [privacy notice](legal/CLA-PRIVACY.md) before signing. See the [service procedure](legal/CLA-SERVICE.md) for the entry point, validation status and records. Merge enforcement is not yet active; an accessible signing page alone does not establish verified authorization. Contact contact@shaloong.com for private authority materials; do not post them in public PRs.
+
 ## 开发环境搭建
 
 ```bash
