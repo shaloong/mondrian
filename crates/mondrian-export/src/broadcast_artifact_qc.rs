@@ -201,14 +201,59 @@ pub(crate) fn verify_finished_broadcast_artifact_until(
             Some("smpte170m") => "170m",
             _ => anyhow::bail!("artifact matrix is absent or unsupported"),
         };
+        let mut signal_decoder = ArtifactSignalDecoder::new(
+            profile.active_picture.raster_width,
+            profile.active_picture.raster_height,
+            matrix,
+            range == "limited",
+        )?;
         let mut session =
             BroadcastArtifactQcSession::new(profile, expected_frames, 256 * 1024 * 1024)?;
+        // Expand YUV planes without a YUV-to-RGB conversion: integer RGB
+        // intermediates in swscale clip excursions before QC can observe them.
+        let filter = if matrix == "gbr" {
+            anyhow::ensure!(range == "full", "RGB artifact must use full range");
+            "format=gbrpf32le".to_owned()
+        } else {
+            format!(
+                "scale=in_range={range}:out_range={range}:flags=accurate_rnd,format=yuv444p16le"
+            )
+        };
+        let pixel_format = if matrix == "gbr" {
+            "gbrpf32le"
+        } else {
+            "yuv444p16le"
+        };
         let mut command = mondrian_media::ffmpeg_command()?;
-        command.args(["-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode", "-nostdin", "-noautorotate", "-apply_cropping", "1", "-i"])
+        command
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-xerror",
+                "-err_detect",
+                "explode",
+                "-nostdin",
+                "-noautorotate",
+                "-apply_cropping",
+                "1",
+                "-i",
+            ])
             .arg(&snapshot_path)
             .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf"])
-            .arg(format!("zscale=matrixin={matrix}:rangein={range}:matrix=gbr:range=full:dither=none,format=gbrpf32le"))
-            .args(["-autoscale", "0", "-fps_mode", "passthrough", "-c:v", "rawvideo", "-pix_fmt", "gbrpf32le", "-f", "rawvideo", "pipe:1"]);
+            .arg(filter)
+            .args([
+                "-noautoscale",
+                "-fps_mode",
+                "passthrough",
+                "-c:v",
+                "rawvideo",
+                "-pix_fmt",
+                pixel_format,
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ]);
         let decoded = mondrian_media::run_supervised_command_streaming_stdout(
             &mut command,
             SupervisedProcessPolicy {
@@ -217,7 +262,7 @@ pub(crate) fn verify_finished_broadcast_artifact_until(
                 ..SupervisedProcessPolicy::default()
             },
             &|| cancellation.is_canceled(),
-            |bytes| session.push(bytes).map_err(io::Error::other),
+            |bytes| signal_decoder.push(bytes, &mut session).map_err(io::Error::other),
         );
         if let Ok(output) = &decoded {
             observed_cleanup = Some(output.cleanup.clone());
@@ -230,6 +275,7 @@ pub(crate) fn verify_finished_broadcast_artifact_until(
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
+            signal_decoder.finish()?;
             let final_identity = hash_published_artifact_until(
                 path,
                 maximum_artifact_bytes,
@@ -285,6 +331,97 @@ pub(crate) fn verify_finished_broadcast_artifact_until(
     }
 }
 
+// One bounded frame of planar 16-bit YUV, converted directly to floating
+// signal RGB. No transfer-function conversion, gamut mapping, or clipping is
+// permitted at this independent measurement boundary.
+struct ArtifactSignalDecoder {
+    pixels: usize,
+    limited: bool,
+    coefficients: Option<(f32, f32)>,
+    pending: Vec<u8>,
+}
+
+impl ArtifactSignalDecoder {
+    fn new(width: u32, height: u32, matrix: &str, limited: bool) -> anyhow::Result<Self> {
+        let pixels = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| anyhow::anyhow!("QC raster overflow"))?;
+        anyhow::ensure!(
+            pixels > 0 && pixels <= (256 * 1024 * 1024) / 18,
+            "QC signal conversion exceeds bounded frame memory"
+        );
+        let coefficients = match matrix {
+            "gbr" => None,
+            "709" => Some((0.2126, 0.0722)),
+            "2020_ncl" => Some((0.2627, 0.0593)),
+            "470bg" | "170m" => Some((0.299, 0.114)),
+            _ => anyhow::bail!("unsupported QC matrix"),
+        };
+        let mut pending = Vec::new();
+        if coefficients.is_some() {
+            pending.try_reserve_exact(pixels * 6)?;
+        }
+        Ok(Self { pixels, limited, coefficients, pending })
+    }
+
+    fn push(
+        &mut self,
+        mut bytes: &[u8],
+        session: &mut BroadcastArtifactQcSession,
+    ) -> anyhow::Result<()> {
+        let Some((kr, kb)) = self.coefficients else {
+            session.push(bytes)?;
+            return Ok(());
+        };
+        let frame_bytes = self.pixels * 6;
+        while !bytes.is_empty() {
+            let take = bytes.len().min(frame_bytes - self.pending.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.pending.len() == frame_bytes {
+                let rgb = yuv444p16_to_gbr_f32(&self.pending, self.pixels, self.limited, kr, kb);
+                session.push(&rgb)?;
+                self.pending.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.pending.is_empty(),
+            "decoder ended in a partial YUV frame"
+        );
+        Ok(())
+    }
+}
+
+fn yuv444p16_to_gbr_f32(bytes: &[u8], pixels: usize, limited: bool, kr: f32, kb: f32) -> Vec<u8> {
+    let sample = |plane: usize, pixel: usize| {
+        let offset = (plane * pixels + pixel) * 2;
+        f32::from(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+    };
+    let (y_offset, y_scale, c_scale) = if limited {
+        (4096.0, 56064.0, 57344.0)
+    } else {
+        (0.0, 65535.0, 65535.0)
+    };
+    let mut output = vec![0; pixels * 12];
+    for pixel in 0..pixels {
+        let y = (sample(0, pixel) - y_offset) / y_scale;
+        let cb = (sample(1, pixel) - 32768.0) / c_scale;
+        let cr = (sample(2, pixel) - 32768.0) / c_scale;
+        let r = y + 2.0 * (1.0 - kr) * cr;
+        let b = y + 2.0 * (1.0 - kb) * cb;
+        let g = y - 2.0 * (kb * (1.0 - kb) * cb + kr * (1.0 - kr) * cr) / (1.0 - kr - kb);
+        for (plane, value) in [g, b, r].into_iter().enumerate() {
+            let offset = (plane * pixels + pixel) * 4;
+            output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    output
+}
+
 fn decode_sha256(value: &str) -> anyhow::Result<[u8; 32]> {
     anyhow::ensure!(
         value.len() == 64 && value.is_ascii(),
@@ -305,6 +442,76 @@ mod tests {
         BroadcastQcObservationTap, BroadcastQcRule, BroadcastQcSeverity, BroadcastQcVerdict,
         QcActivePicture,
     };
+
+    #[test]
+    fn signal_stream_handles_split_samples_and_rejects_truncated_or_extra_frames() {
+        let profile = BroadcastQcProfile {
+            id: "signal-stream".to_owned(),
+            edition: "1".to_owned(),
+            source_sha256: [2; 32],
+            signal_color_space: mondrian_core::ColorSpace::Rec709,
+            observation_tap: BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: QcActivePicture::full(1, 1),
+            rules: vec![BroadcastQcRule::SignalExcursion {
+                rule_id: "range".to_owned(),
+                tolerance_per_mille: 0,
+                maximum_coverage_ppm: 0,
+                severity: BroadcastQcSeverity::Fail,
+            }],
+            maximum_retained_findings: 8,
+            require_regulatory_flash_analysis: false,
+            require_encoded_artifact_revalidation: true,
+        };
+        let mut session = BroadcastArtifactQcSession::new(profile.clone(), 2, 1024).unwrap();
+        let mut decoder = ArtifactSignalDecoder::new(1, 1, "709", true).unwrap();
+        let data: Vec<_> = [4096_u16, 32768, 32768, 60160, 32768, 32768]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        for byte in &data {
+            decoder.push(std::slice::from_ref(byte), &mut session).unwrap();
+        }
+        decoder.finish().unwrap();
+        let report = session.finish([1; 32], 32, true).unwrap();
+        assert!(report.scan.complete);
+        assert_eq!(report.scan.analyzed_frames, 2);
+        let mut session = BroadcastArtifactQcSession::new(profile, 1, 1024).unwrap();
+        let mut decoder = ArtifactSignalDecoder::new(1, 1, "709", true).unwrap();
+        decoder.push(&data[..5], &mut session).unwrap();
+        assert!(decoder.finish().is_err());
+        decoder.push(&data[5..6], &mut session).unwrap();
+        decoder.finish().unwrap();
+        assert!(decoder.push(&data[6..], &mut session).is_err());
+        assert!(ArtifactSignalDecoder::new(u32::MAX, u32::MAX, "709", true).is_err());
+    }
+
+    #[test]
+    fn signal_conversion_preserves_reference_levels_and_chroma_excursions() {
+        for matrix in [(0.2126, 0.0722), (0.2627, 0.0593), (0.299, 0.114)] {
+            for (limited, samples, expected) in [
+                (true, [4096_u16, 32768, 32768], [0.0, 0.0, 0.0]),
+                (true, [60160, 32768, 32768], [1.0, 1.0, 1.0]),
+                (true, [0, 32768, 32768], [-16.0 / 219.0; 3]),
+                (true, [65472, 32768, 32768], [959.0 / 876.0; 3]),
+                (false, [0, 32768, 32768], [0.0, 0.0, 0.0]),
+                (false, [65535, 32768, 32768], [1.0, 1.0, 1.0]),
+            ] {
+                let bytes: Vec<_> = samples.into_iter().flat_map(u16::to_le_bytes).collect();
+                let actual = yuv444p16_to_gbr_f32(&bytes, 1, limited, matrix.0, matrix.1);
+                for (value, expected) in actual.chunks_exact(4).zip(expected) {
+                    assert!(
+                        (f32::from_le_bytes(value.try_into().unwrap()) - expected).abs() < 1e-6
+                    );
+                }
+            }
+            // A saturated Cr sample must survive as an above-unity R value.
+            let bytes: Vec<_> =
+                [60160_u16, 32768, 61440].into_iter().flat_map(u16::to_le_bytes).collect();
+            let rgb = yuv444p16_to_gbr_f32(&bytes, 1, true, matrix.0, matrix.1);
+            let r = f32::from_le_bytes(rgb[8..12].try_into().unwrap());
+            assert!((r - (2.0 - matrix.0)).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn finished_broadcast_preserves_real_limited_range_under_and_over_shoot() {
@@ -359,6 +566,14 @@ mod tests {
                     "16x16",
                     "-framerate",
                     "25",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-colorspace",
+                    "bt709",
+                    "-color_range",
+                    "tv",
                     "-i",
                     "pipe:0",
                     "-frames:v",

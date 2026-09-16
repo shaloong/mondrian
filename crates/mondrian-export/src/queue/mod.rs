@@ -4410,7 +4410,7 @@ fn execute_timeline_export(
                     .arg("1:a:0")
                     .arg("-shortest");
             }
-            TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+            TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
                 let Some(channel_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
@@ -4420,7 +4420,8 @@ fn execute_timeline_export(
                     .arg("lavfi")
                     .arg("-i")
                     .arg(format!(
-                        "anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}"
+                        "anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                        analysis.sample_frames
                     ))
                     .arg("-map")
                     .arg("0:v:0")
@@ -4861,7 +4862,7 @@ fn execute_resident_hevc_export(
                 .arg("-shortest");
             apply_audio_codec_args(&mut command, audio);
         }
-        TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+        TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return ResidentExportAttemptOutcome::Failed(
                     "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
@@ -4872,7 +4873,8 @@ fn execute_resident_hevc_export(
                 .arg("lavfi")
                 .arg("-i")
                 .arg(format!(
-                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate}"
+                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                    analysis.sample_frames
                 ))
                 .arg("-map")
                 .arg("1:a:0")
@@ -5028,12 +5030,13 @@ fn try_execute_smart_render(
                 .arg("-i")
                 .arg(path);
         }
-        TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+        TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
             command.arg("-f").arg("lavfi").arg("-i").arg(format!(
-                "anullsrc=channel_layout={layout}:sample_rate={sample_rate}"
+                "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                analysis.sample_frames
             ));
         }
         TimelineAudioInput::Disabled => {}
@@ -11624,7 +11627,20 @@ mod tests {
                     .expect("read published manifest"),
             )
             .expect("parse published manifest");
-            assert_eq!(manifest["schema_version"], 2);
+            assert_eq!(manifest["schema_version"], 3);
+            let expected_association = if job.config.preset.alpha_mode != ExportAlphaMode::Preserve
+            {
+                "opaque"
+            } else if matches!(
+                format,
+                crate::preset::ImageSequenceFormat::OpenExrHalf
+                    | crate::preset::ImageSequenceFormat::OpenExrFloat
+            ) {
+                "premultiplied"
+            } else {
+                "straight"
+            };
+            assert_eq!(manifest["alpha_association"], expected_association);
             assert_eq!(manifest["frame_count"], 1);
             assert!(manifest["frame_contract"].is_string());
             assert!(manifest["output_pixel_format"].is_string());
@@ -12066,7 +12082,7 @@ mod tests {
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-x264-params")
-            .arg("keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0")
+            .arg("keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0:colorprim=bt709:transfer=bt709:colormatrix=bt709")
             .arg("-color_range")
             .arg("tv")
             .arg("-color_primaries")
@@ -16658,7 +16674,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "-vf"
                 && pair[1]
-                    == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setsar=1/1"
+                    == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,setsar=1/1"
         }));
         assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
     }

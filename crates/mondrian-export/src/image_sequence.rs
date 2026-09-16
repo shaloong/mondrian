@@ -157,6 +157,8 @@ struct ImageSequenceManifest {
     frame_rate: Rational,
     color_space: ColorSpace,
     alpha_mode: ExportAlphaMode,
+    /// Physical channel association, distinct from the preserve/flatten policy.
+    alpha_association: String,
     frames: Vec<ImageSequenceFrameManifest>,
 }
 
@@ -188,6 +190,19 @@ pub(crate) fn ffmpeg_frame_pattern(directory: &Path, format: ImageSequenceFormat
     directory.join(format!(
         "{FRAME_FILE_PREFIX}%0{FRAME_FILE_DIGITS}d.{extension}"
     ))
+}
+
+/// OpenEXR stores associated RGB; renderer staging remains straight alpha.
+/// Explicit conversion makes FFmpeg 6/7 and 8 produce the same file samples.
+pub(crate) fn image_sequence_alpha_filter(
+    format: ImageSequenceFormat,
+    pixel_format: &str,
+) -> Option<&'static str> {
+    (matches!(
+        format,
+        ImageSequenceFormat::OpenExrHalf | ImageSequenceFormat::OpenExrFloat
+    ) && pixel_format == "gbrapf32le")
+        .then_some("format=gbrapf32le,premultiply=inplace=1")
 }
 
 /// Add only the format-owned FFmpeg encoder options.
@@ -326,7 +341,7 @@ pub(crate) fn validate_and_write_manifest(
     let encoding = resolve_image_sequence_encoding(contract.format, contract.alpha_mode)
         .map_err(|error| format!("image-sequence manifest contract is invalid: {error}"))?;
     let manifest = ImageSequenceManifest {
-        schema_version: 2,
+        schema_version: 3,
         format: contract.format,
         frame_contract: encoding.frame,
         output_pixel_format: encoding.output_pixel_format.to_owned(),
@@ -336,6 +351,17 @@ pub(crate) fn validate_and_write_manifest(
         frame_rate: contract.frame_rate,
         color_space: contract.color_space,
         alpha_mode: contract.alpha_mode,
+        alpha_association: if contract.alpha_mode != ExportAlphaMode::Preserve {
+            "opaque"
+        } else if matches!(
+            contract.format,
+            ImageSequenceFormat::OpenExrHalf | ImageSequenceFormat::OpenExrFloat
+        ) {
+            "premultiplied"
+        } else {
+            "straight"
+        }
+        .to_owned(),
         frames,
     };
     let bytes = serde_json::to_vec_pretty(&manifest)
@@ -746,6 +772,19 @@ mod tests {
             _ => return,
         };
 
+        let expected = if matches!(
+            format,
+            ImageSequenceFormat::OpenExrHalf | ImageSequenceFormat::OpenExrFloat
+        ) {
+            [
+                expected[0] * expected[3],
+                expected[1] * expected[3],
+                expected[2] * expected[3],
+                expected[3],
+            ]
+        } else {
+            expected
+        };
         for (channel, (actual, expected)) in actual_samples.into_iter().zip(expected).enumerate() {
             assert!(
                 (actual - expected).abs() <= tolerance,
@@ -765,7 +804,7 @@ mod tests {
             (ImageSequenceFormat::TiffFloat, ExportAlphaMode::Preserve),
         ];
         let rgba = [
-            -0.25_f32, 0.5, 1.5, 0.5, // exercises float extended range / integer clamp
+            -0.25_f32, 0.5, 3.0, 0.5, // remains above unity even after EXR association
             0.125, 0.75, 1.0, 1.0,
         ];
 
@@ -792,6 +831,11 @@ mod tests {
                         .arg("2x1")
                         .arg("-i")
                         .arg("pipe:0");
+                    if let Some(filter) =
+                        image_sequence_alpha_filter(format, encoding.output_pixel_format)
+                    {
+                        command.args(["-vf", filter]);
+                    }
                     apply_ffmpeg_image_encoder_args(
                         &mut command,
                         format,

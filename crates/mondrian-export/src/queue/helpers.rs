@@ -201,6 +201,24 @@ pub(crate) fn apply_export_video_signal_args(
             interlaced_scale,
         ));
     }
+    // Encoder options alone do not tag AVFrames on FFmpeg 8. Preserve the
+    // resolved signal on the frames as well, so non-VUI encoders and muxers
+    // receive the same color identity as the delivery validator.
+    if let Some(tags) = contract.color_space.ffmpeg_tags()
+        && (contract.yuv_matrix.is_some() || contract.professional_rgb_tags)
+    {
+        let matrix = contract.yuv_matrix.map_or("gbr", ExportYuvMatrix::tag_name);
+        filters.push(format!(
+            "setparams=color_primaries={}:color_trc={}:colorspace={}",
+            tags.color_primaries, tags.color_trc, matrix,
+        ));
+    }
+    if let ResolvedExportArtifactEncoding::ImageSequence { format } = &delivery.artifact
+        && let Some(filter) =
+            crate::image_sequence::image_sequence_alpha_filter(*format, contract.pixel_format)
+    {
+        filters.push(filter.to_owned());
+    }
     filters.push(format!(
         "setsar={}/{}",
         delivery.sample_aspect_ratio.numerator(),
