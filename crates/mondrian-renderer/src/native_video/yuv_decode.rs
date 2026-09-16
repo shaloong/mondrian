@@ -732,6 +732,7 @@ impl GpuNativeYuvDecoder {
         }
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn enable_buffer_source(&mut self, device: &wgpu::Device) {
         if self.buffer.is_none() {
             self.buffer = Some(Self::create_pipeline(device, true));
@@ -834,6 +835,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         (Self::fused_texture_source(), self.texture_input_layout())
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn fused_buffer_input(&self) -> Option<(&'static str, &wgpu::BindGroupLayout)> {
         static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             // Substitute only the physical fetch. Sampling, range, matrix and
@@ -904,6 +906,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn prepare_buffer_pass(
         &self,
         device: &wgpu::Device,
