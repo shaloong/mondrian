@@ -245,6 +245,7 @@ The Sequence `AudioProgram` owns:
 - zero or more `AudioMixBus` values;
 - one or more stable `AudioProgramOutput` values;
 - explicit `AudioRoute` values;
+- explicit `AudioProcessorSidechainRoute` values;
 - all `AudioProcessingScope` values;
 - explicit `AudioTransition` values.
 
@@ -307,11 +308,16 @@ disabled-edge-inclusive Bus reachability once. Mixer/patchbay Adapters may use
 its constant-time addition query to omit impossible choices, but may not own a
 parallel cycle algorithm or treat the projection as transaction authority.
 
-This minimal edge contract already covers dry paths, pre/post-fader auxiliary
-sends, submixes, stems, and multiple parallel paths. Sidechain inputs are not
-ordinary summing destinations: they require a typed processor-input endpoint
-and processor bus negotiation, and must not be simulated by weakening Route
-destination types.
+This main-edge contract covers dry paths, pre/post-fader sends, submixes,
+stems, and multiple parallel paths. A sidechain is a separate typed edge from
+one Track/Bus strip port to `(AudioProcessorInstanceId, bus_key)`. It retains
+the same enabled/static/Sequence-time gain controls and strong Route identity,
+but can never become a Bus or Output summing destination. Complete author
+validation resolves the target processor (including shared Scope occurrences)
+and rejects instantaneous cycles across both edge families, even while an edge
+is disabled. Routing edits, Bus disconnection, Track removal, structural Scope
+compaction, automation, and Sequence identity forking preserve or remove every
+strong reference atomically.
 
 Disabled Clip or disabled Component Edit is absent from compilation. Persistent
 Track mute gates `PostMute` while preserving pre-mute taps. Solo is not stored
@@ -489,6 +495,9 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - constant Scope/edit/fader fast paths that do not erase Processor boundaries;
 - constant Route-level fast paths plus prepared Route automation spans and one
   Session-preallocated interleaved gain lane;
+- processor auxiliary-bus declarations negotiated against the exact Render
+  Contract, per-occurrence sidechain bindings, source-port snapshots, and
+  bounded gain/PDC scratch;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 - one resolved native source layout and canonical prepared channel mixer per
   Contribution, with coefficient count and maximum native channel width in the
@@ -566,6 +575,53 @@ Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
 it neither reconstructs processor batches nor reaches into a processor's
 mutable state. A failed entry consumes and poisons its new epoch before any
 instance resets, so partial multi-processor reset can never resume old history.
+Each realized Factory publishes an immutable auxiliary-input contract alongside
+its latency/tail contract. Preparation rejects duplicate/invalid keys, layout
+drift, an authored key absent from the realized definition, a dependency cycle,
+or a detector path that cannot be aligned to the processor main-input signal
+time. Unconnected declared buses are explicit silence; multiple Routes to one
+bus sum through preallocated gain/PDC storage. The callback exposes a combined
+disjoint main/auxiliary borrow, so a processor can modify main PCM while reading
+its detector without copying, allocating, locking, or performing a map lookup.
+Every untrusted Resolver, Factory, and Processor trait call is also an unwind
+boundary. A panic during resolution, contract query, instance creation, state
+entry, or block processing becomes a typed `AdapterPanicked` failure. State
+entry/block failures mark the exclusive hosted instance poisoned before the
+error leaves the Host; stateful outer Sessions poison their continuity epoch,
+while a failed stateless instance refuses every later callback and requires a
+new Session. This protects Mondrian from Rust unwind across the Host Interface,
+but it is not crash, access-violation, hang, or deadline isolation. VST3/CLAP
+remain unavailable unless a concrete out-of-process Adapter supplies those
+stronger guarantees; the built-in resolver continues to fail them closed.
+
+The `processor_isolation` deep Module now supplies that generic out-of-process
+Adapter boundary without changing the Processor Host Interface. One immutable
+Worker Spec binds the helper executable, opaque native preparation payload,
+exact Render Contract, plugin latency/tail/mode/scratch facts, auxiliary buses,
+stable Parameter-lane order, and startup/block deadlines. Preparation performs
+a real child launch and handshake; Session creation launches a fresh persistent
+child for every mutable occurrence and revalidates the same contract again.
+Built-ins remain local, while `IsolatedAudioProcessorResolver` can dispatch only
+external definitions through a concrete discovery/ABI Spec resolver.
+
+Parent and Worker map one fixed temporary backing object sized from maximum block,
+channel layout, auxiliary-bus count, and worst-case sample-accurate Parameter event
+count. The render worker copies PCM/events into that preallocated region and sends
+only a fixed 32-byte command over a private loopback control connection. It never
+creates a process, opens a file, grows a container, or writes an unbounded PCM pipe
+inside block execution. The child validates every range before exposing borrowed
+views to its native Adapter. Output PCM is copied back only after one valid success
+response; partial or failed native output is never published.
+
+The parent owns the hard operation deadline. Timeout, disconnect, malformed bounded
+protocol, Worker-reported failure, panic, abort, access violation, or contract drift
+poisons the exclusive instance, terminates and reaps its exact process, and requires
+a new Session/Worker. Worker shutdown is bounded as well. This keeps plugin execution
+off the physical audio callback: Playback consumes the existing ahead-rendered PCM
+queue, while Export uses the same Audio Program and isolated Processor semantics.
+The boundary is failure containment, not a hostile-code security sandbox; native
+VST3/CLAP discovery, ABI loading, vendor UI, and format qualification remain concrete
+Adapter responsibilities and may not be inferred from the generic Worker protocol.
 At root entry, stateful Track/Bus/Output occurrences enter immediately because
 their strips evaluate every requested block. A stateful Contribution occurrence
 remains pending until its causal execution span first intersects a request,
@@ -635,6 +691,30 @@ range selection. Consequently an off-range, post-mute-gated, disabled, or
 unrouted source cannot fail a selected export or consume its source-window
 grant. The ordinary `build` Interface remains the whole-Program contract used
 by continuous Playback and consumes the same mute-resolved Signal Closure.
+
+The PCM24 audio-stem artifact selects every public Program Output in authored
+order at capture time. Capture retains one independently compiled semantic
+closure per Output, freezes its stable ID and display name, and unions the
+reachable Sequence/media identities only for external dependency resolution.
+Execution never derives stems by soloing Tracks or by mutating one master mix:
+each stem is rendered from its own frozen root through the same compiled Audio
+Program Runtime used by mixdown. Every WAV is independently probed for exact
+PCM codec, semantic layout, sample rate, and rational duration, then hashed.
+Per-output loudness/true-peak evidence and immutable identity are written to a
+versioned manifest before Storage atomically publishes the complete sibling
+directory. Cancellation, a missing output, or one invalid file rejects the
+whole artifact; no partial stem package is visible at the destination.
+
+All stem Runtimes are retained only after a measurement pass proves their
+aggregate occurrence, fixed-residency, and prepared-plan footprint fits the
+single job grant. PCM execution is block-interleaved across outputs, with blocks
+split at the shared source-cache window boundary, so every output consumes the
+same fingerprinted decode window before bounded LRU pressure can advance to the
+next window. One job-scoped `AudioSourceCache` is reused by ordinary mixdown,
+professional delivery, and every stem; it is never recreated per output. Cache
+entry/byte limits remain hard policy, so an exceptionally undersized grant may
+still evict and re-decode rather than exceeding residency, but normal multi-stem
+execution does not scale source decoding linearly with output count.
 
 Offline export enters one fresh epoch at its exact sample-range start. Realtime
 Playback carries its generation on every PCM work request: the first admitted
@@ -719,6 +799,24 @@ reported as false zero. This is deliberately not labelled true peak or loudness:
 R128/ATSC A/85 filtering, windows, gating, channel weighting, oversampled true
 peak, hold/decay presentation, and offline normalization remain separate
 versioned observation or processing stages.
+
+Offline Program delivery now passes the exact rendered floating-point PCM
+through a separate `AudioLoudnessAnalyzer` observation Module before the encoder
+Adapter sees it. The analyzer applies BS.1770 K-weighting, 400 ms blocks at
+100 ms steps, the EBU R128 -70 LUFS absolute and -10 LU relative gates, and a
+four-times windowed-sinc true-peak reconstruction. Its immutable report retains
+integrated/latest momentary/latest short-term loudness, linear/dBTP maximum,
+complete-block count, and exact observed sample-frame count in Export job
+diagnostics. Proven-silent Programs produce explicit digital-silence evidence;
+analyzer construction, non-finite PCM, partial interleaved frames, or finalizing
+failure aborts the Export instead of omitting evidence. The qualified weighting
+matrix is deliberately limited to Mono, Stereo, 5.1(side), 5.1(back), and 7.1.
+Discrete, custom, and immersive speaker sets fail closed until a normative
+weighting table and conformance corpus are admitted. This Module never changes
+PCM and is not placed on the realtime callback. Audio-stem export constructs an
+independent analyzer for every frozen Program Output and persists every report
+inside the package manifest; the primary report also remains available through
+the common job diagnostics Interface.
 
 Exact automation is evaluated in its owner domain and is invariant under block
 partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an
@@ -821,8 +919,9 @@ window. Resident bytes, effective limits, reconfiguration/trim totals,
 hits/misses, decodes, failures, oversize windows, in-flight single-flight
 leaders, and evictions are structured diagnostics. The concrete decoder uses
 an independently reconfigurable LRU pool of isolated persistent FFmpeg child
-Sessions. Idle sessions above a reduced capacity terminate immediately. Busy
-sessions finish their current window and then converge; diagnostics expose the
+Sessions. Idle sessions above a reduced capacity enter bounded asynchronous
+retirement immediately; their physical permits remain occupied until child and
+pump closure. Busy sessions finish their current window and then converge; diagnostics expose the
 temporary over-capacity count instead of pretending the trim already happened.
 Sequential windows reuse continuous `f32le` output, while a non-contiguous miss
 restarts only the matching fingerprint/output-contract Session with bounded
@@ -830,7 +929,17 @@ coarse preroll followed by output-side exact trim. Stdout look-ahead and
 stderr retention are byte-bounded, and generation cancellation kills, waits,
 and joins the process and pump threads. Linked in-process decoding remains a
 replaceable Adapter choice rather than a different source contract. Decode
-runs only on audio render workers, never on the callback or UI thread.
+runs only on audio render workers, never on the callback or UI thread. Native
+child/pump construction uses a separate prebuilt Media startup lane so an
+uninterruptible OS spawn cannot hold the canceled read waiter. Cancellation
+before or during construction preserves partial ownership for the independent
+teardown lane; the physical permit is released only after actual closure.
+Startup completion envelopes retain producer leases through install/retire,
+including channel disconnection. This changes lifetime scheduling, not PCM,
+seek, channel mapping, or the Runtime's generation/publication authority.
+SourceCache schema 6 reports that startup inventory independently from its
+unchanged one-worker teardown contract. Logical responsiveness is not proof
+of the separate 50 ms physical-retirement qualification target.
 
 Playback and export both use this Runtime. Their only differences are Render
 Contract mode, scheduling, error handling, and downstream sink:
@@ -913,9 +1022,9 @@ Adapter before production support can claim a hard termination deadline.
 
 Audio Playback, not the audio compiler, owns device lifecycle, render
 generations, bounded in-flight work, watermarks, preroll, callback consumption,
-underrun recovery, and device-clock evidence. The CPAL callback touches only a
-fixed-capacity queue and atomics; it does not allocate, decode, compile, log,
-inspect the Timeline, or lock a Session.
+underrun recovery, and device-clock evidence. Every physical-output callback
+touches only a fixed-capacity queue and atomics; it does not allocate, decode,
+compile, log, inspect the Timeline, or lock a Session.
 
 `audio_device` is the sole Realtime Audio Output Negotiation Module. Runtime
 selection is an app preference, never Project or Sequence authoring. It is
@@ -932,12 +1041,24 @@ formats. The callback Adapter supports every scalar format represented by the
 current CPAL Interface and clamps only at this physical sink conversion; common
 float Program execution remains unclipped upstream.
 
-CPAL exposes channel count but no portable speaker-position evidence. The
-Module therefore admits versioned Mono and Stereo device conventions plus
-explicit ordinal Discrete layouts. A named 5.1/7.1/custom speaker layout is
-rejected even when the count matches until a platform Adapter proves the
-positions and order. Success publishes one `RealtimeAudioOutputContract` with
-semantic layout, exact rate, scalar format, buffer-range evidence, and counts
+CPAL exposes channel count but no portable speaker-position evidence, and its
+WASAPI `WAVEFORMATEXTENSIBLE` lowering deliberately uses `DIRECTOUT` (zero
+speaker mask). The portable path therefore admits versioned Mono and Stereo
+device conventions plus explicit ordinal Discrete layouts. Windows named
+layouts whose positions fit the normative 18-bit Windows speaker set use a
+separate Media-owned WASAPI Adapter. It reopens the exact CPAL endpoint identity,
+requires an F32 exact channel/rate candidate, derives the mask from the canonical
+`AudioChannelLayout` order, and initializes an event-driven shared-mode stream
+with that exact `WAVEFORMATEXTENSIBLE` mask. Only successful initialization is
+position/order evidence; matching channel count is not. The render worker joins
+the `Pro Audio` MMCSS class and reuses the same bounded queue, activation
+revision, underrun accounting, and playback-delay telemetry as CPAL. Unsupported
+positions such as Wide, TopSide, and LFE2 fail closed instead of being projected
+onto reserved Windows bits. Non-Windows named multichannel remains rejected
+until an equivalent platform Adapter exists.
+
+Success publishes one `RealtimeAudioOutputContract` with semantic layout, exact
+rate, scalar format, buffer-range evidence, channel-semantics proof, and counts
 for enumerated/channel/rate/executable candidates. Low-frequency device
 evidence also retains CPAL host, stable device identity, resolved selection,
 whether it was the system default, optional device name, and any nonfatal name
@@ -949,7 +1070,7 @@ Contract, and backend detail. `AppState` composes physical evidence with
 target match, so diagnostics cannot join facts from different device states.
 
 Physical discovery is a separate low-frequency Window Adapter. It performs no
-CPAL call on the UI thread or realtime callback, owns at most one bounded
+CPAL/platform call on the UI thread or realtime callback, owns at most one bounded
 one-shot attempt, and publishes an immutable catalog snapshot. Preferences may
 select a catalog identity or request rediscovery. The device worker observes
 the latest selection outside the callback. A selection change retires the old
@@ -970,12 +1091,57 @@ diagnostics. The device lifecycle worker has separate start-failure evidence
 from an ordinary `OpenFailed` device attempt. Both render and device workers
 retain owned `JoinHandle`s. Shutdown first cancels current work, closes and
 wakes admission, then joins each worker; a device `Lost` event is emitted only
-after the concrete CPAL stream has been destroyed. An unexpectedly finished
+after the concrete physical stream has been destroyed. An unexpectedly finished
 render worker or disconnected completion channel transitions once to
 `ExecutionUnavailable`, cancels and clears outstanding work, and admits no
 phantom in-flight requests. Concrete stream-generation identities are issued
 with checked monotonic allocation; exhaustion is a structured creation failure
 and never wraps to a reused or zero identity.
+
+The PCM continuity contract is captured as an `AudioPcmContinuityModel` before
+the renderer is erased behind a trait object. `prepare`, `reprime`, anchor
+validation, and shutdown never call a foreign renderer merely to rediscover
+that contract. Pure anchor, generation, configuration, shutdown, and worker
+availability checks run before output deactivation or any other foreign call.
+If admission subsequently rejects a renderer, ownership is transferred to the
+single tracked retirement worker; the caller, render coordinator, and UI thread
+never become its destructor path. The retirement queue has the same hard
+in-flight ceiling as playback admission, so its capacity proof cannot be
+invalidated by an accepted render burst.
+
+The consuming `AudioPlayback::shutdown_and_wait` receipt closes the lifetime
+inventory of both PCM render and concrete device-lifecycle workers. Workers
+already joined after an unexpected disconnect remain in its cumulative
+terminated/panic counts; an absent handle therefore cannot be reinterpreted as
+"never started." Same-thread detachment and any panic fail the aggregate
+closure used by commercial endurance qualification.
+
+Shutdown is a captured two-phase protocol. `begin_shutdown` performs only
+prebuilt atomic cancellation/signaling and queue wakeup; it invokes no trait
+method, allocates no replacement work, and waits for no foreign owner. The
+consuming phase then supervises the render coordinator, renderer-retirement
+worker, output manager, and every device worker against one absolute deadline.
+`AudioPlaybackShutdownEvidence` schema 3 and
+`RealtimeAudioOutputShutdownEvidence` schema 2 distinguish configured,
+started, returned, panicked, timed out, detached, abandoned, and residual
+owners. Evidence is fail-closed and monotonic across handles already consumed
+by ordinary polling.
+
+Render completion messages contain only owned PCM or a stabilized plain error
+string. A renderer's type-erased error value is transferred to the tracked
+retirement worker and destroyed there; it cannot cross the completion channel
+and later run an opaque destructor on playback polling, shutdown, or UI code.
+Queue closure, queue overflow, worker panic, and owner-handoff failure latch
+terminal retirement evidence instead of silently dropping the renderer or
+error on the discovering thread.
+
+The validation App also retains a small App-lifetime Audio failure ledger at
+the terminal owner-replacement seam. Before an unexpectedly stopped render
+owner becomes `ExecutionUnavailable`, the Adapter absorbs its cumulative
+substitution, render-generation recovery, underrun recovery, backend-loss, and
+deactivation-failure counts. Commercial endurance snapshots add that retired
+history to the current owner so counters remain monotonic even though the
+move-only execution owner has been dropped.
 
 The output queue has one non-cloneable Manager-owned producer handle and one
 callback consumer. Enqueue validates exact sample rate, semantic channel
@@ -1005,7 +1171,7 @@ report callback activity but cannot consume queued PCM or advance media time,
 and an active-counter overflow marks the stream failed without wrapping.
 
 Device retirement follows destroy-then-observe ordering. The device worker
-requests deactivation, drops the concrete CPAL stream, captures one final frozen
+requests deactivation, drops the concrete physical stream, captures one final frozen
 snapshot through a read-only observer, and only then publishes typed `Lost`
 evidence. `AudioPlayback` pairs that loss with the exact last media
 `AudioSamplePosition` for the matching stream generation and retains a fixed-size
@@ -1177,6 +1343,12 @@ The automated suite must prove:
   plan preparation;
 - a custom stateful non-zero-latency factory drives Host instantiation, PDC,
   continuity entry, realtime-mode admission, and partition-invariant PCM;
+- a typed sidechain whose detector Track has no main Route remains reachable,
+  negotiates its stable auxiliary bus, copies no callback PCM, produces the
+  detector waveform exactly, and rejects an undeclared realized bus key;
+- main and sidechain dependencies share deterministic topological ordering and
+  disabled-edge-inclusive cycle validation; Sequence duplication rekeys the
+  complete Route-to-Processor strong reference;
 - built-in Sample Delay validates exact integer authoring, keeps audible delay
   outside PDC, resets on seek entry, remains partition invariant, and fails plan
   preparation when its exact Session storage exceeds the Render Contract;
@@ -1191,6 +1363,10 @@ The automated suite must prove:
 - Track/Bus/Program Output sample-peak/RMS observation publishes one complete
   block-atomic bank, preserves unclipped and non-finite evidence, and never
   exposes hidden priming or claims loudness/true-peak conformance;
+- offline Program observation matches the 48 kHz BS.1770 K-weighting reference
+  coefficients, exercises both EBU gates, excludes LFE energy, detects a
+  synthetic intersample peak at four-times reconstruction, and carries exact
+  silence/finite-signal evidence through a probe-qualified FFmpeg export;
 - a root audition request retains only selected Track program sources, while
   nested public outputs remain canonical independent Runtime instances;
 - timeline/audio crates compile and test independently;
@@ -1217,8 +1393,12 @@ The automated suite must prove:
   matrix results are sample-identical;
 - a manual external AAC parity gate compares a cold window, sequential boundary,
   and evicted-window random restart against one sequential reference decode;
-- a manual real-child cancellation gate requires kill/wait/join observation
-  within 50 ms and zero success/failure cache admission;
+- a manual real-child cancellation gate separately observes read return and
+  physical-permit release against one original 50 ms limit, then consumes the
+  raw source shutdown receipt to verify the actual child/pump joins and zero
+  success/failure cache admission. Read return alone is not physical closure.
+  Local cold-start cancellation exceeded that limit on 2026-09-04; it remains
+  an open performance qualification defect, not a passing gate or a leak claim;
 - concurrent identical window misses elect one decode leader and one follower
   cache hit;
 - deterministic professional-audio acceptance tests reject missing/fake output
@@ -1230,8 +1410,9 @@ The automated suite must prove:
 Remaining product work and sequencing live in [ROADMAP](../ROADMAP.md), not in
 this architecture contract. Professional support cannot be claimed until the
 versioned acceptance plan covers layout/device/encoder negotiation, isolated
-plugin-host lifecycle and failure containment, sidechains and standards-based
-metering, authoring UI/Undo/reopen, reference PCM and export parity, persistent
+plugin-host lifecycle and failure containment, sidechain product interaction
+and reference-machine qualification, standards-based metering, authoring
+UI/Undo/reopen, reference PCM and export parity, persistent
 decoder locality/cancellation, and reference-machine realtime load, drift, and
 memory evidence.
 
@@ -1239,3 +1420,22 @@ Those capabilities must deepen the same compiler, prepared schedule, Host, and
 Runtime. Unknown layouts or dependencies continue to fail closed; no item may
 be closed by adding only schema, a disconnected UI, or a consumer-specific
 fallback mixer.
+
+## Embedded audio for Reference Output
+
+Professional Reference Output consumes exact 48 kHz windows from one public
+Audio Program output. It never reads the Monitor Path or infers speaker meaning
+from channel count. Rational video-frame boundaries select sample intervals,
+and video plus audio schedule atomically as one bounded bundle; fractional
+cadences therefore accumulate exact sample positions instead of rounding every
+frame. Device routing and reference lock remain in the Reference Output Module,
+not the Audio Program. See [Reference Output](reference-output.md).
+
+The App's validation-only persistent Reference producer prepares that public
+Program through a dedicated constructor: audition is empty, the target layout
+equals the Sequence Program layout, and `Standard` delivery remapping is
+rejected. Only identity delivery or already-proven silence is admissible. One
+generation enters at the exact first frame's rational sample position and all
+later windows must continue at the prior terminal sample. The Runtime shares
+the App's sole `AudioSourceCache`; it does not create a qualification-only
+decoder authority or borrow Monitor Path state.

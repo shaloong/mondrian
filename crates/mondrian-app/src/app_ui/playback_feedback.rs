@@ -46,11 +46,6 @@ impl ViewerPlaybackFeedback {
             ViewerPreviewState::Ready(_) => Self::Ready,
         }
     }
-
-    /// Whether redraw should avoid synchronously rebuilding the same pending GPU candidate.
-    pub const fn should_defer_gpu_prepare(self) -> bool {
-        matches!(self, Self::Loading)
-    }
 }
 
 /// Payload-free classification used by the feedback Adapter.
@@ -77,14 +72,6 @@ mod tests {
             ViewerFrameImage::new(key, 1, 1, RasterImageColorSpace::Srgb, vec![0, 0, 0, 255])
                 .expect("valid test raster"),
         )
-    }
-
-    #[test]
-    fn only_loading_defers_duplicate_gpu_prepare() {
-        assert!(ViewerPlaybackFeedback::Loading.should_defer_gpu_prepare());
-        assert!(!ViewerPlaybackFeedback::Ready.should_defer_gpu_prepare());
-        assert!(!ViewerPlaybackFeedback::Stale.should_defer_gpu_prepare());
-        assert!(!ViewerPlaybackFeedback::Blocked.should_defer_gpu_prepare());
     }
 
     #[test]

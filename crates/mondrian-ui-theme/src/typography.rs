@@ -3,7 +3,7 @@
 //! 统一的文字样式系统。所有字体大小、行高、字重从这里获取。
 
 /// 文字样式定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
     pub font_size: f32,
     pub line_height: f32,
@@ -46,7 +46,7 @@ impl FontWeight {
 }
 
 /// 排版 Token 集合
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypographyTokens {
     pub small: TextStyle,
     pub body: TextStyle,

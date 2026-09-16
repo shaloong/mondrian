@@ -51,6 +51,35 @@ owner manifest before payload admission, and recovery children exist only
 under a live Project Runtime Lease. The shared primitive never adopts an
 arbitrary external directory as owned state.
 
+`OwnedPublicationDirectory` is the populated-tree counterpart to
+`OwnedPublicationFile`. It allocates and records one unique sibling directory,
+allows a domain to populate and validate only below that identity-bound root,
+recursively rejects symbolic links and unsupported objects, synchronizes every
+regular file and directory, and then publishes the complete tree with
+create-new semantics. The final route is absent until one namespace operation
+makes the complete tree visible. Recursive replacement is deliberately not a
+Storage primitive: a caller that needs version replacement must publish a new
+immutable generation and switch a small manifest/pointer through the atomic-file
+Seam.
+
+The Export Image Sequence Master Module is a direct consumer. It populates one
+identity-bound sibling with deterministic numbered frames, independently proves
+every frame's file representation and decode, hashes the complete inventory,
+and durably adds manifest schema 2 before publication. The final path uses only
+create-new publication; cancellation and ordinary encoding/validation failure
+let the owned sibling clean itself up, while a failure after the source is
+preserved for namespace publication reports that exact recoverable staging path.
+No retry scans loose frame names or adopts an existing output directory.
+
+IMF and DCP professional delivery use the same
+`OwnedPublicationDirectory` Interface. The Export Module wraps essence and
+constructs CPL/PKL/AssetMap documents only below one identity-bound sibling,
+reimports the closed inventory, runs an independent standards validator, and
+only then requests durable tree publication. AS-11 X9 uses
+`OwnedPublicationFile` plus the external-writer reservation/reclaim protocol.
+Neither path exposes a partially populated final route or treats tool exit as
+durability evidence.
+
 `ensure_durable_directory_chain` accepts one caller-selected, already-existing
 absolute anchor and one strict absolute descendant. It publishes each missing
 suffix node through the same direct-child seam. It never walks or flushes

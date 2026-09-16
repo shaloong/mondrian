@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "id": "mondrian-cross-application-color-stimulus-blender-premiere-v1",
+  "edition": "2026-09-local",
+  "raster": {
+    "width": 64,
+    "height": 64,
+    "pixel_aspect_ratio": "1/1",
+    "orientation": "top-left"
+  },
+  "timeline": {
+    "rate_numerator": 24000,
+    "rate_denominator": 1001,
+    "required_frame_indices": [
+      0,
+      17,
+      119
+    ],
+    "frame_identity_patch_required": true
+  },
+  "generation": {
+    "kind": "analytic-patches",
+    "resampling_forbidden": true,
+    "automatic_alignment_forbidden": true,
+    "creative_view_forbidden": true,
+    "dither_forbidden_unless_case_declares_it": true
+  },
+  "patches": {
+    "required_rgb": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0001,
+        0.0001,
+        0.0001
+      ],
+      [
+        0.18,
+        0.18,
+        0.18
+      ],
+      [
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "required_alpha": [
+      0.0,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "smooth_ramps": true,
+    "single_pixel_edges": true,
+    "rgb_greater_than_alpha": true
+  },
+  "cases": [
+    {
+      "id": "scene-linear-rec2020-f32",
+      "frame_index": 0,
+      "encoding": "scene_linear_rec2020_rgba_f32",
+      "payload_format": "open_exr",
+      "required_producers": [
+        "mondrian",
+        "blender"
+      ],
+      "range": [
+        -0.125,
+        16.0
+      ],
+      "alpha": "straight_coverage",
+      "metric": "scene_linear_rec2020"
+    },
+    {
+      "id": "sdr-srgb-alpha-rgba8",
+      "frame_index": 17,
+      "encoding": "srgb_display_rgba8",
+      "payload_format": "png",
+      "required_producers": [
+        "mondrian",
+        "blender",
+        "adobe_premiere_pro"
+      ],
+      "range": [
+        0.0,
+        1.0
+      ],
+      "alpha": "straight_coverage",
+      "metric": "srgb_display"
+    },
+    {
+      "id": "bt2100-pq-rgba-f32",
+      "frame_index": 119,
+      "encoding": "bt2100_pq_rgba_f32",
+      "payload_format": "json_float",
+      "required_producers": [
+        "mondrian",
+        "adobe_premiere_pro"
+      ],
+      "reference_white_nits": 203.0,
+      "nominal_peak_nits": 1000.0,
+      "alpha": "opaque",
+      "metric": "bt2100_pq_display"
+    }
+  ]
+}

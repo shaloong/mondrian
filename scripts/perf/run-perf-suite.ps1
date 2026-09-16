@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $env:CARGO_INCREMENTAL = "0"
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 Import-Module (Join-Path $repositoryRoot "scripts/validation/playback-gate-process.psm1") -Force
+Import-Module (Join-Path $repositoryRoot "scripts/perf/perf-owner-closure.psm1") -Force
 $OutputDir = if ([IO.Path]::IsPathRooted($OutputDir)) {
     [IO.Path]::GetFullPath($OutputDir)
 }
@@ -25,9 +26,11 @@ catch [System.Threading.AbandonedMutexException] {
     $suiteLockTaken = $true
 }
 if (!$suiteLockTaken) {
+    $suiteMutex.Dispose()
     throw "Another Mondrian performance suite is already running"
 }
 
+try {
 function Clear-ReportPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -64,23 +67,6 @@ function Read-StrictJsonLines {
         throw "Performance report contains no JSON records: $Path"
     }
     return $rows
-}
-
-function Assert-PassingCases {
-    param(
-        [Parameter(Mandatory = $true)]$Cases,
-        [Parameter(Mandatory = $true)][string]$Context
-    )
-
-    $caseRows = @($Cases)
-    if ($caseRows.Count -eq 0) {
-        throw "$Context contains no measured cases"
-    }
-    foreach ($case in $caseRows) {
-        if (!($case.PSObject.Properties.Name -contains "passed") -or !$case.passed) {
-            throw "$Context contains a missing or failed case"
-        }
-    }
 }
 
 function Assert-NonFailingColorReport {
@@ -139,7 +125,15 @@ function Assert-EligibleReport {
             if (Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject $actual) {
                 throw "Project report case set is incomplete or duplicated"
             }
-            Assert-PassingCases -Cases $rows -Context "Project report"
+            Assert-MondrianPerfCases -Cases $rows -Scenario "project"
+            foreach ($row in $rows) {
+                Assert-MondrianCleanOwnerClosure `
+                    -Container $row `
+                    -Context "Project report '$($row.case)'" `
+                    -ExpectedPreviewOwners 0 `
+                    -GpuRequired $false
+            }
+            Assert-MondrianIdenticalOwnerClosures -Containers $rows -Context "Project report cases"
         }
         "app" {
             if ($rows.Count -ne 1 -or [string]$rows[0].scenario -ne $ExpectedScenario) {
@@ -148,7 +142,14 @@ function Assert-EligibleReport {
             if (!($rows[0].PSObject.Properties.Name -contains "cases")) {
                 throw "App report does not contain measured cases"
             }
-            Assert-PassingCases -Cases $rows[0].cases -Context "App report $ExpectedScenario"
+            Assert-MondrianPerfCases -Cases $rows[0].cases -Scenario $ExpectedScenario
+            $expectedPreviewOwners = if ($ExpectedScenario -eq "app_ui_scale") { 2 } else { 1 }
+            $gpuRequired = $ExpectedScenario -ne "app_ui_scale"
+            Assert-MondrianCleanOwnerClosure `
+                -Container $rows[0] `
+                -Context "App report $ExpectedScenario" `
+                -ExpectedPreviewOwners $expectedPreviewOwners `
+                -GpuRequired $gpuRequired
             if ($ExpectedScenario -eq "app_ui_scale") {
                 Assert-NonFailingColorReport `
                     -Container $rows[0] `
@@ -164,10 +165,12 @@ function Assert-EligibleReport {
             if ($rows.Count -ne 1 -or [string]$rows[0].scenario -ne $ExpectedScenario) {
                 throw "Export report has an unexpected scenario or record count"
             }
-            if (!($rows[0].PSObject.Properties.Name -contains "passed") -or !$rows[0].passed) {
+            if (!($rows[0].PSObject.Properties.Name -contains "passed") -or
+                $rows[0].passed -isnot [bool] -or !$rows[0].passed) {
                 throw "Export report is missing a passing verdict"
             }
             if (!($rows[0].PSObject.Properties.Name -contains "pixel_oracle_proven") -or
+                $rows[0].pixel_oracle_proven -isnot [bool] -or
                 !$rows[0].pixel_oracle_proven) {
                 throw "Export report is missing canonical pixel evidence"
             }
@@ -188,6 +191,7 @@ function Assert-EligibleReport {
                     throw "4K60 export report has an ineligible workload contract"
                 }
                 if (!($rows[0].PSObject.Properties.Name -contains "fused_first_two_execution_proven") -or
+                    $rows[0].fused_first_two_execution_proven -isnot [bool] -or
                     !$rows[0].fused_first_two_execution_proven -or
                     [uint64]$rows[0].fused_first_two_frames -ne $expectedFusionFrames) {
                     throw "4K60 export report is missing complete fusion execution evidence"
@@ -335,7 +339,20 @@ foreach ($path in @(
 
 $failed = [System.Collections.Generic.List[string]]::new()
 
-$appCargoPrefix = @("test", "-p", "mondrian-app", "--release", "-j", "2", "--lib")
+# Preview requires the same-profile product executable, not a lib-test binary or
+# a stale worker override. Build and tests share Cargo's target configuration.
+if (![string]::IsNullOrWhiteSpace($env:MONDRIAN_PREVIEW_DEMUX_WORKER_PATH)) {
+    throw "Unset MONDRIAN_PREVIEW_DEMUX_WORKER_PATH before the qualification suite"
+}
+if (!(Invoke-PerfTest -Name "release packaged Preview worker build" `
+    -CargoArguments @("build", "-p", "mondrian-app", "--release", "-j", "1", "--bin", "mondrian"))) {
+    throw "Release product build failed; Preview qualification cannot start"
+}
+$appCargoPrefix = @("test", "-p", "mondrian-app", "--release", "-j", "1", "--lib")
+if (!(Invoke-PerfTest -Name "release App test runner build" `
+    -CargoArguments ($appCargoPrefix + @("--no-run")))) {
+    throw "Release App test build failed; no App measurements were started"
+}
 $testSuffix = @("--", "--ignored", "--nocapture", "--test-threads=1")
 
 if (!(Invoke-PerfTest `
@@ -445,10 +462,11 @@ if ($failed.Count -gt 0) {
     foreach ($name in $failed) {
         Write-Host "  - $name"
     }
-    $suiteMutex.ReleaseMutex()
-    $suiteMutex.Dispose()
     exit 1
 }
 
-$suiteMutex.ReleaseMutex()
-$suiteMutex.Dispose()
+}
+finally {
+    try { $suiteMutex.ReleaseMutex() }
+    finally { $suiteMutex.Dispose() }
+}

@@ -13,6 +13,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub fn diagnostics(&self) -> PreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();
         let frame_store = self.frame_store.borrow().diagnostics();
+        let timeline_render_cache = self.timeline_render_cache.borrow().diagnostics();
+        let timeline_render_cache_start_failed =
+            self.timeline_render_cache.borrow().start_failure().is_some();
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
         let decode_residency = self.decode_residency.diagnostics();
@@ -20,10 +23,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {
+            work_callbacks: self.work_watch.callback_evidence(),
             resource_decision_applications: self.metrics.resource_decision_applications.get(),
             visual_program_cache: self.visual_programs.borrow().diagnostics(),
             future_media_window: self.future_media_window.borrow().diagnostics(),
             visual_execution_health_failed: self.visual_execution_health_failed.get(),
+            visual_dependency_health_failed: self.visual_dependency_health_failed.get()
+                || !self.visual_dependencies.is_healthy(),
             render_requests: self.metrics.render_requests.get(),
             ready_frames: self.metrics.ready_frames.get(),
             loading_frames: self.metrics.loading_frames.get(),
@@ -99,13 +105,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             last_current_media_admission: self.last_current_media_admission.get(),
             preview_execution_generation: self.execution.borrow().generation(),
             media_existing_work_waiters: self.media_existing_work_waiters.borrow().len(),
-            media_existing_work_retry_pending: self.media_existing_work_retry_pending.get(),
-            media_existing_work_waiter_registrations: self
-                .media_existing_work_waiter_registrations
-                .get(),
-            media_existing_work_retry_acknowledgements: self
-                .media_existing_work_retry_acknowledgements
-                .get(),
+            media_execution_pressure_waiters: self.media_execution_pressure_waiters.borrow().len(),
+            media_retry_pending: self.media_retry_pending.get(),
+            media_retry_waiter_registrations: self.media_retry_waiter_registrations.get(),
+            media_retry_acknowledgements: self.media_retry_acknowledgements.get(),
             last_gpu_loading_reason: self.last_gpu_loading_reason.get(),
             decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,
@@ -145,6 +148,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
+            decode_execution_resource_unavailable_failures: self
+                .metrics
+                .decode_execution_resource_unavailable_failures
+                .get(),
+            decode_last_execution_resource_unavailable_operation: self
+                .metrics
+                .decode_last_execution_resource_unavailable_operation
+                .get(),
             decode_budget_exhausted_failures: self.metrics.decode_budget_exhausted_failures.get(),
             decode_cancellation,
             decode_cancellation_checkpoints: self.metrics.decode_cancellation_checkpoints.get(),
@@ -259,6 +270,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
             frame_store,
+            timeline_render_cache,
+            timeline_render_cache_start_failed,
             color_input_transform_calls: self.metrics.color_input_transform_calls.get(),
             color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
@@ -499,7 +512,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.record_playback_current_hardware_recovery(priority, &diagnostics);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
-            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+            | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessCameraRawDng
+            | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 bump(&self.metrics.decode_in_process_cpu_frames);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}
@@ -638,6 +653,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             MediaPreviewFailureReason::Timeout => {
                 bump(&self.metrics.decode_timeout_failures);
             }
+            MediaPreviewFailureReason::ExecutionResourceUnavailable { operation } => {
+                bump(&self.metrics.decode_execution_resource_unavailable_failures);
+                self.metrics
+                    .decode_last_execution_resource_unavailable_operation
+                    .set(Some(operation));
+            }
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted => {
                 bump(&self.metrics.decode_budget_exhausted_failures);
             }
@@ -657,6 +678,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         queue_wait_us: u64,
+        owns_current_presentation: bool,
     ) {
         add_cell(&self.metrics.decode_queue_wait_total_us, queue_wait_us);
         self.metrics
@@ -664,11 +686,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .set(self.metrics.decode_queue_wait_max_us.get().max(queue_wait_us));
         self.metrics.decode_queue_wait_last_us.set(queue_wait_us);
         match priority {
-            MediaPreviewRequestPriority::Current => {
+            MediaPreviewRequestPriority::Current if owns_current_presentation => {
                 self.metrics
                     .decode_current_queue_wait_max_us
                     .set(self.metrics.decode_current_queue_wait_max_us.get().max(queue_wait_us));
             }
+            MediaPreviewRequestPriority::Current => {}
             MediaPreviewRequestPriority::Prefetch => {
                 self.metrics
                     .decode_prefetch_queue_wait_max_us
@@ -744,6 +767,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .get(),
             forward_prefetch_min_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
             forward_prefetch_max_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+            steady_prefetch_reservation_limit: MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT,
             forward_prefetch_window_evaluations: self
                 .metrics
                 .playback_forward_prefetch_window_evaluations
@@ -760,7 +784,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Some(budget_us) => {
                 self.metrics.playback_current_deadline_budget_us.set(Some(budget_us));
                 bump(&self.metrics.playback_current_deadline_assignments);
-                bump(&self.metrics.playback_current_decode_decisions);
             }
             None => {
                 bump(&self.metrics.playback_current_deadline_missing_frame_rate);

@@ -6,19 +6,206 @@ use super::frame_contract::{
 use super::native_frame::PreviewDecodeSessionOutputLease;
 use super::{
     duration_us, preview_create_rgba_scaler, preview_hardware_frame_format, preview_trace,
+    CpuYuvChromaPlaneLayout, CpuYuvChromaSubsampling, CpuYuvFrame, CpuYuvSampleFormat,
     DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame, PreviewDecodeDiagnostics,
-    PreviewDecodePath, PreviewDecodeStageDurations, PreviewDecodedFramePayload,
-    PreviewHardwareDecodePlan, PreviewNativeDecodeFallback, PreviewNativeDecodedFrame,
-    PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle, PreviewSourceColorContract,
-    RgbaFrame,
+    PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeStageDurations,
+    PreviewDecodedFramePayload, PreviewHardwareDecodePlan, PreviewNativeDecodeFallback,
+    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+    PreviewSourceColorContract, RgbaFrame,
 };
-use crate::decoder::DecodedVideoSurfaceFormat;
+use crate::decoder::{DecodedVideoChromaLocation, DecodedVideoSurfaceFormat};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::time::Instant;
+
+fn compact_yuv_layout(
+    pixel: ffmpeg::util::format::pixel::Pixel,
+) -> Option<(
+    CpuYuvChromaSubsampling,
+    CpuYuvSampleFormat,
+    CpuYuvChromaPlaneLayout,
+)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    Some(match pixel {
+        Pixel::YUV420P => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P10LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P12LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P10LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P12LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P10LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P12LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::NV12 => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        Pixel::P010LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Msb10,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        _ => return None,
+    })
+}
+
+fn convert_decoded_to_compact_yuv(
+    decoded: &ffmpeg::util::frame::video::Video,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+) -> Result<Option<CpuYuvFrame>> {
+    let Some((subsampling, sample_format, plane_layout)) = compact_yuv_layout(decoded.format())
+    else {
+        return Ok(None);
+    };
+    let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    let mut video_sampling = decoded_video_sampling_from_frame(decoded);
+    video_sampling.matrix = color_contract.applied_matrix;
+    video_sampling.range = color_contract.applied_range;
+    if subsampling != CpuYuvChromaSubsampling::Cs444
+        && video_sampling.chroma_location == DecodedVideoChromaLocation::Unknown
+    {
+        // FFmpeg's conventional MPEG-family planar layouts are horizontally
+        // left-sited when stream metadata omits a more local fact. Bind that
+        // fallback explicitly so the renderer never invents sampling policy.
+        video_sampling.chroma_location = DecodedVideoChromaLocation::Left;
+    }
+    let width = decoded.width();
+    let height = decoded.height();
+    let chroma_width = match subsampling {
+        CpuYuvChromaSubsampling::Cs444 => width,
+        _ => width.div_ceil(2),
+    };
+    let chroma_height = match subsampling {
+        CpuYuvChromaSubsampling::Cs420 => height.div_ceil(2),
+        CpuYuvChromaSubsampling::Cs422 | CpuYuvChromaSubsampling::Cs444 => height,
+    };
+    // SAFETY: decoded is valid for this borrow. av_frame_clone creates an
+    // independently owned AVFrame and retains each immutable AVBufferRef.
+    // FFmpeg's frame wrapper is Send + Sync, so the resulting CPU plane view
+    // can cross the decode/renderer boundary without copying or reordering
+    // roughly 33 MiB for every UHD 4:2:2 10-bit frame.
+    let retained = unsafe { ffmpeg::ffi::av_frame_clone(decoded.as_ptr()) };
+    if retained.is_null() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "FFmpeg could not retain compact CPU YUV planes".to_owned(),
+        });
+    }
+    // SAFETY: retained is a fresh av_frame_clone allocation. Video drop calls
+    // av_frame_free exactly once for the owned pointer.
+    let retained = unsafe { ffmpeg::util::frame::video::Video::wrap(retained) };
+    Ok(Some(
+        CpuYuvFrame::new_ffmpeg(
+            width,
+            height,
+            chroma_width,
+            chroma_height,
+            subsampling,
+            sample_format,
+            plane_layout,
+            source_color,
+            video_sampling,
+            retained,
+            PreviewDecodePath::InProcessFfmpegCpuYuv,
+        )
+        .with_decoded_surface_format(decoded_surface_format_from_pixel(decoded.format()))
+        .with_stage_durations(PreviewDecodeStageDurations::default()),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_decoded_to_compact_yuv(
+    decoded: &ffmpeg::util::frame::video::Video,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
+    target_width: u32,
+    target_height: u32,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+) -> Result<Option<CpuYuvFrame>> {
+    if compact_yuv_layout(decoded.format()).is_none() {
+        return Ok(None);
+    }
+    if decoded.width() == target_width && decoded.height() == target_height {
+        return convert_decoded_to_compact_yuv(decoded, path, source_color);
+    }
+
+    let scaler = ensure_preview_scaler(
+        scaler,
+        scaler_format_contract,
+        decoded.format(),
+        decoded.format(),
+        decoded.width(),
+        decoded.height(),
+        target_width,
+        target_height,
+        path,
+    )?;
+    let mut scaled = ffmpeg::util::frame::video::Video::empty();
+    let scale_started_at = Instant::now();
+    scaler.run(decoded, &mut scaled).map_err(|error| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    let swscale_us = duration_us(scale_started_at.elapsed());
+    // Preserve frame-local color and temporal facts so scaled and unscaled
+    // compact payloads pass through the same fail-closed interpretation.
+    unsafe {
+        ffmpeg::ffi::av_frame_copy_props(scaled.as_mut_ptr(), decoded.as_ptr());
+    }
+    convert_decoded_to_compact_yuv(&scaled, path, source_color).map(|frame| {
+        frame.map(|frame| {
+            frame.with_stage_durations(PreviewDecodeStageDurations {
+                swscale_us,
+                ..PreviewDecodeStageDurations::default()
+            })
+        })
+    })
+}
 
 pub(super) fn convert_decoded_to_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
@@ -79,6 +266,68 @@ pub(super) fn convert_decoded_to_rgba(
     }))
 }
 
+fn convert_decoded_to_encoded_float_rgba(
+    decoded: &ffmpeg::util::frame::video::Video,
+    scaler: &mut ffmpeg::software::scaling::Context,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
+) -> Result<FloatRgbaFrame> {
+    let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
+    let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
+    let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    if *scaler_color_contract != Some(color_contract) {
+        configure_preview_rgba_scaler(scaler, color_contract, path)?;
+        *scaler_color_contract = Some(color_contract);
+    }
+
+    let mut rgba64 = ffmpeg::util::frame::video::Video::empty();
+    let swscale_started_at = Instant::now();
+    scaler.run(decoded, &mut rgba64).map_err(|error| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    let swscale_us = duration_us(swscale_started_at.elapsed());
+
+    let width = rgba64.width();
+    let height = rgba64.height();
+    let stride = rgba64.stride(0);
+    let row_bytes = width as usize * 4 * std::mem::size_of::<u16>();
+    let source = rgba64.data(0);
+    let copy_started_at = Instant::now();
+    let mut output = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        let row = source.get(row_start..row_start + row_bytes).ok_or_else(|| {
+            MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "FFmpeg RGBA64 row {y} is shorter than the declared preview extent"
+                ),
+            }
+        })?;
+        output.extend(row.chunks_exact(2).map(|sample| {
+            f32::from(u16::from_le_bytes([sample[0], sample[1]])) / f32::from(u16::MAX)
+        }));
+    }
+    let rgba_copy_us = duration_us(copy_started_at.elapsed());
+
+    Ok(FloatRgbaFrame::new(
+        width,
+        height,
+        output,
+        color_contract,
+        PreviewDecodePath::InProcessFfmpegCpuFloat,
+    )
+    .with_decoded_surface_format(decoded_surface_format)
+    .with_decoded_video_sampling(decoded_video_sampling)
+    .with_stage_durations(PreviewDecodeStageDurations {
+        swscale_us,
+        rgba_copy_us,
+        ..PreviewDecodeStageDurations::default()
+    }))
+}
+
 fn convert_decoded_to_float_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     target_width: u32,
@@ -86,20 +335,18 @@ fn convert_decoded_to_float_rgba(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<FloatRgbaFrame> {
-    if !source_color.color_space.is_scene_linear() {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: format!(
-                "float preview materialization requires a scene-linear source identity, got {:?}",
-                source_color.color_space
-            ),
-        });
-    }
-
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let copy_started_at = Instant::now();
     let rgba = unpack_ffmpeg_planar_float_rgba(decoded, path)?;
+    // Float storage does not imply a linear transfer function. Preserve the
+    // already resolved author interpretation while bypassing integer swscale
+    // for encoded RGB and numeric data just as for scene-linear RGB.
+    let color_contract = if source_color.is_scene_linear() {
+        DecodedRgbaFrameContract::source_linear(source_color)
+    } else {
+        resolve_cpu_rgba_contract(decoded, source_color, path)?
+    };
     let rgba = resize_float_rgba(
         &rgba,
         decoded.width(),
@@ -113,7 +360,7 @@ fn convert_decoded_to_float_rgba(
         target_width,
         target_height,
         rgba,
-        DecodedRgbaFrameContract::source_linear(source_color),
+        color_contract,
         PreviewDecodePath::InProcessFfmpegCpuFloat,
     )
     .with_decoded_surface_format(decoded_surface_format)
@@ -124,24 +371,30 @@ fn convert_decoded_to_float_rgba(
     }))
 }
 
+fn planar_float_layout(pixel_format: ffmpeg::util::format::pixel::Pixel) -> Option<(bool, bool)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    match pixel_format {
+        Pixel::GBRPF32LE => Some((true, false)),
+        Pixel::GBRPF32BE => Some((false, false)),
+        Pixel::GBRAPF32LE => Some((true, true)),
+        Pixel::GBRAPF32BE => Some((false, true)),
+        _ => None,
+    }
+}
+
 fn unpack_ffmpeg_planar_float_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     path: &Path,
 ) -> Result<Vec<f32>> {
-    let (little_endian, has_alpha) = match decoded.format() {
-        ffmpeg::util::format::pixel::Pixel::GBRPF32LE => (true, false),
-        ffmpeg::util::format::pixel::Pixel::GBRPF32BE => (false, false),
-        ffmpeg::util::format::pixel::Pixel::GBRAPF32LE => (true, true),
-        ffmpeg::util::format::pixel::Pixel::GBRAPF32BE => (false, true),
-        format => {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "scene-linear source decoded to unsupported non-planar-f32 format {format:?}; refusing RGBA8 quantization"
-                ),
-            });
+    let (little_endian, has_alpha) = planar_float_layout(decoded.format()).ok_or_else(|| {
+        MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "float source decoded to unsupported non-planar-f32 format {:?}; refusing integer quantization",
+                decoded.format()
+            ),
         }
-    };
+    })?;
 
     let width = decoded.width() as usize;
     let height = decoded.height() as usize;
@@ -190,7 +443,7 @@ fn read_ffmpeg_f32_plane_sample(
     })
 }
 
-pub(super) fn resize_float_rgba(
+pub(crate) fn resize_float_rgba(
     source: &[f32],
     source_width: u32,
     source_height: u32,
@@ -276,9 +529,13 @@ impl PreviewNativeFrameMaterializationError {
 #[cfg(test)]
 pub(super) fn materialize_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
+    representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
@@ -287,9 +544,10 @@ pub(super) fn materialize_decoded_frame(
 ) -> Result<PreviewDecodedFramePayload> {
     materialize_decoded_frame_inner(
         decoded,
+        representation,
         hardware_decode_plan,
         scaler,
-        scaler_source_format,
+        scaler_format_contract,
         scaler_color_contract,
         target_width,
         target_height,
@@ -302,9 +560,13 @@ pub(super) fn materialize_decoded_frame(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_decoded_frame_with_session_output_lease(
     decoded: &ffmpeg::util::frame::video::Video,
+    representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
@@ -314,9 +576,10 @@ pub(super) fn materialize_decoded_frame_with_session_output_lease(
 ) -> Result<PreviewDecodedFramePayload> {
     materialize_decoded_frame_inner(
         decoded,
+        representation,
         hardware_decode_plan,
         scaler,
-        scaler_source_format,
+        scaler_format_contract,
         scaler_color_contract,
         target_width,
         target_height,
@@ -329,9 +592,13 @@ pub(super) fn materialize_decoded_frame_with_session_output_lease(
 #[allow(clippy::too_many_arguments)]
 fn materialize_decoded_frame_inner(
     decoded: &ffmpeg::util::frame::video::Video,
+    representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
@@ -339,6 +606,13 @@ fn materialize_decoded_frame_inner(
     source_color: PreviewSourceColorContract,
     session_output_lease: Option<PreviewDecodeSessionOutputLease>,
 ) -> Result<PreviewDecodedFramePayload> {
+    if decoded.is_interlaced() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "decoded frame is interlaced but no deinterlacing execution path was admitted"
+                .to_owned(),
+        });
+    }
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
             match materialize_native_decoded_frame(decoded, source_color, session_output_lease) {
@@ -365,8 +639,11 @@ fn materialize_decoded_frame_inner(
             return Err(MondrianError::DecodeFailed {
                 asset_id: path.display().to_string(),
                 reason: format!(
-                    "required GPU-resident decode returned software frame {:?}",
-                    decoded.format()
+                    "required GPU-resident decode returned software frame {:?}; backend {:?}; codec: {}; device: {}",
+                    decoded.format(),
+                    hardware_decode_plan.probe.candidate_backend,
+                    hardware_decode_plan.ffmpeg_codec_config.reason,
+                    hardware_decode_plan.ffmpeg_device_context.reason
                 ),
             });
         } else {
@@ -377,9 +654,10 @@ fn materialize_decoded_frame_inner(
 
     materialize_decoded_to_cpu(
         decoded,
+        representation,
         hardware_decode_plan,
         scaler,
-        scaler_source_format,
+        scaler_format_contract,
         scaler_color_contract,
         target_width,
         target_height,
@@ -397,7 +675,7 @@ fn materialize_native_decoded_frame(
 
     let is_hardware_pixel = matches!(
         decoded.format(),
-        Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI
+        Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI | Pixel::CUDA
     ) || {
         #[cfg(mondrian_ffmpeg_7_1)]
         {
@@ -437,8 +715,12 @@ fn materialize_native_decoded_frame(
         Pixel::VAAPI => {
             resource.drm_prime_frame()?;
         }
+        #[cfg(target_os = "linux")]
+        Pixel::CUDA => {
+            resource.cuda_frame()?;
+        }
         #[cfg(not(target_os = "linux"))]
-        Pixel::VAAPI => {
+        Pixel::VAAPI | Pixel::CUDA => {
             return Err(
                 PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
                     pixel_format: decoded.format(),
@@ -481,6 +763,24 @@ pub(super) fn decoded_native_surface_format_from_software_format(
     match software_format {
         ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 => Ok(DecodedVideoSurfaceFormat::Nv12),
         ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE => Ok(DecodedVideoSurfaceFormat::P010),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P012LE => Ok(DecodedVideoSurfaceFormat::P012),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P016LE => Ok(DecodedVideoSurfaceFormat::P016),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P210LE => Ok(DecodedVideoSurfaceFormat::P210),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P212LE => Ok(DecodedVideoSurfaceFormat::P212),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P216LE => Ok(DecodedVideoSurfaceFormat::P216),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P410LE => Ok(DecodedVideoSurfaceFormat::P410),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P412LE => Ok(DecodedVideoSurfaceFormat::P412),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P416LE => Ok(DecodedVideoSurfaceFormat::P416),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_Y210LE => Ok(DecodedVideoSurfaceFormat::Y210),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_Y212LE => Ok(DecodedVideoSurfaceFormat::Y212),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_XV30LE => Ok(DecodedVideoSurfaceFormat::Xv30),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_XV36LE => Ok(DecodedVideoSurfaceFormat::Xv36),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGBAF16LE => {
+            Ok(DecodedVideoSurfaceFormat::Rgba16Float)
+        }
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGBAF32LE => {
+            Ok(DecodedVideoSurfaceFormat::Rgba32Float)
+        }
         _ => Err(
             PreviewNativeFrameMaterializationError::UnsupportedHardwareSurfaceFormat {
                 software_format,
@@ -491,17 +791,49 @@ pub(super) fn decoded_native_surface_format_from_software_format(
 
 fn materialize_decoded_to_cpu(
     decoded: &ffmpeg::util::frame::video::Video,
+    representation: PreviewDecodeRepresentation,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<PreviewDecodedFramePayload> {
+    let compact_fallback = representation.is_native_surface()
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture();
     if !preview_hardware_frame_format(decoded.format()) {
-        if source_color.color_space.is_scene_linear() {
+        if representation.is_compact_cpu_yuv()
+            || (compact_fallback && compact_yuv_layout(decoded.format()).is_some())
+        {
+            return materialize_decoded_to_compact_yuv(
+                decoded,
+                scaler,
+                scaler_format_contract,
+                target_width,
+                target_height,
+                path,
+                source_color,
+            )?
+            .map_or_else(
+                || {
+                    Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: format!(
+                            "compact CPU YUV representation expected supported compact YUV, decoder returned {:?}",
+                            decoded.format()
+                        ),
+                    })
+                },
+                |frame| Ok(PreviewDecodedFramePayload::CpuYuv(frame)),
+            );
+        }
+        if source_color.is_scene_linear() || planar_float_layout(decoded.format()).is_some() {
             return convert_decoded_to_float_rgba(
                 decoded,
                 target_width,
@@ -511,18 +843,31 @@ fn materialize_decoded_to_cpu(
             )
             .map(PreviewDecodedFramePayload::CpuFloat);
         }
-        let scaler = ensure_preview_rgba_scaler(
+        let destination_format = cpu_preview_destination_format(decoded);
+        let scaler = ensure_preview_scaler(
             scaler,
-            scaler_source_format,
+            scaler_format_contract,
             decoded.format(),
+            destination_format,
             decoded.width(),
             decoded.height(),
             target_width,
             target_height,
             path,
         )?;
-        return convert_decoded_to_rgba(decoded, scaler, path, source_color, scaler_color_contract)
-            .map(PreviewDecodedFramePayload::CpuRgba);
+        return if destination_format == ffmpeg::util::format::pixel::Pixel::RGBA64LE {
+            convert_decoded_to_encoded_float_rgba(
+                decoded,
+                scaler,
+                path,
+                source_color,
+                scaler_color_contract,
+            )
+            .map(PreviewDecodedFramePayload::CpuFloat)
+        } else {
+            convert_decoded_to_rgba(decoded, scaler, path, source_color, scaler_color_contract)
+                .map(PreviewDecodedFramePayload::CpuRgba)
+        };
     }
 
     let mut transferred = ffmpeg::util::frame::video::Video::empty();
@@ -544,7 +889,39 @@ fn materialize_decoded_to_cpu(
         ffmpeg::ffi::av_frame_copy_props(transferred.as_mut_ptr(), decoded.as_ptr());
     }
     hardware_decode_plan.mark_hardware_cpu_transfer_observed();
-    if source_color.color_space.is_scene_linear() {
+    if representation.is_compact_cpu_yuv()
+        || (compact_fallback && compact_yuv_layout(transferred.format()).is_some())
+    {
+        return materialize_decoded_to_compact_yuv(
+            &transferred,
+            scaler,
+            scaler_format_contract,
+            target_width,
+            target_height,
+            path,
+            source_color,
+        )?
+        .map_or_else(
+            || {
+                Err(MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: format!(
+                        "compact CPU YUV representation expected transferred supported compact YUV, decoder returned {:?}",
+                        transferred.format()
+                    ),
+                })
+            },
+            |frame| {
+                Ok(PreviewDecodedFramePayload::CpuYuv(frame.with_stage_durations(
+                    PreviewDecodeStageDurations {
+                        hardware_transfer_us,
+                        ..PreviewDecodeStageDurations::default()
+                    },
+                )))
+            },
+        );
+    }
+    if source_color.is_scene_linear() || planar_float_layout(transferred.format()).is_some() {
         return convert_decoded_to_float_rgba(
             &transferred,
             target_width,
@@ -561,56 +938,94 @@ fn materialize_decoded_to_cpu(
             ))
         });
     }
-    let scaler = ensure_preview_rgba_scaler(
+    let destination_format = cpu_preview_destination_format(&transferred);
+    let scaler = ensure_preview_scaler(
         scaler,
-        scaler_source_format,
+        scaler_format_contract,
         transferred.format(),
+        destination_format,
         transferred.width(),
         transferred.height(),
         target_width,
         target_height,
         path,
     )?;
-    convert_decoded_to_rgba(
-        &transferred,
-        scaler,
-        path,
-        source_color,
-        scaler_color_contract,
-    )
-    .map(|frame| {
-        PreviewDecodedFramePayload::CpuRgba(frame.with_stage_durations(
-            PreviewDecodeStageDurations {
-                hardware_transfer_us,
-                ..PreviewDecodeStageDurations::default()
-            },
-        ))
-    })
+    if destination_format == ffmpeg::util::format::pixel::Pixel::RGBA64LE {
+        convert_decoded_to_encoded_float_rgba(
+            &transferred,
+            scaler,
+            path,
+            source_color,
+            scaler_color_contract,
+        )
+        .map(|frame| {
+            PreviewDecodedFramePayload::CpuFloat(frame.with_stage_durations(
+                PreviewDecodeStageDurations {
+                    hardware_transfer_us,
+                    ..PreviewDecodeStageDurations::default()
+                },
+            ))
+        })
+    } else {
+        convert_decoded_to_rgba(
+            &transferred,
+            scaler,
+            path,
+            source_color,
+            scaler_color_contract,
+        )
+        .map(|frame| {
+            PreviewDecodedFramePayload::CpuRgba(frame.with_stage_durations(
+                PreviewDecodeStageDurations {
+                    hardware_transfer_us,
+                    ..PreviewDecodeStageDurations::default()
+                },
+            ))
+        })
+    }
 }
 
-fn ensure_preview_rgba_scaler<'a>(
+fn cpu_preview_destination_format(
+    decoded: &ffmpeg::util::frame::video::Video,
+) -> ffmpeg::util::format::pixel::Pixel {
+    if super::decode_contract::cpu_preview_uses_float(
+        decoded_video_sampling_from_frame(decoded).bit_depth,
+    ) {
+        ffmpeg::util::format::pixel::Pixel::RGBA64LE
+    } else {
+        ffmpeg::util::format::pixel::Pixel::RGBA
+    }
+}
+
+fn ensure_preview_scaler<'a>(
     scaler: &'a mut Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     source_format: ffmpeg::util::format::pixel::Pixel,
+    destination_format: ffmpeg::util::format::pixel::Pixel,
     source_width: u32,
     source_height: u32,
     target_width: u32,
     target_height: u32,
     path: &Path,
 ) -> Result<&'a mut ffmpeg::software::scaling::Context> {
-    if scaler.is_none() || *scaler_source_format != Some(source_format) {
+    let requested_contract = (source_format, destination_format);
+    if scaler.is_none() || *scaler_format_contract != Some(requested_contract) {
         *scaler = Some(preview_create_rgba_scaler(
             source_format,
+            destination_format,
             source_width,
             source_height,
             target_width,
             target_height,
             path,
         )?);
-        *scaler_source_format = Some(source_format);
+        *scaler_format_contract = Some(requested_contract);
     }
     scaler.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
-        reason: "preview RGBA scaler was not initialized".to_string(),
+        reason: "preview scaler was not initialized".to_string(),
     })
 }

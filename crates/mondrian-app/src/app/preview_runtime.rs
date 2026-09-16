@@ -36,10 +36,13 @@ use crate::app::preview_access_mode::{
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 #[cfg(test)]
-use crate::app::preview_cpu_execution::composite_resolved_preview_working;
 use crate::app::preview_cpu_execution::{
-    composite_resolved_preview, output_boundary_from_color_context, PreviewCompositeOutput,
-    PreviewCpuExecutionDurations,
+    composite_resolved_preview, composite_resolved_preview_working,
+};
+use crate::app::preview_cpu_execution::{
+    composite_resolved_preview_with_signal_monitoring, output_boundary_from_color_context,
+    present_preview_working_with_signal_monitoring, PreviewCompositeOutput,
+    PreviewCpuExecutionDurations, PreviewWorkingCompositeOutput,
 };
 use crate::app::preview_cpu_fallback_task::{
     PreviewCpuFallbackRequest, PreviewCpuFallbackResult, PreviewCpuFallbackSubmission,
@@ -51,7 +54,6 @@ use crate::app::preview_decode_residency::{
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
-#[cfg(any(test, feature = "validation"))]
 use crate::app::preview_execution::PreviewPlaybackIntent;
 use crate::app::preview_execution::{
     PreviewCandidateDecision, PreviewExecutionCoordinator, PreviewGenerationBinding,
@@ -88,11 +90,12 @@ use crate::app::preview_raster_frame::{
 };
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, media_preview_residency_reservation,
-    playback_frame_delivery_kind, playback_hardware_recovery_signals, MediaPreviewFailureReason,
+    media_preview_steady_prefetch_reservation_limit, playback_frame_delivery_kind,
+    playback_hardware_recovery_signals, MediaPreviewFailureReason,
     MediaPreviewResidencyReservation, PlaybackDecodeExecution, PlaybackPressureState,
     PlaybackPressureTransition, PreviewScrubAdaptationState,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES, MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT,
 };
 #[cfg(test)]
 use crate::app::preview_scheduler_policy::{
@@ -108,9 +111,10 @@ use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved;
 #[cfg(test)]
 use crate::app::preview_viewer_plan::viewer_preview_cache_key_for_resolved_plan;
 use crate::app::preview_viewer_plan::{
-    prepare_gpu_composite_layers_with_heterogeneous_effects, resolved_preview_decode_execution,
-    resolved_preview_media_protections, resolved_preview_presentation_quality,
-    PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
+    gpu_layer_for_cached_working, prepare_gpu_composite_layers_with_heterogeneous_effects,
+    resolved_preview_decode_execution, resolved_preview_media_residency,
+    resolved_preview_presentation_quality, PreparedPreviewViewerGpuLayers,
+    PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
 };
 use crate::app::preview_visual_dependencies::PreviewVisualDependencyObserver;
 use crate::app::preview_visual_execution_task::{
@@ -153,23 +157,24 @@ use mondrian_media::{
     PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
     PreviewTemporalExtentSource, VideoColorDiagnostic,
 };
+#[cfg(test)]
 use mondrian_renderer::{
+    color::{ProgramOutputBoundary, ProgramOutputModule, SourceColorModule},
+    evaluate_prepared_visual_program, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, PreparedVisualProgram,
+    RenderCpuColorExecutionSession, RenderInputTransform, TimelineAdjustmentLayer,
+    TimelineCompositeColorPath, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, ViewerGpuExecutionLayer,
+};
+use mondrian_renderer::{
+    color::{RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown},
     color_report_vocab, GpuCompositingDiagnostics, PreparedVisualProgramCacheDiagnostics,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderMonitorAdaptation,
     TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeLegacyBreakdown,
     TimelineCompositeScratch, ViewerHeterogeneousGpuInput,
-};
-#[cfg(test)]
-use mondrian_renderer::{
-    evaluate_prepared_visual_program, execute_cpu_input_stage, CpuEncodedColorFrame,
-    CpuSourceColorFrame, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, PreparedVisualProgram,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeColorPath, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, ViewerGpuExecutionLayer,
 };
 #[cfg(test)]
 use mondrian_timeline::sequence::ResolvedInputColor;
@@ -270,6 +275,9 @@ pub(crate) enum PreviewPresentationState<O> {
 pub(crate) enum PreviewVisualGpuCompletionDisposition {
     /// The completion is current, on time, and may become visible.
     PublishCurrent,
+    /// The ticketless immediate successor completed on time and may occupy the
+    /// bounded prepared-output slot without becoming visible.
+    PrepareSuccessor,
     /// The artifact is cache-only, stale, or no longer belongs to this
     /// Preview lifecycle. Adapter resources must be released without
     /// publication.
@@ -278,6 +286,18 @@ pub(crate) enum PreviewVisualGpuCompletionDisposition {
     /// timestamp must be bound by the App consumption seam.
     TerminalCandidate(mondrian_playback::FrameDeliveryCandidate),
 }
+
+pub use super::preview_work_notification::{
+    PreviewCallbackShutdownRejection, PreviewWorkCallbackEvidence,
+};
+pub use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
+
+pub use super::preview_shutdown_evidence::PreviewRuntimeShutdownEvidence;
+#[cfg(any(test, feature = "validation"))]
+pub use super::preview_shutdown_evidence::{
+    PreviewStartupInventory, PreviewStartupOwnerState, PreviewStartupShutdownEvidence,
+    PreviewStartupWorkerShutdown,
+};
 
 /// Production Preview composition root shared by Window and Headless Adapters.
 ///
@@ -290,6 +310,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     jobs: MediaPreviewJobQueueSender,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     workers: RefCell<Vec<JoinHandle<()>>>,
+    unverified_async_worker_reaps: Cell<u32>,
     shutdown: Arc<PreviewShutdownSignal>,
     decode_residency: Arc<PreviewDecodeResidencyCoordinator>,
     observed_decode_residency_retry_revision: Cell<u64>,
@@ -308,16 +329,31 @@ pub struct PreviewProductionRuntime<O: Clone> {
     /// Entries remain until their queued/in-flight owner settles. The next
     /// work poll then publishes one retry edge for the whole Viewer candidate.
     media_existing_work_waiters: RefCell<HashMap<MediaPreviewKey, MediaPreviewExistingWorkBinding>>,
+    /// Exact current media keys deferred behind realtime execution pressure.
+    ///
+    /// Each entry names the Preview generation that observed a live Broker
+    /// owner. Once the realtime owner set becomes empty, the retained Timeline
+    /// dependency is invalidated and one candidate retry becomes actionable.
+    media_execution_pressure_waiters: RefCell<HashMap<MediaPreviewKey, u64>>,
     /// Retry request retained until a consumer actually enters candidate evaluation.
-    media_existing_work_retry_pending: Cell<bool>,
-    media_existing_work_waiter_registrations: Cell<u64>,
-    media_existing_work_retry_acknowledgements: Cell<u64>,
+    media_retry_pending: Cell<bool>,
+    media_retry_waiter_registrations: Cell<u64>,
+    media_retry_acknowledgements: Cell<u64>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     execution:
         RefCell<PreviewExecutionCoordinator<ViewerPreviewGenerationKey, ViewerPreviewCacheKey, O>>,
     transport_playing: Cell<bool>,
     transport_epoch: Cell<Option<mondrian_playback::PlaybackEpoch>>,
     playback_pressure: Cell<PlaybackPressureState>,
+    #[cfg(any(test, feature = "validation"))]
+    last_video_preroll_observation: Cell<Option<PreviewVideoPreroll>>,
+    /// Last immutable product resource policy applied at Preview's domain seam.
+    ///
+    /// Candidate polling is level-triggered, but policy reconfiguration is not:
+    /// reapplying an equal decision would repeatedly take cache/decoder locks on
+    /// the realtime presentation thread without changing any authority.
+    applied_resource_decision:
+        Cell<Option<crate::app::execution_resource_coordination::PreviewExecutionDecision>>,
     applied_resource_trim: Cell<crate::app::execution_resource_coordination::ResourceTrimRequest>,
     heterogeneous_effect_decision: Cell<
         crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision,
@@ -330,9 +366,14 @@ pub struct PreviewProductionRuntime<O: Clone> {
     cpu_fallback_task: Option<PreviewCpuFallbackTask>,
     cpu_fallback_start_failure: Option<String>,
     viewer_cpu_fallback_active: Cell<bool>,
+    viewer_signal_monitoring: Cell<(
+        mondrian_core::ProgramScopesTap,
+        mondrian_core::SignalMonitoringSettings,
+    )>,
     cpu_fallback_in_flight:
         RefCell<Option<(u64, mondrian_playback::PlaybackEpoch, PreviewOutputKey)>>,
     cpu_fallback_failure: RefCell<Option<(PreviewOutputKey, String)>>,
+    timeline_render_cache: RefCell<crate::app::preview_render_cache::PreviewTimelineRenderCache>,
     visual_ready: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionPrefixReady>>,
     visual_failures: RefCell<HashMap<VisualExecutionTaskKey, String>>,
     media_execution_failures: RefCell<HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>>,
@@ -352,6 +393,9 @@ pub struct PreviewProductionRuntime<O: Clone> {
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
+    display_snapshot_identity: Cell<Option<DisplayOutputIdentity>>,
+    /// Latest exact CPU Viewer output prepared for a user-triggered Gallery capture.
+    last_gallery_capture: RefCell<Option<crate::app::product_action::GalleryCaptureStillPayload>>,
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
@@ -370,6 +414,15 @@ impl PreviewWorkerIsolation {
     const fn requires_packaged_worker(self) -> bool {
         matches!(self, Self::RequiredPackaged)
     }
+}
+
+/// Physical carrier whose production Adapter owns this presentation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewPresentationCarrier {
+    /// A CPU-only consumer explicitly requests the canonical raster boundary.
+    CpuRaster,
+    /// The Window GPU owner must publish its exact external texture first.
+    ExternalGpu,
 }
 
 impl<O: Clone> PreviewProductionRuntime<O> {
@@ -401,6 +454,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    pub(crate) fn set_viewer_signal_monitoring(
+        &self,
+        tap: mondrian_core::ProgramScopesTap,
+        settings: mondrian_core::SignalMonitoringSettings,
+    ) -> bool {
+        let next = (tap, settings);
+        if self.viewer_signal_monitoring.get() == next {
+            return false;
+        }
+        self.viewer_signal_monitoring.set(next);
+        self.invalidate_preview_generation();
+        self.execution.borrow_mut().clear_output();
+        self.work_notifier.retry_became_actionable();
+        true
+    }
+
     fn schedule_cpu_fallback(
         &self,
         generation: u64,
@@ -408,6 +477,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         resolved: &ResolvedPlanView,
         width: u32,
         height: u32,
+        preserve_current_output: bool,
     ) -> PreviewGpuFrameState {
         if self.frame_store.borrow_mut().viewer_frame(&resolved.cpu_cache_key).is_some() {
             return PreviewGpuFrameState::Loading;
@@ -424,10 +494,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .as_ref()
                 .map(|(_, reason)| reason.clone())
                 .unwrap_or_else(|| "Viewer CPU fallback failed".to_owned());
-            return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
-                PreviewOutputStage::GpuComposite,
-                reason,
-            ));
+            return self.unavailable_gpu_candidate_with_retention(
+                PreviewUnavailability::failed(PreviewOutputStage::GpuComposite, reason),
+                preserve_current_output,
+            );
         }
         if self.cpu_fallback_in_flight.borrow().as_ref().is_some_and(
             |(active_generation, active_epoch, key)| {
@@ -439,14 +509,34 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return PreviewGpuFrameState::Loading;
         }
         let Some(task) = self.cpu_fallback_task.as_ref() else {
-            return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
-                PreviewOutputStage::GpuComposite,
-                self.cpu_fallback_start_failure
-                    .as_deref()
-                    .unwrap_or("Preview CPU fallback worker is unavailable"),
-            ));
+            return self.unavailable_gpu_candidate_with_retention(
+                PreviewUnavailability::failed(
+                    PreviewOutputStage::GpuComposite,
+                    self.cpu_fallback_start_failure
+                        .as_deref()
+                        .unwrap_or("Preview CPU fallback worker is unavailable"),
+                ),
+                preserve_current_output,
+            );
         };
+        let cached_working = resolved
+            .render_cache_identity
+            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
+        if let Err(error) = self.scratch.borrow().admit_cpu_active_working_set(
+            resolved.cpu_materialization_active_bytes,
+            mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+        ) {
+            return self.unavailable_gpu_candidate_with_retention(
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineComposite,
+                    error.to_string(),
+                ),
+                preserve_current_output,
+            );
+        }
         let request = PreviewCpuFallbackRequest {
+            cpu_materialization_active_bytes: resolved.cpu_materialization_active_bytes,
+            cpu_working_set_grant: self.scratch.borrow().cpu_working_set_diagnostics().grant,
             generation,
             epoch,
             output_key: resolved.cpu_cache_key.clone(),
@@ -454,6 +544,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             elements: Arc::clone(&resolved.elements),
             color_context: resolved.color_context.clone(),
+            render_cache_identity: resolved.render_cache_identity,
+            cached_working,
+            monitoring_tap: self.viewer_signal_monitoring.get().0,
+            monitoring_settings: self.viewer_signal_monitoring.get().1,
         };
         match task.submit(request) {
             PreviewCpuFallbackSubmission::Scheduled => {
@@ -466,12 +560,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewGpuFrameState::Loading
             }
             PreviewCpuFallbackSubmission::Busy => PreviewGpuFrameState::Loading,
-            PreviewCpuFallbackSubmission::Disconnected => {
-                self.unavailable_gpu_candidate(PreviewUnavailability::failed(
-                    PreviewOutputStage::GpuComposite,
-                    "Preview CPU fallback worker disconnected",
-                ))
-            }
+            PreviewCpuFallbackSubmission::Disconnected => self
+                .unavailable_gpu_candidate_with_retention(
+                    PreviewUnavailability::failed(
+                        PreviewOutputStage::GpuComposite,
+                        "Preview CPU fallback worker disconnected",
+                    ),
+                    preserve_current_output,
+                ),
         }
     }
 
@@ -485,6 +581,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     #[cfg(test)]
     pub(crate) fn new_without_workers_for_test() -> Self {
         Self::with_worker_count(preview_decode_cpu_budget(), 0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_timeline_render_cache_for_test(
+        &self,
+        config: mondrian_render_cache::TimelineRenderCacheConfig,
+    ) -> Result<(), std::io::Error> {
+        let work_notifier = self.work_notifier.clone();
+        let notifier = Arc::new(move || {
+            work_notifier.result_became_pollable();
+        });
+        let service = mondrian_render_cache::TimelineRenderCacheService::start_with_notifier(
+            config, notifier,
+        )?;
+        *self.timeline_render_cache.borrow_mut() =
+            crate::app::preview_render_cache::PreviewTimelineRenderCache::with_service(service);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_memory_residency_for_persistent_cache_test(&self) {
+        self.clear_all_preview_residency();
+        self.execution.borrow_mut().clear_output();
+        self.timeline_render_cache.borrow_mut().clear_memory_state_for_test();
     }
 
     #[cfg(test)]
@@ -524,199 +644,31 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         )
     }
 
-    fn with_worker_count_and_scheduler(
-        decode_cpu_budget: PreviewDecodeCpuBudget,
-        worker_count: usize,
-        scheduler: MediaPreviewScheduler,
-        worker_isolation: PreviewWorkerIsolation,
-    ) -> Self {
-        let (work_notifier, work_watch) = preview_work_notification_channel();
-        let (job_tx, job_rx) = scheduler.job_queue();
-        let (result_tx, result_rx) =
-            mpsc::sync_channel::<MediaPreviewResult>(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
-        let shutdown = Arc::new(PreviewShutdownSignal::default());
-        let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new_with_notifier(
-            work_notifier.clone(),
-        ));
-        let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default();
-        let (visual_execution, visual_execution_start_failure) =
-            match VisualExecutionTask::new_with_notifier(
-                mondrian_playback::SystemMonotonicRuntimeClock::default(),
-                VisualExecutionTaskConfig::default(),
-                work_notifier.clone(),
-            ) {
-                Ok(task) => (Some(task), None),
-                Err(error) => {
-                    tracing::error!("failed to start Preview visual execution worker: {error}");
-                    (None, Some(error.to_string()))
-                }
-            };
-        let (cpu_fallback_task, cpu_fallback_start_failure) =
-            match PreviewCpuFallbackTask::new(work_notifier.clone()) {
-                Ok(task) => (Some(task), None),
-                Err(error) => {
-                    tracing::error!("failed to start Preview CPU fallback worker: {error}");
-                    (None, Some(error.to_string()))
-                }
-            };
-        let mut decode_worker_count = 0;
-        let mut workers = Vec::new();
-        let mut decode_execution_observers = Vec::new();
-        let (demux_worker_executable, mut media_worker_start_failure) = if worker_count == 0
-            || !worker_isolation.requires_packaged_worker()
-        {
-            (None, None)
-        } else {
-            match super::packaged_worker::discover_preview_demux_worker() {
-                Ok(executable) => (Some(executable), None),
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        "Preview media workers were not started because required demux isolation is unavailable"
-                    );
-                    scheduler.close();
-                    (None, Some(error.to_string()))
-                }
-            }
-        };
-        for worker_index in 0..worker_count {
-            if worker_isolation.requires_packaged_worker() && demux_worker_executable.is_none() {
-                break;
-            }
-            let worker_jobs = job_rx.clone();
-            let worker_results = result_tx.clone();
-            let worker_work_notifier = work_notifier.clone();
-            let worker_scheduler = scheduler.clone();
-            let worker_shutdown = Arc::clone(&shutdown);
-            let worker_decode_residency = Arc::clone(&decode_residency);
-            let worker_lane = media_preview_worker_lane(worker_index, worker_count);
-            let (worker_decode_context_bootstrap, execution_observer) =
-                match demux_worker_executable.clone() {
-                    Some(executable) => mondrian_media::PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(executable),
-                    #[cfg(test)]
-                    None if worker_isolation == PreviewWorkerIsolation::DirectTestAdapter => {
-                        mondrian_media::PreviewDecodeSessionContext::observed_bootstrap()
-                    }
-                    None => unreachable!("required packaged worker was checked before spawn"),
-                };
-            let worker_decode_context_bootstrap = worker_decode_context_bootstrap
-                .with_worker_resources(decode_worker_resources.clone());
-            decode_residency.register_worker(worker_lane);
-            match std::thread::Builder::new()
-                .name(format!("mondrian-preview-worker-{worker_index}"))
-                .spawn(move || {
-                    media_preview_worker(
-                        worker_lane,
-                        worker_jobs,
-                        worker_results,
-                        worker_work_notifier,
-                        worker_scheduler,
-                        worker_shutdown,
-                        worker_decode_residency,
-                        worker_decode_context_bootstrap,
-                    )
-                }) {
-                Ok(handle) => {
-                    workers.push(handle);
-                    decode_execution_observers.push((worker_lane, execution_observer));
-                    decode_worker_count += 1;
-                }
-                Err(err) => {
-                    decode_residency.unregister_worker(worker_lane);
-                    if media_worker_start_failure.is_none() {
-                        media_worker_start_failure = Some(format!(
-                            "failed to start Preview media worker {worker_index}: {err}"
-                        ));
-                    }
-                    tracing::warn!(
-                        worker_index,
-                        "failed to start production preview worker: {err}"
-                    );
-                }
-            }
-        }
-        if worker_count > 0 && decode_worker_count == 0 {
-            scheduler.close();
-            media_worker_start_failure.get_or_insert_with(|| {
-                "no configured Preview media worker could be started".to_owned()
-            });
-        }
-
-        Self {
-            work_notifier: work_notifier.clone(),
-            work_watch,
-            jobs: job_tx,
-            results: RefCell::new(result_rx),
-            workers: RefCell::new(workers),
-            shutdown,
-            decode_residency,
-            observed_decode_residency_retry_revision: Cell::new(0),
-            decode_residency_waiting: Cell::new(None),
-            decode_worker_resources,
-            frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
-            media_aggregate_capacity_waiting: Cell::new(false),
-            media_existing_work_waiters: RefCell::new(HashMap::new()),
-            media_existing_work_retry_pending: Cell::new(false),
-            media_existing_work_waiter_registrations: Cell::new(0),
-            media_existing_work_retry_acknowledgements: Cell::new(0),
-            scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
-            execution: RefCell::new(PreviewExecutionCoordinator::default()),
-            transport_playing: Cell::new(false),
-            transport_epoch: Cell::new(None),
-            playback_pressure: Cell::new(PlaybackPressureState::default()),
-            applied_resource_trim: Cell::new(
-                crate::app::execution_resource_coordination::ResourceTrimRequest::None,
-            ),
-            heterogeneous_effect_decision: Cell::new(
-                crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision::conservative_baseline(),
-            ),
-            scheduler,
-            title_task: RefCell::new(PreviewTitleTask::with_notifier(work_notifier.clone())),
-            visual_execution,
-            visual_execution_start_failure,
-            visual_execution_health_failed: Cell::new(false),
-            cpu_fallback_task,
-            cpu_fallback_start_failure,
-            viewer_cpu_fallback_active: Cell::new(false),
-            cpu_fallback_in_flight: RefCell::new(None),
-            cpu_fallback_failure: RefCell::new(None),
-            visual_ready: RefCell::new(HashMap::new()),
-            visual_failures: RefCell::new(HashMap::new()),
-            media_execution_failures: RefCell::new(HashMap::new()),
-            media_worker_health_failed: Cell::new(media_worker_start_failure.is_some()),
-            media_worker_start_failure,
-            last_current_media_admission: Cell::new(None),
-            last_gpu_loading_reason: Cell::new(None),
-            visual_terminal_candidates: RefCell::new(Vec::new()),
-            visual_program_authoring_session: Cell::new(None),
-            visual_programs: RefCell::new(mondrian_renderer::PreparedVisualProgramCache::default()),
-            future_media_window: RefCell::new(request_scheduler::FutureMediaWindowCache::default()),
-            visual_dependencies: PreviewVisualDependencyObserver::new_with_notifier(
-                work_notifier.clone(),
-            ),
-            visual_dependency_health_failed: Cell::new(false),
-            scratch: RefCell::new(TimelineCompositeScratch::default()),
-            evaluation_working_set: RefCell::new(EvaluationWorkingSet::new()),
-            evaluation_working_set_clock: Cell::new(0),
-            last_color_rejection: RefCell::new(None),
-            unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
-            display_snapshot: RefCell::new(None),
-            hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
-            decode_cpu_budget,
-            decode_worker_count,
-            decode_execution_watch: PreviewDecodeWorkerExecutionWatch::new(
-                decode_execution_observers,
-            ),
-            metrics: PreviewMetrics::default(),
-        }
-    }
-
     /// Clone the payload-free completion watch shared by every Preview worker.
     ///
     /// Revisions only indicate that result transports should be polled. The
     /// Runtime's typed result pumps remain the sole completion authority.
     pub(crate) fn work_watch(&self) -> PreviewWorkWatch {
         self.work_watch.clone()
+    }
+
+    /// Clone the latest exact CPU Viewer output as a named Gallery capture payload.
+    ///
+    /// GPU-only presentation intentionally returns `None` until its explicit
+    /// readback path publishes equivalent working-linear evidence.
+    pub fn gallery_capture_payload(
+        &self,
+        name: impl Into<String>,
+    ) -> Option<crate::app::product_action::GalleryCaptureStillPayload> {
+        self.last_gallery_capture.borrow().clone().map(|mut payload| {
+            payload.name = name.into();
+            payload
+        })
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn last_video_preroll_observation_for_test(&self) -> Option<PreviewVideoPreroll> {
+        self.last_video_preroll_observation.get()
     }
 
     #[cfg(test)]
@@ -727,15 +679,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         );
     }
 
+    #[cfg(all(test, feature = "validation"))]
+    pub(crate) fn retain_shutdown_worker_for_test(&self, worker: JoinHandle<()>) {
+        self.workers.borrow_mut().push(worker);
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_pending_playback_current_preview_work_for_test(
         &self,
         demand_identity: mondrian_playback::FrameDemandIdentity,
-    ) {
+    ) -> MediaPreviewKey {
         self.seed_pending_preview_work_with_access_mode_for_test(
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(demand_identity),
-        );
+        )
     }
 
     #[cfg(test)]
@@ -761,7 +718,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         access_mode: PreviewDecodeAccessMode,
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
-    ) {
+    ) -> MediaPreviewKey {
         let key = MediaPreviewKey::test_cpu(
             PathBuf::from("E:/media/pending-preview.mov"),
             MediaPreviewKey::test_fingerprint(1_920),
@@ -782,7 +739,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         );
         let hardware_decode_request = self.hardware_decode_request_for_key(access_mode, &key);
         let _ = self.jobs.enqueue(MediaPreviewJob {
-            key,
+            key: key.clone(),
             generation,
             priority: MediaPreviewRequestPriority::Current,
             access_mode,
@@ -798,6 +755,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         });
         self.execution.borrow_mut().invalidate(|| generation);
         self.execution.borrow_mut().set_pending(true);
+        key
     }
 
     /// Build a CPU working-space preview frame suitable for the app-window GPU output boundary.
@@ -808,30 +766,50 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         request: PreviewFrameExecutionRequest<'_>,
     ) -> PreviewGpuFrameState {
+        let candidate_started = Instant::now();
+        let mut observation = PreviewWorkObservation::new(
+            request.snapshot().transport().current_frame(),
+            "candidate-preamble",
+        );
         // Candidate evaluation is the acknowledgement boundary for retained
         // retry authority. Polling alone must never consume this request.
-        if self.media_existing_work_retry_pending.replace(false) {
-            bump(&self.media_existing_work_retry_acknowledgements);
+        if self.media_retry_pending.replace(false) {
+            bump(&self.media_retry_acknowledgements);
         }
         self.last_gpu_loading_reason.set(None);
         let snapshot = request.snapshot();
         let proxy_demands = request.proxy_demands();
         let transport = snapshot.transport();
+        let unavailable_gpu_candidate = |reason| {
+            self.unavailable_gpu_candidate_with_retention(
+                reason,
+                transport.is_speculative_preparation(),
+            )
+        };
         bump(&self.metrics.gpu_preview_candidate_requests);
         self.synchronize_visual_program_authoring_session(snapshot);
+        let terminal_promotion = self.promote_terminal_output_before_retirement(snapshot);
         self.synchronize_transport_intent(transport.intent());
+        if transport.is_playing()
+            && !transport.is_speculative_preparation()
+            && let Some(active) = transport.demand().map(PreviewFrameDemandSnapshot::identity)
+        {
+            self.scheduler.synchronize_playback_current_demand(active);
+        }
         self.pump_visual_execution_results(
             transport
                 .is_playing()
                 .then(|| transport.demand().map(PreviewFrameDemandSnapshot::identity))
                 .flatten(),
         );
+        let preamble_us = app_duration_us(candidate_started.elapsed());
+        observation.next("candidate-color-contract");
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(authoring) = snapshot.authoring() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
+            return unavailable_gpu_candidate(PreviewUnavailability::no_content(
                 PreviewOutputStage::Project,
                 "no active Sequence",
             ));
@@ -839,55 +817,65 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(sequence) = authoring.active_sequence() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
+            return unavailable_gpu_candidate(PreviewUnavailability::no_content(
                 PreviewOutputStage::Project,
                 "no active Sequence",
             ));
         };
         if let Err(reason) = self.apply_visual_dependency_refreshes() {
-            return self.unavailable_gpu_candidate(reason);
+            return unavailable_gpu_candidate(reason);
         }
         let frame = transport.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
-        let display_snapshot = self.display_snapshot.borrow();
-        let display_color_space = match preview_display_color_space(
-            sequence,
-            snapshot.viewer_display(),
-            display_snapshot.as_ref(),
-        ) {
-            Ok(color_space) => color_space,
-            Err(blocker) => {
-                self.record_preview_gpu_output_blocker(&blocker);
-                self.scheduler.prune_obsolete();
-                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
-                    PreviewOutputStage::DisplayContract,
-                    blocker.description(),
-                ));
-            }
-        };
+        let (generation_key, width, height, display_color_space) =
+            match self.resolve_preview_generation_contract(snapshot, authoring, sequence) {
+                Ok(contract) => contract,
+                Err(blocker) => {
+                    self.record_preview_gpu_output_blocker(&blocker);
+                    self.scheduler.prune_obsolete();
+                    return unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                        PreviewOutputStage::DisplayContract,
+                        blocker.description(),
+                    ));
+                }
+            };
         let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
-        let Some(program_output_color_space) = color_context.output_color_space.color() else {
+            match sequence.settings.root_program_color_context(authoring.color_environment()) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.record_preview_gpu_output_blocker(
+                        &PreviewGpuOutputBlocker::UnsupportedFeature {
+                            feature: "program_color_context".to_owned(),
+                            reason: error.to_string(),
+                        },
+                    );
+                    self.scheduler.prune_obsolete();
+                    return unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                        PreviewOutputStage::ProgramOutput,
+                        error.to_string(),
+                    ));
+                }
+            };
+        let Some(program_output_color_space) = color_context.output_color_space().color() else {
             self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "program_output_identity".to_owned(),
                 reason: format!(
                     "Program Output {:?} is not an encoded color identity",
-                    color_context.output_color_space
+                    color_context.output_color_space()
                 ),
             });
             self.scheduler.prune_obsolete();
-            return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+            return unavailable_gpu_candidate(PreviewUnavailability::blocked(
                 PreviewOutputStage::ProgramOutput,
                 format!(
                     "Program Output {:?} is not an encoded color identity",
-                    color_context.output_color_space
+                    color_context.output_color_space()
                 ),
             ));
         };
         let monitor_adaptation = match RenderMonitorAdaptation::new(
             program_output_color_space,
             display_color_space,
-            color_context.engine.clone(),
+            color_context.engine().clone(),
         ) {
             Ok(adaptation) => adaptation,
             Err(error) => {
@@ -898,26 +886,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     },
                 );
                 self.scheduler.prune_obsolete();
-                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                return unavailable_gpu_candidate(PreviewUnavailability::blocked(
                     PreviewOutputStage::MonitorAdaptation,
                     error.to_string(),
                 ));
             }
         };
-        let generation_binding =
-            self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
-                snapshot,
-                sequence,
-                frame,
-                width,
-                height,
-                display_color_space,
-                display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_identity),
-            ));
+        observation.next("candidate-generation");
+        let generation_binding = self.activate_preview_generation(generation_key);
         let generation = match generation_binding {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
+        observation.next("candidate-promotion");
         let playback_intent = transport.playback_intent();
         if transport.is_successor_preparation()
             && self.execution.borrow().has_prepared_successor_for_intent(playback_intent)
@@ -925,14 +906,33 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.scheduler.prune_obsolete();
             return PreviewGpuFrameState::Prepared;
         }
-        let prepared_promotion = if transport.is_successor_preparation() {
+        let prepared_promotion = if transport.is_speculative_preparation() {
             None
         } else {
             self.execution
                 .borrow_mut()
                 .promote_prepared_successor_for_intent(playback_intent)
-        };
+        }
+        .or_else(|| {
+            terminal_promotion.and_then(|promotion| {
+                match &promotion {
+                    PreviewPreparedPromotion::Gpu { key, .. } => {
+                        self.execution.borrow_mut().output_for(key)?;
+                    }
+                    PreviewPreparedPromotion::Transparent => {}
+                }
+                Some(promotion)
+            })
+        });
         if let Some(prepared) = prepared_promotion {
+            // Promotion is the common steady-state current path in Headless
+            // playback. It must retain the visible turn's recurring future
+            // media responsibility after speculative candidates were narrowed
+            // to their exact frame; otherwise a cold source transition is not
+            // discovered until its immediate-successor turn at the cut.
+            observation.next("current-prefetch");
+            self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
+            observation.next("current-prune");
             self.scheduler.prune_obsolete();
             return match prepared {
                 PreviewPreparedPromotion::Gpu { already_visible, .. } => {
@@ -950,7 +950,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         if transport.is_playing()
             && transport.demand().is_none()
-            && !transport.is_successor_preparation()
+            && !transport.is_speculative_preparation()
         {
             if transport.is_priming() {
                 // Presenting the priming current frame consumes its Frame
@@ -972,10 +972,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     && self.execution.borrow().has_exact_current_output()
                 {
                     bump(&self.metrics.gpu_preview_candidate_current);
-                    return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
-                        (),
-                        self.playback_presentation_ticket(snapshot),
-                    ));
+                    return PreviewGpuFrameState::Current(
+                        PreviewPresentationCandidate::already_visible(
+                            (),
+                            self.playback_presentation_ticket(snapshot),
+                        ),
+                    );
                 }
                 self.execution.borrow_mut().set_pending(true);
                 bump(&self.metrics.gpu_preview_candidate_loading);
@@ -985,12 +987,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if matches!(generation_binding, PreviewGenerationBinding::Current(_))
                 && self.execution.borrow().has_exact_current_output()
             {
+                self.schedule_media_prefetches(
+                    snapshot,
+                    proxy_demands,
+                    sequence,
+                    frame,
+                    width,
+                    height,
+                );
                 self.scheduler.prune_obsolete();
                 bump(&self.metrics.gpu_preview_candidate_current);
-                return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
-                    (),
-                    self.playback_presentation_ticket(snapshot),
-                ));
+                return PreviewGpuFrameState::Current(
+                    PreviewPresentationCandidate::already_visible(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ),
+                );
             }
             // A terminal Late/Failed/Canceled fact consumed this frame's
             // authority. Retain any prior output as stale and wait for the
@@ -1009,7 +1021,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.scheduler.prune_obsolete();
             self.try_release_settled_transport_media_residency();
             bump(&self.metrics.gpu_preview_candidate_current);
-            return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
+            return PreviewGpuFrameState::Current(PreviewPresentationCandidate::already_visible(
                 (),
                 self.playback_presentation_ticket(snapshot),
             ));
@@ -1026,11 +1038,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             runtime_scale: transport.runtime_scale(),
             display_color_space,
-            display_contract_identity: display_snapshot
-                .as_ref()
-                .map(DisplayOutputSnapshot::contract_identity),
+            display_contract_identity: self.display_snapshot_identity.get(),
         };
-        let resolved = match self.acquire_frame_evaluation(
+        if !transport.is_playing()
+            && let Some(proof) = self.evaluation_working_set.borrow().completed_for(evaluation_key)
+        {
+            let (tap, settings) = self.viewer_signal_monitoring.get();
+            let key = proof
+                .output_key
+                .with_monitor_adaptation(&monitor_adaptation)
+                .with_signal_monitoring(tap, settings);
+            if self.execution.borrow_mut().output_for(&key).is_some() {
+                self.execution.borrow_mut().set_presentation_quality(proof.presentation_quality);
+                self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_current);
+                return PreviewGpuFrameState::Current(
+                    PreviewPresentationCandidate::already_visible(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ),
+                );
+            }
+        }
+        let evaluation_started = Instant::now();
+        let resolution = self.acquire_frame_evaluation(
             snapshot,
             proxy_demands,
             sequence,
@@ -1039,7 +1070,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             color_context,
             evaluation_key,
-        ) {
+        );
+        let evaluation_us = app_duration_us(evaluation_started.elapsed());
+        let resolved = match resolution {
             FrameResolutionOutcome::Ready(evaluation) => {
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&evaluation.elements),
@@ -1047,9 +1080,29 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // The GPU output identity overlays the monitor adaptation on
                 // the evaluation's plan identity; the shared evaluation stays
                 // display-independent.
-                let cache_key = evaluation.output_key.with_monitor_adaptation(&monitor_adaptation);
+                let (monitoring_tap, monitoring_settings) = self.viewer_signal_monitoring.get();
+                let cache_key = evaluation
+                    .output_key
+                    .with_monitor_adaptation(&monitor_adaptation)
+                    .with_signal_monitoring(monitoring_tap, monitoring_settings);
+                self.evaluation_working_set.borrow_mut().bind_gpu_output(
+                    evaluation_key,
+                    cache_key.clone(),
+                    playback_intent,
+                );
                 let cache_reusable =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable);
+                if transport.is_lookahead_preparation()
+                    && cache_reusable
+                    && self
+                        .execution
+                        .borrow()
+                        .exact_current_output()
+                        .is_some_and(|(current, _)| current == &cache_key)
+                {
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
                 if transport.is_successor_preparation()
                     && cache_reusable
                     && self
@@ -1072,20 +1125,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     self.scheduler.prune_obsolete();
                     self.try_release_settled_transport_media_residency();
                     bump(&self.metrics.gpu_preview_candidate_current);
-                    return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
-                        (),
-                        self.playback_presentation_ticket(snapshot),
-                    ));
+                    return PreviewGpuFrameState::Current(
+                        PreviewPresentationCandidate::already_visible(
+                            (),
+                            self.playback_presentation_ticket(snapshot),
+                        ),
+                    );
                 }
                 ResolvedPlanView {
+                    cpu_materialization_active_bytes: evaluation.cpu_materialization_active_bytes,
                     elements: Arc::clone(&evaluation.elements),
                     cache_key,
-                    cpu_cache_key: evaluation.output_key.clone(),
+                    cpu_cache_key: evaluation
+                        .output_key
+                        .with_signal_monitoring(monitoring_tap, monitoring_settings),
                     cache_reusable,
                     color_context: evaluation.color_context.clone(),
+                    render_cache_identity: evaluation.render_cache_identity,
                 }
             }
             FrameResolutionOutcome::Empty => {
+                if transport.is_lookahead_preparation() {
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
                 if transport.is_successor_preparation() {
                     self.execution
                         .borrow_mut()
@@ -1136,7 +1199,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // that current Timeline evaluation just rebound to. Publish
                 // an edge while the waiter is still retained; the ordinary
                 // poll consumes it and authorizes exactly one re-evaluation.
-                self.publish_existing_work_retry_if_actionable();
+                self.publish_media_retry_if_actionable();
                 return match decision {
                     PreviewCandidateDecision::Loading => {
                         bump(&self.metrics.gpu_preview_candidate_loading);
@@ -1147,7 +1210,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             bump(&self.metrics.gpu_preview_candidate_loading);
                             PreviewGpuFrameState::Loading
                         } else {
-                            self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                            unavailable_gpu_candidate(PreviewUnavailability::failed(
                                 PreviewOutputStage::TimelineEvaluation,
                                 "Timeline reported pending media without registering pending work",
                             ))
@@ -1169,43 +1232,74 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     height,
                 );
                 self.scheduler.prune_obsolete();
-                return self.unavailable_gpu_candidate(reason);
+                return unavailable_gpu_candidate(reason);
             }
         };
         if self.viewer_cpu_fallback_active.get() {
-            let state =
-                self.schedule_cpu_fallback(generation, transport.epoch(), &resolved, width, height);
+            if snapshot.viewer_display() != &mondrian_core::DisplayManagementPolicy::default() {
+                let blocker = PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "cpu_viewer_display_policy_carrier".to_owned(),
+                    reason: "bounded CPU Viewer fallback uses the fixed sRGB UI atlas and cannot execute a non-default monitor/HDR/ICC policy".to_owned(),
+                };
+                self.record_preview_gpu_output_blocker(&blocker);
+                self.scheduler.prune_obsolete();
+                return unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                    PreviewOutputStage::DisplayContract,
+                    blocker.description(),
+                ));
+            }
+            let state = self.schedule_cpu_fallback(
+                generation,
+                transport.epoch(),
+                &resolved,
+                width,
+                height,
+                transport.is_speculative_preparation(),
+            );
             self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
             self.scheduler.prune_obsolete();
             return state;
         }
-        let mut media_residency_protections =
-            resolved_preview_media_protections(&resolved.elements);
+        let mut media_residency_guards = resolved_preview_media_residency(&resolved.elements);
+        let cached_working = resolved
+            .render_cache_identity
+            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
+        if cached_working.is_some() {
+            media_residency_guards.clear();
+        }
         let mut cache_key = resolved.cache_key.clone();
         let program_output_boundary =
             match output_boundary_from_color_context(&resolved.color_context) {
                 Ok(boundary) => boundary,
                 Err(error) => {
-                    return self.unavailable_gpu_candidate(error.unavailability());
+                    return unavailable_gpu_candidate(error.unavailability());
                 }
             };
         let decode_execution = resolved_preview_decode_execution(&resolved.elements);
         let heterogeneous_decision = self.heterogeneous_effect_decision.get();
+        let layer_preparation_started = Instant::now();
         let prepared_gpu_layers = {
             let mut scratch = self.scratch.borrow_mut();
-            prepare_gpu_composite_layers_with_heterogeneous_effects(
-                &resolved.elements,
-                resolved.color_context.working_color_space,
-                &mut scratch,
-                heterogeneous_decision.cpu_prefix_grant(),
-            )
-            .map_err(|error| {
-                let blocker = match &error {
-                    PreviewViewerGpuLayerPreparationError::Compositing { reason } => Some(*reason),
-                    _ => None,
-                };
-                (blocker, error.to_string())
-            })
+            match cached_working {
+                Some(frame) => gpu_layer_for_cached_working(frame, &mut scratch)
+                    .map(|layer| PreparedPreviewViewerGpuLayers::Ordinary { layers: vec![layer] })
+                    .map_err(|reason| (Some(reason), format!("cached working frame: {reason:?}"))),
+                None => prepare_gpu_composite_layers_with_heterogeneous_effects(
+                    &resolved.elements,
+                    resolved.color_context.working_color_space(),
+                    &mut scratch,
+                    heterogeneous_decision.cpu_prefix_grant(),
+                )
+                .map_err(|error| {
+                    let blocker = match &error {
+                        PreviewViewerGpuLayerPreparationError::Compositing { reason } => {
+                            Some(*reason)
+                        }
+                        _ => None,
+                    };
+                    (blocker, error.to_string())
+                }),
+            }
         };
         let prepared_gpu_layers = match prepared_gpu_layers {
             Ok(prepared) => prepared,
@@ -1223,12 +1317,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     height,
                 );
                 self.scheduler.prune_obsolete();
-                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                return unavailable_gpu_candidate(PreviewUnavailability::blocked(
                     PreviewOutputStage::GpuComposite,
                     detail,
                 ));
             }
         };
+        let layer_preparation_us = app_duration_us(layer_preparation_started.elapsed());
 
         let (layers, heterogeneous_execution) = match prepared_gpu_layers {
             PreparedPreviewViewerGpuLayers::Ordinary { layers } => (layers, None),
@@ -1259,7 +1354,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         height,
                     );
                     self.scheduler.prune_obsolete();
-                    return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                    return unavailable_gpu_candidate(PreviewUnavailability::failed(
                         PreviewOutputStage::GpuComposite,
                         "Preview visual execution worker terminated",
                     ));
@@ -1274,7 +1369,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         height,
                     );
                     self.scheduler.prune_obsolete();
-                    return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                    return unavailable_gpu_candidate(PreviewUnavailability::failed(
                         PreviewOutputStage::GpuComposite,
                         failure,
                     ));
@@ -1312,7 +1407,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             height,
                         );
                         self.scheduler.prune_obsolete();
-                        return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                        return unavailable_gpu_candidate(PreviewUnavailability::failed(
                             PreviewOutputStage::GpuComposite,
                             format!("Preview heterogeneous GPU admission failed: {error}"),
                         ));
@@ -1339,7 +1434,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             height,
                         );
                         self.scheduler.prune_obsolete();
-                        return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                        return unavailable_gpu_candidate(PreviewUnavailability::failed(
                             PreviewOutputStage::GpuComposite,
                             detail,
                         ));
@@ -1351,7 +1446,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let admission = VisualExecutionAdmission::new(
                         visual_key,
                         generation,
-                        if transport.is_successor_preparation() {
+                        if transport.is_speculative_preparation() {
                             mondrian_playback::FrameWorkPriority::Prefetch
                         } else {
                             mondrian_playback::FrameWorkPriority::Current
@@ -1363,7 +1458,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             transport.epoch(),
                             cpu_prefix,
                             gpu_grant,
-                            std::mem::take(&mut media_residency_protections),
+                            std::mem::take(&mut media_residency_guards),
                         ),
                     );
                     let submission = task.submit(admission);
@@ -1396,7 +1491,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     ),
                                 );
                             }
-                            self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                            unavailable_gpu_candidate(PreviewUnavailability::failed(
                                 PreviewOutputStage::GpuComposite,
                                 "Preview visual execution generation was superseded before admission",
                             ))
@@ -1412,7 +1507,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     ),
                                 );
                             }
-                            self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                            unavailable_gpu_candidate(PreviewUnavailability::failed(
                                 PreviewOutputStage::GpuComposite,
                                 "Preview visual execution Broker rejected current work",
                             ))
@@ -1421,9 +1516,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 };
 
                 let (output, lease) = ready.into_parts();
-                let (output, gpu_grant, async_media_residency_protections) =
+                let (output, gpu_grant, async_media_residency_guards) =
                     output.into_heterogeneous_cpu_prefix_batch();
-                media_residency_protections.extend(async_media_residency_protections);
+                media_residency_guards.extend(async_media_residency_guards);
                 let completions = output.into_completions().into_vec();
                 if completions.len() != continuations.len()
                     || completions.iter().zip(continuations.iter()).any(
@@ -1441,7 +1536,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         height,
                     );
                     self.scheduler.prune_obsolete();
-                    return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                    return unavailable_gpu_candidate(PreviewUnavailability::failed(
                         PreviewOutputStage::GpuComposite,
                         "heterogeneous CPU completions do not match Viewer continuation addresses",
                     ));
@@ -1475,7 +1570,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             height,
                         );
                         self.scheduler.prune_obsolete();
-                        return self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                        return unavailable_gpu_candidate(PreviewUnavailability::failed(
                             PreviewOutputStage::GpuComposite,
                             error.to_string(),
                         ));
@@ -1507,10 +1602,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 self.scheduler.prune_obsolete();
                 self.try_release_settled_transport_media_residency();
                 bump(&self.metrics.gpu_preview_candidate_current);
-                return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
-                    (),
-                    self.playback_presentation_ticket(snapshot),
-                ));
+                return PreviewGpuFrameState::Current(
+                    PreviewPresentationCandidate::already_visible(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ),
+                );
             }
             PreviewCandidateDecision::Execute(candidate_id) => candidate_id,
             PreviewCandidateDecision::Loading | PreviewCandidateDecision::Unavailable => {
@@ -1520,8 +1617,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if !resolved.cache_reusable {
             cache_key = cache_key.with_execution_nonce(candidate_id);
         }
+        let prefetch_started = Instant::now();
         self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
+        let prefetch_us = app_duration_us(prefetch_started.elapsed());
         self.scheduler.prune_obsolete();
+        if transport.is_speculative_preparation() {
+            tracing::debug!(
+                frame,
+                preamble_us,
+                evaluation_us,
+                layer_preparation_us,
+                prefetch_us,
+                total_us = app_duration_us(candidate_started.elapsed()),
+                "completed speculative Preview GPU candidate stages"
+            );
+        }
         bump(&self.metrics.gpu_preview_candidate_ready);
         add_cell(
             &self.metrics.gpu_preview_candidate_pixels,
@@ -1533,22 +1643,124 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             width,
             height,
-            resolved.color_context.working_color_space,
+            resolved.color_context.working_color_space(),
             working_input,
             program_output_boundary,
             monitor_adaptation,
             candidate_id,
-            if transport.is_successor_preparation() {
+            generation,
+            if transport.is_speculative_preparation() {
                 crate::app::preview_execution::PreviewGpuFramePurpose::SuccessorPreparation
             } else {
                 crate::app::preview_execution::PreviewGpuFramePurpose::Current
             },
             playback_intent,
+            self.execution.borrow().presentation_quality(),
             self.playback_presentation_ticket(snapshot),
             decode_execution,
             heterogeneous_execution,
-            media_residency_protections,
+            media_residency_guards,
         )))
+    }
+
+    /// Bind one exact CPU-complete speculative frame to the freshly captured
+    /// current Frame Demand without repeating Timeline, effect, or media work.
+    ///
+    /// Generation and complete playback intent are both required. A resize,
+    /// authoring change, display-contract change, seek, or quality rotation
+    /// therefore retires the staged artifact instead of publishing it under a
+    /// different execution contract.
+    pub(crate) fn bind_staged_gpu_frame_for_current(
+        &self,
+        mut frame: Box<PreviewGpuFrame>,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        if self.visual_program_authoring_session.get() != snapshot.authoring_session_id() {
+            return None;
+        }
+        let authoring = snapshot.authoring()?;
+        let sequence = authoring.active_sequence()?;
+        let (generation_key, _, _, _) =
+            self.resolve_preview_generation_contract(snapshot, authoring, sequence).ok()?;
+        let intent = snapshot.transport().playback_intent();
+        let execution = self.execution.borrow();
+        if !execution.is_current_generation_key(&generation_key)
+            || frame.generation() != execution.generation()
+            || frame.playback_intent() != intent
+            || frame.has_heterogeneous_gpu_execution()
+        {
+            return None;
+        }
+        drop(execution);
+        let ticket = snapshot.presentation_ticket(frame.presentation_quality())?;
+        self.scheduler.synchronize_playback_current_demand(ticket.identity());
+        frame.bind_current_presentation(ticket);
+        Some(frame)
+    }
+
+    /// Consume only an exact terminal successor before transport cancellation.
+    /// This changes no physical presentation: the ordinary promotion result still
+    /// carries its original already-visible flag and receives the current ticket.
+    fn promote_terminal_output_before_retirement(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> Option<PreviewPreparedPromotion<ViewerPreviewCacheKey>> {
+        let transport = snapshot.transport();
+        if !transport.is_ended() || transport.is_speculative_preparation() {
+            return None;
+        }
+        // External author/effect dependency changes must invalidate the old
+        // prepared artifact before its generation can be reused.
+        self.apply_visual_dependency_refreshes().ok()?;
+        let authoring = snapshot.authoring()?;
+        let sequence = authoring.active_sequence()?;
+        let (next, _, _, _) =
+            self.resolve_preview_generation_contract(snapshot, authoring, sequence).ok()?;
+        let mut execution = self.execution.borrow_mut();
+        let previous = execution.current_generation_key()?;
+        if !previous.playing
+            || previous.playback_epoch != Some(transport.epoch())
+            || previous.sequence_id != next.sequence_id
+            || previous.sequence_revision != next.sequence_revision
+            || previous.project_author_generation != next.project_author_generation
+            || previous.display_contract_identity != next.display_contract_identity
+            || previous.width != next.width
+            || previous.height != next.height
+            || previous.display_color_space != next.display_color_space
+        {
+            return None;
+        }
+        execution.promote_prepared_successor_for_intent(transport.playback_intent())
+    }
+
+    fn resolve_preview_generation_contract(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        authoring: &PreviewAuthoringSnapshot<'_>,
+        sequence: &Sequence,
+    ) -> std::result::Result<
+        (ViewerPreviewGenerationKey, u32, u32, ColorSpace),
+        PreviewGpuOutputBlocker,
+    > {
+        let frame = snapshot.transport().current_frame().max(0);
+        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let display_snapshot = self.display_snapshot.borrow();
+        let display_color_space = preview_display_color_space(
+            sequence,
+            authoring.color_environment().engine(),
+            snapshot.viewer_display(),
+            display_snapshot.as_ref(),
+        )?;
+        let key = ViewerPreviewGenerationKey::from_snapshot(
+            snapshot,
+            sequence,
+            frame,
+            width,
+            height,
+            display_color_space,
+            self.display_snapshot_identity.get(),
+        );
+        Ok((key, width, height, display_color_space))
     }
 
     /// Build the exact ticket that a Presentation Adapter may complete only
@@ -1595,7 +1807,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ///
     /// This is a bounded scheduling observation only. Presentation still
     /// requires a fresh current request carrying the active Frame Demand.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_prepared_successor_for_intent(
         &self,
         playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
@@ -1603,24 +1815,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.execution.borrow().has_prepared_successor_for_intent(playback_intent)
     }
 
-    /// Exact successor output that was already visible before its boundary.
-    #[cfg(test)]
-    pub(crate) fn already_visible_successor_output_key(
-        &self,
-        playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
-    ) -> Option<PreviewOutputKey> {
-        self.execution.borrow().already_visible_successor_key(playback_intent).cloned()
-    }
-
     /// Whether the coordinator retains any physically usable GPU output,
     /// including a stale output that is not bound to the current intent.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_retained_gpu_output(&self) -> bool {
         self.execution.borrow().current_output().is_some()
     }
 
     /// Whether the sole registered output has this complete resolved identity.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_gpu_output_for_key(&self, key: &PreviewOutputKey) -> bool {
         self.execution
             .borrow()
@@ -1632,6 +1835,24 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn registered_gpu_output_key(&self) -> Option<PreviewOutputKey> {
         self.execution.borrow().current_output().map(|(key, _)| key.clone())
+    }
+
+    /// Cloneable semantic and Adapter artifact identity of the sole retained
+    /// GPU output, irrespective of whether the active generation has already
+    /// re-resolved it.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn registered_gpu_output_artifact(&self) -> Option<(PreviewOutputKey, O)> {
+        self.execution
+            .borrow()
+            .current_output()
+            .map(|(key, output)| (key.clone(), output.clone()))
+    }
+
+    /// Revalidate one retained output after the current resolved candidate
+    /// proved the same complete semantic identity.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn revalidate_registered_gpu_output_for_key(&self, key: &PreviewOutputKey) -> bool {
+        self.execution.borrow_mut().output_for(key).is_some()
     }
 
     /// Revoke a registered GPU output whose exact completion callback was lost.
@@ -1660,6 +1881,43 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.execution.borrow().exact_current_output().map(|(key, _)| key.clone())
     }
 
+    /// Clone the exact active-generation artifact for Adapter presentation.
+    ///
+    /// This read-only observation neither reactivates stale output nor consumes
+    /// a frame demand. The Adapter must still validate its physical slot and
+    /// publish through the existing Playback ticket seam.
+    pub(crate) fn registered_exact_current_gpu_output_artifact(
+        &self,
+    ) -> Option<(PreviewOutputKey, O)> {
+        self.execution
+            .borrow()
+            .exact_current_output()
+            .map(|(key, output)| (key.clone(), output.clone()))
+    }
+
+    /// Prepared GPU output identity still relevant to the current transport
+    /// coordinate.
+    ///
+    /// Before a frame boundary the prepared artifact belongs to the exact
+    /// immediate successor. Immediately after that boundary it belongs to the
+    /// exact current intent until promotion runs. Any other intent has been
+    /// skipped or superseded and must not retain a physical presentation slot.
+    pub(crate) fn registered_relevant_prepared_gpu_output_key(
+        &self,
+        current_intent: PreviewPlaybackIntent,
+        immediate_successor_intent: Option<PreviewPlaybackIntent>,
+    ) -> Option<PreviewOutputKey> {
+        let execution = self.execution.borrow();
+        execution
+            .exact_prepared_successor_gpu_output_key_for_intent(current_intent)
+            .or_else(|| {
+                immediate_successor_intent.and_then(|intent| {
+                    execution.exact_prepared_successor_gpu_output_key_for_intent(intent)
+                })
+            })
+            .cloned()
+    }
+
     /// Whether the retained output is the exact semantic and physical artifact.
     ///
     /// `matches_artifact` compares Adapter-owned physical identity (for
@@ -1683,6 +1941,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         execution: PreviewGpuHeterogeneousExecution,
         completed: &mondrian_renderer::ViewerHeterogeneousGpuCompletedBatch,
+        successor_preparation: bool,
     ) -> Result<PreviewVisualGpuCompletionDisposition, PreviewGpuHeterogeneousCompletionError> {
         let reusable = execution.reusable();
         if let Err(error) = execution.validate_completed(completed) {
@@ -1714,7 +1973,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 },
             );
         }
-        if finalization.may_publish_current() {
+        if successor_preparation && finalization.may_cache() {
+            Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor)
+        } else if finalization.may_publish_current() {
             Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent)
         } else {
             Ok(PreviewVisualGpuCompletionDisposition::Release)
@@ -1838,7 +2099,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut outcome = PreviewWorkPoll::default();
         while let Some(result) = task.try_poll() {
             match result {
-                PreviewCpuFallbackResult::Ready(ready) => {
+                PreviewCpuFallbackResult::Ready(mut ready) => {
+                    if let Some(frame) = ready.render_cache_frame.take() {
+                        self.timeline_render_cache.borrow_mut().publish(frame);
+                    }
                     if ready.generation == active_generation
                         && active_epoch == Some(ready.epoch)
                         && self.viewer_cpu_fallback_active.get()
@@ -1904,6 +2168,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         }
         outcome
+    }
+
+    fn pump_timeline_render_cache_results(&self) -> PreviewWorkPoll {
+        PreviewWorkPoll {
+            visible_change: self.timeline_render_cache.borrow_mut().pump(),
+            ..PreviewWorkPoll::default()
+        }
     }
 
     fn observe_visual_execution_disconnect(
@@ -2052,11 +2323,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     /// Synchronize the display output contract snapshot used by preview scheduling.
     pub(crate) fn set_display_output_snapshot(&self, snapshot: Option<&DisplayOutputSnapshot>) {
-        let previous_identity = self
-            .display_snapshot
-            .borrow()
-            .as_ref()
-            .map(DisplayOutputSnapshot::contract_identity);
+        let previous_identity = self.display_snapshot_identity.get();
         let next_identity = snapshot.map(DisplayOutputSnapshot::contract_identity);
 
         if previous_identity != next_identity {
@@ -2064,6 +2331,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
 
         self.display_snapshot.replace(snapshot.cloned());
+        self.display_snapshot_identity.set(next_identity);
     }
 
     fn clear_cached_frames_for_display_change(&self) {
@@ -2140,27 +2408,38 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if will_rotate {
             self.try_release_settled_transport_media_residency();
         }
-        let preserve_playback_locality = self
+        let generation_transition = self
             .execution
             .borrow()
             .current_generation_key()
-            .is_some_and(|current| key.has_compatible_playback_media_authority(current));
-        let binding = self.execution.borrow_mut().bind_generation(key, || {
-            if preserve_playback_locality {
-                self.scheduler.begin_generation_preserving_playback_locality()
-            } else {
-                self.scheduler.begin_generation()
-            }
-        });
+            .map_or(ViewerPreviewGenerationTransition::Semantic, |current| {
+                key.transition_from(current)
+            });
+        let binding =
+            self.execution
+                .borrow_mut()
+                .bind_generation(key, || match generation_transition {
+                    ViewerPreviewGenerationTransition::ViewerOnly => {
+                        self.scheduler.begin_generation_preserving_playback_locality()
+                    }
+                    ViewerPreviewGenerationTransition::Representation => {
+                        self.scheduler.begin_generation_preserving_in_flight_playback_locality()
+                    }
+                    ViewerPreviewGenerationTransition::Semantic => {
+                        self.scheduler.begin_generation()
+                    }
+                });
         let generation = match binding {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
         if matches!(binding, PreviewGenerationBinding::Rotated(_)) {
+            self.evaluation_working_set.borrow_mut().retire_producer_waits();
             self.decode_residency_waiting.set(None);
             self.media_aggregate_capacity_waiting.set(false);
             self.media_existing_work_waiters.borrow_mut().clear();
-            self.media_existing_work_retry_pending.set(false);
+            self.media_execution_pressure_waiters.borrow_mut().clear();
+            self.media_retry_pending.set(false);
             if let Some(task) = &self.visual_execution {
                 task.prune_before(generation);
             }
@@ -2173,10 +2452,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn invalidate_preview_generation(&self) {
+        self.evaluation_working_set.borrow_mut().retire_producer_waits();
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();
-        self.media_existing_work_retry_pending.set(false);
+        self.media_execution_pressure_waiters.borrow_mut().clear();
+        self.media_retry_pending.set(false);
         let generation =
             self.execution.borrow_mut().invalidate(|| self.scheduler.begin_generation());
         if let Some(task) = &self.visual_execution {
@@ -2202,16 +2483,62 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 }
 
-fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
-    let current_thread_id = thread::current().id();
+fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownEvidence {
+    let mut evidence = PreviewRuntimeShutdownEvidence {
+        schema_version: 4,
+        ..PreviewRuntimeShutdownEvidence::default()
+    };
     for handle in handles {
-        if handle.thread().id() == current_thread_id {
-            continue;
+        let outcome = PreviewOwnedWorkerShutdown::join(handle);
+        match outcome {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
+                tracing::warn!("production preview worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("production preview shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("production preview worker exceeded its shutdown deadline");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
-        if handle.join().is_err() {
-            tracing::warn!("production preview worker panicked during shutdown");
-        }
+        evidence.record(outcome);
     }
+    evidence
+}
+
+fn join_preview_workers_until(
+    handles: Vec<JoinHandle<()>>,
+    deadline: Instant,
+) -> (
+    PreviewRuntimeShutdownEvidence,
+    Vec<PreviewOwnedWorkerShutdown>,
+) {
+    let mut outcomes = Vec::with_capacity(handles.len());
+    let mut evidence = PreviewRuntimeShutdownEvidence {
+        schema_version: 4,
+        ..PreviewRuntimeShutdownEvidence::default()
+    };
+    for handle in handles {
+        let outcome = PreviewOwnedWorkerShutdown::join_until(handle, deadline);
+        outcomes.push(outcome);
+        match outcome {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
+                tracing::warn!("production preview worker panicked during bounded shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("production preview bounded shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("production preview worker exceeded its shutdown deadline");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
+        }
+        evidence.record(outcome);
+    }
+    (evidence, outcomes)
 }
 
 /// Borrowed projection of a resolved evaluation consumed by the GPU producer.
@@ -2220,11 +2547,13 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
 /// evaluation itself becomes the single authoritative construction point
 /// (output key, elements, color context, reuse policy).
 struct ResolvedPlanView {
+    cpu_materialization_active_bytes: u64,
     elements: Arc<[ResolvedPreviewElement]>,
     cache_key: PreviewOutputKey,
     cpu_cache_key: PreviewOutputKey,
     cache_reusable: bool,
     color_context: ProgramColorContext,
+    render_cache_identity: Option<mondrian_render_cache::TimelineRenderCacheIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2244,24 +2573,39 @@ struct ViewerPreviewGenerationKey {
     seek_source: crate::app::ui_actions::TimelineSeekSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerPreviewGenerationTransition {
+    /// Only final Viewer presentation changed; queued media keys remain valid.
+    ViewerOnly,
+    /// Decode representation changed; only a running codec Session remains useful.
+    Representation,
+    /// Source, authoring, transport, or lifecycle authority changed.
+    Semantic,
+}
+
 impl ViewerPreviewGenerationKey {
-    /// Whether a Viewer-generation rotation leaves the underlying playback
-    /// media work identity unchanged.
+    /// Classify which physical playback work remains valid across a rotation.
     ///
     /// Monitor/color contracts and presentation source may rotate final Viewer
     /// work while the queued media keys remain reusable. Output dimensions are
     /// deliberately part of this predicate: a scale change may reuse the open
     /// decoder Session, but old-size queued work would occupy the entire bounded
     /// prefetch window and starve admission of the new Half/Quarter keys.
-    fn has_compatible_playback_media_authority(&self, current: &Self) -> bool {
-        self.playing
+    fn transition_from(&self, current: &Self) -> ViewerPreviewGenerationTransition {
+        let same_decode_authority = self.playing
             && current.playing
             && self.playback_epoch == current.playback_epoch
             && self.sequence_id == current.sequence_id
             && self.sequence_revision == current.sequence_revision
-            && self.project_author_generation == current.project_author_generation
-            && self.width == current.width
-            && self.height == current.height
+            && self.project_author_generation == current.project_author_generation;
+        if !same_decode_authority {
+            return ViewerPreviewGenerationTransition::Semantic;
+        }
+        if self.width == current.width && self.height == current.height {
+            ViewerPreviewGenerationTransition::ViewerOnly
+        } else {
+            ViewerPreviewGenerationTransition::Representation
+        }
     }
 
     fn from_snapshot(
@@ -2307,6 +2651,10 @@ mod presentation;
 mod request_scheduler;
 mod result_pump;
 mod service_lifecycle;
+mod startup;
+pub(crate) use startup::PreviewStartupOwner;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) use startup::{PreviewStartupCheckpoint, PreviewStartupFailure};
 mod timeline_evaluation;
 mod title_adapter;
 
@@ -2351,6 +2699,7 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
             }
         }
         outcome.merge(self.pump_visual_execution_results(pending_demand));
+        outcome.merge(self.pump_timeline_render_cache_results());
         outcome.merge(self.pump_cpu_fallback_results());
         for candidate in self.take_visual_terminal_candidates(pending_demand) {
             if !outcome
@@ -2377,7 +2726,18 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         &self,
         request: PreviewVideoPrerollRequest<'_>,
     ) -> Option<PreviewVideoPreroll> {
-        self.playback_video_preroll_readiness(request.snapshot(), request.proxy_demands())
+        // Preroll may be the first Preview entry after App transport starts or
+        // restarts. Establish the decoder-family lifecycle before it admits or
+        // retains media; a later current GPU candidate must not perform that
+        // transition and retire the residency that this owner just proved.
+        self.synchronize_transport_intent(request.snapshot().transport().intent());
+        let readiness =
+            self.playback_video_preroll_readiness(request.snapshot(), request.proxy_demands());
+        #[cfg(any(test, feature = "validation"))]
+        if let Some(readiness) = readiness {
+            self.last_video_preroll_observation.set(Some(readiness));
+        }
+        readiness
     }
 }
 
@@ -2404,9 +2764,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         decision: &crate::app::execution_resource_coordination::PreviewExecutionDecision,
     ) {
+        if self.applied_resource_decision.get() == Some(*decision) {
+            return;
+        }
+        self.applied_resource_decision.set(Some(*decision));
         bump(&self.metrics.resource_decision_applications);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);
+        self.decode_worker_resources.reconfigure_session_residency(
+            mondrian_media::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(
+                decision.frame_store.current_media_working_set_resource_unit_limit,
+                self.decode_worker_count.max(1),
+            ),
+        );
         self.title_task
             .borrow_mut()
             .set_cache_byte_budget(decision.title_cache_budget_bytes);
@@ -2452,8 +2822,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.last_color_rejection.replace(Some(rejection));
     }
 
-    fn unavailable_gpu_candidate(&self, reason: PreviewUnavailability) -> PreviewGpuFrameState {
-        self.clear_terminal_viewer_state();
+    fn unavailable_gpu_candidate_with_retention(
+        &self,
+        reason: PreviewUnavailability,
+        preserve_current_output: bool,
+    ) -> PreviewGpuFrameState {
+        if !preserve_current_output {
+            self.clear_terminal_viewer_state();
+        }
         bump(&self.metrics.gpu_preview_candidate_unavailable);
         self.unavailability_evidence.borrow_mut().observe(&reason);
         PreviewGpuFrameState::Unavailable(reason)
@@ -2503,7 +2879,16 @@ pub fn preview_input_color_resolution_counts_for_frame(
     color_environment: &mondrian_core::ProjectColorEnvironment,
     frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, PreviewUnavailability> {
-    let color_context = sequence.settings.root_program_color_context(color_environment);
+    let color_context =
+        sequence
+            .settings
+            .root_program_color_context(color_environment)
+            .map_err(|error| {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::ProgramOutput,
+                    format!("invalid Program color context: {error}"),
+                )
+            })?;
     let target_resolution = preview_execution_resolution(
         sequence.settings.resolution,
         sequence.settings.preview.resolution_scale,
@@ -2586,6 +2971,8 @@ struct PreviewMetrics {
     decode_startup_preroll_queue_wait_max_us: Cell<u64>,
     decode_failures: Cell<u64>,
     decode_timeout_failures: Cell<u64>,
+    decode_execution_resource_unavailable_failures: Cell<u64>,
+    decode_last_execution_resource_unavailable_operation: Cell<Option<&'static str>>,
     decode_budget_exhausted_failures: Cell<u64>,
     decode_cancellation: RefCell<mondrian_playback::FrameCancellationEvidenceCollector>,
     decode_cancellation_checkpoints: Cell<mondrian_media::PreviewDecodeCancellationEvidence>,
@@ -2717,6 +3104,39 @@ fn add_cell(counter: &Cell<u64>, delta: u64) {
     counter.set(counter.get().saturating_add(delta));
 }
 
+// Stack-local timings only: no retained media, scheduling decisions or receipts.
+struct PreviewWorkObservation {
+    frame: i64,
+    step: &'static str,
+    started: Instant,
+}
+impl PreviewWorkObservation {
+    fn new(frame: i64, step: &'static str) -> Self {
+        Self { frame, step, started: Instant::now() }
+    }
+    fn next(&mut self, step: &'static str) {
+        self.observe();
+        self.step = step;
+        self.started = Instant::now();
+    }
+    fn observe(&self) {
+        let elapsed_us = app_duration_us(self.started.elapsed());
+        if elapsed_us >= 5_000 {
+            tracing::debug!(
+                frame = self.frame,
+                step = self.step,
+                elapsed_us,
+                "slow Preview work step"
+            );
+        }
+    }
+}
+impl Drop for PreviewWorkObservation {
+    fn drop(&mut self) {
+        self.observe();
+    }
+}
+
 fn app_duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
@@ -2750,30 +3170,38 @@ fn preview_dimensions_for_sequence_at_runtime_scale(
 
 fn preview_display_color_space(
     sequence: &Sequence,
+    engine: &mondrian_core::ColorEngine,
     viewer_display_management: &mondrian_core::DisplayManagementPolicy,
     display_snapshot: Option<&DisplayOutputSnapshot>,
 ) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color.program_output.color_space;
-    let profile_space = match viewer_display_management.monitor_profile {
-        mondrian_core::MonitorProfileReference::IccProfile { .. } => {
-            preview_icc_display_color_space(display_snapshot)?
-        }
-        ref monitor => monitor.managed_color_space(sequence_output).unwrap_or(sequence_output),
-    };
-
-    Ok(
-        match viewer_display_management.viewer_mode.resolve(profile_space) {
-            mondrian_core::ResolvedViewerDisplayMode::Sdr => {
-                if profile_space.is_hdr() {
-                    ColorSpace::Rec709
-                } else {
-                    profile_space
-                }
+    let resolved = viewer_display_management
+        .resolve_output_color_space(engine, sequence_output)
+        .map_err(|error| {
+            crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "display_policy_resolution".to_owned(),
+                reason: error.to_string(),
             }
-            mondrian_core::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
-            mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
-        },
-    )
+        })?;
+
+    if !matches!(
+        viewer_display_management.calibration(),
+        mondrian_core::DisplayCalibrationPolicy::Disabled
+    ) {
+        let calibrated_source = preview_icc_display_color_space(display_snapshot)?;
+        if calibrated_source != resolved {
+            return Err(
+                crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "display_calibration_source_drift".to_owned(),
+                    reason: format!(
+                        "display contract calibrates {calibrated_source:?}, but policy resolves {resolved:?}"
+                    ),
+                },
+            );
+        }
+    }
+
+    Ok(resolved)
 }
 
 fn preview_icc_display_color_space(
@@ -2783,7 +3211,7 @@ fn preview_icc_display_color_space(
         return Err(
             crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_preview_color_space_resolution".to_owned(),
-                reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
+                reason: "ICC device calibration requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
             },
         );
     };

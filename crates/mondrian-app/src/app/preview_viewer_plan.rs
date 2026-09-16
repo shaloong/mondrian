@@ -15,7 +15,7 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{identity_compiled_effect_graph, CompiledEffectGraph, EffectFrameExtent};
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
-    GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
+    CpuColorFrame, GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
     HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
@@ -29,8 +29,7 @@ use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::MediaPreviewFrame;
-
-const MAX_PREVIEW_GPU_LAYERS: usize = 5;
+use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
@@ -73,19 +72,19 @@ pub(crate) enum ResolvedPreviewTransitionInput {
     },
 }
 
-/// Retain every Store protection needed by one current Viewer candidate.
-pub(crate) fn resolved_preview_media_protections(
+/// Retain physical Store leases and any Current protection for one Viewer candidate.
+pub(crate) fn resolved_preview_media_residency(
     elements: &[ResolvedPreviewElement],
-) -> Vec<mondrian_playback::MediaFrameProtectionLease> {
+) -> Vec<PreviewMediaResidencyGuard> {
     let mut protections = Vec::new();
     for element in elements {
         match element {
             ResolvedPreviewElement::Media { frame, .. } => {
-                protections.extend(frame.residency_protection());
+                protections.extend(frame.residency_guard());
             }
             ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
-                protections.extend(transition_input_protection(left));
-                protections.extend(transition_input_protection(right));
+                protections.extend(transition_input_residency(left));
+                protections.extend(transition_input_residency(right));
             }
             ResolvedPreviewElement::SolidColor(_)
             | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
@@ -95,11 +94,11 @@ pub(crate) fn resolved_preview_media_protections(
     protections
 }
 
-fn transition_input_protection(
+fn transition_input_residency(
     input: &ResolvedPreviewTransitionInput,
-) -> Option<mondrian_playback::MediaFrameProtectionLease> {
+) -> Option<PreviewMediaResidencyGuard> {
     match input {
-        ResolvedPreviewTransitionInput::Media { frame, .. } => frame.residency_protection(),
+        ResolvedPreviewTransitionInput::Media { frame, .. } => frame.residency_guard(),
         ResolvedPreviewTransitionInput::Transparent
         | ResolvedPreviewTransitionInput::SolidColor(_)
         | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => None,
@@ -187,11 +186,11 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context: &ProgramColorContext,
 ) -> PreviewOutputKey {
     let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v1");
-    color_context.working_color_space.hash(&mut builder);
-    color_context.output_color_space.hash(&mut builder);
-    color_context.output_tone_map.hash(&mut builder);
-    color_context.engine.hash(&mut builder);
-    color_context.output_transform.hash(&mut builder);
+    color_context.working_color_space().hash(&mut builder);
+    color_context.output_color_space().hash(&mut builder);
+    color_context.output_tone_map().hash(&mut builder);
+    color_context.engine().hash(&mut builder);
+    color_context.output_transform().hash(&mut builder);
     elements.len().hash(&mut builder);
     for element in elements {
         match element {
@@ -375,7 +374,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                 frame_seed,
                 ..
             } => {
-                layers.push(ViewerGpuExecutionLayer::Source(gpu_media_source(
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(gpu_media_source(
                     frame,
                     *opacity,
                     *blend_mode,
@@ -384,24 +383,24 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                     *frame_seed,
                     working_color_space,
                     scratch,
-                )?));
+                )?)));
                 has_composited_layer |= opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::SolidColor(layer) => {
-                layers.push(ViewerGpuExecutionLayer::Source(gpu_solid_source(
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(gpu_solid_source(
                     layer, scratch,
-                )?));
+                )?)));
                 has_composited_layer |= layer.opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
-                layers.push(ViewerGpuExecutionLayer::Source(gpu_solid_source(
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(gpu_solid_source(
                     layer, scratch,
-                )?));
+                )?)));
                 has_composited_layer |= layer.opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
-                    || layer.opacity <= 1.0e-4
+                    || !opacity_has_contribution(layer.opacity)
                     || layer.effect_graph.graph().is_identity()
                 {
                     continue;
@@ -431,10 +430,35 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
             }
         }
     }
-    if layers.len() > MAX_PREVIEW_GPU_LAYERS {
-        return Err(GpuCompositingBlockerReason::TooManyLayers);
-    }
     Ok(layers)
+}
+
+/// Lower one verified post-composite Timeline cache hit as a single identity
+/// working layer. The ordinary Viewer output/monitor stages remain unchanged.
+pub(crate) fn gpu_layer_for_cached_working(
+    frame: CpuColorFrame,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<ViewerGpuExecutionLayer, GpuCompositingBlockerReason> {
+    let graph =
+        identity_compiled_effect_graph().ok_or(GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    let effect_plan = scratch
+        .get_or_lower_effect_gpu_plan(&graph)
+        .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    Ok(ViewerGpuExecutionLayer::Source(Box::new(
+        ViewerGpuSourceLayer::Media {
+            frame: Some(frame),
+            is_data_texture: false,
+            gpu_source: None,
+            native_source: None,
+            cpu_yuv_source: None,
+            heterogeneous_input: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan,
+            frame_seed: 0,
+        },
+    )))
 }
 
 /// Lower one resolved Viewer plan without executing heterogeneous work.
@@ -477,40 +501,42 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 if !opacity_has_contribution(*opacity) {
                     continue;
                 }
-                layers.push(ViewerGpuExecutionLayer::Source(builder.media_source(
-                    frame,
-                    *opacity,
-                    *blend_mode,
-                    *transform,
-                    effect_graph,
-                    prepared_heterogeneous_route.as_deref(),
-                    *frame_seed,
-                )?));
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(
+                    builder.media_source(
+                        frame,
+                        *opacity,
+                        *blend_mode,
+                        *transform,
+                        effect_graph,
+                        prepared_heterogeneous_route.as_deref(),
+                        *frame_seed,
+                    )?,
+                )));
                 has_composited_layer = true;
             }
             ResolvedPreviewElement::SolidColor(layer) => {
                 if !opacity_has_contribution(layer.opacity) {
                     continue;
                 }
-                layers.push(ViewerGpuExecutionLayer::Source(
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(
                     gpu_solid_source(layer, builder.scratch).map_err(|reason| {
                         PreviewViewerGpuLayerPreparationError::Compositing { reason }
                     })?,
-                ));
+                )));
                 has_composited_layer = true;
             }
             ResolvedPreviewElement::HeterogeneousSolidColor { layer, prepared_route } => {
                 if !opacity_has_contribution(layer.opacity) {
                     continue;
                 }
-                layers.push(ViewerGpuExecutionLayer::Source(
+                layers.push(ViewerGpuExecutionLayer::Source(Box::new(
                     builder.solid_source(layer, prepared_route)?,
-                ));
+                )));
                 has_composited_layer = true;
             }
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
-                    || layer.opacity <= 1.0e-4
+                    || !opacity_has_contribution(layer.opacity)
                     || layer.effect_graph.graph().is_identity()
                 {
                     continue;
@@ -545,12 +571,6 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
             }
         }
     }
-    if layers.len() > MAX_PREVIEW_GPU_LAYERS {
-        return Err(PreviewViewerGpuLayerPreparationError::Compositing {
-            reason: GpuCompositingBlockerReason::TooManyLayers,
-        });
-    }
-
     let (items, continuations) = builder.into_parts();
     if items.is_empty() {
         return Ok(PreparedPreviewViewerGpuLayers::Ordinary { layers });
@@ -611,10 +631,14 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         }
 
         if let Ok(effect_plan) = self.scratch.get_or_lower_effect_gpu_plan(effect_graph) {
+            let (native_source, transform) =
+                native_source_for_projected_transform(frame, transform);
             return Ok(ViewerGpuSourceLayer::Media {
                 frame: frame.working_payload(),
+                is_data_texture: frame.is_data_texture(),
                 gpu_source: frame.gpu_source(),
-                native_source: frame.native_source(),
+                native_source,
+                cpu_yuv_source: frame.cpu_yuv_source(),
                 heterogeneous_input: None,
                 opacity,
                 blend_mode,
@@ -650,8 +674,10 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         });
         Ok(ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: Some(address),
             opacity,
             blend_mode,
@@ -692,8 +718,10 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         });
         Ok(ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: Some(address),
             opacity: layer.opacity,
             blend_mode: layer.blend_mode,
@@ -752,7 +780,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 )?
             }
         };
-        Ok(ViewerGpuTransitionInput::Source(source))
+        Ok(ViewerGpuTransitionInput::Source(Box::new(source)))
     }
 
     fn identity_effect_plan(
@@ -820,10 +848,13 @@ fn gpu_media_source(
     let effect_plan = scratch
         .get_or_lower_effect_gpu_plan(effect_graph)
         .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    let (native_source, transform) = native_source_for_projected_transform(frame, transform);
     Ok(ViewerGpuSourceLayer::Media {
         frame: frame.working_payload(),
+        is_data_texture: frame.is_data_texture(),
         gpu_source: frame.gpu_source(),
-        native_source: frame.native_source(),
+        native_source,
+        cpu_yuv_source: frame.cpu_yuv_source(),
         heterogeneous_input: None,
         opacity,
         blend_mode,
@@ -831,6 +862,41 @@ fn gpu_media_source(
         effect_plan,
         frame_seed,
     })
+}
+
+fn native_source_for_projected_transform(
+    frame: &MediaPreviewFrame,
+    mut transform: [f32; 6],
+) -> (Option<mondrian_renderer::ViewerGpuNativeSource>, [f32; 6]) {
+    let Some(mut source) = frame.native_source() else {
+        return (None, transform);
+    };
+    let source_width = source.materialization_width;
+    let source_height = source.materialization_height;
+    let materialization_width =
+        native_materialization_axis(source_width, transform[0], transform[3]);
+    let materialization_height =
+        native_materialization_axis(source_height, transform[1], transform[4]);
+
+    if materialization_width != source_width || materialization_height != source_height {
+        let source_x = source_width as f32 / materialization_width as f32;
+        let source_y = source_height as f32 / materialization_height as f32;
+        transform[0] *= source_x;
+        transform[3] *= source_x;
+        transform[1] *= source_y;
+        transform[4] *= source_y;
+        source.materialization_width = materialization_width;
+        source.materialization_height = materialization_height;
+    }
+    (Some(source), transform)
+}
+
+fn native_materialization_axis(source_extent: u32, x: f32, y: f32) -> u32 {
+    let projected_extent = (x.hypot(y) * source_extent as f32).ceil();
+    if !projected_extent.is_finite() {
+        return source_extent;
+    }
+    (projected_extent as u32).clamp(1, source_extent)
 }
 
 fn gpu_solid_source(
@@ -878,7 +944,7 @@ fn gpu_transition_input(
             scratch,
         )?,
     };
-    Ok(ViewerGpuTransitionInput::Source(source))
+    Ok(ViewerGpuTransitionInput::Source(Box::new(source)))
 }
 
 fn transition_input_has_contribution(
@@ -965,6 +1031,7 @@ fn is_preview_gpu_transform_supported(transform: [f32; 6]) -> bool {
 #[cfg(test)]
 mod heterogeneous_tests {
     use super::*;
+    use crate::app::preview_media_frame::MediaPreviewGpuSourceFrame;
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::{TimelineTime, WorkingRgbaF32Frame};
     use mondrian_effects::{
@@ -1008,6 +1075,42 @@ mod heterogeneous_tests {
             .expect("compile heterogeneous tracer")
     }
 
+    #[test]
+    fn verified_render_cache_frame_lowers_as_one_identity_working_layer() {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            data: vec![[0.25, 0.5, 1.0, 1.0]; (WIDTH * HEIGHT) as usize],
+            color_space: WORKING_SPACE,
+        });
+        let mut scratch = TimelineCompositeScratch::default();
+        let layer = gpu_layer_for_cached_working(frame.clone(), &mut scratch)
+            .expect("identity cached layer");
+        let ViewerGpuExecutionLayer::Source(source) = layer else {
+            panic!("cache hit must be one ordinary source");
+        };
+        let ViewerGpuSourceLayer::Media {
+            frame: Some(lowered),
+            gpu_source: None,
+            native_source: None,
+            cpu_yuv_source: None,
+            heterogeneous_input: None,
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+            ..
+        } = *source
+        else {
+            panic!("cache hit must be one ordinary CPU-working source");
+        };
+        assert!(lowered.shares_storage_with(&frame));
+        assert_eq!(opacity, 1.0);
+        assert_eq!(blend_mode, BlendMode::Normal);
+        assert_eq!(transform, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(frame_seed, 0);
+    }
+
     fn working_frame(identity_salt: u64) -> MediaPreviewFrame {
         let mut identity =
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.heterogeneous-plan-test.v1");
@@ -1019,6 +1122,25 @@ mod heterogeneous_tests {
                 color_space: WORKING_SPACE,
                 data: vec![[0.2, 0.4, 0.6, 1.0]; (WIDTH * HEIGHT) as usize],
             }),
+            mondrian_core::Resolution { width: WIDTH, height: HEIGHT },
+            identity.finish_identity(),
+            FramePresentationQuality::Ready,
+            PreviewDecodeExecutionSummary::default(),
+        )
+    }
+
+    fn data_texture_frame(identity_salt: u64) -> MediaPreviewFrame {
+        let mut identity =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.data-texture-plan-test.v1");
+        identity_salt.hash(&mut identity);
+        let numeric = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WORKING_SPACE,
+            data: vec![[-0.25, 0.5, 1.75, 0.8]; (WIDTH * HEIGHT) as usize],
+        });
+        MediaPreviewFrame::from_source(
+            MediaPreviewGpuSourceFrame::new_data_texture(numeric, WORKING_SPACE),
             mondrian_core::Resolution { width: WIDTH, height: HEIGHT },
             identity.finish_identity(),
             FramePresentationQuality::Ready,
@@ -1073,6 +1195,40 @@ mod heterogeneous_tests {
         }
     }
 
+    fn ordinary_solid(graph: Arc<CompiledEffectGraph>, frame_seed: i64) -> ResolvedPreviewElement {
+        ResolvedPreviewElement::SolidColor(TimelineSolidColorLayer {
+            color: mondrian_core::Color { r: 0.2, g: 0.4, b: 0.6, a: 0.75 },
+            opacity: 0.8,
+            blend_mode: BlendMode::Screen,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: graph,
+            frame_seed,
+        })
+    }
+
+    #[test]
+    fn ordinary_gpu_lowering_preserves_stacks_beyond_the_legacy_five_layer_limit() {
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        let resolved: Vec<_> = (0..9)
+            .map(|frame_seed| ordinary_solid(Arc::clone(&graph), frame_seed))
+            .collect();
+
+        let layers = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+            .expect("layer count is not a compositing blocker");
+
+        assert_eq!(layers.len(), 9);
+        for (index, layer) in layers.iter().enumerate() {
+            let ViewerGpuExecutionLayer::Source(source) = layer else {
+                panic!("expected source layer");
+            };
+            assert!(matches!(
+                source.as_ref(),
+                ViewerGpuSourceLayer::SolidColor { layer, .. }
+                    if layer.frame_seed == index as i64
+            ));
+        }
+    }
+
     #[test]
     fn exact_full_gpu_media_preserves_non_normal_blend_on_the_ordinary_path() {
         let resolved = [media_with_blend(
@@ -1091,12 +1247,46 @@ mod heterogeneous_tests {
         let PreparedPreviewViewerGpuLayers::Ordinary { layers } = prepared else {
             panic!("identity graph must remain on the ordinary Viewer path");
         };
+        let [ViewerGpuExecutionLayer::Source(source)] = &layers[..] else {
+            panic!("expected one source layer");
+        };
         assert!(matches!(
-            &layers[..],
-            [ViewerGpuExecutionLayer::Source(
-                ViewerGpuSourceLayer::Media { blend_mode: BlendMode::Screen, .. }
-            )]
+            source.as_ref(),
+            ViewerGpuSourceLayer::Media { blend_mode: BlendMode::Screen, .. }
         ));
+    }
+
+    #[test]
+    fn data_texture_lowers_to_typed_cpu_numeric_upload_without_a_color_source() {
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        let resolved = [ResolvedPreviewElement::Media {
+            frame: data_texture_frame(9),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: graph,
+            prepared_heterogeneous_route: None,
+            frame_seed: 9,
+        }];
+
+        let layers = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+            .expect("DataTexture Viewer plan");
+        let [ViewerGpuExecutionLayer::Source(source)] = &layers[..] else {
+            panic!("expected one DataTexture source layer");
+        };
+        let ViewerGpuSourceLayer::Media {
+            frame: Some(frame),
+            is_data_texture: true,
+            gpu_source: None,
+            native_source: None,
+            cpu_yuv_source: None,
+            heterogeneous_input: None,
+            ..
+        } = source.as_ref()
+        else {
+            panic!("DataTexture must use the typed CPU numeric upload seam");
+        };
+        assert_eq!(frame.rgba_f32().data[0], [-0.25, 0.5, 1.75, 0.8]);
     }
 
     #[test]
@@ -1134,15 +1324,18 @@ mod heterogeneous_tests {
             gpu.binding().frame_extent(),
             EffectFrameExtent::new(WIDTH, HEIGHT)
         );
+        let ViewerGpuExecutionLayer::Source(source) = &layers[0] else {
+            panic!("expected source layer");
+        };
         assert!(matches!(
-            &layers[0],
-            ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            source.as_ref(),
+            ViewerGpuSourceLayer::Media {
                 heterogeneous_input: Some(0),
                 frame: None,
                 gpu_source: None,
                 native_source: None,
                 ..
-            })
+            }
         ));
     }
 
@@ -1169,18 +1362,19 @@ mod heterogeneous_tests {
             continuations[0].frame_extent,
             EffectFrameExtent::new(WIDTH, HEIGHT)
         );
+        let [ViewerGpuExecutionLayer::Source(source)] = &layers[..] else {
+            panic!("expected one source layer");
+        };
         assert!(matches!(
-            &layers[..],
-            [ViewerGpuExecutionLayer::Source(
-                ViewerGpuSourceLayer::Media {
-                    heterogeneous_input: Some(0),
-                    frame: None,
-                    gpu_source: None,
-                    native_source: None,
-                    blend_mode: BlendMode::Screen,
-                    ..
-                }
-            )]
+            source.as_ref(),
+            ViewerGpuSourceLayer::Media {
+                heterogeneous_input: Some(0),
+                frame: None,
+                gpu_source: None,
+                native_source: None,
+                blend_mode: BlendMode::Screen,
+                ..
+            }
         ));
     }
 

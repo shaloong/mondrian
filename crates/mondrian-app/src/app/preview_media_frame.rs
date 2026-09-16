@@ -7,28 +7,35 @@
 use std::sync::{Arc, OnceLock};
 
 use mondrian_core::types::{ColorSpace, Resolution};
+use mondrian_core::{compose_picture_affine, ResolvedPictureGeometry};
 #[cfg(any(test, feature = "validation"))]
 use mondrian_media::PreviewDecodeTemporalSelection;
 use mondrian_media::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSampling,
+    CpuYuvFrame, DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSampling,
     DecodedVideoSurfaceFormat, PreviewDecodeDiagnostics, PreviewNativeDecodedFrame,
 };
 use mondrian_playback::FramePresentationQuality;
+#[cfg(test)]
+use mondrian_renderer::CpuSourceColorFrame;
 use mondrian_renderer::{
-    execute_cpu_source_input_stage_with_session, project_affine_to_sampled_extents, CpuColorFrame,
-    CpuSourceColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
-    RenderColorTransformError, RenderCpuColorExecutionSession, RenderInputTransform,
+    color::RenderColorStageDiagnostics, project_affine_to_sampled_extents, CpuColorFrame,
+    PreparedSourceFrame, RenderColorTransformDiagnostics, RenderColorTransformError,
+    RenderCpuColorExecutionSession, RenderInputTransform, ViewerGpuCpuYuvSource,
     ViewerGpuMediaSource, ViewerGpuNativeSource,
 };
 
 use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIdentity};
+
+use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
     sampled_resolution: Resolution,
     logical_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
     identity: PreviewSemanticIdentity,
+    render_cache_source_fingerprint: Option<Arc<[u8; 32]>>,
     cross_call_reusable: bool,
     presentation_quality: FramePresentationQuality,
     decode_execution: PreviewDecodeExecutionSummary,
@@ -39,7 +46,8 @@ pub(crate) struct MediaPreviewFrame {
 #[derive(Debug, Clone)]
 enum MediaPreviewPayload {
     Working(CpuColorFrame),
-    Source(MediaPreviewGpuSourceFrame),
+    Source(Box<MediaPreviewGpuSourceFrame>),
+    CpuYuv(MediaPreviewCpuYuvSourceFrame),
     Native(MediaPreviewNativeSourceFrame),
 }
 
@@ -56,7 +64,9 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Working(frame),
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -72,12 +82,14 @@ impl MediaPreviewFrame {
         presentation_quality: FramePresentationQuality,
         decode_execution: PreviewDecodeExecutionSummary,
     ) -> Self {
-        let descriptor = source.source.descriptor();
+        let (width, height) = source.prepared_source.extent();
         Self {
-            payload: MediaPreviewPayload::Source(source),
-            sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
+            payload: MediaPreviewPayload::Source(Box::new(source)),
+            sampled_resolution: Resolution { width, height },
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -98,7 +110,32 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Native(source),
             sampled_resolution,
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
+            cross_call_reusable: true,
+            presentation_quality,
+            decode_execution,
+            residency_resource: None,
+            residency_protection: None,
+        }
+    }
+
+    pub(crate) fn from_cpu_yuv(
+        source: MediaPreviewCpuYuvSourceFrame,
+        sampled_resolution: Resolution,
+        logical_resolution: Resolution,
+        identity: PreviewSemanticIdentity,
+        presentation_quality: FramePresentationQuality,
+        decode_execution: PreviewDecodeExecutionSummary,
+    ) -> Self {
+        Self {
+            payload: MediaPreviewPayload::CpuYuv(source),
+            sampled_resolution,
+            logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -116,14 +153,28 @@ impl MediaPreviewFrame {
                     .saturating_mul(self.sampled_resolution.height as usize)
                     .saturating_mul(4)
                     .saturating_mul(std::mem::size_of::<f32>());
-                source.source.retained_bytes().saturating_add(working_reservation)
+                source.prepared_source.retained_bytes().saturating_add(working_reservation)
             }
+            MediaPreviewPayload::CpuYuv(source) => source.frame.retained_bytes(),
             MediaPreviewPayload::Native(_) => 0,
         }
     }
 
+    /// Bind resolved source picture geometry before Clip-local authoring transforms.
+    pub(crate) fn with_picture_geometry(mut self, geometry: ResolvedPictureGeometry) -> Self {
+        self.source_to_display_affine = geometry.source_to_display_affine();
+        self
+    }
+
     pub(crate) fn decoder_resource_units(&self) -> usize {
         usize::from(matches!(self.payload, MediaPreviewPayload::Native(_)))
+    }
+
+    /// Whether this clone retains a Store allocation or a native decoder owner.
+    pub(crate) fn retains_media_residency(&self) -> bool {
+        self.residency_resource.is_some()
+            || self.residency_protection.is_some()
+            || self.decoder_resource_units() != 0
     }
 
     /// Attach the Store-owned physical allocation shared by every frame clone.
@@ -156,11 +207,15 @@ impl MediaPreviewFrame {
         self
     }
 
-    /// Clone the protection carried by this current-frame payload.
-    pub(crate) fn residency_protection(
-        &self,
-    ) -> Option<mondrian_playback::MediaFrameProtectionLease> {
-        self.residency_protection.clone()
+    /// Retain physical residency without granting speculation Current protection.
+    pub(crate) fn residency_guard(&self) -> Option<PreviewMediaResidencyGuard> {
+        if self.residency_resource.is_none() && self.residency_protection.is_none() {
+            return None;
+        }
+        Some(PreviewMediaResidencyGuard::from_leases(
+            self.residency_resource.clone(),
+            self.residency_protection.clone(),
+        ))
     }
 
     pub(crate) fn width(&self) -> u32 {
@@ -180,6 +235,20 @@ impl MediaPreviewFrame {
         self.identity
     }
 
+    /// Canonical provider-independent source identity for persistent working-frame reuse.
+    pub(crate) fn render_cache_source_fingerprint(&self) -> Option<[u8; 32]> {
+        self.render_cache_source_fingerprint.as_deref().copied()
+    }
+
+    /// Attach source-Adapter canonical identity without changing Viewer identity.
+    pub(crate) fn with_render_cache_source_fingerprint(
+        mut self,
+        fingerprint: Option<[u8; 32]>,
+    ) -> Self {
+        self.render_cache_source_fingerprint = fingerprint.map(Arc::new);
+        self
+    }
+
     /// Whether this frame may participate in semantic cross-call cache reuse.
     pub(crate) const fn permits_cross_call_reuse(&self) -> bool {
         self.cross_call_reusable
@@ -195,16 +264,29 @@ impl MediaPreviewFrame {
     pub(crate) fn working_payload(&self) -> Option<CpuColorFrame> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => Some(frame.clone()),
-            MediaPreviewPayload::Source(_) | MediaPreviewPayload::Native(_) => None,
+            MediaPreviewPayload::Source(source) => source.prepared_source.data_texture_frame(),
+            MediaPreviewPayload::CpuYuv(_) | MediaPreviewPayload::Native(_) => None,
         }
     }
 
     pub(crate) fn working_color_space(&self) -> Option<mondrian_core::WorkingColorSpace> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => frame.descriptor().color_space.working(),
-            MediaPreviewPayload::Source(source) => Some(source.input_transform.working_color_space),
+            MediaPreviewPayload::Source(source) => {
+                Some(source.prepared_source.working_color_space())
+            }
+            MediaPreviewPayload::CpuYuv(source) => Some(source.input_transform.working_color_space),
             MediaPreviewPayload::Native(source) => Some(source.input_transform.working_color_space),
         }
+    }
+
+    /// Whether the CPU working payload represents an explicit non-color
+    /// DataTexture bypass rather than color-managed working pixels.
+    pub(crate) fn is_data_texture(&self) -> bool {
+        matches!(
+            &self.payload,
+            MediaPreviewPayload::Source(source) if source.prepared_source.is_data_texture()
+        )
     }
 
     #[cfg(test)]
@@ -231,6 +313,7 @@ impl MediaPreviewFrame {
         match &self.payload {
             MediaPreviewPayload::Working(_) => None,
             MediaPreviewPayload::Source(source) => source.temporal_selection,
+            MediaPreviewPayload::CpuYuv(source) => source.temporal_selection,
             MediaPreviewPayload::Native(source) => source.temporal_selection,
         }
     }
@@ -239,9 +322,10 @@ impl MediaPreviewFrame {
         let MediaPreviewPayload::Source(source) = &self.payload else {
             return None;
         };
+        let (source_frame, input_transform) = source.prepared_source.color_managed_gpu_input()?;
         Some(ViewerGpuMediaSource {
-            source: Arc::clone(&source.source),
-            input_transform: source.input_transform.clone(),
+            source: source_frame,
+            input_transform,
             decoder_residency: source.decoder_residency,
             decoder_handle_kind: source.decoder_handle_kind,
             decoded_surface_format: source.decoded_surface_format,
@@ -262,6 +346,18 @@ impl MediaPreviewFrame {
         })
     }
 
+    pub(crate) fn cpu_yuv_source(&self) -> Option<ViewerGpuCpuYuvSource> {
+        let MediaPreviewPayload::CpuYuv(source) = &self.payload else {
+            return None;
+        };
+        Some(ViewerGpuCpuYuvSource {
+            frame: Arc::clone(&source.frame),
+            input_transform: source.input_transform.clone(),
+            materialization_width: self.sampled_resolution.width,
+            materialization_height: self.sampled_resolution.height,
+        })
+    }
+
     pub(crate) fn working_frame_with_session(
         &self,
         color_session: &mut RenderCpuColorExecutionSession,
@@ -278,22 +374,21 @@ impl MediaPreviewFrame {
                     surface_format: native.native_frame.surface_format,
                 })
             }
+            MediaPreviewPayload::CpuYuv(_) => Err(MediaPreviewWorkingFrameError::CpuYuvRequiresGpu),
             MediaPreviewPayload::Source(source) => {
                 let cached_before = source.working_cache.get().is_some();
                 let entry = source
                     .working_cache
                     .get_or_init(|| {
-                        execute_cpu_source_input_stage_with_session(
-                            source.source.as_ref(),
-                            &source.input_transform,
-                            color_session,
-                        )
-                        .map(|output| MediaPreviewWorkingFrameCacheEntry {
-                            frame: output.result.frame,
-                            color_diagnostics: output.result.diagnostics,
-                            stage_diagnostics: output.stage_diagnostics,
-                        })
-                        .map_err(Arc::new)
+                        source
+                            .prepared_source
+                            .execute_cpu_with_session(color_session)
+                            .map(|output| MediaPreviewWorkingFrameCacheEntry {
+                                frame: output.frame,
+                                color_diagnostics: output.color_diagnostics,
+                                stage_diagnostics: output.stage_diagnostics,
+                            })
+                            .map_err(Arc::new)
                     })
                     .as_ref()
                     .map_err(
@@ -303,7 +398,11 @@ impl MediaPreviewFrame {
                     )?;
                 Ok(MediaPreviewWorkingFrame {
                     frame: entry.frame.clone(),
-                    color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
+                    color_diagnostics: if cached_before {
+                        None
+                    } else {
+                        entry.color_diagnostics
+                    },
                     stage_diagnostics: if cached_before {
                         RenderColorStageDiagnostics::default()
                     } else {
@@ -329,8 +428,9 @@ pub(crate) fn project_preview_media_transform(
     output_authoring: Resolution,
     output_sampled: Resolution,
 ) -> Option<[f32; 6]> {
+    let interpreted = compose_picture_affine(transform, frame.source_to_display_affine)?;
     project_affine_to_sampled_extents(
-        transform,
+        interpreted,
         frame.logical_resolution(),
         Resolution { width: frame.width(), height: frame.height() },
         output_authoring,
@@ -347,6 +447,8 @@ pub(crate) struct MediaPreviewWorkingFrame {
 /// Failure to adapt a decoded Preview payload into a CPU working frame.
 #[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum MediaPreviewWorkingFrameError {
+    #[error("compact CPU YUV Preview payload requires renderer GPU materialization")]
+    CpuYuvRequiresGpu,
     #[error(
         "native decoded surface ({handle_kind:?} {surface_format:?}) requires renderer native import; no CPU working fallback exists"
     )]
@@ -363,8 +465,7 @@ pub(crate) enum MediaPreviewWorkingFrameError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewGpuSourceFrame {
-    pub(crate) source: Arc<CpuSourceColorFrame>,
-    pub(crate) input_transform: RenderInputTransform,
+    pub(crate) prepared_source: PreparedSourceFrame,
     pub(crate) decoder_residency: DecodedFrameResidency,
     pub(crate) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
@@ -382,6 +483,27 @@ pub(crate) struct MediaPreviewNativeSourceFrame {
     pub(crate) native_frame: Arc<PreviewNativeDecodedFrame>,
     #[cfg(any(test, feature = "validation"))]
     temporal_selection: Option<PreviewDecodeTemporalSelection>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MediaPreviewCpuYuvSourceFrame {
+    pub(crate) frame: Arc<CpuYuvFrame>,
+    pub(crate) input_transform: RenderInputTransform,
+    #[cfg(any(test, feature = "validation"))]
+    temporal_selection: Option<PreviewDecodeTemporalSelection>,
+}
+
+impl MediaPreviewCpuYuvSourceFrame {
+    pub(crate) fn from_decode(frame: CpuYuvFrame, input_transform: RenderInputTransform) -> Self {
+        #[cfg(any(test, feature = "validation"))]
+        let temporal_selection = frame.diagnostics.temporal_selection();
+        Self {
+            frame: Arc::new(frame),
+            input_transform,
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection,
+        }
+    }
 }
 
 impl MediaPreviewNativeSourceFrame {
@@ -409,8 +531,24 @@ impl MediaPreviewGpuSourceFrame {
         input_transform: RenderInputTransform,
     ) -> Self {
         Self {
-            source: Arc::new(source.into()),
-            input_transform,
+            prepared_source: PreparedSourceFrame::from_typed_source(source, input_transform),
+            decoder_residency: DecodedFrameResidency::CpuRgba,
+            decoder_handle_kind: None,
+            decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            decoded_video_sampling: DecodedVideoSampling::default(),
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection: None,
+            working_cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_data_texture(
+        frame: CpuColorFrame,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Self {
+        Self {
+            prepared_source: PreparedSourceFrame::DataTexture { frame, working_color_space },
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
@@ -422,15 +560,13 @@ impl MediaPreviewGpuSourceFrame {
     }
 
     pub(crate) fn from_decode_diagnostics(
-        source: impl Into<CpuSourceColorFrame>,
-        input_transform: RenderInputTransform,
+        prepared_source: PreparedSourceFrame,
         diagnostics: PreviewDecodeDiagnostics,
     ) -> Self {
         #[cfg(any(test, feature = "validation"))]
         let temporal_selection = diagnostics.temporal_selection();
         Self {
-            source: Arc::new(source.into()),
-            input_transform,
+            prepared_source,
             decoder_residency: diagnostics.decoded_frame_residency,
             decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
             decoded_surface_format: diagnostics.decoded_surface_format,
@@ -445,6 +581,6 @@ impl MediaPreviewGpuSourceFrame {
 #[derive(Debug, Clone)]
 struct MediaPreviewWorkingFrameCacheEntry {
     frame: CpuColorFrame,
-    color_diagnostics: RenderColorTransformDiagnostics,
+    color_diagnostics: Option<RenderColorTransformDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
 }

@@ -8,7 +8,10 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use mondrian_core::{ColorSpace, ProgramColorScopeError, ProgramSignalColorimetry, WaveformMode};
+use mondrian_core::{
+    ColorSpace, ProgramColorScopeError, ProgramScopeScale, ProgramScopesTap,
+    ProgramSignalColorimetry, WaveformMode,
+};
 
 const VECTOR_GRID: u32 = 64;
 const HISTOGRAM_HEIGHT: u32 = 128;
@@ -22,6 +25,8 @@ const DISPLAY_WORKGROUP_SIZE: u32 = 8;
 pub struct GpuProgramScopesRequest {
     signal_color_space: ColorSpace,
     waveform_mode: WaveformMode,
+    scale: ProgramScopeScale,
+    tap: ProgramScopesTap,
     bins: u32,
     waveform_width: u32,
 }
@@ -39,12 +44,29 @@ impl GpuProgramScopesRequest {
         Ok(Self {
             signal_color_space,
             waveform_mode,
+            scale: ProgramScopeScale::Ire,
+            tap: ProgramScopesTap::ProgramOutput,
             bins: bins.clamp(16, 1024),
             waveform_width: waveform_width.clamp(64, 1024),
         })
     }
 
-    /// Encoded Program Output identity measured by this request.
+    /// Construct a request with the complete professional control contract.
+    pub fn with_controls(
+        signal_color_space: ColorSpace,
+        waveform_mode: WaveformMode,
+        scale: ProgramScopeScale,
+        tap: ProgramScopesTap,
+        bins: u32,
+        waveform_width: u32,
+    ) -> Result<Self, ProgramColorScopeError> {
+        let mut request = Self::new(signal_color_space, waveform_mode, bins, waveform_width)?;
+        request.scale = scale;
+        request.tap = tap;
+        Ok(request)
+    }
+
+    /// Encoded signal identity measured at the selected Viewer tap.
     pub const fn signal_color_space(self) -> ColorSpace {
         self.signal_color_space
     }
@@ -52,6 +74,16 @@ impl GpuProgramScopesRequest {
     /// Requested waveform component layout.
     pub const fn waveform_mode(self) -> WaveformMode {
         self.waveform_mode
+    }
+
+    /// Vertical aggregation scale.
+    pub const fn scale(self) -> ProgramScopeScale {
+        self.scale
+    }
+
+    /// Viewer color boundary sampled by this request.
+    pub const fn tap(self) -> ProgramScopesTap {
+        self.tap
     }
 
     /// Number of signal bins.
@@ -77,6 +109,8 @@ impl Default for GpuProgramScopesRequest {
         Self {
             signal_color_space: ColorSpace::Rec709,
             waveform_mode: WaveformMode::Luma,
+            scale: ProgramScopeScale::Ire,
+            tap: ProgramScopesTap::ProgramOutput,
             bins: 256,
             waveform_width: 512,
         }
@@ -230,6 +264,10 @@ impl GpuProgramScopesRuntime {
             kb: colorimetry.kb(),
             sample_count: input_width.saturating_mul(input_height) as f32,
             max_column_samples: max_column_samples as f32,
+            scale_kind: u32::from(request.scale.maximum_nits().is_some()),
+            transfer_kind: scope_transfer_kind(request.signal_color_space),
+            scale_max_nits: request.scale.maximum_nits().unwrap_or(100) as f32,
+            _padding: 0,
         };
         queue.write_buffer(&resources.uniforms, 0, bytemuck::bytes_of(&uniforms));
         encoder.clear_buffer(resources.counts.as_ref(), 0, None);
@@ -320,6 +358,21 @@ struct ScopesUniforms {
     kb: f32,
     sample_count: f32,
     max_column_samples: f32,
+    scale_kind: u32,
+    transfer_kind: u32,
+    scale_max_nits: f32,
+    _padding: u32,
+}
+
+fn scope_transfer_kind(color_space: ColorSpace) -> u32 {
+    match color_space {
+        ColorSpace::Srgb | ColorSpace::DisplayP3 => 1,
+        ColorSpace::Rec601Pal => 3,
+        ColorSpace::Rec2100Pq => 4,
+        ColorSpace::Rec2100Hlg => 5,
+        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 => 2,
+        _ => 0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +625,10 @@ struct Uniforms {
     kb: f32,
     sample_count: f32,
     max_column_samples: f32,
+    scale_kind: u32,
+    transfer_kind: u32,
+    scale_max_nits: f32,
+    _padding: u32,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -580,6 +637,64 @@ struct Uniforms {
 
 fn signal_bin(value: f32) -> u32 {
     return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
+}
+
+fn pq_nits(encoded: f32) -> f32 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let signal = pow(clamp(encoded, 0.0, 1.0), 1.0 / m2);
+    let numerator = max(signal - c1, 0.0);
+    return 10000.0 * pow(numerator / (c2 - c3 * signal), 1.0 / m1);
+}
+
+fn hlg_scene(encoded: f32) -> f32 {
+    let value = clamp(encoded, 0.0, 1.0);
+    if value <= 0.5 {
+        return value * value / 3.0;
+    }
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.55991073;
+    return (exp((value - c) / a) + b) / 12.0;
+}
+
+fn srgb_linear(encoded: f32) -> f32 {
+    let value = clamp(encoded, 0.0, 1.0);
+    return select(pow((value + 0.055) / 1.055, 2.4), value / 12.92, value <= 0.04045);
+}
+
+fn display_nits(rgb: vec3<f32>) -> vec3<f32> {
+    let value = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    if uniforms.transfer_kind == 1u {
+        return vec3<f32>(srgb_linear(value.r), srgb_linear(value.g), srgb_linear(value.b)) * 100.0;
+    }
+    if uniforms.transfer_kind == 2u {
+        return pow(value, vec3<f32>(2.4)) * 100.0;
+    }
+    if uniforms.transfer_kind == 3u {
+        return pow(value, vec3<f32>(2.8)) * 100.0;
+    }
+    if uniforms.transfer_kind == 4u {
+        return vec3<f32>(pq_nits(value.r), pq_nits(value.g), pq_nits(value.b));
+    }
+    if uniforms.transfer_kind == 5u {
+        let scene = vec3<f32>(hlg_scene(value.r), hlg_scene(value.g), hlg_scene(value.b));
+        let scene_luma = dot(scene, vec3<f32>(uniforms.kr, 1.0 - uniforms.kr - uniforms.kb, uniforms.kb));
+        return scene * (1000.0 * pow(max(scene_luma, 0.0), 0.2));
+    }
+    return vec3<f32>(0.0);
+}
+
+fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
+    if uniforms.scale_kind == 0u {
+        return vec4<f32>(rgb, encoded_luma);
+    }
+    let nits = display_nits(rgb);
+    let luma_nits = dot(nits, vec3<f32>(uniforms.kr, 1.0 - uniforms.kr - uniforms.kb, uniforms.kb));
+    return vec4<f32>(nits, luma_nits) / uniforms.scale_max_nits;
 }
 
 const INVALID_KEY: u32 = 0xffffffffu;
@@ -653,10 +768,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let kg = 1.0 - uniforms.kr - uniforms.kb;
         let y = uniforms.kr * rgb.r + kg * rgb.g + uniforms.kb * rgb.b;
-        let rb = signal_bin(rgb.r);
-        let gb = signal_bin(rgb.g);
-        let bb = signal_bin(rgb.b);
-        let yb = signal_bin(y);
+        let scaled = scaled_components(rgb, y);
+        let rb = signal_bin(scaled.r);
+        let gb = signal_bin(scaled.g);
+        let bb = signal_bin(scaled.b);
+        let yb = signal_bin(scaled.a);
         red_histogram[i] = uniforms.histogram_offset + rb;
         green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
         blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
@@ -710,6 +826,10 @@ struct Uniforms {
     kb: f32,
     sample_count: f32,
     max_column_samples: f32,
+    scale_kind: u32,
+    transfer_kind: u32,
+    scale_max_nits: f32,
+    _padding: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> counts: array<atomic<u32>>;
@@ -763,7 +883,7 @@ mod tests {
     use super::*;
     use crate::GpuContext;
     use mondrian_core::{
-        compute_program_color_scopes_rgba8, compute_program_color_scopes_rgba_f32,
+        compute_program_color_scopes_rgba8_with_scale, compute_program_color_scopes_rgba_f32,
     };
 
     #[test]
@@ -831,8 +951,15 @@ mod tests {
             wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
         );
         let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
-        let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::Luma, 16, 64)
-            .expect("scope request");
+        let request = GpuProgramScopesRequest::with_controls(
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            ProgramScopeScale::Nits1000,
+            ProgramScopesTap::ProgramOutput,
+            16,
+            64,
+        )
+        .expect("nits scope request");
         let mut runtime = GpuProgramScopesRuntime::default();
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("program-scopes-test-encoder"),
@@ -864,12 +991,13 @@ mod tests {
         context.queue.submit(std::iter::once(encoder.finish()));
         let bytes = map_test_readback(&context.device, &readback);
         let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
-        let cpu = compute_program_color_scopes_rgba8(
+        let cpu = compute_program_color_scopes_rgba8_with_scale(
             &pixels,
             2,
             2,
             ColorSpace::Rec709,
             WaveformMode::Luma,
+            ProgramScopeScale::Nits1000,
             16,
         )
         .expect("CPU scopes reference");

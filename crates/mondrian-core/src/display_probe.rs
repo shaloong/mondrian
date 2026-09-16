@@ -14,7 +14,9 @@
 //! 3. **Fail-closed for unknown capabilities.** If the platform cannot provide
 //!    ICC/HDR data, the probe returns structured `Unknown`/`Unsupported` statuses.
 
-use crate::color_models::{DisplayManagementPolicy, MonitorProfileReference, ViewerDisplayMode};
+use crate::color_models::{
+    DisplayCalibrationPolicy, DisplayManagementPolicy, MonitorOutputIntent, ViewerDisplayMode,
+};
 use crate::display_contract::*;
 use crate::types::ColorSpace;
 
@@ -71,6 +73,7 @@ impl FakeDisplayProbe {
     pub fn sdr_pass() -> Self {
         Self {
             snapshot: DisplayOutputSnapshot {
+                display_management_policy: DisplayManagementPolicy::default(),
                 display_id: DisplayId {
                     name: Some("Fake Monitor".to_owned()),
                     position: (0, 0),
@@ -197,10 +200,14 @@ impl FakeDisplayProbe {
 impl PlatformDisplayProbe for FakeDisplayProbe {
     fn current_display_snapshot(
         &self,
-        _policy: &DisplayManagementPolicy,
-        _output_color_space: ColorSpace,
+        policy: &DisplayManagementPolicy,
+        output_color_space: ColorSpace,
     ) -> DisplayOutputSnapshot {
-        self.snapshot.clone()
+        let mut snapshot = self.snapshot.clone();
+        snapshot.display_management_policy = policy.clone();
+        snapshot.requested_viewer_mode = format!("{:?}", policy.viewer_mode());
+        snapshot.requested_output_color_space = format!("{output_color_space:?}");
+        snapshot
     }
 
     fn supports_os_icc_discovery(&self) -> bool {
@@ -225,23 +232,25 @@ pub fn resolve_monitor_profile_status(
     policy: &DisplayManagementPolicy,
     platform_supports_icc: bool,
 ) -> MonitorProfileStatus {
-    match &policy.monitor_profile {
-        MonitorProfileReference::MatchOutputColorSpace => MonitorProfileStatus::NotRequested,
-        MonitorProfileReference::ColorSpace(cs) => MonitorProfileStatus::ManagedColorSpace {
-            color_space: *cs,
-            source: MonitorProfileSource::UserConfigured,
+    match policy.calibration() {
+        DisplayCalibrationPolicy::Disabled => match policy.monitor_output() {
+            MonitorOutputIntent::ColorSpace(cs) => MonitorProfileStatus::ManagedColorSpace {
+                color_space: *cs,
+                source: MonitorProfileSource::UserConfigured,
+            },
+            MonitorOutputIntent::MatchProgramOutput
+            | MonitorOutputIntent::OcioDisplayView { .. } => MonitorProfileStatus::NotRequested,
         },
-        MonitorProfileReference::OcioDisplay { display: _ } => {
-            MonitorProfileStatus::ManagedColorSpace {
-                color_space: ColorSpace::Rec709,
-                source: MonitorProfileSource::OcioConfig,
-            }
-        }
-        MonitorProfileReference::IccProfile { profile_id } => {
+        DisplayCalibrationPolicy::OsDefault | DisplayCalibrationPolicy::IccProfilePath(_) => {
+            let profile_reference = match policy.calibration() {
+                DisplayCalibrationPolicy::OsDefault => "os-default".to_owned(),
+                DisplayCalibrationPolicy::IccProfilePath(path) => path.clone(),
+                DisplayCalibrationPolicy::Disabled => unreachable!("matched above"),
+            };
             if !platform_supports_icc {
                 MonitorProfileStatus::IccProfileUnsupported {
                     feature_code: "os_icc_profile".to_owned(),
-                    profile_path: Some(profile_id.clone()),
+                    profile_path: Some(profile_reference),
                     reason: "OS ICC profile discovery not implemented".to_owned(),
                 }
             } else {
@@ -529,12 +538,11 @@ mod tests {
 
     #[test]
     fn resolve_monitor_profile_icc_unsupported_on_platform() {
-        let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::IccProfile {
-                profile_id: "test.icc".to_owned(),
-            },
-            ..Default::default()
-        };
+        let policy = DisplayManagementPolicy::default()
+            .with_calibration(DisplayCalibrationPolicy::IccProfilePath(
+                std::env::temp_dir().join("test.icc").display().to_string(),
+            ))
+            .expect("absolute ICC path");
         let status = resolve_monitor_profile_status(&policy, false);
         match &status {
             MonitorProfileStatus::IccProfileUnsupported { feature_code, .. } => {
@@ -546,10 +554,9 @@ mod tests {
 
     #[test]
     fn resolve_monitor_profile_color_space() {
-        let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
-            ..Default::default()
-        };
+        let policy = DisplayManagementPolicy::default()
+            .with_monitor_output(MonitorOutputIntent::ColorSpace(ColorSpace::DisplayP3))
+            .expect("Display P3 monitor target");
         let status = resolve_monitor_profile_status(&policy, false);
         assert_eq!(
             status,

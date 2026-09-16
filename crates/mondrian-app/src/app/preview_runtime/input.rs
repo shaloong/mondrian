@@ -13,10 +13,10 @@ use mondrian_core::{
     DisplayManagementPolicy, FramePosition, ProjectColorEnvironment, ProjectSettings,
 };
 use mondrian_editor_state::AuthoringSessionId;
-use mondrian_media::ProxyConfig;
+use mondrian_media::{PreviewPlaybackDirection, ProxyConfig};
 use mondrian_playback::{
     FrameDemand, FrameDemandIdentity, FramePresentationQuality, FramePresentationTicket,
-    PlaybackEpoch, PreviewResolutionScale, TransportState,
+    PlaybackEpoch, PlaybackRate, PreviewResolutionScale, TransportState,
 };
 use mondrian_renderer::PreparedVisualAuthorSnapshotIdentity;
 use mondrian_timeline::sequence::{Sequence, SequenceCollection};
@@ -34,6 +34,16 @@ pub(crate) enum PreviewFrameExecutionPurpose {
     Current,
     /// Prepare the immediate successor without presentation authority.
     SuccessorPreparation,
+    /// Prepare CPU-side work for a farther bounded playback lookahead.
+    ///
+    /// This purpose cannot mutate the immediate-successor publication slot.
+    /// A Presentation Adapter may retain the resulting ticketless frame only
+    /// until that exact coordinate becomes the immediate successor.
+    LookaheadPreparation,
+    /// Prepare backend objects for one farther cold source activation without
+    /// retaining its frame evaluation in the ordinary four-entry LRU.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    ColdActivationPreparation,
 }
 
 /// Narrow command seam used when Preview source resolution discovers missing
@@ -202,11 +212,13 @@ impl PreviewFrameDemandSnapshot {
 pub(crate) struct PreviewTransportSnapshot {
     state: TransportState,
     position: FramePosition,
+    rate: PlaybackRate,
     epoch: PlaybackEpoch,
     quality_revision: u64,
     runtime_scale: PreviewResolutionScale,
     seek_source: TimelineSeekSource,
     demand: Option<PreviewFrameDemandSnapshot>,
+    priming_work_deadline: Option<Instant>,
     purpose: PreviewFrameExecutionPurpose,
 }
 
@@ -215,6 +227,7 @@ impl PreviewTransportSnapshot {
     pub(crate) const fn new(
         state: TransportState,
         position: FramePosition,
+        rate: PlaybackRate,
         epoch: PlaybackEpoch,
         quality_revision: u64,
         runtime_scale: PreviewResolutionScale,
@@ -224,11 +237,13 @@ impl PreviewTransportSnapshot {
         Self {
             state,
             position,
+            rate,
             epoch,
             quality_revision,
             runtime_scale,
             seek_source,
             demand,
+            priming_work_deadline: None,
             purpose: PreviewFrameExecutionPurpose::Current,
         }
     }
@@ -238,12 +253,45 @@ impl PreviewTransportSnapshot {
         self.position.frame
     }
 
+    /// Exact adjacent Timeline frame in the active playback direction.
+    pub(crate) const fn adjacent_playback_frame(self) -> Option<i64> {
+        if self.rate.is_forward() {
+            self.position.frame.checked_add(1)
+        } else {
+            self.position.frame.checked_sub(1)
+        }
+    }
+
+    /// Exact bounded future Timeline frame in the active playback direction.
+    pub(crate) fn playback_frame_at_offset(self, offset: usize) -> Option<i64> {
+        let offset = i64::try_from(offset).ok()?;
+        if self.rate.is_forward() {
+            self.position.frame.checked_add(offset)
+        } else {
+            self.position.frame.checked_sub(offset)
+        }
+    }
+
+    /// Media-session traversal direction without exposing Playback rate math.
+    pub(crate) const fn playback_direction(self) -> PreviewPlaybackDirection {
+        if self.rate.is_forward() {
+            PreviewPlaybackDirection::Forward
+        } else {
+            PreviewPlaybackDirection::Reverse
+        }
+    }
+
     /// Whether the Playback decoder family is authoritative.
     pub(crate) const fn is_playing(self) -> bool {
         matches!(
             self.state,
             TransportState::Priming | TransportState::Playing | TransportState::Recovering
         )
+    }
+
+    /// Whether the Engine reached the authored terminal coordinate naturally.
+    pub(crate) const fn is_ended(self) -> bool {
+        matches!(self.state, TransportState::Ended)
     }
 
     /// Whether startup preroll currently holds the Clock Master.
@@ -281,6 +329,25 @@ impl PreviewTransportSnapshot {
         self.demand
     }
 
+    /// Bind a read-only work horizon; this never creates presentation authority.
+    pub(crate) const fn with_priming_work_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.priming_work_deadline = deadline;
+        self
+    }
+
+    /// Original active Priming horizon, including after current presentation.
+    pub(crate) const fn priming_work_deadline(self) -> Option<Instant> {
+        self.priming_work_deadline
+    }
+
+    /// Whether optional media may start without preempting the initial picture.
+    /// A consumed ticket is necessary but is never itself a media Ready proof.
+    pub(crate) fn allows_future_media_admission(self, observed_at: Instant) -> bool {
+        !self.is_priming()
+            || (self.demand.is_none()
+                && self.priming_work_deadline.is_some_and(|deadline| observed_at < deadline))
+    }
+
     /// Whether this snapshot describes bounded immediate-successor preparation.
     pub(crate) const fn is_successor_preparation(self) -> bool {
         matches!(
@@ -289,13 +356,51 @@ impl PreviewTransportSnapshot {
         )
     }
 
+    /// Whether this snapshot is ticketless bounded playback preparation.
+    pub(crate) const fn is_speculative_preparation(self) -> bool {
+        matches!(
+            self.purpose,
+            PreviewFrameExecutionPurpose::SuccessorPreparation
+                | PreviewFrameExecutionPurpose::LookaheadPreparation
+                | PreviewFrameExecutionPurpose::ColdActivationPreparation
+        )
+    }
+
+    /// Whether this snapshot may only warm CPU-side work for a farther frame.
+    pub(crate) const fn is_lookahead_preparation(self) -> bool {
+        matches!(
+            self.purpose,
+            PreviewFrameExecutionPurpose::LookaheadPreparation
+                | PreviewFrameExecutionPurpose::ColdActivationPreparation
+        )
+    }
+
+    /// Whether this request is the ephemeral farther cold-source prewarm.
+    pub(crate) const fn is_cold_activation_preparation(self) -> bool {
+        matches!(
+            self.purpose,
+            PreviewFrameExecutionPurpose::ColdActivationPreparation
+        )
+    }
+
     fn for_successor_preparation(mut self, frame: i64) -> Option<Self> {
-        if !self.is_playing() || frame != self.position.frame.checked_add(1)? {
+        if !self.is_playing() || frame != self.adjacent_playback_frame()? {
             return None;
         }
         self.position = FramePosition::new(frame, self.position.time_base);
         self.demand = None;
         self.purpose = PreviewFrameExecutionPurpose::SuccessorPreparation;
+        Some(self)
+    }
+
+    fn for_lookahead_preparation(mut self, offset: usize) -> Option<Self> {
+        if !self.is_playing() || offset < 2 {
+            return None;
+        }
+        let frame = self.playback_frame_at_offset(offset)?;
+        self.position = FramePosition::new(frame, self.position.time_base);
+        self.demand = None;
+        self.purpose = PreviewFrameExecutionPurpose::LookaheadPreparation;
         Some(self)
     }
 }
@@ -366,9 +471,39 @@ impl<'a> PreviewFrameExecutionRequest<'a> {
         mut snapshot: PreviewExecutionSnapshot<'a>,
         proxy_demands: &'a dyn PreviewProxyDemandSink,
     ) -> Option<Self> {
-        let successor = snapshot.transport().current_frame().checked_add(1)?;
+        let successor = snapshot.transport().adjacent_playback_frame()?;
         snapshot.transport = snapshot.transport.for_successor_preparation(successor)?;
         Some(Self { snapshot, proxy_demands })
+    }
+
+    /// Bind bounded ticketless CPU lookahead beyond the immediate successor.
+    pub(crate) fn lookahead(
+        mut snapshot: PreviewExecutionSnapshot<'a>,
+        proxy_demands: &'a dyn PreviewProxyDemandSink,
+        offset: usize,
+    ) -> Option<Self> {
+        snapshot.transport = snapshot.transport.for_lookahead_preparation(offset)?;
+        Some(Self { snapshot, proxy_demands })
+    }
+
+    /// Bind one exact farther playback coordinate already discovered by the
+    /// bounded cold-activation planner.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    pub(crate) fn lookahead_frame(
+        snapshot: PreviewExecutionSnapshot<'a>,
+        proxy_demands: &'a dyn PreviewProxyDemandSink,
+        frame: i64,
+    ) -> Option<Self> {
+        let transport = snapshot.transport();
+        let distance = match transport.playback_direction() {
+            PreviewPlaybackDirection::Forward => frame.checked_sub(transport.current_frame())?,
+            PreviewPlaybackDirection::Reverse => transport.current_frame().checked_sub(frame)?,
+        };
+        let offset = usize::try_from(distance).ok()?;
+        let mut request = Self::lookahead(snapshot, proxy_demands, offset)?;
+        request.snapshot.transport.purpose =
+            PreviewFrameExecutionPurpose::ColdActivationPreparation;
+        Some(request)
     }
 
     /// Immutable execution facts.

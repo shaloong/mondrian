@@ -12,13 +12,16 @@ use std::path::{Path, PathBuf};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_core::{Resolution, TimelineTime};
-use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
-    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
-    PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
-    ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
+use mondrian_core::{
+    PictureInterpretationOverrides, Resolution, ResolvedPictureGeometry, TimelineTime,
 };
+use mondrian_media::{
+    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
+    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
+    PreviewDecodeSource, PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract,
+    ProxyConfig, ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
+};
+use mondrian_renderer::{color::SourceColorModule, SourceFramePreparationIntent};
 use mondrian_timeline::sequence::{
     InputColorResolution, InputColorResolutionSource, MediaInputColorContext, ResolvedInputColor,
 };
@@ -72,6 +75,7 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) asset: &'a AssetRecord,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
+    pub(crate) picture_overrides: PictureInterpretationOverrides,
     pub(crate) source_sample: mondrian_core::SourceSampleTarget,
     pub(crate) input_color: &'a MediaInputColorContext,
     pub(crate) prefer_proxy: bool,
@@ -126,7 +130,7 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
     #[error("admitted media probe has no video stream")]
     SourceVideoStreamUnavailable,
     #[error(
-        "admitted video stream has no proven, internally consistent sampling contract; open Interpret Asset and set source color space/range before Preview"
+        "admitted video stream has no proven, internally consistent pixel format, bit depth and alpha contract; color/range overrides cannot repair unsupported decoder sampling"
     )]
     SourceSamplingUnavailable,
     #[error("source file revision changed after the admitted media probe")]
@@ -139,12 +143,18 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
     ProxyPathResolutionFailed { reason: String },
     #[error("physical Preview decode contract is invalid: {reason}")]
     DecodeContractInvalid { reason: String },
+    #[error("picture interpretation is unsupported: {reason}")]
+    PictureInterpretationUnsupported { reason: String },
+    #[error("data-texture media requires a proven RGB pixel format, got {pixel_format:?}")]
+    DataTextureRequiresRgb {
+        pixel_format: mondrian_core::PixelFormat,
+    },
 }
 
 /// Exhaustive result of adapting one asset into Preview execution semantics.
 #[derive(Debug, Clone)]
 pub(crate) enum PreviewMediaSourceOutcome {
-    Ready(ResolvedPreviewMediaSource),
+    Ready(Box<ResolvedPreviewMediaSource>),
     ColorRejected(RejectedPreviewMediaSource),
     Unavailable(UnavailablePreviewMediaSource),
 }
@@ -193,9 +203,36 @@ pub(crate) fn resolve_preview_media_source(
         executable_color_space,
         request.input_color,
     );
-    let input_color_space = match input_color_resolution.resolved {
-        ResolvedInputColor::Color(color_space) => color_space,
-        ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
+    let input_video_range = if primary_video.camera_raw.is_some() {
+        DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
+    } else {
+        DecodedVideoRangeContract::from_interpretation(
+            request.asset.interpretation.range,
+            primary_video.color_range,
+        )
+    };
+    let (mut source_color, mut preparation_intent) = match input_color_resolution.resolved {
+        ResolvedInputColor::Color(color_space) => (
+            PreviewSourceColorContract::new(color_space, input_video_range),
+            SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
+                request.input_color,
+            )),
+        ),
+        ResolvedInputColor::Data => {
+            if !proven_sampling.pixel_format.is_rgb() {
+                return unavailable(
+                    &request,
+                    PreviewMediaSourceUnavailableReason::DataTextureRequiresRgb {
+                        pixel_format: proven_sampling.pixel_format,
+                    },
+                );
+            }
+            (
+                PreviewSourceColorContract::data_texture(input_video_range),
+                SourceFramePreparationIntent::data_texture(request.input_color.working_color_space),
+            )
+        }
+        ResolvedInputColor::Rejected => {
             return PreviewMediaSourceOutcome::ColorRejected(RejectedPreviewMediaSource {
                 asset_id: request.asset.id,
                 path: source_path.to_path_buf(),
@@ -204,13 +241,6 @@ pub(crate) fn resolve_preview_media_source(
             });
         }
     };
-    let mut source_color = PreviewSourceColorContract::new(
-        input_color_space,
-        DecodedVideoRangeContract::from_interpretation(
-            request.asset.interpretation.range,
-            primary_video.color_range,
-        ),
-    );
     if input_color_resolution.source == InputColorResolutionSource::MissingPolicyAssumeRec709 {
         // "Assume Rec.709" must authorize the complete YUV-to-RGB
         // interpretation. Binding BT.709 here makes the fallback explicit in
@@ -218,8 +248,30 @@ pub(crate) fn resolve_preview_media_source(
         source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
     }
     let source_has_alpha = proven_sampling.has_alpha;
+    let source_resolution = Resolution {
+        width: primary_video.width,
+        height: primary_video.height,
+    };
+    let picture_geometry = match ResolvedPictureGeometry::resolve_with_overrides(
+        source_resolution,
+        primary_video.picture,
+        request.picture_overrides,
+    ) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            return unavailable(
+                &request,
+                PreviewMediaSourceUnavailableReason::PictureInterpretationUnsupported {
+                    reason: error.to_string(),
+                },
+            );
+        }
+    };
     let resolved_path = match resolve_preview_media_decode_path(
-        request.prefer_proxy,
+        request.prefer_proxy
+            && !source_color.is_data_texture()
+            && primary_video.camera_raw.is_none()
+            && picture_geometry.scan() == mondrian_core::PictureScan::Progressive,
         source_has_alpha,
         source_path,
         primary_video,
@@ -242,12 +294,19 @@ pub(crate) fn resolve_preview_media_source(
         source_fingerprint,
     } = resolved_path;
 
-    let source_resolution = Resolution {
-        width: primary_video.width,
-        height: primary_video.height,
-    };
-    let payload_requirement = if request.cpu_working_required {
+    let decode_source =
+        if request.asset.kind == AssetKind::StillImage && decode_source.path() == source_path {
+            decode_source.with_still_image_source()
+        } else {
+            decode_source
+        };
+
+    let field_processing =
+        mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan());
+    let payload_requirement = if request.cpu_working_required || source_color.is_data_texture() {
         PreviewDecodePayloadRequirement::CpuAddressable
+    } else if field_processing.requires_cpu_decode() {
+        PreviewDecodePayloadRequirement::CpuYuvAllowed
     } else {
         PreviewDecodePayloadRequirement::NativeAllowed
     };
@@ -259,6 +318,7 @@ pub(crate) fn resolve_preview_media_source(
         payload_requirement,
         hardware_request,
         request.representation_quality,
+        source_color,
     ) {
         Ok(representation) => representation,
         Err(error) => {
@@ -270,12 +330,38 @@ pub(crate) fn resolve_preview_media_source(
             );
         }
     };
-    let decode = match PreviewDecodeKey::new(
-        decode_source,
-        request.source_sample,
-        representation,
-        source_color,
-    ) {
+    if representation.is_native_surface() {
+        // A decoder-native surface reaches the renderer without a CPU raster.
+        // Bind the matching GPU OCIO input intent into the same immutable media
+        // key; carrying the CPU intent here would admit native decode and then
+        // fail only after the Viewer owns the physical D3D12/Metal surface.
+        preparation_intent = SourceFramePreparationIntent::ColorManaged(
+            SourceColorModule::gpu_intent(request.input_color),
+        );
+    }
+    let decode_result = match primary_video.camera_raw.as_ref() {
+        Some(raw) => mondrian_media::CameraRawDecodeIntent::new(
+            raw.adapter,
+            request.asset.interpretation.camera_raw,
+        )
+        .and_then(|intent| {
+            PreviewDecodeKey::new_camera_raw(
+                decode_source,
+                request.source_sample,
+                representation,
+                source_color,
+                intent,
+            )
+        }),
+        None => PreviewDecodeKey::new(
+            decode_source,
+            request.source_sample,
+            representation,
+            source_color,
+        )
+        .and_then(|key| key.with_field_processing(field_processing)),
+    };
+    let decode = match decode_result {
         Ok(decode) => decode,
         Err(error) => {
             return unavailable(
@@ -290,20 +376,22 @@ pub(crate) fn resolve_preview_media_source(
         asset_id: request.asset.id,
         decode,
         source_resolution,
+        picture_geometry,
         alpha_interpretation: request.alpha_interpretation,
-        working_color_space: request.input_color.working_color_space,
-        input_tone_map: request.input_color.input_tone_map,
-        engine: request.input_color.engine.clone(),
+        preparation_intent,
     };
 
-    let proxy_generation =
-        proxy_generation_intent(&request, source_path, path_resolution, source_fingerprint);
-    PreviewMediaSourceOutcome::Ready(ResolvedPreviewMediaSource {
+    let proxy_generation = (!source_color.is_data_texture() && primary_video.camera_raw.is_none())
+        .then(|| {
+            proxy_generation_intent(&request, source_path, path_resolution, source_fingerprint)
+        })
+        .flatten();
+    PreviewMediaSourceOutcome::Ready(Box::new(ResolvedPreviewMediaSource {
         key,
         path_resolution,
         input_color_resolution,
         proxy_generation,
-    })
+    }))
 }
 
 /// Resolve the exact input-color decision shared by Preview evaluation paths.
@@ -339,7 +427,7 @@ fn resolve_preview_media_decode_path(
     let Some(proxy_color) = proxy_color else {
         return source_decode_path(source_path, source_fingerprint, primary_video);
     };
-    if proxy_color.source_color_space() != source_color.color_space
+    if Some(proxy_color.source_color_space()) != source_color.color_space()
         || proxy_color.source_range() != source_color.range.baseline()
     {
         return source_decode_path_with_resolution(

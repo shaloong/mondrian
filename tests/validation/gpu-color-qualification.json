@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "id": "windows-gpu-color-v1",
+  "execution_policy": "sealed-required",
+  "policy_environment": "MONDRIAN_GPU_COLOR_QUALIFICATION_POLICY",
+  "required_runner_labels": [
+    "self-hosted",
+    "Windows",
+    "X64",
+    "mondrian-reference",
+    "mondrian-gpu-color"
+  ],
+  "required_adapter": {
+    "backend": "Dx12",
+    "device_type": "DiscreteGpu",
+    "machine_inventory_name_match_required": true,
+    "driver_identity_required": true,
+    "same_adapter_across_reports_required": true
+  },
+  "build_timeout_seconds": 3600,
+  "gates": [
+    {
+      "id": "output-smoke",
+      "target": "lib",
+      "test": "color_stage::tests::gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device",
+      "ignored": true,
+      "timeout_seconds": 600,
+      "report": {
+        "environment": "MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT",
+        "file": "output-smoke.jsonl",
+        "schema_path": "health_report.schema_version",
+        "schema_version": 3,
+        "scenario": "renderer_gpu_output_boundary"
+      }
+    },
+    {
+      "id": "standard-all-views-accuracy",
+      "target": "lib",
+      "test": "color_stage::tests::gpu_output_boundary_runtime_matches_cpu_for_all_standard_views_on_real_wgpu_device",
+      "ignored": false,
+      "timeout_seconds": 600
+    },
+    {
+      "id": "standard-rec709-accuracy",
+      "target": "lib",
+      "test": "color_stage::tests::gpu_standard_rec709_view_matches_cpu_rgba8_on_real_wgpu_device",
+      "ignored": false,
+      "timeout_seconds": 600
+    },
+    {
+      "id": "standard-pq-delta-e-itp",
+      "target": "lib",
+      "test": "color_stage::tests::gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device",
+      "ignored": false,
+      "timeout_seconds": 600
+    },
+    {
+      "id": "aces-pq-delta-e-itp",
+      "target": "lib",
+      "test": "color_stage::tests::gpu_aces_pq_intent_meets_delta_e_itp_budget_on_real_wgpu_device",
+      "ignored": false,
+      "timeout_seconds": 600
+    },
+    {
+      "id": "native-yuv-color-accuracy",
+      "target": "lib",
+      "test": "native_video::yuv_decode::tests::nv12_shader_decodes_limited_range_on_real_wgpu_device",
+      "ignored": false,
+      "timeout_seconds": 600
+    },
+    {
+      "id": "standard-view-4k-performance",
+      "target": "integration",
+      "integration_test": "color_view_gpu_perf",
+      "test": "standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2",
+      "ignored": true,
+      "timeout_seconds": 1200,
+      "report": {
+        "environment": "MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT",
+        "file": "standard-view-4k.jsonl",
+        "schema_path": "schema_version",
+        "schema_version": 4,
+        "scenario": "renderer_color_view_4k_gpu_timestamp"
+      }
+    },
+    {
+      "id": "standard-input-4k-performance",
+      "target": "integration",
+      "integration_test": "color_view_gpu_perf",
+      "test": "standard_input_transforms_4k_gpu_timestamp_meet_budget",
+      "ignored": true,
+      "timeout_seconds": 1200,
+      "report": {
+        "environment": "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT",
+        "file": "standard-input-4k.jsonl",
+        "schema_path": "schema_version",
+        "schema_version": 1,
+        "scenario": "renderer_color_transform_4k_gpu_timestamp"
+      }
+    }
+  ],
+  "acceptance": {
+    "all_gates_must_run": true,
+    "all_gate_processes_must_pass": true,
+    "skipped_reports_forbidden": true,
+    "report_hashes_required": true,
+    "source_sha_required": true,
+    "clean_machine_report_required": true
+  }
+}

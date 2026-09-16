@@ -179,7 +179,7 @@ fn playback_cursor_work_preserves_in_flight_locality_after_deadline() {
         job.access_mode = access_mode;
         job.deadline_at = Some(Instant::now() + Duration::from_secs(1));
         assert_eq!(
-            frame_work_request(job, mondrian_playback::FrameWorkResourceScope::Shared)
+            frame_work_request(job, mondrian_playback::FrameWorkResourceScope::Shared, None,)
                 .in_flight_deadline_policy,
             expected,
             "unexpected in-flight deadline policy for {priority:?}/{access_mode:?}"
@@ -1484,7 +1484,6 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     let promoted = test_media_key(1);
     let other_prefetch = test_media_key(2);
     let promoted_payload = test_media_job(promoted.clone(), MediaPreviewRequestPriority::Prefetch);
-    let original_enqueued_at = promoted_payload.enqueued_at;
 
     assert_eq!(
         sender.enqueue(promoted_payload),
@@ -1544,9 +1543,9 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(promoted_job.generation, 7);
     assert_eq!(promoted_job.key.source_sample(), promoted.source_sample());
-    assert_eq!(
-        promoted_job.enqueued_at, original_enqueued_at,
-        "metadata promotion must preserve the queued execution payload"
+    assert!(
+        promoted_job.enqueued_at >= promoted_at,
+        "queue evidence must begin at the promoted current binding"
     );
     assert_eq!(promoted_job.deadline_at, None);
     assert_eq!(promoted_job.demand_identity, Some(demand_identity));
@@ -1571,7 +1570,6 @@ fn media_preview_job_queue_promote_refreshes_current_generation_without_priority
     let key = test_media_key(1);
     let original_payload =
         test_media_job_with_generation(key.clone(), 2, MediaPreviewRequestPriority::Current);
-    let original_enqueued_at = original_payload.enqueued_at;
 
     assert_eq!(
         sender.enqueue(original_payload),
@@ -1607,7 +1605,10 @@ fn media_preview_job_queue_promote_refreshes_current_generation_without_priority
     assert_eq!(job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
     assert_eq!(job.generation, 5);
-    assert_eq!(job.enqueued_at, original_enqueued_at);
+    assert!(
+        job.enqueued_at >= refreshed_at,
+        "queue evidence must begin at the refreshed generation binding"
+    );
     assert_eq!(job.deadline_at, refreshed_deadline);
 }
 
@@ -1873,6 +1874,43 @@ fn media_preview_job_queue_clear_and_close_release_workers() {
 }
 
 #[test]
+fn media_receiver_acquisition_preserves_admission_until_the_actual_sender_closes() {
+    let scheduler = MediaPreviewScheduler::default();
+    let (sender, initial_receiver) = scheduler.job_queue();
+    drop(initial_receiver);
+    let receiver = scheduler.job_receiver();
+    assert!(matches!(
+        sender.enqueue(test_media_job(
+            test_media_key(31),
+            MediaPreviewRequestPriority::Prefetch
+        )),
+        MediaPreviewJobEnqueueStatus::Enqueued { .. }
+    ));
+    assert!(receiver.recv().is_some());
+    // A receiver is not an admission owner, including one dropped at construction.
+    drop(scheduler.job_receiver());
+    assert!(matches!(
+        sender.enqueue(test_media_job(
+            test_media_key(32),
+            MediaPreviewRequestPriority::Prefetch
+        )),
+        MediaPreviewJobEnqueueStatus::Enqueued { .. }
+    ));
+    assert!(receiver.recv().is_some());
+    drop(sender);
+    assert!(receiver.recv().is_none());
+    assert_eq!(
+        scheduler.request(
+            test_media_key(33),
+            scheduler.begin_generation(),
+            MediaPreviewRequestPriority::Prefetch,
+            PreviewDecodeAccessMode::PlaybackCursor
+        ),
+        MediaPreviewRequestStatus::Closed
+    );
+}
+
+#[test]
 fn media_preview_worker_count_reserves_cpu_capacity() {
     assert_eq!(media_preview_worker_count_for(0), 1);
     assert_eq!(media_preview_worker_count_for(1), 1);
@@ -1881,8 +1919,8 @@ fn media_preview_worker_count_reserves_cpu_capacity() {
     assert_eq!(media_preview_worker_count_for(7), 2);
     assert_eq!(media_preview_worker_count_for(8), 2);
     assert_eq!(media_preview_worker_count_for(11), 2);
-    assert_eq!(media_preview_worker_count_for(12), 2);
-    assert_eq!(media_preview_worker_count_for(32), 2);
+    assert_eq!(media_preview_worker_count_for(12), 3);
+    assert_eq!(media_preview_worker_count_for(32), 3);
 }
 
 #[test]
@@ -1906,7 +1944,7 @@ fn media_preview_worker_lane_reserves_playback_only_when_parallel() {
     );
     assert_eq!(
         media_preview_worker_lane(2, 3),
-        MediaPreviewWorkerLane::NonPlayback
+        MediaPreviewWorkerLane::Still
     );
 }
 

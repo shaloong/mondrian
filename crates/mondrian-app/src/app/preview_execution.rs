@@ -11,11 +11,21 @@ use mondrian_core::{ExecutionCancellationToken, WorkingColorSpace};
 use mondrian_media::{DecodedVideoSurfaceFormat, PreviewDecodeExecutionPath};
 use mondrian_playback::{FramePresentationQuality, PlaybackEpoch};
 use mondrian_renderer::{
-    HeterogeneousGpuContinuationBinding, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    color::ProgramOutputBoundary, HeterogeneousGpuContinuationBinding, RenderMonitorAdaptation,
     ViewerGpuExecutionLayer, ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuInput,
 };
 use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
+
+/// Maximum number of CPU-complete speculative Viewer frames retained without
+/// consuming GPU submission or presentation-output capacity.
+///
+/// Five lookahead coordinates protect the complete six-frame Priming prefix
+/// beyond the separately submitted immediate successor. The sixth slot lets
+/// that exact immediate successor wait for GPU admission without evicting the
+/// horizon. This ownership capacity does not relax qualification's independent
+/// four-frame maximum recovery displacement.
+pub(crate) const PREVIEW_GPU_CPU_STAGING_CAPACITY: usize = 6;
 
 /// Strong process-local semantic identity used by Preview cache and
 /// presentation-registration keys.
@@ -207,6 +217,31 @@ impl PreviewOutputKey {
         )
     }
 
+    /// Derive the final Viewer presentation identity for active signal warnings.
+    ///
+    /// Disabled monitoring preserves the existing identity, while the tap and
+    /// complete warning settings distinguish every presentation-only raster.
+    pub(crate) fn with_signal_monitoring(
+        &self,
+        tap: mondrian_core::ProgramScopesTap,
+        settings: mondrian_core::SignalMonitoringSettings,
+    ) -> Self {
+        if !settings.is_active() {
+            return self.clone();
+        }
+        let mut builder =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.signal-monitoring.v1");
+        self.plan_identity.hash(&mut builder);
+        tap.hash(&mut builder);
+        settings.hash(&mut builder);
+        Self::new(
+            self.sequence_id,
+            self.width,
+            self.height,
+            builder.finish_identity(),
+        )
+    }
+
     /// Bind a semantic plan identity to one concrete non-reusable execution.
     pub(crate) fn with_execution_nonce(&self, candidate_id: u64) -> Self {
         let mut builder =
@@ -264,16 +299,18 @@ pub(crate) struct PreviewGpuFrame {
     pub(crate) height: u32,
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) working_input: PreviewGpuWorkingInput,
-    pub(crate) program_output_boundary: RenderOutputColorBoundary,
+    pub(crate) program_output_boundary: ProgramOutputBoundary,
     pub(crate) monitor_adaptation: RenderMonitorAdaptation,
     candidate_id: u64,
+    generation: u64,
     purpose: PreviewGpuFramePurpose,
     playback_intent: PreviewPlaybackIntent,
+    presentation_quality: FramePresentationQuality,
     presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
     heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
     // Intentionally unread: dropping the complete submitted frame releases
-    // these demand-scoped Frame Store guards only after exact GPU completion.
-    _media_residency_protections: Vec<mondrian_playback::MediaFrameProtectionLease>,
+    // these physical Frame Store leases only after exact GPU completion.
+    _media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
     #[cfg_attr(not(test), allow(dead_code))]
     decode_execution: PreviewDecodeExecutionSummary,
 }
@@ -289,15 +326,17 @@ impl PreviewGpuFrame {
         height: u32,
         working_color_space: WorkingColorSpace,
         working_input: PreviewGpuWorkingInput,
-        program_output_boundary: RenderOutputColorBoundary,
+        program_output_boundary: ProgramOutputBoundary,
         monitor_adaptation: RenderMonitorAdaptation,
         candidate_id: u64,
+        generation: u64,
         purpose: PreviewGpuFramePurpose,
         playback_intent: PreviewPlaybackIntent,
+        presentation_quality: FramePresentationQuality,
         presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
         decode_execution: PreviewDecodeExecutionSummary,
         heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
-        media_residency_protections: Vec<mondrian_playback::MediaFrameProtectionLease>,
+        media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
     ) -> Self {
         Self {
             output_key,
@@ -310,11 +349,13 @@ impl PreviewGpuFrame {
             program_output_boundary,
             monitor_adaptation,
             candidate_id,
+            generation,
             purpose,
             playback_intent,
+            presentation_quality,
             presentation_ticket,
             heterogeneous_execution,
-            _media_residency_protections: media_residency_protections,
+            _media_residency_guards: media_residency_guards,
             decode_execution,
         }
     }
@@ -327,6 +368,11 @@ impl PreviewGpuFrame {
     /// Candidate identity used to correlate one execution attempt.
     pub(crate) const fn candidate_id(&self) -> u64 {
         self.candidate_id
+    }
+
+    /// Preview execution generation that proved this complete CPU candidate.
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Whether this output is ticketless immediate-successor preparation.
@@ -344,6 +390,39 @@ impl PreviewGpuFrame {
         &self,
     ) -> Option<mondrian_playback::FramePresentationTicket> {
         self.presentation_ticket
+    }
+
+    /// Convert an exact CPU-complete speculative candidate into the current
+    /// presentation candidate under a freshly captured Frame Demand.
+    ///
+    /// Callers must first prove generation and playback-intent equality. This
+    /// transition preserves the frame-local quality result and cannot invent
+    /// authority when the current request carries no demand.
+    pub(crate) fn bind_current_presentation(
+        &mut self,
+        presentation_ticket: mondrian_playback::FramePresentationTicket,
+    ) {
+        debug_assert!(self.is_successor_preparation());
+        debug_assert_eq!(
+            presentation_ticket.identity().epoch,
+            self.playback_intent.epoch
+        );
+        debug_assert_eq!(
+            presentation_ticket.identity().quality_revision,
+            self.playback_intent.quality_revision
+        );
+        debug_assert_eq!(
+            presentation_ticket.identity().target_frame,
+            self.playback_intent.frame
+        );
+        self.purpose = PreviewGpuFramePurpose::Current;
+        self.presentation_ticket = Some(presentation_ticket);
+    }
+
+    /// Frame-local quality used when a speculative candidate later acquires
+    /// the exact current presentation authority.
+    pub(crate) const fn presentation_quality(&self) -> FramePresentationQuality {
+        self.presentation_quality
     }
 
     /// Move the exact CPU-prefix completions into Viewer command recording.
@@ -374,6 +453,94 @@ impl PreviewGpuFrame {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn decode_execution(&self) -> PreviewDecodeExecutionSummary {
         self.decode_execution
+    }
+}
+
+/// Bounded Adapter-owned queue of CPU-complete speculative Viewer frames.
+///
+/// Entries are keyed by the complete playback intent. No entry is semantically
+/// prepared or physically published until an Adapter submits it. Replacing an
+/// exact intent and evicting the oldest excess entry both retire resources by
+/// ordinary RAII.
+pub(crate) struct PreviewGpuFrameStaging {
+    frames: Vec<PreviewGpuFrame>,
+}
+
+impl Default for PreviewGpuFrameStaging {
+    fn default() -> Self {
+        Self {
+            frames: Vec::with_capacity(PREVIEW_GPU_CPU_STAGING_CAPACITY),
+        }
+    }
+}
+
+impl PreviewGpuFrameStaging {
+    /// Retain one CPU-complete ticketless candidate inside the bounded horizon.
+    pub(crate) fn stage(&mut self, frame: Box<PreviewGpuFrame>) {
+        debug_assert!(frame.is_successor_preparation());
+        debug_assert!(frame.presentation_ticket().is_none());
+        let intent = frame.playback_intent();
+        if let Some(existing) =
+            self.frames.iter_mut().find(|existing| existing.playback_intent() == intent)
+        {
+            *existing = *frame;
+            return;
+        }
+        if self.frames.len() == PREVIEW_GPU_CPU_STAGING_CAPACITY {
+            self.frames.remove(0);
+        }
+        self.frames.push(*frame);
+    }
+
+    /// Take only the frame proved for this exact playback intent.
+    pub(crate) fn take_exact(
+        &mut self,
+        intent: PreviewPlaybackIntent,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        let index = self.frames.iter().position(|frame| frame.playback_intent() == intent)?;
+        Some(Box::new(self.frames.remove(index)))
+    }
+
+    /// Whether the queue already retains this complete intent.
+    pub(crate) fn contains(&self, intent: PreviewPlaybackIntent) -> bool {
+        self.frames.iter().any(|frame| frame.playback_intent() == intent)
+    }
+
+    /// Borrow staged frames in the order supplied by the existing transport
+    /// owner, without creating another retained scheduling snapshot.
+    pub(crate) fn ordered_frames<'a>(
+        &'a self,
+        expected: &'a [PreviewPlaybackIntent],
+    ) -> impl Iterator<Item = &'a PreviewGpuFrame> {
+        expected.iter().filter_map(|intent| {
+            self.frames.iter().find(|frame| frame.playback_intent() == *intent)
+        })
+    }
+
+    /// Retire entries outside the current bounded playback horizon.
+    pub(crate) fn retain_only(&mut self, expected: &[PreviewPlaybackIntent]) {
+        self.frames.retain(|frame| expected.contains(&frame.playback_intent()));
+    }
+
+    /// Release speculative owners invalidated by transport or quality changes.
+    /// Keep the exact current frame available for promotion at natural end.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    pub(crate) fn retain_current_generation(
+        &mut self,
+        current: PreviewPlaybackIntent,
+        playing: bool,
+    ) {
+        self.frames.retain(|frame| {
+            let intent = frame.playback_intent();
+            intent.epoch == current.epoch
+                && intent.quality_revision == current.quality_revision
+                && (intent.frame == current.frame || (playing && intent.frame > current.frame))
+        });
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn len(&self) -> usize {
+        self.frames.len()
     }
 }
 
@@ -664,13 +831,20 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// Invalidate every intent and bind the resulting empty lifecycle to a new
     /// execution generation.
     pub(crate) fn invalidate(&mut self, begin_generation: impl FnOnce() -> u64) -> u64 {
+        let generation = self.retire_scheduling(begin_generation);
+        self.current_output = None;
+        generation
+    }
+
+    /// Cancel obsolete work while retaining independent output as stale only.
+    /// A later consumer must prove its complete semantic key through `output_for`.
+    pub(crate) fn retire_scheduling(&mut self, begin_generation: impl FnOnce() -> u64) -> u64 {
         self.generation_cancellation.cancel();
         self.generation_key = None;
         self.generation = begin_generation();
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.pending = false;
         self.presentation_quality = FramePresentationQuality::Ready;
-        self.current_output = None;
         self.current_output_generation = None;
         self.prepared_successor = None;
         self.prepared_successor_generation = None;
@@ -793,6 +967,21 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
                 .is_some_and(|(prepared, _)| *prepared == intent)
     }
 
+    /// GPU output identity of the prepared successor proved for the exact
+    /// current transport intent.
+    pub(crate) fn exact_prepared_successor_gpu_output_key_for_intent(
+        &self,
+        intent: PreviewPlaybackIntent,
+    ) -> Option<&K> {
+        if !self.has_prepared_successor_for_intent(intent) {
+            return None;
+        }
+        self.prepared_successor.as_ref().and_then(|(_, prepared)| match prepared {
+            PreparedPreviewOutput::Gpu { key, .. } => Some(key),
+            PreparedPreviewOutput::Transparent => None,
+        })
+    }
+
     /// Promote only the successor proved for the exact current transport intent.
     pub(crate) fn promote_prepared_successor_for_intent(
         &mut self,
@@ -855,27 +1044,6 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         ));
         self.prepared_successor_generation = Some(self.generation);
         true
-    }
-
-    /// Exact prepared alias that is already represented by the visible slot.
-    #[cfg(test)]
-    pub(crate) fn already_visible_successor_key(
-        &self,
-        intent: PreviewPlaybackIntent,
-    ) -> Option<&K> {
-        if self.prepared_successor_generation != Some(self.generation) {
-            return None;
-        }
-        self.prepared_successor.as_ref().and_then(|(prepared_intent, prepared)| {
-            if *prepared_intent != intent {
-                return None;
-            }
-            match prepared {
-                PreparedPreviewOutput::Gpu { key, already_visible: true, .. } => Some(key),
-                PreparedPreviewOutput::Gpu { already_visible: false, .. }
-                | PreparedPreviewOutput::Transparent => None,
-            }
-        })
     }
 
     /// Whether the registered output was proven under the active generation.
@@ -992,6 +1160,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn active_signal_monitoring_is_part_of_final_presentation_identity_only() {
+        let base = PreviewOutputKey::new(
+            SequenceId::new(),
+            1920,
+            1080,
+            PreviewSemanticIdentity::from_test_fingerprint([7; 32]),
+        );
+        assert_eq!(
+            base.with_signal_monitoring(
+                mondrian_core::ProgramScopesTap::MonitorOutput,
+                mondrian_core::SignalMonitoringSettings::default(),
+            ),
+            base
+        );
+        let active =
+            mondrian_core::SignalMonitoringSettings { false_color: true, ..Default::default() };
+        assert_ne!(
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::ProgramOutput, active),
+            base
+        );
+        assert_ne!(
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::ProgramOutput, active),
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::MonitorOutput, active)
+        );
+    }
+
+    #[test]
     fn generation_output_and_candidate_lifecycle_stay_atomic() {
         let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
         assert_eq!(
@@ -1032,6 +1227,21 @@ mod tests {
         assert_eq!(coordinator.output_for(&9), None);
         assert!(!coordinator.has_exact_current_output());
         assert_eq!(coordinator.exact_current_output(), None);
+    }
+
+    #[test]
+    fn scheduling_retirement_preserves_only_stale_output_and_content_invalidation_drops_it() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "texture");
+        let cancellation = coordinator.generation_cancellation();
+        coordinator.retire_scheduling(|| 42);
+        assert!(cancellation.is_canceled());
+        assert!(!coordinator.has_exact_current_output());
+        assert_eq!(coordinator.output_for(&8), None);
+        assert_eq!(coordinator.output_for(&9), Some("texture"));
+        coordinator.invalidate(|| 43);
+        assert_eq!(coordinator.output_for(&9), None);
     }
 
     #[test]
@@ -1124,6 +1334,7 @@ mod tests {
             3,
             10,
         );
+        let skipped_successor = PreviewPlaybackIntent::new(successor.epoch, 3, 11);
         coordinator.register_prepared_successor(successor, 10, "physical:successor");
 
         assert_eq!(
@@ -1131,6 +1342,14 @@ mod tests {
             Some((&9, &"physical:current"))
         );
         assert!(coordinator.has_prepared_successor_for_intent(successor));
+        assert_eq!(
+            coordinator.exact_prepared_successor_gpu_output_key_for_intent(successor),
+            Some(&10)
+        );
+        assert_eq!(
+            coordinator.exact_prepared_successor_gpu_output_key_for_intent(skipped_successor),
+            None
+        );
         assert_eq!(
             coordinator.plan_candidate(Some(&9)),
             PreviewCandidateDecision::Current

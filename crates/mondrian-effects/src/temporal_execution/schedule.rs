@@ -87,6 +87,21 @@ pub(super) fn temporal_scalar_required_bytes(
                         plan_take_value(mask, &mut live, &mut remaining_uses, &mut working)?;
                         working.release_frame()?;
                     }
+                    EffectGraphNodeKind::MaskCombine { left, right, .. } => {
+                        let left = temporal_program.address_for_input(context, *left)?;
+                        let right = temporal_program.address_for_input(context, *right)?;
+                        plan_take_value(left, &mut live, &mut remaining_uses, &mut working)?;
+                        plan_take_value(right, &mut live, &mut remaining_uses, &mut working)?;
+                        working.release_frame()?;
+                    }
+                    EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                        for input in [*base, *graded, *matte] {
+                            let input = temporal_program.address_for_input(context, input)?;
+                            plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        }
+                        working.release_frame()?;
+                        working.release_frame()?;
+                    }
                     EffectGraphNodeKind::MaskSource { .. } => {
                         working.reserve_frame()?;
                         let raster = mask_rasters

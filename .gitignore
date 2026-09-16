@@ -57,3 +57,7 @@ logs/
 .claude/
 CLAUDE.md
 AGENTS.md
+
+# Local agent issue trackers and validation evidence
+/.scratch/
+**/.scratch/

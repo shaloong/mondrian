@@ -1,65 +1,24 @@
 //! Export helpers: codec arguments, transactional process monitoring, and validation.
 use super::*;
 
-pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig) {
-    match codec {
-        VideoCodecConfig::H264 { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libx264")
-                .arg("-preset")
-                .arg("medium")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::H264Profile::High => "high",
-                });
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::Hevc { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libx265")
-                .arg("-preset")
-                .arg("medium")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::HevcProfile::Main => "main",
-                    crate::preset::HevcProfile::Main10 => "main10",
-                });
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::Av1 { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libaom-av1")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::Av1Profile::Main => "0",
-                })
-                .arg("-b:v")
-                .arg("0");
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::ProRes { profile } => {
-            cmd.arg("-c:v")
-                .arg("prores_ks")
-                .arg("-profile:v")
-                .arg(prores_profile_variant(*profile));
-        }
-        VideoCodecConfig::Gif { .. } => {
-            cmd.arg("-c:v").arg("gif");
-        }
-    }
+pub(crate) fn apply_video_codec_args(
+    cmd: &mut Command,
+    codec: &VideoCodecConfig,
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+    encoder: crate::hardware_encoding::ResolvedVideoEncoder,
+) {
+    crate::hardware_encoding::apply_video_encoder_args(cmd, codec, coding, encoder);
 }
 
-fn apply_video_rate_control_args(cmd: &mut Command, rate_control: crate::preset::VideoRateControl) {
-    cmd.arg("-crf").arg(rate_control.crf.to_string());
-    if let (Some(max_bitrate), Some(buffer_size)) = (
-        rate_control.max_bitrate_kbps,
-        rate_control.buffer_size_kbits,
-    ) {
-        cmd.arg("-maxrate")
-            .arg(format!("{max_bitrate}k"))
-            .arg("-bufsize")
-            .arg(format!("{buffer_size}k"));
-    }
+pub(crate) fn apply_external_filter_thread_args(
+    cmd: &mut Command,
+    policy: service::ExportExecutionResourcePolicy,
+) {
+    let threads = policy.ffmpeg_filter_threads.max(1).to_string();
+    cmd.arg("-filter_threads")
+        .arg(&threads)
+        .arg("-filter_complex_threads")
+        .arg(threads);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,18 +62,25 @@ struct ExportVideoSignalContract {
     scale_range: Option<&'static str>,
     yuv_matrix: Option<ExportYuvMatrix>,
     color_space: ColorSpace,
+    professional_rgb_tags: bool,
 }
 
 impl ExportVideoSignalContract {
     fn resolve(_settings: &SequenceSettings, delivery: &ResolvedExportDeliveryContract) -> Self {
         let color_space = delivery.color_target.color_space;
         if delivery.chroma_sampling == crate::preset::ExportChromaSampling::Rgb {
+            let professional_rgb_tags = matches!(
+                &delivery.artifact,
+                ResolvedExportArtifactEncoding::MediaFile { video, .. }
+                    if crate::mezzanine::professional_mezzanine_contract(video).is_some()
+            );
             return Self {
                 pixel_format: delivery.pixel_format,
                 codec_range: None,
                 scale_range: None,
                 yuv_matrix: None,
                 color_space,
+                professional_rgb_tags,
             };
         }
         let (codec_range, scale_range) = match delivery.video_range {
@@ -145,17 +111,33 @@ impl ExportVideoSignalContract {
             scale_range: Some(scale_range),
             yuv_matrix: Some(yuv_matrix),
             color_space,
+            professional_rgb_tags: false,
         }
     }
 
-    fn validation_constraints(self) -> crate::validator::ExpectedVideoSignalConstraints {
+    fn validation_constraints(
+        self,
+        delivery: &ResolvedExportDeliveryContract,
+    ) -> crate::validator::ExpectedVideoSignalConstraints {
         let tags = self.color_space.ffmpeg_tags();
         crate::validator::ExpectedVideoSignalConstraints {
             pixel_format: Some(self.pixel_format.to_owned()),
             color_range: self.codec_range.map(str::to_owned),
             color_primaries: tags.map(|tags| tags.color_primaries.to_owned()),
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
-            color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
+            color_matrix: self
+                .yuv_matrix
+                .map(|matrix| matrix.tag_name().to_owned())
+                .or_else(|| self.professional_rgb_tags.then(|| "gbr".to_owned())),
+            sample_aspect_ratio: Some(delivery.sample_aspect_ratio),
+            field_order: Some(
+                match delivery.field_order {
+                    mondrian_core::timeline_data::FieldOrder::Progressive => "progressive",
+                    mondrian_core::timeline_data::FieldOrder::UpperFirst => "tt",
+                    mondrian_core::timeline_data::FieldOrder::LowerFirst => "bb",
+                }
+                .to_owned(),
+            ),
             require_color_tags_absent: tags.is_none(),
             static_hdr_metadata: crate::validator::ExpectedStaticHdrMetadata::Absent,
         }
@@ -172,7 +154,7 @@ pub fn expected_export_video_signal(
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
     let mut constraints =
-        ExportVideoSignalContract::resolve(settings, delivery).validation_constraints();
+        ExportVideoSignalContract::resolve(settings, delivery).validation_constraints(delivery);
     if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
         let mastering_display = settings
             .delivery
@@ -205,11 +187,42 @@ pub(crate) fn apply_export_video_signal_args(
     delivery: &ResolvedExportDeliveryContract,
 ) {
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
+    let mut filters = Vec::new();
     if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
-        cmd.arg("-vf").arg(format!(
-            "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
-            matrix.scale_name()
+        let interlaced_scale =
+            if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+                ":interl=1"
+            } else {
+                ""
+            };
+        filters.push(format!(
+            "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}{}",
+            matrix.scale_name(),
+            interlaced_scale,
         ));
+    }
+    filters.push(format!(
+        "setsar={}/{}",
+        delivery.sample_aspect_ratio.numerator(),
+        delivery.sample_aspect_ratio.denominator()
+    ));
+    let field_order = match delivery.field_order {
+        mondrian_core::timeline_data::FieldOrder::Progressive => "progressive",
+        mondrian_core::timeline_data::FieldOrder::UpperFirst => "tt",
+        mondrian_core::timeline_data::FieldOrder::LowerFirst => "bb",
+    };
+    cmd.arg("-vf").arg(filters.join(",")).arg("-field_order").arg(field_order);
+    if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+        cmd.arg("-top").arg("1");
+        if matches!(
+            &delivery.artifact,
+            ResolvedExportArtifactEncoding::MediaFile {
+                video: VideoCodecConfig::ProRes { .. },
+                ..
+            }
+        ) {
+            cmd.arg("-flags").arg("+ildct+ilme");
+        }
     }
     cmd.arg("-pix_fmt").arg(contract.pixel_format);
     if let Some(range) = contract.codec_range {
@@ -222,10 +235,20 @@ pub(crate) fn apply_export_video_signal_args(
             .arg(tags.color_trc)
             .arg("-colorspace")
             .arg(matrix.tag_name());
+    } else if let Some(tags) = contract.color_space.ffmpeg_tags()
+        && contract.professional_rgb_tags
+    {
+        cmd.arg("-color_primaries")
+            .arg(tags.color_primaries)
+            .arg("-color_trc")
+            .arg(tags.color_trc)
+            .arg("-colorspace")
+            .arg("rgb");
     }
 }
 
-/// Emit encoder-native color signaling for the H.264/H.265 VUI.
+/// Emit one encoder-native H.264/H.265 parameter dictionary containing both
+/// the resolved GOP contract and VUI/HDR signaling.
 ///
 /// FFmpeg 8 no longer maps the container-level `-color_primaries` and
 /// `-color_trc` options into the x264/x265 bitstream, which would otherwise
@@ -236,39 +259,92 @@ pub(crate) fn apply_export_video_signal_args(
 pub(crate) fn apply_encoder_signal_params(
     cmd: &mut Command,
     codec: &VideoCodecConfig,
+    encoder: crate::hardware_encoding::ResolvedVideoEncoder,
     settings: &SequenceSettings,
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<(), String> {
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
-    let Some(tags) = contract.color_space.ffmpeg_tags() else {
-        return Ok(());
-    };
-    let Some(matrix) = contract.yuv_matrix else {
-        return Ok(());
-    };
-    let vui = format!(
-        "colorprim={}:transfer={}:colormatrix={}",
-        tags.color_primaries,
-        tags.color_trc,
-        matrix.tag_name()
-    );
     match codec {
-        VideoCodecConfig::H264 { .. } => {
-            cmd.arg("-x264-params").arg(vui);
+        VideoCodecConfig::H264 { .. }
+            if encoder == crate::hardware_encoding::ResolvedVideoEncoder::Libx264 =>
+        {
+            let mut params = h26x_coding_params(delivery.video_coding)?;
+            append_encoder_vui_params(&mut params, contract);
+            cmd.arg("-x264-params").arg(params.join(":"));
         }
-        VideoCodecConfig::Hevc { .. } => {
-            let mut params = vui;
+        VideoCodecConfig::Hevc { .. }
+            if encoder == crate::hardware_encoding::ResolvedVideoEncoder::Libx265 =>
+        {
+            let mut params = h26x_coding_params(delivery.video_coding)?;
+            append_encoder_vui_params(&mut params, contract);
             if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
-                params.push(':');
-                params.push_str(&h265_hdr_metadata_params(settings)?);
+                params.push(h265_hdr_metadata_params(settings)?);
             }
-            cmd.arg("-x265-params").arg(params);
+            cmd.arg("-x265-params").arg(params.join(":"));
         }
-        VideoCodecConfig::Av1 { .. }
+        VideoCodecConfig::AvcIntra { .. }
+            if matches!(
+                encoder,
+                crate::hardware_encoding::ResolvedVideoEncoder::Professional(
+                    crate::mezzanine::MezzanineEncoderAdapter::Libx264AvcIntra
+                )
+            ) =>
+        {
+            let mut params = Vec::new();
+            append_encoder_vui_params(&mut params, contract);
+            if !params.is_empty() {
+                cmd.arg("-x264-params").arg(params.join(":"));
+            }
+        }
+        VideoCodecConfig::H264 { .. }
+        | VideoCodecConfig::Hevc { .. }
+        | VideoCodecConfig::Av1 { .. }
         | VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
         | VideoCodecConfig::Gif { .. } => {}
     }
     Ok(())
+}
+
+fn h26x_coding_params(
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+) -> Result<Vec<String>, String> {
+    let crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+        keyframe_interval_frames,
+        max_b_frames,
+        closed_gop,
+        scene_cut,
+    } = coding
+    else {
+        return Err("H.264/HEVC encoder received a non-H26x coding contract".to_owned());
+    };
+    Ok(vec![
+        format!("keyint={keyframe_interval_frames}"),
+        format!("min-keyint={keyframe_interval_frames}"),
+        format!("bframes={max_b_frames}"),
+        format!(
+            "scenecut={}",
+            match scene_cut {
+                crate::video_encoding::VideoSceneCutPolicy::Adaptive => 40,
+                crate::video_encoding::VideoSceneCutPolicy::Disabled => 0,
+            }
+        ),
+        format!("open-gop={}", u8::from(!closed_gop)),
+    ])
+}
+
+fn append_encoder_vui_params(params: &mut Vec<String>, contract: ExportVideoSignalContract) {
+    let (Some(tags), Some(matrix)) = (contract.color_space.ffmpeg_tags(), contract.yuv_matrix)
+    else {
+        return;
+    };
+    params.extend([
+        format!("colorprim={}", tags.color_primaries),
+        format!("transfer={}", tags.color_trc),
+        format!("colormatrix={}", matrix.tag_name()),
+    ]);
 }
 
 fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, String> {
@@ -332,23 +408,26 @@ pub(crate) fn validate_timeline_dynamic_hdr_delivery(
     timeline: &TimelineExportSnapshot,
     source_issues: VideoColorDiagnosticIssueAggregate,
 ) -> Result<(), String> {
-    let write_static_hdr = timeline
-        .sequence
-        .settings
-        .delivery
-        .static_hdr_metadata_policy
-        .writes_authored_metadata();
-    if write_static_hdr
-        && (source_issues.diagnostics_with_dynamic_hdr10_plus > 0
-            || source_issues.diagnostics_with_dolby_vision_config > 0)
-    {
-        return Err(format!(
-            "当前 HDR metadata 后端只写入项目级 ST 2086/MaxCLL/MaxFALL；引用素材包含 HDR10+ 动态 metadata（{} 个）或 Dolby Vision 配置（{} 个），渲染后不能安全透传，请使用经过验证的动态 HDR 重新制作流程",
-            source_issues.diagnostics_with_dynamic_hdr10_plus,
-            source_issues.diagnostics_with_dolby_vision_config
-        ));
+    match timeline.sequence.dynamic_hdr.delivery_intent() {
+        mondrian_timeline::DynamicHdrDeliveryIntent::Omit => Ok(()),
+        mondrian_timeline::DynamicHdrDeliveryIntent::PreserveSourceExact { family } => {
+            let present = match family {
+                mondrian_core::DynamicHdrMetadataFamily::St2094_40Application4 => {
+                    source_issues.diagnostics_with_dynamic_hdr10_plus > 0
+                }
+                mondrian_core::DynamicHdrMetadataFamily::DolbyVision => {
+                    source_issues.diagnostics_with_dolby_vision_config > 0
+                }
+            };
+            present.then_some(()).ok_or_else(|| {
+                format!(
+                    "Dynamic HDR exact preservation requested {}, but the frozen source diagnostics do not detect that metadata family",
+                    family.diagnostic_label()
+                )
+            })
+        }
+        mondrian_timeline::DynamicHdrDeliveryIntent::Remake { .. } => Ok(()),
     }
-    Ok(())
 }
 
 pub(crate) const fn prores_profile_variant(profile: crate::preset::ProResProfile) -> &'static str {

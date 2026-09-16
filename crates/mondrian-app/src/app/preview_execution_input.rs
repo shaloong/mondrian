@@ -39,12 +39,14 @@ impl AppState {
         let transport = PreviewTransportSnapshot::new(
             playback.state,
             playback.position,
+            playback.rate,
             playback.epoch,
             playback.quality_revision,
             self.playback_preview_resolution_scale(),
             self.last_timeline_seek_source,
             demand,
-        );
+        )
+        .with_priming_work_deadline(self.playback_priming_work_deadline_at(sampled_at));
         PreviewExecutionSnapshot::new(authoring, transport, &self.viewer_display_management)
     }
 
@@ -62,6 +64,34 @@ impl AppState {
         sampled_at: Instant,
     ) -> Option<PreviewFrameExecutionRequest<'_>> {
         PreviewFrameExecutionRequest::successor(self.preview_execution_snapshot(sampled_at), self)
+    }
+
+    /// Capture ticketless CPU preparation for a bounded future playback frame.
+    pub(crate) fn preview_lookahead_execution_request(
+        &self,
+        sampled_at: Instant,
+        offset: usize,
+    ) -> Option<PreviewFrameExecutionRequest<'_>> {
+        PreviewFrameExecutionRequest::lookahead(
+            self.preview_execution_snapshot(sampled_at),
+            self,
+            offset,
+        )
+    }
+
+    /// Capture ticketless CPU/GPU preparation for an exact farther playback
+    /// coordinate returned by the cold-activation planner.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    pub(crate) fn preview_cold_activation_execution_request(
+        &self,
+        sampled_at: Instant,
+        frame: i64,
+    ) -> Option<PreviewFrameExecutionRequest<'_>> {
+        PreviewFrameExecutionRequest::lookahead_frame(
+            self.preview_execution_snapshot(sampled_at),
+            self,
+            frame,
+        )
     }
 
     /// Recapture preroll facts after terminal Frame Deliveries were applied.

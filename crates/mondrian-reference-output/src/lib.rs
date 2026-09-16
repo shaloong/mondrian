@@ -1,0 +1,55 @@
+//! Scheduled clean-feed output for professional video I/O adapters.
+//!
+//! This crate owns the platform-neutral Reference Output Module: exact signal
+//! admission, clean-feed payload contracts, rational embedded-audio cadence,
+//! bounded scheduled playout, lifecycle evidence, and vendor-adapter seams.
+//! DeckLink COM and AJA NTV2 C++ details remain behind concrete bridges.
+
+mod adapter;
+mod ancillary_journal;
+pub use ancillary_journal::{
+    NativeAncillaryJournalBinding, NativeAncillaryJournalInventory, NativeAncillaryJournalReceipt,
+};
+mod frame;
+mod module;
+mod signal;
+
+pub use mondrian_broadcast::AncillaryFrame;
+
+pub use adapter::{
+    ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
+    ReferenceOutputAdapterSession, ReferenceOutputDeviceDescriptor, ReferenceOutputDeviceId,
+    ReferenceOutputHardwareTime, ReferenceOutputProvider, ReferenceOutputProviderEvidence,
+    ReferenceOutputProviderShutdownFailure, ReferenceOutputRoutingPreferences,
+    ReferenceOutputRuntimeAvailability, ReferenceOutputSessionShutdownReceipt,
+    ReferenceOutputShutdownCoordinatorFacts, SimulatedReferenceOutputAdapter,
+    UnavailableVendorReferenceOutputBridge, VendorReferenceOutputAdapter,
+    VendorReferenceOutputBridge,
+};
+pub use frame::{
+    pack_encoded_rgb_to_rgb12, pack_encoded_rgb_to_v210, pack_f32_audio_to_s24,
+    ReferenceAudioFrame, ReferenceAudioPackingError, ReferenceOutputBundle,
+    ReferenceOutputPayloadError, ReferenceVideoFrame, ReferenceVideoPackingError,
+};
+pub use module::{
+    ReferenceOutputDiagnostics, ReferenceOutputError, ReferenceOutputModule,
+    ReferenceOutputModuleShutdownReceipt, ReferenceOutputModuleStopCoordinator,
+    ReferenceOutputModuleStopOutcome, ReferenceOutputState,
+};
+pub use signal::{
+    ReferenceAudioCadence, ReferenceAudioCadenceError, ReferenceHdrSignal,
+    ReferenceOutputAncillaryPolicy, ReferenceOutputMode, ReferenceOutputModeError,
+    ReferenceOutputOpenRequest, ReferenceOutputPixelFormat, ReferenceOutputRange,
+    ReferenceOutputReferencePolicy, ReferenceOutputScan, ReferenceOutputSignal,
+    ReferenceOutputSignalError,
+};
+
+#[cfg(all(windows, feature = "native-aja"))]
+mod native_aja;
+#[cfg(all(windows, feature = "native-aja"))]
+pub use native_aja::{AjaReferenceOutputAdapter, AjaWireReadbackConfiguration};
+
+#[cfg(all(windows, feature = "native-decklink"))]
+mod native_decklink;
+#[cfg(all(windows, feature = "native-decklink"))]
+pub use native_decklink::{DeckLinkReferenceOutputAdapter, DeckLinkWireReadbackConfiguration};

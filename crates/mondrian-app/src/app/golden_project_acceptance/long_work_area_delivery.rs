@@ -414,7 +414,7 @@ fn reimport_and_sample(
     let time_base = sequence.time_base();
     let input_color = sequence
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
 
     let mut sampled_frames = Vec::new();
@@ -459,6 +459,7 @@ fn decode_sampled_frame(
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
+        picture_overrides: Default::default(),
         source_sample: SourceSampleTarget::covering(TimelineTime::from_frame_position(
             FramePosition::new(frame, time_base),
         )?),
@@ -506,14 +507,16 @@ fn long_work_area_delivery_candidate_gate() -> anyhow::Result<()> {
     let contract = load_golden_contract(&root)?;
     let directory = new_run_directory(&root, "MONDRIAN_LONG_WORK_AREA_RUN_ROOT", "long-work-area")?;
     let project_path = directory.join("long-work-area-delivery.mdp");
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         project_path.clone(),
         "Long Work Area Delivery",
         sequence_settings_from_contract(&contract.timeline)?,
         ProjectColorEnvironment::default(),
         ProjectSettings::default(),
     )?;
-    let report = execute_long_work_area_delivery(&root, &contract, &mut workflow, &directory)?;
+    let report = workflow.run_with(|workflow| {
+        execute_long_work_area_delivery(&root, &contract, workflow, &directory)
+    })?;
     ensure!(
         report.status == "pass",
         "long Work Area delivery gate failed"

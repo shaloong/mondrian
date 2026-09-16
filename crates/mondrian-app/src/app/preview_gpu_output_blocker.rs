@@ -15,7 +15,7 @@
 //! 3. **Frame residency / scheduling blockers** — working-frame or external
 //!    texture lifecycle issues detected during presentation scheduling.
 
-use mondrian_renderer::RenderColorStageGpuBlockerBreakdown;
+use mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown;
 use serde::{Deserialize, Serialize};
 
 /// Typed reasons the GPU color output boundary cannot execute for preview.
@@ -100,9 +100,9 @@ pub enum PreviewGpuOutputBlocker {
     },
     /// OS ICC profile discovery or a usable profile payload is unavailable.
     ///
-    /// When the user configures `MonitorProfileReference::IccProfile` and
-    /// the OS cannot provide ICC data, this blocker is emitted. The contract
-    /// **must not** fall back to Rec.709 / sRGB.
+    /// When the user configures OS-default or explicit-path ICC calibration
+    /// and a usable profile payload cannot be provided, this blocker is
+    /// emitted. The contract **must not** fall back to Rec.709 / sRGB.
     MonitorIccProfileUnsupported {
         /// Stable feature code (e.g. `os_icc_profile`).
         feature_code: String,

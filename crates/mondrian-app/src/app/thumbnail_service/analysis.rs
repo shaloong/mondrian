@@ -8,15 +8,18 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
-    DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
-    PreviewDecodeSessionContext, PreviewSourceColorContract,
+    DecodedRgbaEncoding, DecodedVideoRange, DecodedVideoRangeContract, PreviewDecodeAccessMode,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewDecodeSessionContext,
+    PreviewSourceColorContract,
 };
 use mondrian_renderer::{
-    execute_cpu_input_stage_float_with_session, execute_cpu_input_stage_with_session,
-    execute_cpu_output_boundary_rgba8_with_session, CpuEncodedColorFrame, LinearFloatSource,
-    RenderCpuColorExecutionSession, RenderInputTransform, RenderOutputColorBoundary,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, SourceColorModule},
+    CpuEncodedColorFrame, CpuEncodedFloatColorFrame, CpuSourceColorFrame, LinearFloatSource,
+    RenderCpuColorExecutionSession,
 };
-use mondrian_timeline::sequence::{ProgramColorContext, ResolvedInputColor};
+use mondrian_timeline::sequence::{
+    MediaInputColorContext, MissingColorMetadataPolicy, ProgramColorContext, ResolvedInputColor,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -77,13 +80,24 @@ pub(super) struct ThumbnailColorContract {
     pub(super) source_color_space: ColorSpace,
     pub(super) source_range: DecodedVideoRangeContract,
     pub(super) working_color_space: WorkingColorSpace,
+    pub(super) missing_metadata_policy: MissingColorMetadataPolicy,
     pub(super) output_color_space: ColorSpace,
     pub(super) tone_map: bool,
     pub(super) engine: ColorEngine,
     pub(super) output_transform: OutputTransformIntent,
+    pub(super) camera_raw: Option<mondrian_media::CameraRawDecodeIntent>,
 }
 
 impl ThumbnailColorContract {
+    fn media_input_context(&self) -> MediaInputColorContext {
+        MediaInputColorContext {
+            working_color_space: self.working_color_space,
+            input_tone_map: false,
+            engine: self.engine.clone(),
+            missing_metadata_policy: self.missing_metadata_policy,
+        }
+    }
+
     pub(super) fn resolve(
         asset: &AssetRecord,
         context: &ProgramColorContext,
@@ -96,12 +110,12 @@ impl ThumbnailColorContract {
                 )
             })?;
         let source_color_space = match context
-            .missing_metadata_policy
+            .missing_metadata_policy()
             .resolve_asset_input_decision(
                 None,
                 asset.interpretation,
                 primary_video.executable_color_space(),
-                context.working_color_space,
+                context.working_color_space(),
             )
             .resolved
         {
@@ -119,11 +133,15 @@ impl ThumbnailColorContract {
                 ));
             }
         };
-        let source_range = DecodedVideoRangeContract::from_interpretation(
-            asset.interpretation.range,
-            primary_video.color_range,
-        );
-        let output_color_space = context.output_color_space.color().ok_or_else(|| {
+        let source_range = if primary_video.camera_raw.is_some() {
+            DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
+        } else {
+            DecodedVideoRangeContract::from_interpretation(
+                asset.interpretation.range,
+                primary_video.color_range,
+            )
+        };
+        let output_color_space = context.output_color_space().color().ok_or_else(|| {
             failure(
                 ThumbnailFailureReason::InternalOutputIdentity,
                 "thumbnail presentation requires an encoded output identity",
@@ -135,21 +153,39 @@ impl ThumbnailColorContract {
                 format!("thumbnail raster contract does not support {output_color_space:?}"),
             ));
         }
+        let camera_raw = primary_video
+            .camera_raw
+            .as_ref()
+            .map(|raw| {
+                mondrian_media::CameraRawDecodeIntent::new(
+                    raw.adapter,
+                    asset.interpretation.camera_raw,
+                )
+                .map_err(|error| {
+                    failure(
+                        ThumbnailFailureReason::DecodeFailed,
+                        format!("invalid camera RAW thumbnail contract: {error}"),
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Self {
             video_stream_index: primary_video.index,
             source_color_space,
             source_range,
-            working_color_space: context.working_color_space,
+            working_color_space: context.working_color_space(),
+            missing_metadata_policy: context.missing_metadata_policy(),
             output_color_space,
-            tone_map: context.output_tone_map,
-            engine: context.engine.clone(),
-            output_transform: context.output_transform.clone(),
+            tone_map: context.output_tone_map(),
+            engine: context.engine().clone(),
+            output_transform: context.output_transform().clone(),
+            camera_raw,
         })
     }
 
-    pub(super) fn output_boundary(&self) -> Result<RenderOutputColorBoundary, ThumbnailFailure> {
-        RenderOutputColorBoundary::from_intent(
-            mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
+    pub(super) fn output_boundary(&self) -> Result<ProgramOutputBoundary, ThumbnailFailure> {
+        ProgramOutputBoundary::from_intent(
+            ProgramOutputRole::Display,
             self.output_color_space,
             &self.output_transform,
             self.tone_map,
@@ -173,7 +209,7 @@ pub(super) fn decode_thumbnail(
         media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
         PreviewDecodeAccessMode::RandomAccessStillFrame
     );
-    let request = PreviewDecodeRequest::new(
+    let mut request = PreviewDecodeRequest::new(
         job.key.path.as_path(),
         mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -185,6 +221,9 @@ pub(super) fn decode_thumbnail(
     .with_video_stream_index(job.key.color.video_stream_index)
     .with_max_size(Some(THUMBNAIL_MAX_WIDTH), Some(THUMBNAIL_MAX_HEIGHT))
     .with_fingerprint(job.key.fingerprint);
+    if let Some(camera_raw) = job.key.color.camera_raw {
+        request = request.with_camera_raw(camera_raw);
+    }
     let cancellation = job.cancellation.clone();
     let (width, height, rgba) =
         match decode_context.decode_cancellable(request, move || cancellation.is_canceled()) {
@@ -203,10 +242,12 @@ pub(super) fn decode_thumbnail(
             Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
                 let width = frame.width;
                 let height = frame.height;
+                let encoding = frame.color_contract.encoding;
                 let rgba = color_manage_float_with_session(
                     width,
                     height,
                     frame.into_data(),
+                    encoding,
                     &job.key.color,
                     color_session,
                 )?;
@@ -225,6 +266,15 @@ pub(super) fn decode_thumbnail(
                         "thumbnail requires CPU RGBA, got native GPU {} {:?}",
                         frame.handle_kind().as_str(),
                         frame.surface_format
+                    ),
+                ));
+            }
+            Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+                return Err(failure(
+                    ThumbnailFailureReason::UnexpectedGpuFrame,
+                    format!(
+                        "thumbnail requires CPU RGBA, got compact CPU YUV {:?} {:?}",
+                        frame.chroma_subsampling, frame.sample_format
                     ),
                 ));
             }
@@ -257,18 +307,22 @@ fn color_manage_rgba_with_session(
     color: &ThumbnailColorContract,
     color_session: &mut RenderCpuColorExecutionSession,
 ) -> Result<Vec<u8>, ThumbnailFailure> {
-    let source = CpuEncodedColorFrame::source_rgba8(width, height, color.source_color_space, rgba);
-    let input =
-        RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());
+    let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8(
+        width,
+        height,
+        color.source_color_space,
+        rgba,
+    ));
     let working =
-        execute_cpu_input_stage_with_session(&source, &input, color_session).map_err(|error| {
-            failure(
-                ThumbnailFailureReason::InputTransformFailed,
-                format!("thumbnail input transform failed: {error}"),
-            )
-        })?;
-    execute_cpu_output_boundary_rgba8_with_session(
-        &working.result.frame,
+        SourceColorModule::execute_cpu(&source, &color.media_input_context(), color_session)
+            .map_err(|error| {
+                failure(
+                    ThumbnailFailureReason::InputTransformFailed,
+                    format!("thumbnail input transform failed: {error}"),
+                )
+            })?;
+    ProgramOutputModule::execute_cpu_rgba8(
+        working.frame(),
         &color.output_boundary()?,
         color_session,
     )
@@ -285,21 +339,40 @@ fn color_manage_float_with_session(
     width: u32,
     height: u32,
     rgba: Vec<f32>,
+    encoding: DecodedRgbaEncoding,
     color: &ThumbnailColorContract,
     color_session: &mut RenderCpuColorExecutionSession,
 ) -> Result<Vec<u8>, ThumbnailFailure> {
-    let source = LinearFloatSource::new(width, height, color.source_color_space, rgba);
-    let input =
-        RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());
-    let working = execute_cpu_input_stage_float_with_session(&source, &input, color_session)
-        .map_err(|error| {
-            failure(
-                ThumbnailFailureReason::InputTransformFailed,
-                format!("thumbnail float input transform failed: {error}"),
-            )
-        })?;
-    execute_cpu_output_boundary_rgba8_with_session(
-        &working.result.frame,
+    let source =
+        match encoding {
+            DecodedRgbaEncoding::SourceEncodedRgb => {
+                CpuSourceColorFrame::from(CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                    width,
+                    height,
+                    color.source_color_space,
+                    rgba,
+                ))
+            }
+            DecodedRgbaEncoding::SourceLinearRgb => CpuSourceColorFrame::from(
+                LinearFloatSource::new(width, height, color.source_color_space, rgba),
+            ),
+            DecodedRgbaEncoding::DataTexture => {
+                return Err(failure(
+                    ThumbnailFailureReason::NonColorDataUnsupported,
+                    "thumbnail cannot color-manage a decoded data texture",
+                ));
+            }
+        };
+    let working =
+        SourceColorModule::execute_cpu(&source, &color.media_input_context(), color_session)
+            .map_err(|error| {
+                failure(
+                    ThumbnailFailureReason::InputTransformFailed,
+                    format!("thumbnail float input transform failed: {error}"),
+                )
+            })?;
+    ProgramOutputModule::execute_cpu_rgba8(
+        working.frame(),
         &color.output_boundary()?,
         color_session,
     )

@@ -3,7 +3,93 @@
 use mondrian_core::Result;
 use std::sync::Arc;
 
-#[cfg(test)]
+/// Create the production device, retaining wgpu's feature/limit validation.
+/// On NVIDIA Vulkan, add only enumerated external-memory/semaphore FD extensions
+/// needed by the CUDA Adapter. Every other platform uses ordinary wgpu creation.
+pub async fn request_device_with_native_video_support(
+    adapter: &wgpu::Adapter,
+    descriptor: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Device, wgpu::Queue)> {
+    #[cfg(target_os = "linux")]
+    if adapter.get_info().backend == wgpu::Backend::Vulkan
+        && adapter.get_info().vendor == 0x10de
+        && !descriptor.required_features.intersects(wgpu::Features::all_experimental_mask())
+        && adapter.features().contains(descriptor.required_features)
+        && descriptor.required_limits.check_limits(&adapter.limits())
+    {
+        let opened = {
+            // SAFETY: the HAL borrow belongs to this exact public adapter.
+            let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() };
+            if let Some(hal) = hal {
+                let instance = hal.shared_instance().raw_instance();
+                let extensions = unsafe {
+                    instance.enumerate_device_extension_properties(hal.raw_physical_device())
+                }
+                .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                    reason: error.to_string(),
+                })?;
+                let extra = [
+                    ash::khr::external_memory_fd::NAME,
+                    ash::khr::external_semaphore_fd::NAME,
+                ];
+                let supported = extra.iter().all(|name| {
+                    extensions.iter().any(|extension| {
+                        // Vulkan guarantees a null-terminated extension name.
+                        (unsafe { std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) })
+                            == *name
+                    })
+                });
+                if supported {
+                    // SAFETY: only physically enumerated extensions are added;
+                    // wgpu's requested features, limits and queues are preserved.
+                    Some(
+                        unsafe {
+                            hal.open_with_callback(
+                                descriptor.required_features,
+                                &descriptor.required_limits,
+                                &descriptor.memory_hints,
+                                Some(Box::new(move |args| {
+                                    for name in extra {
+                                        if !args.extensions.contains(&name) {
+                                            args.extensions.push(name);
+                                        }
+                                    }
+                                })),
+                            )
+                        }
+                        .map_err(|error| {
+                            mondrian_core::MondrianError::GpuInitFailed {
+                                reason: error.to_string(),
+                            }
+                        })?,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(opened) = opened {
+            // SAFETY: opened above from this exact adapter and descriptor.
+            return unsafe {
+                adapter.create_device_from_hal::<wgpu::hal::api::Vulkan>(opened, descriptor)
+            }
+            .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                reason: error.to_string(),
+            });
+        }
+    }
+    adapter
+        .request_device(descriptor)
+        .await
+        .map_err(|error| mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+const TEST_GPU_CONTEXT_CAPACITY: usize = 1;
+
+#[cfg(all(test, not(target_os = "linux")))]
 const TEST_GPU_CONTEXT_CAPACITY: usize = 2;
 
 #[cfg(test)]
@@ -12,17 +98,20 @@ static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar)
 
 /// Process-local admission for unit tests that own independent native devices.
 ///
-/// The Rust test harness otherwise provisions dozens of DX12 devices at once.
-/// That is not representative of product execution and can terminate the test
-/// process in the Windows driver before an assertion is reported. The permit
-/// remains attached to the context so device destruction, not test scheduling,
+/// The Rust test harness otherwise provisions dozens of native devices at
+/// once. That is not representative of product execution and can terminate the
+/// test process in the platform driver before an assertion is reported. Linux
+/// uses an exclusive owner because device destruction and the following device
+/// creation can overlap inside Vulkan drivers; other platforms admit two. The
+/// permit remains attached to the context so the owner, not test scheduling,
 /// releases capacity.
 #[cfg(test)]
-struct TestGpuContextPermit;
+pub(crate) struct TestGpuContextPermit;
 
 #[cfg(test)]
 impl TestGpuContextPermit {
-    fn acquire() -> Self {
+    /// Admit one independently created native test device owner.
+    pub(crate) fn acquire() -> Self {
         let (admission, changed) = &TEST_GPU_CONTEXT_ADMISSION;
         let active = match admission.lock() {
             Ok(active) => active,
@@ -78,13 +167,13 @@ pub fn ocio_lut_filtering_device_features(adapter_features: wgpu::Features) -> w
 }
 
 /// Request an adapter while preserving native-video import on platforms where
-/// the renderer has a backend-specific bridge.
+/// the renderer has a backend-specific native import path.
 ///
 /// The [`wgpu::Instance`] already reflects any `WGPU_BACKEND` restriction, so
 /// an explicit environment override remains authoritative. On Windows, when
 /// more than one backend represents the same physical GPU, a DX12 adapter with
 /// native NV12/P010 support is preferred over a Vulkan representation that
-/// cannot participate in the D3D11/DX12 shared-texture bridge. If enumeration
+/// cannot participate in the D3D12VA same-device path. If enumeration
 /// produces no admissible adapter, wgpu's normal request path remains the
 /// fallback.
 pub async fn request_adapter_with_native_video_preference(
@@ -204,15 +293,18 @@ impl GpuContext {
 
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
+        let working_texture_features = crate::product_gpu_working_texture_device_features(&adapter)
+            .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
+                reason: error.to_string(),
+            })?;
         let device_descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(adapter.features())
-                | ocio_lut_filtering_device_features(adapter.features()),
+                | ocio_lut_filtering_device_features(adapter.features())
+                | working_texture_features,
             ..wgpu::DeviceDescriptor::default()
         };
-        let (device, queue) = adapter
-            .request_device(&device_descriptor)
-            .await
-            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed { reason: e.to_string() })?;
+        let (device, queue) =
+            request_device_with_native_video_support(&adapter, &device_descriptor).await?;
 
         Ok(Arc::new(Self {
             device: Arc::new(device),

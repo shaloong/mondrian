@@ -341,8 +341,17 @@ pub fn inspect_audio_automation<'a>(
                 .routes
                 .iter()
                 .find(|route| route.id == *route_id)
+                .map(|route| (route.source, route.gain_db, route.gain_automation.as_ref()))
+                .or_else(|| {
+                    sequence
+                        .audio_program
+                        .sidechain_routes
+                        .iter()
+                        .find(|route| route.id == *route_id)
+                        .map(|route| (route.source, route.gain_db, route.gain_automation.as_ref()))
+                })
                 .ok_or(AudioAutomationAddressError::UnknownRoute(*route_id))?;
-            let blocker = match route.source {
+            let blocker = match route.0 {
                 crate::audio::AudioRouteSource::Track { track_id, .. } => sequence
                     .audio_tracks
                     .iter()
@@ -356,8 +365,8 @@ pub fn inspect_audio_automation<'a>(
                 target,
                 AuthoringTimeDomain::Sequence(sequence.id),
                 ROUTE_GAIN_DB_PARAMETER_ID,
-                route.gain_db,
-                route.gain_automation.as_ref(),
+                route.1,
+                route.2,
                 gain_contract(),
                 all_interpolations(),
                 blocker,
@@ -670,9 +679,19 @@ fn apply_to_candidate(
             )
         }
         AudioAutomationTarget::RouteGain { route_id } => {
+            if let Some(route) =
+                sequence.audio_program.routes.iter_mut().find(|route| route.id == *route_id)
+            {
+                return edit_optional_curve(
+                    &mut route.gain_automation,
+                    &mut route.gain_db,
+                    ROUTE_GAIN_DB_PARAMETER_ID,
+                    edit,
+                );
+            }
             let route = sequence
                 .audio_program
-                .routes
+                .sidechain_routes
                 .iter_mut()
                 .find(|route| route.id == *route_id)
                 .ok_or(AudioAutomationAddressError::UnknownRoute(*route_id))?;

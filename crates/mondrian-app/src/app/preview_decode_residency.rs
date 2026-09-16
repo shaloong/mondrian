@@ -15,38 +15,35 @@ use super::preview_work_notification::PreviewWorkNotifier;
 const WORKER_ANY: u8 = 1 << 0;
 const WORKER_PLAYBACK: u8 = 1 << 1;
 const WORKER_NON_PLAYBACK: u8 = 1 << 2;
+const WORKER_STILL: u8 = 1 << 3;
 
-/// Mutually exclusive family of decoder sessions allowed to remain resident.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreviewDecodeResidencyFamily {
-    Playback,
-    Interactive,
-}
-
-impl PreviewDecodeResidencyFamily {
-    pub(crate) const fn for_access_mode(access_mode: PreviewDecodeAccessMode) -> Self {
-        match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => Self::Playback,
-            PreviewDecodeAccessMode::ScrubCursor
-            | PreviewDecodeAccessMode::RandomAccessStillFrame => Self::Interactive,
-        }
-    }
-}
+/// Mutually exclusive family of decoder Sessions allowed to remain resident.
+pub(crate) use mondrian_media::PreviewDecodeSessionFamily as PreviewDecodeResidencyFamily;
 
 /// One worker's action at a published residency revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PreviewDecodeResidencyDirective {
     revision: u64,
     retire_context: bool,
+    retired_family: Option<PreviewDecodeResidencyFamily>,
+    retire_all_contexts: bool,
 }
 
 impl PreviewDecodeResidencyDirective {
+    pub(crate) const fn retire_all_contexts(self) -> bool {
+        self.retire_all_contexts
+    }
+
     pub(crate) const fn revision(self) -> u64 {
         self.revision
     }
 
     pub(crate) const fn retire_context(self) -> bool {
         self.retire_context
+    }
+
+    pub(crate) const fn retired_family(self) -> Option<PreviewDecodeResidencyFamily> {
+        self.retired_family
     }
 }
 
@@ -55,6 +52,7 @@ struct PreviewDecodeResidencyState {
     revision: u64,
     actionable_retry_revision: u64,
     active_family: Option<PreviewDecodeResidencyFamily>,
+    retire_all_contexts: bool,
     worker_mask: u8,
     required_ack_mask: u8,
     acknowledged_mask: u8,
@@ -90,6 +88,7 @@ impl PreviewDecodeResidencyCoordinator {
                 revision: 0,
                 actionable_retry_revision: 0,
                 active_family: None,
+                retire_all_contexts: false,
                 worker_mask: 0,
                 required_ack_mask: 0,
                 acknowledged_mask: 0,
@@ -134,10 +133,27 @@ impl PreviewDecodeResidencyCoordinator {
         }
         state.revision = state.revision.saturating_add(1);
         state.transitions = state.transitions.saturating_add(1);
+        // A rapid reopen cannot erase a full retirement missed by a worker.
+        state.retire_all_contexts &= retirement_barrier_blocked(&state);
         state.active_family = Some(family);
-        state.required_ack_mask = state.worker_mask & retired_worker_mask(family);
+        // Every worker can own either family: the NonPlayback lane may own a
+        // cold Playback Session and the Playback lane may have an exceptional
+        // failover history. Each worker retires only the obsolete Session
+        // family, preserving unrelated locality inside the same context.
+        state.required_ack_mask = state.worker_mask;
         state.acknowledged_mask = 0;
         true
+    }
+
+    /// Retire both worker-owned families without changing transport authority.
+    /// Admission resumes only after every worker consumes the requested Sessions.
+    /// Native output leases defer destruction and acknowledgement until release.
+    pub(crate) fn retire_all(&self) {
+        let mut state = lock_state(&self.state);
+        state.revision = state.revision.saturating_add(1);
+        state.retire_all_contexts = true;
+        state.required_ack_mask = state.worker_mask;
+        state.acknowledged_mask = 0;
     }
 
     /// Current coordination revision for a newly started worker loop.
@@ -165,6 +181,8 @@ impl PreviewDecodeResidencyCoordinator {
         (state.revision != observed_revision).then_some(PreviewDecodeResidencyDirective {
             revision: state.revision,
             retire_context: state.required_ack_mask & worker_lane_bit(lane) != 0,
+            retired_family: state.active_family.map(opposite_residency_family),
+            retire_all_contexts: state.retire_all_contexts,
         })
     }
 
@@ -228,13 +246,16 @@ const fn worker_lane_bit(lane: MediaPreviewWorkerLane) -> u8 {
         MediaPreviewWorkerLane::Any => WORKER_ANY,
         MediaPreviewWorkerLane::Playback => WORKER_PLAYBACK,
         MediaPreviewWorkerLane::NonPlayback => WORKER_NON_PLAYBACK,
+        MediaPreviewWorkerLane::Still => WORKER_STILL,
     }
 }
 
-const fn retired_worker_mask(family: PreviewDecodeResidencyFamily) -> u8 {
+const fn opposite_residency_family(
+    family: PreviewDecodeResidencyFamily,
+) -> PreviewDecodeResidencyFamily {
     match family {
-        PreviewDecodeResidencyFamily::Playback => WORKER_ANY | WORKER_NON_PLAYBACK,
-        PreviewDecodeResidencyFamily::Interactive => WORKER_ANY | WORKER_PLAYBACK,
+        PreviewDecodeResidencyFamily::Playback => PreviewDecodeResidencyFamily::Interactive,
+        PreviewDecodeResidencyFamily::Interactive => PreviewDecodeResidencyFamily::Playback,
     }
 }
 
@@ -263,10 +284,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_retirement_survives_reactivation_until_every_worker_observes_it() {
+        let coordinator = PreviewDecodeResidencyCoordinator::new();
+        let lane = MediaPreviewWorkerLane::NonPlayback;
+        coordinator.register_worker(lane);
+        coordinator.activate(PreviewDecodeResidencyFamily::Interactive);
+        coordinator.acknowledge_retirement(lane, coordinator.revision());
+        let observed = coordinator.revision();
+        coordinator.retire_all();
+        assert!(!coordinator.admission_ready(PreviewDecodeAccessMode::ScrubCursor));
+        assert!(!coordinator.activate(PreviewDecodeResidencyFamily::Interactive));
+        coordinator.activate(PreviewDecodeResidencyFamily::Playback);
+        let directive = coordinator.worker_directive(lane, observed).expect("retirement");
+        assert!(directive.retire_context());
+        assert!(directive.retire_all_contexts());
+        coordinator.acknowledge_retirement(lane, observed);
+        assert!(!coordinator.admission_ready(PreviewDecodeAccessMode::PlaybackCursor));
+        coordinator.acknowledge_retirement(lane, directive.revision());
+        assert!(coordinator.admission_ready(PreviewDecodeAccessMode::PlaybackCursor));
+        coordinator.activate(PreviewDecodeResidencyFamily::Interactive);
+        assert!(!coordinator
+            .worker_directive(lane, directive.revision())
+            .expect("next transition")
+            .retire_all_contexts());
+    }
+
+    #[test]
     fn interactive_admission_waits_for_playback_owner_retirement() {
         let coordinator = PreviewDecodeResidencyCoordinator::new();
         coordinator.register_worker(MediaPreviewWorkerLane::Playback);
         coordinator.register_worker(MediaPreviewWorkerLane::NonPlayback);
+        coordinator.register_worker(MediaPreviewWorkerLane::Still);
         assert!(coordinator.activate(PreviewDecodeResidencyFamily::Playback));
         let playback_revision = coordinator.revision();
         let directive = coordinator
@@ -275,6 +323,22 @@ mod tests {
         assert!(directive.retire_context());
         coordinator
             .acknowledge_retirement(MediaPreviewWorkerLane::NonPlayback, directive.revision());
+        let directive = coordinator
+            .worker_directive(MediaPreviewWorkerLane::Playback, 0)
+            .expect("playback worker should retire stale interactive Sessions");
+        assert_eq!(
+            directive.retired_family(),
+            Some(PreviewDecodeResidencyFamily::Interactive)
+        );
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Playback, directive.revision());
+        assert!(
+            !coordinator.admission_ready(PreviewDecodeAccessMode::PlaybackCursor),
+            "the Still worker can own an interactive decoder and remains part of the family barrier"
+        );
+        let directive = coordinator
+            .worker_directive(MediaPreviewWorkerLane::Still, 0)
+            .expect("still worker should retire stale interactive Sessions");
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Still, directive.revision());
         assert!(coordinator.admits(PreviewDecodeAccessMode::PlaybackCursor));
 
         assert!(coordinator.activate(PreviewDecodeResidencyFamily::Interactive));
@@ -284,6 +348,20 @@ mod tests {
             .expect("playback worker should observe interactive phase");
         assert!(directive.retire_context());
         coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Playback, directive.revision());
+        let directive = coordinator
+            .worker_directive(MediaPreviewWorkerLane::NonPlayback, playback_revision)
+            .expect("shared worker may own a borrowed Playback Session");
+        assert_eq!(
+            directive.retired_family(),
+            Some(PreviewDecodeResidencyFamily::Playback)
+        );
+        coordinator
+            .acknowledge_retirement(MediaPreviewWorkerLane::NonPlayback, directive.revision());
+        assert!(!coordinator.admission_ready(PreviewDecodeAccessMode::ScrubCursor));
+        let directive = coordinator
+            .worker_directive(MediaPreviewWorkerLane::Still, playback_revision)
+            .expect("still worker should retire its Playback-family static Sessions");
+        coordinator.acknowledge_retirement(MediaPreviewWorkerLane::Still, directive.revision());
         assert!(coordinator.admits(PreviewDecodeAccessMode::ScrubCursor));
         assert!(coordinator.admits(PreviewDecodeAccessMode::RandomAccessStillFrame));
         assert!(!coordinator.admits(PreviewDecodeAccessMode::PlaybackCursor));

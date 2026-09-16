@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Mondrian packaged runtime is ready");
         return Ok(());
     }
+    mondrian_platform::prepare_graphics_process()?;
     mondrian_app::app_ui::window::run_app_ui()
 }
 

@@ -82,6 +82,12 @@ pub enum Action {
     Play,
     Pause,
     TogglePlay,
+    /// J: start reverse or double an already-running reverse shuttle.
+    ShuttleReverse,
+    /// K: stop shuttle/playback at the authoritative current phase.
+    ShuttleStop,
+    /// L: start forward or double an already-running forward shuttle.
+    ShuttleForward,
     /// Seek to an exact input coordinate in the active Sequence domain.
     ///
     /// The `FramePosition` time base is authoritative input, not a display hint;
@@ -298,6 +304,17 @@ mod tests {
     #[test]
     fn round_trip_toggle_play() {
         assert_eq!(round_trip(&Action::TogglePlay), Action::TogglePlay);
+    }
+
+    #[test]
+    fn round_trip_editorial_shuttle_actions() {
+        for action in [
+            Action::ShuttleReverse,
+            Action::ShuttleStop,
+            Action::ShuttleForward,
+        ] {
+            assert_eq!(round_trip(&action), action);
+        }
     }
 
     #[test]

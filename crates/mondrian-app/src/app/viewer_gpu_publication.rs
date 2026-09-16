@@ -141,6 +141,12 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
         self.current.as_ref()
     }
 
+    /// Number of move-only physical output leases retained by this Adapter.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn active_count(&self) -> usize {
+        usize::from(self.current.is_some()) + usize::from(self.prepared.is_some())
+    }
+
     /// Consume the retained prepared owner, if any.
     ///
     /// The caller is responsible for dropping the returned publication, which
@@ -151,12 +157,39 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
         self.prepared.take()
     }
 
+    /// Retire a prepared physical owner that is no longer backed by the
+    /// active semantic generation.
+    ///
+    /// A transport seek can rotate Preview semantics while the previously
+    /// prepared successor lease remains live in the presentation Adapter.
+    /// Keeping that stale second output blocks the capacity-one renderer from
+    /// recording the replacement current frame.
+    pub(crate) fn retire_prepared_unless(
+        &mut self,
+        expected_output_key: Option<&K>,
+    ) -> Option<ViewerGpuPhysicalPublication<K, O, L>> {
+        let stale = self
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| expected_output_key != Some(prepared.output_key()));
+        stale.then(|| self.prepared.take()).flatten()
+    }
+
     /// Visible artifact only when it has the exact semantic output identity.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn current_artifact_for_key(&self, output_key: &K) -> Option<&O> {
         self.current
             .as_ref()
             .filter(|current| current.output_key() == output_key)
+            .map(ViewerGpuPhysicalPublication::artifact)
+    }
+
+    /// Prepared artifact only when it has the exact semantic output identity.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn prepared_artifact_for_key(&self, output_key: &K) -> Option<&O> {
+        self.prepared
+            .as_ref()
+            .filter(|prepared| prepared.output_key() == output_key)
             .map(ViewerGpuPhysicalPublication::artifact)
     }
 
@@ -316,6 +349,25 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lookup_requires_the_exact_key_and_never_aliases_current() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut slots = ViewerGpuPublicationSlots::default();
+        publish(&mut slots, false, 1, "current", "visible", &drops);
+        publish(&mut slots, true, 2, "next", "prepared", &drops);
+
+        assert_eq!(
+            slots.prepared_artifact_for_key(&"next".to_owned()),
+            Some(&"prepared")
+        );
+        assert!(slots.prepared_artifact_for_key(&"current".to_owned()).is_none());
+        assert!(slots.prepared_artifact_for_key(&"other".to_owned()).is_none());
+        assert_eq!(
+            slots.current_artifact_for_key(&"current".to_owned()),
+            Some(&"visible")
+        );
+    }
+
+    #[test]
     fn exact_submission_retirement_cannot_clear_a_replacement() {
         let drops = Arc::new(AtomicUsize::new(0));
         let mut slots = ViewerGpuPublicationSlots::default();
@@ -336,6 +388,7 @@ mod tests {
         let mut slots = ViewerGpuPublicationSlots::default();
         publish(&mut slots, false, 5, "current", "a", &drops);
         publish(&mut slots, true, 6, "prepared", "b", &drops);
+        assert_eq!(slots.active_count(), 2);
 
         let retired = slots.drain();
         assert_eq!(
@@ -348,5 +401,26 @@ mod tests {
         );
         assert_eq!(drops.load(Ordering::Relaxed), 2);
         assert!(slots.current().is_none());
+        assert_eq!(slots.active_count(), 0);
+    }
+
+    #[test]
+    fn stale_prepared_output_retires_when_semantic_generation_rotates() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut slots = ViewerGpuPublicationSlots::default();
+        publish(&mut slots, false, 7, "current", "visible", &drops);
+        publish(&mut slots, true, 8, "old-successor", "prepared", &drops);
+
+        let retired = slots.retire_prepared_unless(None);
+
+        assert_eq!(
+            retired.map(ViewerGpuPhysicalPublication::into_artifact),
+            Some("prepared")
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            slots.current_artifact_for_key(&"current".to_owned()),
+            Some(&"visible")
+        );
     }
 }

@@ -2,11 +2,42 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 
 use super::*;
+
+#[test]
+fn native_retirement_does_not_admit_playback_before_old_family_is_consumed() {
+    let residency = PreviewDecodeResidencyCoordinator::new();
+    let lane = MediaPreviewWorkerLane::NonPlayback;
+    residency.register_worker(lane);
+    residency.activate(PreviewDecodeResidencyFamily::Playback);
+    let revision = residency.revision();
+    let mut context =
+        MediaPreviewWorkerDecodeContext::new(PreviewDecodeSessionContext::bootstrap());
+    let mut pending = PendingMediaPreviewSessionRetirements {
+        release_device_roots: true,
+        ..PendingMediaPreviewSessionRetirements::default()
+    };
+    pending.insert(PreviewDecodeSessionFamily::Interactive);
+    pending.acknowledge_if_released(&mut context, &residency, lane, revision);
+    assert!(
+        pending.release_device_roots,
+        "full clear must wait for native owners"
+    );
+    assert!(!residency.admits(PreviewDecodeAccessMode::PlaybackCursor));
+    // Only the owning worker removes this pending family after clear_family.
+    pending.remove(PreviewDecodeSessionFamily::Interactive);
+    pending.acknowledge_if_released(&mut context, &residency, lane, revision);
+    assert!(
+        !pending.release_device_roots,
+        "full clear precedes acknowledgement"
+    );
+    assert!(residency.admits(PreviewDecodeAccessMode::PlaybackCursor));
+}
 use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::preview_decode_residency::PreviewDecodeResidencyFamily;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::{Resolution, TimelineTime};
+use mondrian_core::{Resolution, TimelineTime, WorkingColorSpace};
 use mondrian_media::{DecodedVideoRange, DecodedVideoRangeContract, PreviewSourceColorContract};
+use mondrian_renderer::RenderInputTransform;
 
 fn test_media_key(label: &str) -> MediaPreviewKey {
     test_media_key_at(label, TimelineTime::new(1, 2).expect("exact source time"))
@@ -49,6 +80,22 @@ fn typed_decode_temporal_mismatch_preserves_retry_suppression_classification() {
     assert_eq!(
         media_preview_failure_reason(&error),
         MediaPreviewFailureReason::TemporalMismatch
+    );
+}
+
+#[test]
+fn typed_execution_resource_failure_preserves_the_exact_operation() {
+    let error = MondrianError::MediaExecutionResourceUnavailable {
+        operation: "start Preview demux stderr reader",
+        source: std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        cleanup: Some("child_reaped=true".to_owned()),
+    };
+
+    assert_eq!(
+        media_preview_failure_reason(&error),
+        MediaPreviewFailureReason::ExecutionResourceUnavailable {
+            operation: "start Preview demux stderr reader",
+        }
     );
 }
 
@@ -100,6 +147,18 @@ fn test_decoded_frame_evidence(selected_pts: Option<i64>) -> MediaPreviewDecoded
 }
 
 #[test]
+fn preview_cpu_rgba_decode_delegates_to_source_frame_preparation() {
+    let task_source = include_str!("../preview_media_task.rs");
+    assert_eq!(
+        task_source.matches("prepare_decoded_cpu_source_frame(").count(),
+        2
+    );
+    assert!(!task_source.contains("CpuEncodedFloatColorFrame"));
+    assert!(!task_source.contains("LinearFloatSource"));
+    assert!(!task_source.contains("normalize_alpha"));
+}
+
+#[test]
 fn decoded_media_frame_identity_tracks_the_complete_media_preview_key() {
     let first = test_media_key("identity");
     let different_time = with_source_time(
@@ -107,9 +166,14 @@ fn decoded_media_frame_identity_tracks_the_complete_media_preview_key() {
         TimelineTime::new(3, 4).expect("different exact source time"),
     );
     let mut different_engine = first.clone();
-    different_engine.engine = ColorEngine::Aces {
-        preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-    };
+    different_engine.preparation_intent = RenderInputTransform::to_working(
+        WorkingColorSpace::LinearRec709,
+        false,
+        ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        },
+    )
+    .into();
 
     let evidence = test_decoded_frame_evidence(Some(24_000));
     let first_identity = media_preview_frame_identity(&first, evidence);
@@ -132,7 +196,7 @@ fn decoded_media_frame_identity_tracks_actual_selected_output_evidence() {
     let approximate = media_preview_frame_identity(&key, test_decoded_frame_evidence(Some(18_000)));
     let different_payload_kind = media_preview_frame_identity(
         &key,
-        MediaPreviewDecodedFrameEvidence::CpuLinearRgbaF32 {
+        MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
             width: 320,
             height: 180,
             color_contract: DecodedRgbaFrameContract {

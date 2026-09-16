@@ -7,19 +7,18 @@ use lru::LruCache;
 use mondrian_core::ColorSpace;
 use mondrian_core::{
     extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
-    ocio_gpu_config_revision_for_engine, ColorEngine, GpuLanguage, OcioColorSpaceIdentity,
-    OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
-    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    ColorEngine, GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
+    OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 /// Full, domain-separated identity used to authorize OCIO GPU cache reuse.
 ///
@@ -276,7 +275,7 @@ impl OcioGpuShaderPlan {
         OcioGpuCanonicalIdentity::for_hash(
             b"shader-plan",
             &(
-                &self.request,
+                static_request_identity(&self.request),
                 self.bundle_identity,
                 self.shader_len,
                 self.texture_2d_count,
@@ -872,7 +871,29 @@ pub struct OcioGpuBindingContract {
 impl OcioGpuBindingContract {
     /// Stable hash of the contract.
     pub fn stable_hash(&self) -> u64 {
-        hash_value(self)
+        let uniform_layout = self
+            .uniforms
+            .iter()
+            .map(|uniform| {
+                (
+                    uniform.index,
+                    &uniform.name,
+                    uniform.uniform_type,
+                    uniform.buffer_offset,
+                    uniform.value_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        hash_value(&(
+            self.descriptor_set_index,
+            self.uniform_buffer_binding,
+            self.texture_binding_start,
+            self.uniform_buffer_size,
+            self.uniform_count,
+            uniform_layout,
+            &self.textures_2d,
+            &self.textures_3d,
+        ))
     }
 
     /// Validate this contract against the shader plan it was extracted from.
@@ -3688,6 +3709,7 @@ pub struct OcioGpuWgpuUploadedUniformBuffer {
     pub bytes_hash: u64,
     /// Uploaded wgpu buffer.
     pub buffer: wgpu::Buffer,
+    resident_bytes_hash: AtomicU64,
     resource_identity: OcioGpuCanonicalIdentity,
     payload_identity: OcioGpuCanonicalIdentity,
 }
@@ -3782,6 +3804,7 @@ impl OcioGpuWgpuUniformUploader {
             byte_len: packed.bytes.len(),
             bytes_hash: hash_bytes(&packed.bytes),
             buffer,
+            resident_bytes_hash: AtomicU64::new(hash_bytes(&packed.bytes)),
             resource_identity: packed.resource_identity,
             payload_identity: packed.payload_identity(),
         }))
@@ -4225,14 +4248,60 @@ impl std::fmt::Display for OcioGpuWgpuBackendObjectError {
 
 impl std::error::Error for OcioGpuWgpuBackendObjectError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UniformRefresh {
+    NotPresent,
+    Reused,
+    Updated,
+}
+
+fn refresh_backend_uniform(
+    queue: &wgpu::Queue,
+    shader_plan: &OcioGpuShaderPlan,
+    static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+    objects: &OcioGpuWgpuPreparedBackendObjects,
+) -> Result<UniformRefresh, OcioGpuWgpuUniformUploadError> {
+    let upload_plan = OcioGpuWgpuUniformUploadPlan::for_shader_plan(
+        shader_plan,
+        &static_pipeline.resources.resources,
+    );
+    let packed = upload_plan.pack_buffer()?;
+    validate_packed_uniform_upload(&packed)?;
+    if packed.bytes.is_empty() {
+        return Ok(UniformRefresh::NotPresent);
+    }
+    let uploaded = objects.uploaded_uniform.as_ref().ok_or(
+        OcioGpuWgpuUniformUploadError::MissingUniformBuffer {
+            uniform_count: shader_plan.bundle().uniforms.len(),
+        },
+    )?;
+    if packed.byte_len != uploaded.byte_len {
+        return Err(OcioGpuWgpuUniformUploadError::PackedByteLengthMismatch {
+            expected: uploaded.byte_len,
+            actual: packed.byte_len,
+        });
+    }
+    let resident = uploaded.resident_bytes_hash.load(Ordering::Acquire);
+    if resident == packed.bytes_hash {
+        return Ok(UniformRefresh::Reused);
+    }
+    queue.write_buffer(&uploaded.buffer, 0, &packed.bytes);
+    uploaded.resident_bytes_hash.store(packed.bytes_hash, Ordering::Release);
+    Ok(UniformRefresh::Updated)
+}
+
 /// Renderer-owned runtime for concrete OCIO GPU backend object preparation.
 pub struct OcioGpuWgpuBackendObjectRuntime {
     objects: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuWgpuPreparedBackendObjects>>,
+    input_pipelines: LruCache<OcioGpuCanonicalIdentity, Arc<wgpu::RenderPipeline>>,
     wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache,
     render_pipelines: OcioGpuWgpuRenderPipelineCache,
     hits: u64,
     misses: u64,
     failures: u64,
+    uniform_updates: u64,
+    uniform_reuses: u64,
+    uniform_failures: u64,
 }
 
 impl OcioGpuWgpuBackendObjectRuntime {
@@ -4240,11 +4309,15 @@ impl OcioGpuWgpuBackendObjectRuntime {
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
             objects: LruCache::new(capacity),
+            input_pipelines: LruCache::new(capacity),
             wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default(),
             render_pipelines: OcioGpuWgpuRenderPipelineCache::default(),
             hits: 0,
             misses: 0,
             failures: 0,
+            uniform_updates: 0,
+            uniform_reuses: 0,
+            uniform_failures: 0,
         }
     }
 
@@ -4272,6 +4345,20 @@ impl OcioGpuWgpuBackendObjectRuntime {
         }
         let cache_key = backend_object_cache_key(shader_plan, static_pipeline);
         if let Some(hit) = self.objects.get(&cache_key) {
+            match refresh_backend_uniform(queue, shader_plan, static_pipeline, hit) {
+                Ok(UniformRefresh::Updated) => {
+                    self.uniform_updates = self.uniform_updates.saturating_add(1);
+                }
+                Ok(UniformRefresh::Reused) => {
+                    self.uniform_reuses = self.uniform_reuses.saturating_add(1);
+                }
+                Ok(UniformRefresh::NotPresent) => {}
+                Err(err) => {
+                    self.failures = self.failures.saturating_add(1);
+                    self.uniform_failures = self.uniform_failures.saturating_add(1);
+                    return Err(OcioGpuWgpuBackendObjectError::UniformUpload(err));
+                }
+            }
             self.hits = self.hits.saturating_add(1);
             return Ok(Arc::clone(hit));
         }
@@ -4294,6 +4381,82 @@ impl OcioGpuWgpuBackendObjectRuntime {
                 Err(err)
             }
         }
+    }
+
+    /// Compose a physical input fetch with the same compiled OCIO callable and LUTs.
+    /// The caller supplies a group-1 input layout; OCIO retains group 0.
+    pub(crate) fn prepare_fused_input_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        shader_plan: &OcioGpuShaderPlan,
+        backend: &OcioGpuWgpuPreparedBackendObjects,
+        input_source: &str,
+        input_layout: &wgpu::BindGroupLayout,
+    ) -> Result<Arc<wgpu::RenderPipeline>, OcioGpuFusedInputError> {
+        if backend.ocio_bind_group.bind_group_index != 0 {
+            return Err(OcioGpuFusedInputError::ResourceGroup);
+        }
+        let key = OcioGpuCanonicalIdentity::for_hash(
+            b"fused-input-pipeline",
+            &(
+                shader_plan.canonical_identity(),
+                backend.ocio_bind_group.layout_identity,
+                input_source,
+            ),
+        );
+        if let Some(pipeline) = self.input_pipelines.get(&key) {
+            return Ok(Arc::clone(pipeline));
+        }
+        let source = format!("{}\n{input_source}", ocio_input_callable_wgsl(shader_plan)?);
+        let module = naga::front::wgsl::parse_str(&source)
+            .map_err(|error| OcioGpuFusedInputError::Parse(error.emit_to_string(&source)))?;
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .map_err(|error| OcioGpuFusedInputError::Validation(error.to_string()))?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.ocio.fused-input.shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.ocio.fused-input.layout"),
+            bind_group_layouts: &[Some(&backend.ocio_bind_group.layout), Some(input_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = Arc::new(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.ocio.fused-input.pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: crate::product_gpu_working_texture_format().to_wgpu(),
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            }),
+        );
+        self.input_pipelines.put(key, Arc::clone(&pipeline));
+        Ok(pipeline)
     }
 
     fn prepare_backend_objects_uncached(
@@ -4415,6 +4578,9 @@ impl OcioGpuWgpuBackendObjectRuntime {
             hits: self.hits,
             misses: self.misses,
             failures: self.failures,
+            uniform_updates: self.uniform_updates,
+            uniform_reuses: self.uniform_reuses,
+            uniform_failures: self.uniform_failures,
             wrapper_modules: self.wrapper_modules.diagnostics(),
             render_pipelines: self.render_pipelines.diagnostics(),
             wrapper_input_bindings,
@@ -4439,6 +4605,12 @@ pub struct OcioGpuWgpuBackendObjectRuntimeDiagnostics {
     pub misses: u64,
     /// Object preparation failures.
     pub failures: u64,
+    /// Dynamic uniform writes into already-resident buffers.
+    pub uniform_updates: u64,
+    /// Uniform payloads already resident and therefore not uploaded again.
+    pub uniform_reuses: u64,
+    /// Dynamic uniform refresh failures.
+    pub uniform_failures: u64,
     /// Wrapper shader-module cache diagnostics.
     pub wrapper_modules: OcioGpuWgpuWrapperShaderModuleCacheDiagnostics,
     /// Render-pipeline cache diagnostics.
@@ -5124,12 +5296,162 @@ pub enum OcioGpuWgpuBlocker {
     },
 }
 
-/// Bounded cache for OCIO GPU shader extraction results.
+const DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY: usize = 256;
+
+type OcioSharedShaderPlanCell = Arc<OnceLock<Result<Arc<OcioGpuShaderPlan>, String>>>;
+
+/// Process-wide registry of immutable, device-independent OCIO GPU artifacts.
+///
+/// Full requests, including dynamic property values, key the shared plan. This
+/// makes the shader source, copied LUTs, binding metadata, and current uniform
+/// payload safe to reuse between Preview and historical Export owners. wgpu
+/// objects and mutable uniform buffers remain outside this Module in their
+/// device/owner-scoped runtimes.
+struct OcioSharedShaderPlanRegistry {
+    entries: LruCache<OcioGpuCanonicalIdentity, OcioSharedShaderPlanCell>,
+    in_flight: HashMap<OcioGpuCanonicalIdentity, OcioSharedShaderPlanCell>,
+    hits: u64,
+    misses: u64,
+    waits: u64,
+    builds: u64,
+    failures: u64,
+    evictions: u64,
+}
+
+impl OcioSharedShaderPlanRegistry {
+    fn new() -> Self {
+        Self {
+            entries: LruCache::new(
+                NonZeroUsize::new(DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY)
+                    .unwrap_or(NonZeroUsize::MIN),
+            ),
+            in_flight: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+        }
+    }
+}
+
+static OCIO_SHARED_SHADER_PLANS: LazyLock<Mutex<OcioSharedShaderPlanRegistry>> =
+    LazyLock::new(|| Mutex::new(OcioSharedShaderPlanRegistry::new()));
+
+/// Point-in-time evidence for the shared device-independent GPU artifact Module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioSharedShaderPlanRegistryDiagnostics {
+    /// Exact full-request lookups served by an existing ready or in-flight cell.
+    pub hits: u64,
+    /// Exact full requests admitted because no shared cell existed.
+    pub misses: u64,
+    /// Existing cells observed while their first extraction was in flight.
+    pub waits: u64,
+    /// Device-independent OCIO plans extracted from shared parent graphs.
+    pub builds: u64,
+    /// Plan extractions that failed closed and were not retained.
+    pub failures: u64,
+    /// Ready plans removed by bounded LRU admission.
+    pub evictions: u64,
+    /// Ready device-independent plans currently retained.
+    pub entries: usize,
+    /// Exact full-request extractions currently in flight.
+    pub in_flight: usize,
+    /// Maximum ready plan count.
+    pub capacity: usize,
+}
+
+/// Return reuse and pressure evidence for shared plain OCIO GPU artifacts.
+pub fn ocio_shared_shader_plan_registry_diagnostics() -> OcioSharedShaderPlanRegistryDiagnostics {
+    let Ok(registry) = OCIO_SHARED_SHADER_PLANS.lock() else {
+        return OcioSharedShaderPlanRegistryDiagnostics {
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+            entries: 0,
+            in_flight: 0,
+            capacity: DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY,
+        };
+    };
+    OcioSharedShaderPlanRegistryDiagnostics {
+        hits: registry.hits,
+        misses: registry.misses,
+        waits: registry.waits,
+        builds: registry.builds,
+        failures: registry.failures,
+        evictions: registry.evictions,
+        entries: registry.entries.len(),
+        in_flight: registry.in_flight.len(),
+        capacity: DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY,
+    }
+}
+
+fn resolve_shared_shader_plan(
+    request: OcioGpuShaderRequest,
+    request_key: OcioGpuCanonicalIdentity,
+) -> Result<(Arc<OcioGpuShaderPlan>, bool), String> {
+    let (cell, shared_hit) = {
+        let mut registry = OCIO_SHARED_SHADER_PLANS
+            .lock()
+            .map_err(|_| "OCIO shared shader-plan registry lock is poisoned".to_owned())?;
+        if let Some(cell) = registry.entries.get(&request_key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            (cell, true)
+        } else if let Some(cell) = registry.in_flight.get(&request_key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            registry.waits = registry.waits.saturating_add(1);
+            (cell, true)
+        } else {
+            registry.misses = registry.misses.saturating_add(1);
+            let cell = Arc::new(OnceLock::new());
+            registry.in_flight.insert(request_key, Arc::clone(&cell));
+            (cell, false)
+        }
+    };
+
+    let resolved = cell.get_or_init(|| {
+        let result = extract_bundle(&request)
+            .map(|bundle| Arc::new(plan_from_bundle(request.clone(), Arc::new(bundle))));
+        if let Ok(mut registry) = OCIO_SHARED_SHADER_PLANS.lock() {
+            registry.builds = registry.builds.saturating_add(1);
+            if result.is_err() {
+                registry.failures = registry.failures.saturating_add(1);
+            }
+            let matching_in_flight = registry
+                .in_flight
+                .get(&request_key)
+                .is_some_and(|cached| Arc::ptr_eq(cached, &cell));
+            if matching_in_flight {
+                registry.in_flight.remove(&request_key);
+                if result.is_ok() {
+                    if registry.entries.len() == DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY {
+                        registry.evictions = registry.evictions.saturating_add(1);
+                    }
+                    registry.entries.put(request_key, Arc::clone(&cell));
+                }
+            }
+        }
+        result
+    });
+
+    resolved
+        .as_ref()
+        .map(|plan| (Arc::clone(plan), shared_hit))
+        .map_err(|reason| reason.clone())
+}
+
+/// Bounded owner cache backed by the shared immutable OCIO artifact Module.
 pub struct OcioGpuShaderCache {
     entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuShaderPlan>>,
     hits: u64,
     misses: u64,
     extraction_failures: u64,
+    shared_hits: u64,
+    shared_misses: u64,
 }
 
 impl OcioGpuShaderCache {
@@ -5140,10 +5462,15 @@ impl OcioGpuShaderCache {
             hits: 0,
             misses: 0,
             extraction_failures: 0,
+            shared_hits: 0,
+            shared_misses: 0,
         }
     }
 
-    /// Clear all cached entries for renderer or GPU-device lifecycle invalidation.
+    /// Clear this owner's front cache for renderer lifecycle invalidation.
+    ///
+    /// Device-independent shared plans remain available to other owners; wgpu
+    /// backend objects have separate device-scoped lifecycle barriers.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -5153,26 +5480,26 @@ impl OcioGpuShaderCache {
         &mut self,
         request: OcioGpuShaderRequest,
     ) -> Result<Arc<OcioGpuShaderPlan>, OcioGpuShaderError> {
-        let config_revision = match ocio_gpu_config_revision_for_engine(request.engine()) {
-            Ok(revision) => revision,
-            Err(reason) => {
-                self.misses = self.misses.saturating_add(1);
-                self.extraction_failures = self.extraction_failures.saturating_add(1);
-                return Err(OcioGpuShaderError { request, reason });
-            }
-        };
-        let request_key = request_cache_identity(&request, config_revision);
+        // ColorEngine is the complete semantic identity. A warm owner lookup
+        // must not select OCIO's process-global config or include operational
+        // reload generation in the semantic key.
+        let request_key = request_cache_identity(&request);
         if let Some(hit) = self.entries.get(&request_key) {
             self.hits += 1;
             return Ok(Arc::clone(hit));
         }
 
-        self.misses += 1;
-        let bundle = extract_bundle(&request).map_err(|reason| {
-            self.extraction_failures += 1;
-            OcioGpuShaderError { request: request.clone(), reason }
-        })?;
-        let plan = Arc::new(plan_from_bundle(request, Arc::new(bundle)));
+        self.misses = self.misses.saturating_add(1);
+        let (plan, shared_hit) =
+            resolve_shared_shader_plan(request.clone(), request_key).map_err(|reason| {
+                self.extraction_failures += 1;
+                OcioGpuShaderError { request: request.clone(), reason }
+            })?;
+        if shared_hit {
+            self.shared_hits = self.shared_hits.saturating_add(1);
+        } else {
+            self.shared_misses = self.shared_misses.saturating_add(1);
+        }
         self.entries.put(request_key, Arc::clone(&plan));
         Ok(plan)
     }
@@ -5236,6 +5563,8 @@ impl OcioGpuShaderCache {
             hits: self.hits,
             misses: self.misses,
             extraction_failures: self.extraction_failures,
+            shared_hits: self.shared_hits,
+            shared_misses: self.shared_misses,
         }
     }
 }
@@ -5257,6 +5586,10 @@ pub struct OcioGpuShaderCacheDiagnostics {
     pub misses: u64,
     /// OCIO extraction failures.
     pub extraction_failures: u64,
+    /// Owner misses served by an existing shared immutable plan or in-flight cell.
+    pub shared_hits: u64,
+    /// Owner misses that admitted a new shared immutable plan build.
+    pub shared_misses: u64,
 }
 
 /// Error returned when OCIO cannot produce a GPU shader plan.
@@ -5592,7 +5925,6 @@ fn shader_bundle_identity(bundle: &OcioGpuShaderBundle) -> OcioGpuCanonicalIdent
         uniform.uniform_type.hash(&mut hasher);
         uniform.buffer_offset.hash(&mut hasher);
         uniform.value_count.hash(&mut hasher);
-        hash_uniform_value_into(&mut hasher, &uniform.value);
     }
 
     hasher.finalize()
@@ -5646,11 +5978,38 @@ fn plan_from_bundle(
     }
 }
 
-fn request_cache_identity(
-    request: &OcioGpuShaderRequest,
-    config_revision: u64,
-) -> OcioGpuCanonicalIdentity {
-    OcioGpuCanonicalIdentity::for_hash(b"shader-request", &(request, config_revision))
+fn request_cache_identity(request: &OcioGpuShaderRequest) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(b"shader-request", request)
+}
+
+fn static_request_identity(request: &OcioGpuShaderRequest) -> OcioGpuCanonicalIdentity {
+    match request {
+        OcioGpuShaderRequest::ColorSpace { engine, src, dst, language } => {
+            OcioGpuCanonicalIdentity::for_hash(
+                b"static-shader-request",
+                &(
+                    0u8,
+                    engine.static_processor_identity(),
+                    src,
+                    dst,
+                    *language as i32,
+                ),
+            )
+        }
+        OcioGpuShaderRequest::DisplayView { engine, src, display, view, language } => {
+            OcioGpuCanonicalIdentity::for_hash(
+                b"static-shader-request",
+                &(
+                    1u8,
+                    engine.static_processor_identity(),
+                    src,
+                    display,
+                    view,
+                    *language as i32,
+                ),
+            )
+        }
+    }
 }
 
 fn hash_request_and_processor(
@@ -5659,7 +6018,7 @@ fn hash_request_and_processor(
 ) -> u64 {
     OcioGpuCanonicalIdentity::for_hash(
         b"diagnostic-request-processor",
-        &(request, processor_cache_id),
+        &(static_request_identity(request), processor_cache_id),
     )
     .diagnostic_key()
 }
@@ -5933,6 +6292,65 @@ fn wrapper_ocio_program_glsl_call(contract: &OcioGpuGeneratedProgramContract) ->
         }
         OcioGpuGeneratedProgramCallStyle::Unknown => String::new(),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OcioGpuFusedInputError {
+    #[error("OCIO input program is not a callable function")]
+    NotCallable,
+    #[error("fused input requires the canonical group-0 OCIO resource contract")]
+    ResourceGroup,
+    #[error("OCIO callable lowering failed: {0}")]
+    Lowering(String),
+    #[error("OCIO callable translation failed: {0:?}")]
+    Translation(OcioGpuShaderTranslationFailure),
+    #[error("fused input WGSL parsing failed: {0}")]
+    Parse(String),
+    #[error("fused input shader validation failed: {0}")]
+    Validation(String),
+    #[error("OCIO callable WGSL emission failed: {0}")]
+    Emission(String),
+}
+
+/// Lower the canonical OCIO callable without materializing an RGBA input texture.
+fn ocio_input_callable_wgsl(
+    shader_plan: &OcioGpuShaderPlan,
+) -> Result<String, OcioGpuFusedInputError> {
+    let contract = OcioGpuGeneratedProgramContract::for_shader_plan(shader_plan);
+    if contract.call_style == OcioGpuGeneratedProgramCallStyle::Unknown
+        || contract.main_function_present
+    {
+        return Err(OcioGpuFusedInputError::NotCallable);
+    }
+    let source = format!(
+        "#version 450 core\n{}\nvec4 mondrian_apply_input(vec4 {}) {{\nfloat saved_alpha = {}.a;\n{}\n{}.a = saved_alpha;\nreturn {};\n}}\nvoid main() {{}}",
+        lower_ocio_program_source_for_wgpu(shader_plan).map_err(OcioGpuFusedInputError::Lowering)?,
+        contract.pixel_name, contract.pixel_name,
+        wrapper_ocio_program_glsl_call(&contract), contract.pixel_name, contract.pixel_name,
+    );
+    let artifact = translate_naga_shader_stage(
+        GpuLanguage::Glsl4_0,
+        OcioGpuShaderTargetLanguage::NagaIr,
+        OcioGpuShaderStage::Fragment,
+        hash_value(&source),
+        &source,
+    )
+    .map_err(OcioGpuFusedInputError::Translation)?;
+    let mut module = artifact.naga_module;
+    module.entry_points.clear();
+    for (_, function) in module.functions.iter_mut() {
+        if function.name.as_deref() == Some("main") {
+            function.name = Some("mondrian_unused_library_entry".into());
+        }
+    }
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|error| OcioGpuFusedInputError::Validation(error.to_string()))?;
+    naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+        .map_err(|error| OcioGpuFusedInputError::Emission(error.to_string()))
 }
 
 fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result<String, String> {
@@ -7525,7 +7943,6 @@ mod tests {
                 mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
                     source,
                     "0".repeat(64),
-                    "test-resolved-config".to_owned(),
                     "0".repeat(64),
                     "Linear Rec.2020".to_owned(),
                     vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
@@ -7540,6 +7957,25 @@ mod tests {
                     Vec::new(),
                 )
                 .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
+    fn pinned_custom_engine_with_exposure(value: f64) -> ColorEngine {
+        let engine = pinned_custom_engine(mondrian_core::OcioConfigSource::Builtin {
+            name: "dynamic-unit-test".to_owned(),
+        });
+        let identity = engine.custom_ocio_identity().expect("Custom OCIO identity");
+        let exposure = mondrian_core::CustomOcioDynamicPropertyIdentity::new(
+            mondrian_core::CustomOcioDynamicPropertyKind::Exposure,
+            mondrian_core::CustomOcioDynamicPropertyValue::Scalar(value),
+        )
+        .expect("dynamic exposure identity");
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                identity
+                    .with_dynamic_properties(vec![exposure])
+                    .expect("Custom OCIO dynamic properties"),
             ),
         }
     }
@@ -7868,6 +8304,22 @@ mod tests {
         plan_from_bundle(request, bundle)
     }
 
+    fn dynamic_custom_shader_plan(
+        authored_exposure: f64,
+        uniform_exposure: f32,
+    ) -> OcioGpuShaderPlan {
+        let template = shader_plan_with_single_uniform_buffer_size(16);
+        let mut bundle = Arc::unwrap_or_clone(template.bundle);
+        bundle.uniforms[0].value = OcioGpuUniformValue::F32(vec![uniform_exposure]);
+        let request = OcioGpuShaderRequest::ColorSpace {
+            engine: pinned_custom_engine_with_exposure(authored_exposure),
+            src: ColorSpace::Rec709.into(),
+            dst: ColorSpace::Srgb.into(),
+            language: GpuLanguage::Glsl4_0,
+        };
+        plan_from_bundle(request, Arc::new(bundle))
+    }
+
     fn callable_ocio_program_text() -> &'static str {
         r#"
             #version 450 core
@@ -8093,6 +8545,39 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_ocio_values_change_uniform_payload_without_rebuilding_static_gpu_identity() {
+        let first = dynamic_custom_shader_plan(0.0, 0.0);
+        let second = dynamic_custom_shader_plan(1.0, 1.0);
+
+        assert_ne!(
+            request_cache_identity(&first.request),
+            request_cache_identity(&second.request),
+            "shader extraction must observe new authored values"
+        );
+        assert_eq!(
+            first.canonical_identity(),
+            second.canonical_identity(),
+            "dynamic payload must not rebuild shader/layout/pipeline/LUT identity"
+        );
+        assert_eq!(first.binding_contract_hash, second.binding_contract_hash);
+
+        let first_resources =
+            OcioGpuWgpuResourcePlan::for_shader_plan(&first).expect("first resources");
+        let second_resources =
+            OcioGpuWgpuResourcePlan::for_shader_plan(&second).expect("second resources");
+        assert_eq!(first_resources.resource_key, second_resources.resource_key);
+
+        let first_uniform = OcioGpuWgpuUniformUploadPlan::for_shader_plan(&first, &first_resources)
+            .pack_buffer()
+            .expect("first uniform payload");
+        let second_uniform =
+            OcioGpuWgpuUniformUploadPlan::for_shader_plan(&second, &second_resources)
+                .pack_buffer()
+                .expect("second uniform payload");
+        assert_ne!(first_uniform.bytes_hash, second_uniform.bytes_hash);
+    }
+
+    #[test]
     fn backend_prep_runtime_surfaces_wrapper_link_blockers() {
         let shader_plan = shader_plan_with_text("void unrelated(inout vec4 color) {}");
         let mut runtime = OcioGpuWgpuBackendPrepRuntime::default();
@@ -8150,6 +8635,9 @@ mod tests {
                 hits: 0,
                 misses: 0,
                 failures: 0,
+                uniform_updates: 0,
+                uniform_reuses: 0,
+                uniform_failures: 0,
                 wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default().diagnostics(),
                 render_pipelines: OcioGpuWgpuRenderPipelineCache::default().diagnostics(),
                 wrapper_input_bindings: OcioGpuWgpuWrapperInputBindingCacheDiagnostics::default(),
@@ -8301,6 +8789,60 @@ mod tests {
             error,
             OcioGpuWgpuBackendObjectError::Float32FilteringUnsupported
         );
+    }
+
+    #[tokio::test]
+    async fn backend_object_runtime_refreshes_dynamic_uniform_without_object_rebuild() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping dynamic uniform residency test: no GPU adapter available");
+            return;
+        };
+        let first_plan = dynamic_custom_shader_plan(0.0, 0.0);
+        let second_plan = dynamic_custom_shader_plan(1.0, 1.0);
+        let mut prep_runtime = OcioGpuWgpuBackendPrepRuntime::default();
+        let static_pipeline = prep_runtime
+            .prepare_static_pipeline(&first_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare static dynamic-property pipeline");
+        let second_static = prep_runtime
+            .prepare_static_pipeline(&second_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("reuse static dynamic-property pipeline");
+        assert!(Arc::ptr_eq(&static_pipeline, &second_static));
+
+        let mut object_runtime = OcioGpuWgpuBackendObjectRuntime::default();
+        let first = object_runtime
+            .prepare_backend_objects(
+                &context.device,
+                &context.queue,
+                &first_plan,
+                &static_pipeline,
+            )
+            .expect("create dynamic-property backend objects");
+        let updated = object_runtime
+            .prepare_backend_objects(
+                &context.device,
+                &context.queue,
+                &second_plan,
+                &second_static,
+            )
+            .expect("refresh resident dynamic uniform");
+        let reused = object_runtime
+            .prepare_backend_objects(
+                &context.device,
+                &context.queue,
+                &second_plan,
+                &second_static,
+            )
+            .expect("reuse resident dynamic uniform");
+
+        assert!(Arc::ptr_eq(&first, &updated));
+        assert!(Arc::ptr_eq(&updated, &reused));
+        let diagnostics = object_runtime.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.uniform_updates, 1);
+        assert_eq!(diagnostics.uniform_reuses, 1);
+        assert_eq!(diagnostics.uniform_failures, 0);
     }
 
     #[test]
@@ -8980,6 +9522,24 @@ mod tests {
     }
 
     #[test]
+    fn input_callable_links_without_rgba_texture_for_both_ocio_call_styles() {
+        for source in [callable_ocio_program_text(), returning_ocio_program_text()] {
+            let library = ocio_input_callable_wgsl(&shader_plan_with_text(source))
+                .expect("canonical callable lowers");
+            let source = format!("{library}\n@fragment fn main() -> @location(0) vec4<f32> {{ return mondrian_apply_input(vec4<f32>(0.5)); }}");
+            let module = naga::front::wgsl::parse_str(&source).expect("callable links");
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("linked module validates");
+            assert_eq!(module.entry_points.len(), 1);
+            assert!(module.global_variables.iter().all(|(_, variable)| variable.binding.is_none()));
+        }
+    }
+
+    #[test]
     fn wrapper_shader_module_artifact_cache_reuses_validated_stage_split_naga_modules() {
         let resources = bind_resource_test_plan(50);
         let shader_plan = shader_plan_with_text(callable_ocio_program_text());
@@ -9579,8 +10139,8 @@ mod tests {
             .expect_err("missing Custom config must fail instead of hitting Standard cache");
         assert_eq!(error.request, custom_request);
         assert_ne!(
-            request_cache_identity(&standard_request, 0),
-            request_cache_identity(&error.request, 0)
+            request_cache_identity(&standard_request),
+            request_cache_identity(&error.request)
         );
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -9601,31 +10161,12 @@ mod tests {
         let current = request_for(mondrian_core::MondrianStandardPackageIdentity::V3);
 
         assert_ne!(
-            request_cache_identity(&legacy, 0),
-            request_cache_identity(&current, 0)
+            request_cache_identity(&legacy),
+            request_cache_identity(&current)
         );
         assert_ne!(
             hash_request_and_processor(&legacy, Some("same-processor-id")),
             hash_request_and_processor(&current, Some("same-processor-id"))
-        );
-    }
-
-    #[test]
-    fn shader_request_cache_key_invalidates_on_config_revision() {
-        let request = OcioGpuShaderRequest::ColorSpace {
-            engine: pinned_custom_engine(mondrian_core::OcioConfigSource::Environment),
-            src: ColorSpace::SonySLog3SGamut3Cine.into(),
-            dst: ColorSpace::Rec709.into(),
-            language: GpuLanguage::Glsl4_0,
-        };
-
-        assert_eq!(
-            request_cache_identity(&request, 7),
-            request_cache_identity(&request, 7)
-        );
-        assert_ne!(
-            request_cache_identity(&request, 7),
-            request_cache_identity(&request, 8)
         );
     }
 

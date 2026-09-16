@@ -83,6 +83,13 @@ impl AppState {
                     self.play()
                 }
             }
+            Action::ShuttleReverse => {
+                self.shuttle(mondrian_playback::PlaybackShuttleDirection::Reverse)
+            }
+            Action::ShuttleStop => self.pause(),
+            Action::ShuttleForward => {
+                self.shuttle(mondrian_playback::PlaybackShuttleDirection::Forward)
+            }
             Action::Seek(position) => {
                 let frame = self.sequence_frame_from_action_position("seek", position)?;
                 self.seek(frame)
@@ -462,6 +469,12 @@ impl AppState {
         &mut self,
         payload: AssetSetInterpretationPayload,
     ) -> Result<()> {
+        payload.interpretation.camera_raw.validate().map_err(|error| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "set_asset_interpretation".to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("解释素材失败：{reason}"), true);
@@ -1074,6 +1087,9 @@ impl AppState {
             ProductAction::VisualEffect(action) => {
                 self.dispatch_visual_effect_product_action(action)
             }
+            ProductAction::Grade(action) => self.dispatch_grade_product_action(action),
+            ProductAction::DynamicHdr(edit) => self.dispatch_dynamic_hdr_product_action(edit),
+            ProductAction::Gallery(action) => self.dispatch_gallery_product_action(action),
             ProductAction::VisualMask(action) => self.dispatch_visual_mask_product_action(action),
         }
     }
@@ -1355,6 +1371,14 @@ impl AppState {
                     ExportDraftEdit::OutputPath(output_path) => {
                         self.set_export_draft_output_path(output_path)
                     }
+                    ExportDraftEdit::ImportAncillary(path) => {
+                        self.import_export_draft_ancillary(path)?
+                    }
+                    ExportDraftEdit::ClearAncillary => self.clear_export_draft_ancillary(),
+                    ExportDraftEdit::ImportRegulatoryPse(path) => {
+                        self.import_export_draft_regulatory_pse(path)?
+                    }
+                    ExportDraftEdit::ClearRegulatoryPse => self.clear_export_draft_regulatory_pse(),
                 };
                 require_action_executed(
                     changed,
@@ -1365,6 +1389,7 @@ impl AppState {
             ExportProductAction::Enqueue(request) => {
                 self.enqueue_timeline_export(*request).map(|_| ())
             }
+            ExportProductAction::EnqueueDraft => self.enqueue_current_export_draft().map(|_| ()),
             ExportProductAction::Cancel(job_id) => match self.cancel_export_job(job_id) {
                 ExportCancelOutcome::Requested => Ok(()),
                 ExportCancelOutcome::AlreadyRequested => Err(action_not_executed(
@@ -1938,13 +1963,15 @@ mod tests {
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::automation::AnimationParameterAddress;
+    use mondrian_core::automation::{
+        AnimationParameterAddress, QualifierSample, QualifierSampleOperation, QualifierSampleSet,
+    };
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{
         AssetId, AudioComponentEditId, AudioSourceComponentId, ClipLinkGroupId, EffectId,
         FramePosition, MaskId, TrackId,
     };
-    use mondrian_core::{Color, ColorSpace};
+    use mondrian_core::{Color, ColorSpace, NormalizedCurve, NormalizedCurvePoint};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
     use mondrian_effects::EffectType;
     use mondrian_media::info::{AudioCodec, ChannelLayout};
@@ -1978,7 +2005,6 @@ mod tests {
                 mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
                     mondrian_core::OcioConfigSource::Environment,
                     "0".repeat(64),
-                    "test-config".to_owned(),
                     "0".repeat(64),
                     working_space.to_owned(),
                     vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
@@ -2202,6 +2228,28 @@ mod tests {
             PropertyValue::Int(value) => PropertyValue::Int(value.saturating_add(1)),
             PropertyValue::Float(value) => PropertyValue::Float(*value + 0.5),
             PropertyValue::Double(value) => PropertyValue::Double(*value + 0.5),
+            PropertyValue::Curve(value) => {
+                let mut points = value.points().to_vec();
+                points[0].y = if points[0].y < 0.5 {
+                    points[0].y + 0.25
+                } else {
+                    points[0].y - 0.25
+                };
+                PropertyValue::Curve(
+                    mondrian_core::NormalizedCurve::new(points).expect("changed test curve"),
+                )
+            }
+            PropertyValue::QualifierSamples(value) => {
+                let mut samples = value.samples().to_vec();
+                samples.push(mondrian_core::automation::QualifierSample::new(
+                    [0.25, 0.5, 0.75],
+                    mondrian_core::automation::QualifierSampleOperation::Include,
+                ));
+                PropertyValue::QualifierSamples(
+                    mondrian_core::automation::QualifierSampleSet::new(samples)
+                        .expect("changed qualifier samples"),
+                )
+            }
             PropertyValue::Vec2(value) => PropertyValue::Vec2(*value + glam::Vec2::splat(0.5)),
             PropertyValue::Vec3(value) => PropertyValue::Vec3(*value + glam::Vec3::splat(0.5)),
             PropertyValue::Color(_) => PropertyValue::Color(Color::from_hex(0x44AAFF)),
@@ -2336,6 +2384,9 @@ mod tests {
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             }))
             .expect_err("empty output path should fail");
 
@@ -4350,6 +4401,14 @@ mod tests {
         let events = state.event_bus.subscribe();
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            camera_raw: mondrian_core::CameraRawInterpretation {
+                exposure_millistops: 1_000,
+                white_balance: mondrian_core::CameraRawWhiteBalance::TemperatureTint {
+                    temperature_kelvin: 5_600,
+                    tint_milli: 25,
+                },
+                debayer_quality: mondrian_core::CameraRawDebayerQuality::Bilinear,
+            },
             ..AssetMediaInterpretation::default()
         };
 
@@ -4374,6 +4433,31 @@ mod tests {
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_set_interpretation_rejects_invalid_camera_raw_bounds() {
+        let mut state = AppState::new();
+        let error = state
+            .dispatch_action(assets_set_interpretation_action(
+                AssetsSetInterpretationPayload {
+                    asset_id: AssetId::new(),
+                    interpretation: AssetMediaInterpretation {
+                        camera_raw: mondrian_core::CameraRawInterpretation {
+                            exposure_millistops: 5_001,
+                            ..mondrian_core::CameraRawInterpretation::default()
+                        },
+                        ..AssetMediaInterpretation::default()
+                    },
+                },
+            ))
+            .expect_err("invalid RAW interpretation must fail closed");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { ref step_id, ref reason }
+                if step_id == "set_asset_interpretation" && reason.contains("outside")
+        ));
     }
 
     #[test]
@@ -5056,15 +5140,17 @@ mod tests {
             sequence.settings.color.program_output.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
-        let context =
-            sequence.settings.root_program_color_context(state.project_color_environment());
+        let context = sequence
+            .settings
+            .root_program_color_context(state.project_color_environment())
+            .expect("valid context");
         assert_eq!(
-            context.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            context.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
         assert!(!state.project_settings().proxy_enabled);
         assert_eq!(state.new_sequence_defaults(), &sequence_settings);
@@ -5112,7 +5198,8 @@ mod tests {
             .active_sequence()
             .expect("sequence")
             .settings
-            .root_program_color_context(state.project_color_environment());
+            .root_program_color_context(state.project_color_environment())
+            .expect("valid context");
         let mut defaults = state.new_sequence_defaults().clone();
         defaults.resolution = Resolution::UHD4K;
 
@@ -5132,7 +5219,8 @@ mod tests {
                 .active_sequence()
                 .expect("active sequence")
                 .settings
-                .root_program_color_context(state.project_color_environment()),
+                .root_program_color_context(state.project_color_environment())
+                .expect("valid context"),
             before_context
         );
         assert_eq!(
@@ -5191,10 +5279,11 @@ mod tests {
         assert_eq!(active.revision, original_revision);
         assert_eq!(state.project_color_environment(), &color_environment);
         assert_eq!(
-            &active
+            active
                 .settings
                 .root_program_color_context(state.project_color_environment())
-                .engine,
+                .expect("valid context")
+                .engine(),
             color_environment.engine()
         );
         assert_eq!(
@@ -6894,6 +6983,151 @@ mod tests {
             .find(|effect| effect.id == effect_id)
             .and_then(|effect| effect.properties.property(&path))
             .expect("reapplied Crop property");
+        assert_eq!(property.static_value(), &next_value);
+    }
+
+    #[test]
+    fn dispatch_color_curve_by_stable_address_has_reversible_author_snapshot() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let effect = mondrian_effects::instantiate_effect_node(EffectType::Curves)
+            .expect("Curves definition");
+        let effect_id = effect.id;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
+        let master_id = EffectType::Curves.parameter_id("master").expect("master parameter ID");
+        let (path, parameter, initial_value) = {
+            let effect = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("Curves effect");
+            let (path, property) = effect
+                .properties
+                .iter()
+                .find(|(_, property)| property.descriptor.parameter_id() == &master_id)
+                .expect("master curve property");
+            (
+                path.to_owned(),
+                property.address(),
+                property.static_value().clone(),
+            )
+        };
+        let next_curve = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.02),
+            NormalizedCurvePoint::new(0.45, 0.62),
+            NormalizedCurvePoint::new(1.0, 0.98),
+        ])
+        .expect("edited curve");
+        let next_value = PropertyValue::Curve(next_curve);
+
+        state
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id,
+                    parameter,
+                    value: next_value.clone(),
+                },
+            ))
+            .expect("dispatch curve edit");
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("updated curve");
+        assert_eq!(property.static_value(), &next_value);
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo curve edit"));
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("restored curve");
+        assert_eq!(property.static_value(), &initial_value);
+
+        assert!(state.redo_timeline().expect("redo curve edit"));
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("reapplied curve");
+        assert_eq!(property.static_value(), &next_value);
+    }
+
+    #[test]
+    fn dispatch_qualifier_samples_by_stable_address_has_reversible_author_snapshot() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let effect = mondrian_effects::instantiate_effect_node(EffectType::Qualifier)
+            .expect("Qualifier definition");
+        let effect_id = effect.id;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
+        let samples_id =
+            EffectType::Qualifier.parameter_id("samples").expect("samples parameter ID");
+        let (path, parameter, initial_value) = {
+            let effect = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .expect("Qualifier effect");
+            let (path, property) = effect
+                .properties
+                .iter()
+                .find(|(_, property)| property.descriptor.parameter_id() == &samples_id)
+                .expect("Qualifier samples property");
+            (
+                path.to_owned(),
+                property.address(),
+                property.static_value().clone(),
+            )
+        };
+        let next_value = PropertyValue::QualifierSamples(
+            QualifierSampleSet::new(vec![
+                QualifierSample::new([0.05, 0.9, 0.12], QualifierSampleOperation::Include),
+                QualifierSample::new([0.9, 0.08, 0.04], QualifierSampleOperation::Exclude),
+            ])
+            .expect("edited Qualifier samples"),
+        );
+
+        state
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id,
+                    parameter,
+                    value: next_value.clone(),
+                },
+            ))
+            .expect("dispatch Qualifier sample edit");
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("updated Qualifier samples");
+        assert_eq!(property.static_value(), &next_value);
+        assert!(state.can_undo_action());
+
+        assert!(state.undo_timeline().expect("undo Qualifier samples"));
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("restored Qualifier samples");
+        assert_eq!(property.static_value(), &initial_value);
+
+        assert!(state.redo_timeline().expect("redo Qualifier samples"));
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("reapplied Qualifier samples");
         assert_eq!(property.static_value(), &next_value);
     }
 

@@ -12,6 +12,7 @@ validation = []
 mondrian-core     = { workspace = true }
 mondrian-effects  = { workspace = true }
 mondrian-media    = { workspace = true }
+mondrian-reference-output = { workspace = true }
 mondrian-timeline = { workspace = true }
 wgpu       = { workspace = true }
 naga       = { workspace = true }
@@ -28,8 +29,15 @@ serde_json = { workspace = true }
 sha2       = { workspace = true }
 lru        = "0.18"
 parking_lot = { workspace = true }
+pulp = { workspace = true }
+rayon = { workspace = true }
 cosmic-text = { workspace = true }
 fontdb = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = "0.38"
+libloading = "0.8"
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
@@ -40,6 +48,7 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLTexture"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 mondrian-effects = { workspace = true }
 image = { workspace = true, features = ["exr"] }
 pollster = "0.4"

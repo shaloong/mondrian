@@ -5,6 +5,11 @@ stores editing decisions, project settings, sequence structure, and asset-librar
 metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
 must live outside `.mdp`.
 
+Persistent Timeline render-cache artifacts live in a versioned machine-local
+cache namespace. Project/Sequence authoring persists only enablement and format
+intent; no artifact path, LRU state, checksum, cache hit, or rendered pixel is
+Project state. See [Timeline Render Cache](timeline-render-cache.md).
+
 ## Persistent Project Document
 
 `mondrian-project::ProjectDocument` is the canonical saved project payload inside
@@ -18,11 +23,21 @@ must live outside `.mdp`.
 - `color_environment: ProjectColorEnvironment`
 - `new_sequence_defaults: SequenceSettings`
 - `sequences: SequenceCollection`
+- `gallery: ProjectGallery`
 - `proxy_mode_assets: AuthoringSet<AssetId>` (persisted with the exact
   canonical `BTreeSet<AssetId>` JSON representation)
 
 `mondrian-core` keeps only shared project metadata and settings types. It does
 not define a second top-level project container.
+
+Camera RAW controls are asset-library author state, not Project/Sequence/Clip
+duplicates. `AssetMediaInterpretation.camera_raw` stores exact fixed-point
+exposure, camera-versus-authored white balance, and debayer quality. Probe facts
+such as CFA, bit depth, camera model, ColorMatrix, and AsShotNeutral remain in
+the media snapshot. The immutable Export dependency freezes both sets, while
+the versioned runtime development intent combines them at the Media boundary.
+One Asset `SetInterpretation` action replaces the complete interpretation
+atomically; dialog draft changes do not write SQLite.
 
 `document_revision` advances only after an explicit project save succeeds. It
 is persistence/conflict evidence, not author-semantic identity. Each persisted
@@ -54,6 +69,13 @@ the exact Project engine. Mondrian Standard pins Linear Rec.2020; Custom OCIO
 pins the working and output routes covered by its saved processor identity;
 ACES permits its supported explicit working spaces. An incompatible candidate
 cannot enter a saved document or author transaction.
+Execution does not persist a second resolved color bag. It derives a closed
+`ProgramColorContext` from the validated `ProjectColorEnvironment` and exact
+Sequence settings. That context has private fields and a closed encoded-or-
+working output, so deserialization, restore, Preview, and Export cannot bypass
+Project validation by assembling an engine/working/output/intent combination.
+Root construction repeats the necessary engine-qualified checks at the
+execution boundary; nested construction consumes that proven parent context.
 `Sequence::validate_author_contract` is the sole local Sequence-body seam for
 revision, settings/color, author identities, Audio Program, Track/Clip time,
 Basic Title, Transform, Effect, and Mask validation. `ProjectDocument` adds
@@ -61,6 +83,96 @@ collection-wide nesting/reference validation around it. Selected-range Export
 admission reuses the local seam only for its exact captured root/nested closure;
 it neither requires unrelated Project Sequences nor duplicates these rules in
 an execution crate.
+
+Effect author state persists only the Core-owned stable type identity,
+definition-stable parameter schemas, instance addresses, static values, and
+exact animation curves. Executable grade math is deliberately absent from the
+document. In particular, `builtin.color_wheel` remains the persisted Primaries
+compatibility key and `builtin.asc_cdl` Vec3 keyframes round-trip through
+`project.json` inside the `.mdp` archive without label- or index-based identity
+translation. `builtin.curves` persists each non-animatable curve as a validated
+ordered `PropertyValue::Curve`; `.mdp` round-trip preserves every control point,
+the effect identity, the instance `AnimationTrackId`, and the definition
+`ParameterId`. The derived 256-sample CPU/GPU resource is never serialized.
+`builtin.qualifier` follows the same split: its non-animatable
+`PropertyValue::QualifierSamples` persists one to sixteen finite normalized RGB
+samples with explicit Include/Exclude operations and at least one Include.
+Archive save/reopen preserves sample order and values, EffectId,
+AnimationTrackId, and ParameterId, then revalidates the reopened author state.
+`PreparedQualifier`, normalized execution coordinates, fingerprints, matte
+planes, and GPU pass resources are derived runtime state and never enter
+`project.json`.
+
+Gamut Compression persists only `builtin.gamut_compression` plus its stable
+`amount` Parameter Schema and authored automation. Highlight Recovery persists
+only `builtin.highlight_recovery` plus `threshold`, `rolloff`, and `strength`.
+Archive save/reopen preserves EffectId, instance AnimationTrackId,
+definition-stable ParameterId, and values; working/AP1 matrices, luminance
+coefficients, compiled grades, GPU uniforms, and shader programs are rebuilt
+from the validated Sequence working-space context.
+
+HDR Grading persists only `builtin.hdr_grading`, its 33 stable Parameter
+Schemas, typed property values, and automation. Archive save/reopen preserves
+EffectId, owner-local AnimationTrackId, definition-stable ParameterId, values,
+and the definition-owned Global/six-zone Inspector groups. Zone sample tables,
+working-space luminance coefficients, semantic fingerprints, GPU atlas slots,
+and uniforms are derived execution state and never enter `project.json`.
+
+Grade hierarchy author state follows the same author/execution split. A
+Sequence persists its Grade Definition catalog, named Versions, active Version
+references, bounded Core `GradeGraph` DAGs, Grade Groups, Clip assignments, and
+one optional Timeline Grade assignment. Shared Grade is represented only by
+repeated typed references to one Definition. Version creation forks graph,
+Effect, and automation identities once; active-Version switching does not copy
+the graph. Archive validation rejects missing references, duplicate identities,
+invalid topology, empty names, and configured size/fan-in/version-limit
+violations.
+
+The Project Gallery is deliberate authored reference media rather than a
+rebuildable cache. Each of at most 512 stills stores a non-empty name, strong
+source Sequence and active Grade Version bindings, exact source time, a
+presentation-contract fingerprint, bounded working-linear statistics, and one
+canonical RGBA8 sRGB PNG of at most 64 MiB compressed and 256 MiB decoded. JSON carries the PNG as base64 so the
+existing canonical three-entry `.mdp` layout stays portable and requires no
+parallel archive-entry namespace.
+
+Project validation closes every Sequence/Grade Version reference, decodes each
+PNG under strict 16K-per-axis and 256 MiB allocation limits, requires canonical
+RGBA8 pixels, and requires its real dimensions to match the declared non-zero extent.
+Corrupt, truncated, oversized, or misdeclared stills fail project admission.
+The frozen binding records which Grade Versions produced the reference; it
+does not follow later active-Version changes. Shot Match evidence embeds the
+reference statistics it consumed, so removing an otherwise unreferenced still
+does not make an already-authored Grade Version invalid.
+
+Prepared Grade resources, compiled schedules, stage bindings, cache signatures,
+GPU resources, and retained-byte estimates are runtime evidence and are never
+serialized. `AuthoringFootprint` traverses Grade catalogs, graphs, Effects, and
+automation through their structurally shared collections, so bounded History
+charges shared roots once while conservatively accounting detached Version
+branches.
+
+Custom OCIO dynamic properties remain part of the persisted global
+`ProjectColorEnvironment`, not Sequence or monitor preference state. Their
+legacy-compatible `property`/`value` representation is accepted only after
+strict typed canonicalization, unique-kind ordering, complete OCIO component
+counts, and curve validation. Static processor identity is a derived runtime
+projection that removes the changing payload; it is never persisted in place
+of the complete author identity.
+
+Clip Mask author state follows the same persistence boundary. `.mdp`
+save/reopen retains the ordered masks, stable `MaskId`, shape-animation
+`KeyframeId`, exact `TimelineTime`, Rectangle/Ellipse geometry, every Bezier
+position and incoming/outgoing control, scalar parameters, and operation. It
+revalidates those identities and values on reopen. Prepared mask rasters,
+flattened paths/spatial indices, `AlphaMask` planes, combined mattes, compiled
+graph nodes, and GPU textures are execution state and are never serialized.
+An optional `MaskTrackingRecipe` additionally persists stable `TrackingId`,
+motion model/direction, exact anchor and generated range, bounded settings,
+complete admitted source fingerprint, physical video-stream index, and summary
+quality evidence. The generated shapes are the authoritative ordinary shape
+keys. Decoded frames, features, image pyramids, cancellation state and result
+cache are Session/runtime resources and never enter `project.json`.
 
 `ProjectDocument::prepare_authoring_validation_certificate` is the full
 validation Interface and `ProjectDocument::validate` invokes it and discards
@@ -476,6 +588,11 @@ or internally inconsistent evidence fails closed before Preview decode or
 proxy generation until a fresh probe can prove a supported sampling contract.
 This avoids silently reducing unknown precision or possible Alpha without
 changing the persistence schema.
+The stable `PixelFormat` contract represents common planar YUV/GBR/GBRA and
+packed/two-plane 10/12/16-bit little-endian formats explicitly. Its bit depth,
+RGB/YCbCr family, and Alpha facts are canonical probe values; execution adapters
+may derive a hardware packing candidate from them but cannot rewrite the stored
+sampling identity to match device capabilities.
 
 The current `MediaFileFingerprint` is one internally consistent open-file
 revision observation: length, second/nanosecond modification time, filesystem
@@ -507,7 +624,7 @@ library/index.db
 Archive `format_version`, document `schema_version`, and embedded library
 `PRAGMA user_version` are independent contracts. `manifest.json` records the
 expected library schema version in addition to archive layout. The current
-archive-v1 manifest explicitly writes `library_schema_version: 5`.
+archive-v1 manifest explicitly writes `library_schema_version: 6`.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. The ordinary current-schema path streams each JSON ZIP entry
@@ -516,7 +633,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v25 is the sole accepted Alpha author schema. It persists the
+Document schema v27 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
@@ -525,12 +642,21 @@ with stable shape-key identities and explicit interpolation, complete Basic
 Title properties, a Clip-local visual author origin, closed Sequence `color`
 and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
 variant persists exact origin, signed scale, and covering/strict-predecessor
-sampling boundary while deriving its terminal boundary from duration. Unknown
-fields and older or future document versions fail closed; no alias, fallback,
+sampling boundary while deriving its terminal boundary from duration. Schema
+v27 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
+plus an empty Program catalog by default), bounded format-specific analyzed
+Program/Shot payloads, immutable analysis provenance, and strong Remake
+references. The 26-to-27 migration inserts that explicit empty state;
+deserialization does not use a hidden serde default. Schema v27 also persists
+each media Clip's optional bounded editorial-source identity (reel,
+exact SMPTE source reference, and foreign item key) inside
+`MediaInterpretation`; it never promotes those interchange facts into Asset or
+placement identity. Unknown fields and older or future document versions fail
+closed; no alias, fallback,
 default synthesis, or inferred migration is promised during Alpha.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
-v5. Its ordered `PRAGMA user_version` registry applies each step in one
+v6. Its ordered `PRAGMA user_version` registry applies each step in one
 transaction, validates the resulting tables and columns, and rolls back both
 DDL and version on failure. SQLite migrates only the extracted runtime copy;
 opening never rewrites the source `.mdp`.

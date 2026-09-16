@@ -5,8 +5,16 @@ use super::*;
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioOutputClockCommit {
+    Observe,
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    Hold,
+}
+
 struct PreparedTimelineAudioSource {
     renderer: Arc<dyn AudioPcmRenderer>,
+    continuity_model: AudioPcmContinuityModel,
     meter_observer: mondrian_audio::AudioMeterObserver,
     delivery_evidence: mondrian_audio::AudioDeliveryEvidence,
     authoring_session_id: AuthoringSessionId,
@@ -18,6 +26,53 @@ pub(super) enum AppAudioPlayback {
     Unavailable { sample_rate: u32, reason: String },
 }
 
+/// App-lifetime carry-forward for cumulative Audio failures when an execution
+/// owner is terminally replaced.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AudioEnduranceFailureLedger {
+    render_substitutions: u64,
+    render_generation_recoveries: u64,
+    underrun_recoveries: u64,
+    backend_losses: u64,
+    deactivation_failures: u64,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl AudioEnduranceFailureLedger {
+    fn absorb(&mut self, retired: AudioPlaybackSnapshot) {
+        self.render_substitutions =
+            self.render_substitutions.saturating_add(retired.render_substitution_count);
+        self.render_generation_recoveries = self
+            .render_generation_recoveries
+            .saturating_add(retired.render_generation_recovery_count);
+        self.underrun_recoveries =
+            self.underrun_recoveries.saturating_add(retired.underrun_recovery_count);
+        self.backend_losses =
+            self.backend_losses.saturating_add(retired.output_lifecycle.backend_loss_count);
+        self.deactivation_failures = self
+            .deactivation_failures
+            .saturating_add(retired.output_lifecycle.deactivation_failed_count);
+    }
+
+    fn project(self, mut current: AudioPlaybackSnapshot) -> AudioPlaybackSnapshot {
+        current.render_substitution_count =
+            current.render_substitution_count.saturating_add(self.render_substitutions);
+        current.render_generation_recovery_count = current
+            .render_generation_recovery_count
+            .saturating_add(self.render_generation_recoveries);
+        current.underrun_recovery_count =
+            current.underrun_recovery_count.saturating_add(self.underrun_recoveries);
+        current.output_lifecycle.backend_loss_count =
+            current.output_lifecycle.backend_loss_count.saturating_add(self.backend_losses);
+        current.output_lifecycle.deactivation_failed_count = current
+            .output_lifecycle
+            .deactivation_failed_count
+            .saturating_add(self.deactivation_failures);
+        current
+    }
+}
+
 impl AppAudioPlayback {
     pub(super) fn product_default(sample_rate: u32) -> Self {
         match AudioPlayback::product_default() {
@@ -27,6 +82,49 @@ impl AppAudioPlayback {
                 tracing::error!(%reason, "Audio Playback execution is unavailable; transport will remain Synthetic-mastered");
                 Self::Unavailable { sample_rate, reason }
             }
+        }
+    }
+
+    fn begin_endurance_shutdown(&mut self) {
+        if let Self::Available(playback) = self {
+            playback.begin_shutdown();
+        }
+    }
+
+    #[cfg(test)]
+    fn shutdown_and_wait(
+        &mut self,
+        sample_rate: u32,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        let retired = std::mem::replace(
+            self,
+            Self::Unavailable {
+                sample_rate,
+                reason: "Audio Playback was synchronously retired".to_owned(),
+            },
+        );
+        match retired {
+            Self::Available(playback) => (*playback).shutdown_and_wait(),
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence::no_owner(),
+        }
+    }
+
+    fn shutdown_until(
+        &mut self,
+        sample_rate: u32,
+        deadline: Instant,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let retired = std::mem::replace(
+            self,
+            Self::Unavailable {
+                sample_rate,
+                reason: "Audio Playback was synchronously retired".to_owned(),
+            },
+        );
+        match retired {
+            Self::Available(playback) => (*playback).shutdown_until(deadline),
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence::no_owner(),
         }
     }
 
@@ -54,12 +152,15 @@ impl AppAudioPlayback {
         &mut self,
         anchor: AudioSamplePosition,
         renderer: Arc<dyn AudioPcmRenderer>,
+        continuity_model: AudioPcmContinuityModel,
     ) -> Result<(), AudioPlaybackError> {
         match self {
-            Self::Available(playback) => playback.prepare(anchor, renderer),
+            Self::Available(playback) => playback.prepare(anchor, renderer, continuity_model),
             Self::Unavailable { sample_rate, .. } => {
-                drop(renderer);
-                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+                let validation =
+                    mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate);
+                mondrian_media::handoff_unqualified_audio_pcm_renderer(renderer);
+                validation
             }
         }
     }
@@ -125,6 +226,15 @@ impl AppAudioPlayback {
         }
     }
 
+    fn output_device_selection(&self) -> mondrian_media::RealtimeAudioOutputDeviceSelection {
+        match self {
+            Self::Available(playback) => playback.output_device_selection(),
+            Self::Unavailable { .. } => {
+                mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault
+            }
+        }
+    }
+
     #[cfg(all(feature = "validation", test))]
     fn request_controlled_output_recycle(
         &self,
@@ -142,6 +252,13 @@ impl AppAudioPlayback {
 }
 
 impl AppState {
+    /// Snapshot the machine-local audio-output intent without polling playback.
+    pub fn audio_output_device_selection(
+        &self,
+    ) -> mondrian_media::RealtimeAudioOutputDeviceSelection {
+        self.audio_playback.output_device_selection()
+    }
+
     /// Publish a latest-wins user/runtime audio-output selection.
     ///
     /// This preference is deliberately outside Project authoring. A changed
@@ -266,6 +383,27 @@ struct AppliedFrameDelivery {
     snapshot_changed: bool,
 }
 
+/// Exact result of applying a timestamp-free Frame Delivery candidate.
+///
+/// Acceptance and visible Transport mutation are separate facts: consuming a
+/// demand while already in the same recovery state can be accepted without
+/// changing the public Playback snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameDeliveryCandidateReceipt {
+    accepted: bool,
+    transport_changed: bool,
+}
+
+impl FrameDeliveryCandidateReceipt {
+    pub(crate) const fn accepted(self) -> bool {
+        self.accepted
+    }
+
+    pub(crate) const fn transport_changed(self) -> bool {
+        self.transport_changed
+    }
+}
+
 impl PlaybackAdvance {
     /// Return whether UI models should refresh for this playback tick.
     pub fn requires_refresh(self) -> bool {
@@ -371,6 +509,50 @@ impl AppState {
         Ok(())
     }
 
+    /// Apply one J/L editorial shuttle command through the Playback Session.
+    ///
+    /// Reverse and non-1x rates deliberately clear realtime PCM. This is an
+    /// explicit product policy until a qualified varispeed audio processor can
+    /// preserve pitch/phase without moving work onto the device callback.
+    pub fn shuttle(&mut self, direction: PlaybackShuttleDirection) -> mondrian_core::Result<()> {
+        let action = match direction {
+            PlaybackShuttleDirection::Reverse => "shuttle_reverse",
+            PlaybackShuttleDirection::Forward => "shuttle_forward",
+        };
+        let observed_at = Instant::now();
+        self.synchronize_playback_observation_clock(observed_at);
+        self.require_transport_sequence(action)?;
+        let playback_now = self.playback_engine.monotonic_high_water();
+        let end_frame = self.last_content_frame()?;
+        let time_base = self.playback_time_base();
+        let position = FramePosition::new(self.current_frame().max(0), time_base);
+        let binding = self
+            .playback_timeline_binding(end_frame)
+            .map_err(|error| transport_action_error(action, error))?;
+        let mut engine = self.playback_engine.clone();
+        let snapshot = engine
+            .shuttle_timeline(binding, position, direction, playback_now)
+            .map_err(|error| transport_action_error(action, error))?;
+        let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, action)?;
+        self.audio_playback
+            .validate_anchor(audio_anchor)
+            .map_err(|error| transport_action_error(action, error))?;
+        let renderer = snapshot
+            .rate
+            .supports_realtime_audio()
+            .then(|| self.audio_playback_renderer(action))
+            .transpose()?
+            .flatten();
+        self.commit_audio_playback(action, audio_anchor, renderer)?;
+        self.playback_engine = engine;
+        self.audio_idle_warmup.set_automatic_policy_enabled(false);
+        self.audio_idle_warmup.set_dispatch_enabled(false);
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        self.refresh_internal_execution_resource_decision();
+        Ok(())
+    }
+
     pub fn pause(&mut self) -> mondrian_core::Result<()> {
         let observed_at = Instant::now();
         self.synchronize_playback_observation_clock(observed_at);
@@ -463,14 +645,17 @@ impl AppState {
             ));
         }
         let was_running = self.is_playing();
+        let realtime_audio = self.playback_engine.snapshot().rate.supports_realtime_audio();
         let end_frame = self.last_content_frame()?;
         let time_base = self.playback_time_base();
         let binding = self
             .playback_timeline_binding(end_frame)
             .map_err(|error| transport_action_error("seek", error))?;
         let timeline_anchor = FramePosition::new(frame, time_base);
-        let renderer =
-            was_running.then(|| self.audio_playback_renderer("seek")).transpose()?.flatten();
+        let renderer = (was_running && realtime_audio)
+            .then(|| self.audio_playback_renderer("seek"))
+            .transpose()?
+            .flatten();
         let mut engine = self.playback_engine.clone();
         engine
             .seek_timeline(binding, timeline_anchor, playback_now)
@@ -528,6 +713,22 @@ impl AppState {
     }
 
     pub fn pump_audio_output(&mut self) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_clock_commit(AudioOutputClockCommit::Observe)
+    }
+
+    /// Fill the physical audio render queue while retaining the current
+    /// transport coordinate. Headless AV validation uses this while the exact
+    /// current picture is still resolving, then submits the audio-clock
+    /// observation only after that picture has physical Ready evidence.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn pump_audio_output_without_clock_commit(&mut self) -> mondrian_core::Result<()> {
+        self.pump_audio_output_with_clock_commit(AudioOutputClockCommit::Hold)
+    }
+
+    fn pump_audio_output_with_clock_commit(
+        &mut self,
+        clock_commit: AudioOutputClockCommit,
+    ) -> mondrian_core::Result<()> {
         self.poll_audio_idle_warmup();
         let mode = self.audio_playback_mode();
         let poll_started_at = Instant::now();
@@ -553,7 +754,9 @@ impl AppState {
         }
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
         self.audio_idle_warmup.set_dispatch_enabled(false);
-        self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+        if clock_commit == AudioOutputClockCommit::Observe {
+            self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+        }
         Ok(())
     }
 
@@ -624,6 +827,8 @@ impl AppState {
             AudioPlaybackEvent::RenderWorkerStoppedUnexpectedly { reason } => {
                 let unavailable_reason =
                     format!("audio render worker stopped unexpectedly: {reason}");
+                #[cfg(any(test, feature = "validation"))]
+                self.absorb_audio_endurance_failures();
                 let unavailable = AppAudioPlayback::Unavailable {
                     sample_rate: self.audio_sample_rate,
                     reason: unavailable_reason.clone(),
@@ -937,10 +1142,12 @@ impl AppState {
         )
         .map_err(|error| transport_action_error(action, error))?;
         let requires_execution = renderer.execution_demand().requires_execution();
+        let continuity_model = renderer.continuity_model();
         let meter_observer = renderer.meter_observer();
         let delivery_evidence = renderer.delivery_evidence();
         Ok(requires_execution.then(|| PreparedTimelineAudioSource {
             renderer: Arc::new(renderer),
+            continuity_model,
             meter_observer,
             delivery_evidence,
             authoring_session_id,
@@ -956,7 +1163,7 @@ impl AppState {
     ) -> mondrian_core::Result<()> {
         if let Some(source) = source {
             self.audio_playback
-                .prepare(anchor, source.renderer)
+                .prepare(anchor, source.renderer, source.continuity_model)
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.bind_meter(
                 source.authoring_session_id,
@@ -988,7 +1195,7 @@ impl AppState {
             self.playback_engine.monotonic_high_water(),
             "refresh_audio_playback",
         )?;
-        if self.is_playing() {
+        if self.is_playing() && self.playback_engine.snapshot().rate.supports_realtime_audio() {
             self.prepare_audio_playback(anchor)
         } else {
             self.commit_audio_playback("refresh_audio_playback", anchor, None)
@@ -1216,6 +1423,38 @@ impl AppState {
         self.audio_playback.snapshot(self.audio_playback_mode())
     }
 
+    /// Return current Audio ownership with cumulative failures from any
+    /// terminally replaced execution owner carried forward.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn audio_endurance_snapshot(&self) -> AudioPlaybackSnapshot {
+        self.audio_endurance_failure_ledger.project(self.audio_playback_snapshot())
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn absorb_audio_endurance_failures(&mut self) {
+        let retired = self.audio_playback_snapshot();
+        self.audio_endurance_failure_ledger.absorb(retired);
+    }
+
+    /// Consume and synchronously close the Audio owner used by this App State.
+    #[cfg(test)]
+    pub(crate) fn shutdown_audio_playback_and_wait(
+        &mut self,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.audio_playback.shutdown_and_wait(self.audio_sample_rate)
+    }
+
+    pub(crate) fn begin_audio_playback_endurance_shutdown(&mut self) {
+        self.audio_playback.begin_endurance_shutdown();
+    }
+
+    pub(crate) fn shutdown_audio_playback_until(
+        &mut self,
+        deadline: Instant,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.audio_playback.shutdown_until(self.audio_sample_rate, deadline)
+    }
+
     /// Latest successful CPAL host/device/configuration negotiation evidence.
     ///
     /// This remains available after device loss so diagnostics can explain
@@ -1333,11 +1572,11 @@ impl AppState {
             return PlaybackAdvance {
                 previous_frame,
                 current_frame: target_frame,
-                frames_advanced: (target_frame - previous_frame).max(0),
+                frames_advanced: target_frame - previous_frame,
                 status: PlaybackAdvanceStatus::ReachedEnd,
             };
         }
-        if target_frame <= previous_frame {
+        if target_frame == previous_frame {
             return PlaybackAdvance {
                 previous_frame,
                 current_frame: previous_frame,
@@ -1409,6 +1648,8 @@ impl AppState {
             demand,
             ready_media_frames,
             preservable_media_frames,
+            true,
+            true,
             Instant::now(),
         )
     }
@@ -1418,12 +1659,16 @@ impl AppState {
         demand: FrameDemandIdentity,
         ready_media_frames: usize,
         preservable_media_frames: usize,
+        bounded_cold_activation_ready: bool,
+        presentation_successor_ready: bool,
         observed_at: Instant,
     ) -> bool {
         let observation = VideoPrerollObservation {
             demand,
             ready_media_frames,
             preservable_media_frames,
+            bounded_cold_activation_ready,
+            presentation_successor_ready,
         };
         let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
             Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
@@ -1449,7 +1694,8 @@ impl AppState {
     }
 
     fn audio_playback_mode(&self) -> AudioPlaybackMode {
-        audio_playback_mode_for_transport(self.playback_engine.snapshot().state)
+        let snapshot = self.playback_engine.snapshot();
+        audio_playback_mode_for_transport(snapshot.state, snapshot.rate)
     }
 
     /// Current authoritative Clock Master exposed to diagnostics/UI adapters.
@@ -1502,17 +1748,96 @@ impl AppState {
     /// on the exact [`FramePresentationTicket`] deadline.
     pub fn playback_frame_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
         let demand = self.playback_engine.pending_frame_demand()?;
+        self.project_playback_work_deadline(demand, sampled_at)
+    }
+
+    /// Renew only the persistent still obligation after a native output replacement.
+    pub(crate) fn renew_still_frame_demand_after_output_retirement(
+        &mut self,
+    ) -> Result<Option<mondrian_playback::FrameDemandIdentity>, mondrian_playback::PlaybackError>
+    {
+        let observed_at = Instant::now();
+        let timestamp = self
+            .playback_timestamp_for_observation(observed_at)?
+            .max(self.playback_engine.monotonic_high_water());
+        let demand = self
+            .playback_engine
+            .renew_still_frame_demand_after_output_retirement(timestamp)?;
+        if demand.is_some() {
+            self.reanchor_playback_observation_projection_at(observed_at, timestamp);
+            self.capture_playback_evidence();
+        }
+        Ok(demand.map(|demand| demand.identity()))
+    }
+
+    /// Reissue the exact current playback picture against one bounded recovery deadline.
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    pub(crate) fn reissue_current_frame_demand_for_recovery_until(
+        &mut self,
+        recovery_deadline: Instant,
+    ) -> Result<mondrian_playback::FrameDemandIdentity, mondrian_playback::PlaybackError> {
+        self.reissue_current_frame_demand_for_recovery_at(Instant::now(), recovery_deadline)
+    }
+
+    #[cfg_attr(not(any(test, feature = "validation")), allow(dead_code))]
+    fn reissue_current_frame_demand_for_recovery_at(
+        &mut self,
+        observed_at: Instant,
+        recovery_deadline: Instant,
+    ) -> Result<mondrian_playback::FrameDemandIdentity, mondrian_playback::PlaybackError> {
+        let remaining = recovery_deadline
+            .checked_duration_since(observed_at)
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(mondrian_playback::PlaybackError::InvalidRecoveryFrameDemand)?;
+        let observed_timestamp = self
+            .playback_timestamp_for_observation(observed_at)?
+            .max(self.playback_engine.monotonic_high_water());
+        let engine_deadline = observed_timestamp.checked_add(remaining)?;
+        let demand = self
+            .playback_engine
+            .reissue_current_frame_demand_for_recovery(observed_timestamp, engine_deadline)?;
+        let engine_now = self.playback_engine.monotonic_high_water();
+        self.reanchor_playback_observation_projection_at(observed_at, engine_now);
+        self.capture_playback_evidence();
+        Ok(demand.identity())
+    }
+
+    /// Read the original Priming work budget after its presentation ticket is consumed.
+    pub(crate) fn playback_priming_work_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
+        let snapshot = self.playback_engine.snapshot();
+        if snapshot.state != mondrian_playback::TransportState::Priming {
+            return None;
+        }
+        let demand = self.playback_engine.frame_demand()?;
+        if demand.epoch != snapshot.epoch
+            || demand.quality_revision != snapshot.quality_revision
+            || demand.target.frame != snapshot.position.frame
+        {
+            return None;
+        }
+        self.project_playback_work_deadline(demand, sampled_at)
+    }
+
+    fn project_playback_work_deadline(
+        &self,
+        demand: mondrian_playback::FrameDemand,
+        sampled_at: Instant,
+    ) -> Option<Instant> {
         let deadline = demand.deadline?;
         let sampled_timestamp = self
             .playback_timestamp_for_observation(sampled_at)
             .ok()?
             .max(self.playback_engine.monotonic_high_water());
-        let remaining = deadline
+        let target = deadline
             .duration_since_origin()
-            .checked_sub(sampled_timestamp.duration_since_origin())
-            .unwrap_or(Duration::ZERO);
-        let grace = Duration::from_nanos(demand.late_presentation_grace_ns);
-        sampled_at.checked_add(remaining.saturating_add(grace))
+            .checked_add(Duration::from_nanos(demand.late_presentation_grace_ns))?;
+        let sampled = sampled_timestamp.duration_since_origin();
+        if let Some(remaining) = target.checked_sub(sampled) {
+            sampled_at.checked_add(remaining)
+        } else {
+            // Preserve an expired instant instead of renewing late grace.
+            sampled_at.checked_sub(sampled.checked_sub(target)?)
+        }
     }
 
     /// Identity preview adapters may return only while the current demand still
@@ -1562,20 +1887,57 @@ impl AppState {
     }
 
     /// Complete a demand whose exact physical artifact was already visible at
-    /// the supplied observation instant.
+    /// or before the supplied observation instant.
     ///
-    /// This narrow seam is only valid for an exact prepared successor that
-    /// aliases the current physical output. The commit may synchronize
-    /// semantic ownership metadata, but it must not replace pixels or perform
-    /// any fallible work. A distinct prepared buffer must use ordinary
-    /// presentation completion at its real visibility-commit instant.
+    /// This narrow seam is only valid for an exact prepared successor or
+    /// current-plan reuse that aliases the continuously retained physical
+    /// output. The commit may synchronize semantic ownership metadata, but it
+    /// must not replace pixels or perform any fallible work. If semantic proof
+    /// finishes after the presentation deadline, the already-visible artifact
+    /// is conservatively classified at the deadline while terminal observation
+    /// retains the real current monotonic timestamp. A distinct prepared
+    /// buffer must use ordinary presentation completion at its real
+    /// visibility-commit instant.
     pub(crate) fn finalize_already_visible_frame_presentation<C: FnOnce()>(
         &mut self,
         ticket: Option<FramePresentationTicket>,
-        already_visible_at: Instant,
+        observed_at: Instant,
         publication: FramePresentationPublication<C>,
     ) -> FramePresentationDisposition {
-        self.finalize_frame_presentation_at(ticket, already_visible_at, publication)
+        let Some(ticket) = ticket else {
+            return self.finalize_frame_presentation_at(None, observed_at, publication);
+        };
+        let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
+            Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
+            Err(error) => {
+                tracing::warn!(%error, "rejected already-visible frame publication with an invalid observation timestamp");
+                return FramePresentationDisposition::LostAuthority;
+            }
+        };
+        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        let visibility_timestamp = ticket.deadline().map_or(observed_timestamp, |deadline| {
+            observed_timestamp.min(deadline)
+        });
+        let kind = ticket.delivery_kind_at(visibility_timestamp);
+        if !matches!(kind, FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded) {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        let FramePresentationPublication::Prepared(commit) = publication else {
+            return FramePresentationDisposition::OutputRejected;
+        };
+        let delivery = FrameDeliveryCandidate::for_demand(ticket.identity(), kind)
+            .complete_at(observed_timestamp);
+        let applied = self.observe_frame_delivery_at_wall(delivery, observed_at);
+        if !applied.accepted {
+            return FramePresentationDisposition::LostAuthority;
+        }
+        commit();
+        FramePresentationDisposition::Presented(FramePresentationCompletion {
+            delivery,
+            transport_changed: applied.snapshot_changed,
+        })
     }
 
     fn finalize_frame_presentation_at<C: FnOnce()>(
@@ -1765,16 +2127,30 @@ impl AppState {
         candidate: FrameDeliveryCandidate,
         observed_at: Instant,
     ) -> bool {
+        let receipt = self.observe_frame_delivery_candidate_with_receipt(candidate, observed_at);
+        receipt.accepted() && receipt.transport_changed()
+    }
+
+    /// Apply a timestamp-free terminal candidate and retain acceptance even
+    /// when consuming its demand leaves the public Transport snapshot equal.
+    pub(crate) fn observe_frame_delivery_candidate_with_receipt(
+        &mut self,
+        candidate: FrameDeliveryCandidate,
+        observed_at: Instant,
+    ) -> FrameDeliveryCandidateReceipt {
         let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
             Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
             Err(error) => {
                 tracing::warn!(%error, ?candidate, "rejected Frame Delivery candidate with an invalid observation timestamp");
-                return false;
+                return FrameDeliveryCandidateReceipt { accepted: false, transport_changed: false };
             }
         };
         let applied = self
             .observe_frame_delivery_at_wall(candidate.complete_at(observed_timestamp), observed_at);
-        applied.accepted && applied.snapshot_changed
+        FrameDeliveryCandidateReceipt {
+            accepted: applied.accepted,
+            transport_changed: applied.snapshot_changed,
+        }
     }
 
     fn observe_frame_delivery_at_wall(
@@ -1890,7 +2266,13 @@ impl AppState {
     }
 }
 
-fn audio_playback_mode_for_transport(state: TransportState) -> AudioPlaybackMode {
+fn audio_playback_mode_for_transport(
+    state: TransportState,
+    rate: PlaybackRate,
+) -> AudioPlaybackMode {
+    if !rate.supports_realtime_audio() {
+        return AudioPlaybackMode::Idle;
+    }
     match state {
         TransportState::Priming => AudioPlaybackMode::Preroll,
         TransportState::Playing | TransportState::Recovering => AudioPlaybackMode::Consume,
@@ -2013,7 +2395,14 @@ fn audio_device_clock_observation(
         age <= AUDIO_CALLBACK_STALE_AFTER
             && callback_age_frames.is_some_and(|frames| frames <= freshness_frame_limit)
     });
+    // Activation-wide callback count and the host monotonic clock are two
+    // independent physical clocks. Their ordinary ppm drift accumulates for
+    // the lifetime of a stream, so this absolute comparison is valid only for
+    // initial admission. Once AudioDevice owns the clock, PlaybackEngine
+    // validates every adjacent observation against its retained device anchor,
+    // including monotonic consumed frames, elapsed-time rate and uncertainty.
     let callback_position_plausible = terminal_frozen
+        || already_audio_master
         || match (snapshot.active_duration, snapshot.last_callback_age) {
             (Some(active_duration), Some(callback_age)) => {
                 let observed_span = active_duration
@@ -2119,7 +2508,7 @@ mod tests {
             .map(|demand| demand.identity())
             .expect("frame demand after play");
         let observed_at = state.playback_observation_instant_anchor;
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, observed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, observed_at));
         assert_eq!(
             state.advance_playback_clock(Duration::ZERO).status,
             PlaybackAdvanceStatus::WaitingForFrame,
@@ -2137,6 +2526,54 @@ mod tests {
             FrameDeliveryCandidate::for_demand(identity, kind),
             state.playback_observation_instant_anchor,
         )
+    }
+
+    #[test]
+    fn endurance_shutdown_consumes_the_app_states_actual_audio_owner() {
+        let mut state = AppState::new();
+        let initial = state.shutdown_audio_playback_and_wait();
+        assert!(initial.all_workers_terminated());
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::new(mondrian_media::AudioPlaybackConfig::product_default())
+                .expect("start deterministic Audio Playback owner"),
+        ));
+
+        let evidence = state.shutdown_audio_playback_and_wait();
+
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert!(evidence.all_workers_terminated());
+        assert_eq!(
+            state.audio_playback_unavailable_reason(),
+            Some("Audio Playback was synchronously retired")
+        );
+        let repeated = state.shutdown_audio_playback_and_wait();
+        assert_eq!(repeated.schema_version, 3);
+        assert_eq!(repeated.render_workers_started, 0);
+        assert!(repeated.shutdown_resource_facts_complete_at_deadline);
+        assert!(!repeated.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(repeated.all_workers_terminated());
+    }
+
+    #[test]
+    fn unavailable_audio_shutdown_returns_complete_resolved_current_schema_receipts() {
+        let sample_rate = 48_000;
+        let mut playback = AppAudioPlayback::Unavailable {
+            sample_rate,
+            reason: "injected unavailable Audio owner".to_owned(),
+        };
+
+        let synchronous = playback.shutdown_and_wait(sample_rate);
+        assert_eq!(synchronous.schema_version, 3);
+        assert!(synchronous.shutdown_resource_facts_complete_at_deadline);
+        assert!(!synchronous.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(synchronous.all_workers_terminated());
+
+        let deadline = playback.shutdown_until(sample_rate, Instant::now());
+        assert_eq!(deadline.schema_version, 3);
+        assert!(deadline.shutdown_resource_facts_complete_at_deadline);
+        assert!(!deadline.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(deadline.all_workers_terminated());
     }
 
     #[test]
@@ -2158,6 +2595,64 @@ mod tests {
             state.audio_playback.snapshot(AudioPlaybackMode::Idle),
             audio_before
         );
+    }
+
+    #[test]
+    fn app_shuttle_uses_signed_engine_rate_and_explicitly_mutes_non_1x_audio() {
+        let mut state = state_with_sequence(20);
+        state.seek(10).expect("position");
+        state.shuttle(PlaybackShuttleDirection::Reverse).expect("reverse");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::REVERSE_1X
+        );
+        assert_eq!(
+            state
+                .preview_execution_snapshot(state.playback_observation_instant_anchor)
+                .transport()
+                .playback_direction(),
+            mondrian_media::PreviewPlaybackDirection::Reverse
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Idle);
+        assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("reverse demand");
+        assert!(state.observe_video_preroll_at_wall(
+            demand,
+            0,
+            0,
+            true,
+            true,
+            state.playback_observation_instant_anchor,
+        ));
+
+        let reverse = state.advance_playback_clock(Duration::from_millis(40));
+        assert_eq!(reverse.status, PlaybackAdvanceStatus::Advanced);
+        assert_eq!(reverse.frames_advanced, -1);
+        assert_eq!(reverse.current_frame, 9);
+
+        state.shuttle(PlaybackShuttleDirection::Reverse).expect("faster reverse");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::new(-2, 1).expect("rate")
+        );
+        state.pause().expect("K pause");
+        state.shuttle(PlaybackShuttleDirection::Forward).expect("forward");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::FORWARD_1X
+        );
+        assert_eq!(
+            state
+                .preview_execution_snapshot(state.playback_observation_instant_anchor)
+                .transport()
+                .playback_direction(),
+            mondrian_media::PreviewPlaybackDirection::Forward
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Preroll);
     }
 
     #[test]
@@ -2407,6 +2902,66 @@ mod tests {
     }
 
     #[test]
+    fn long_lived_audio_master_uses_incremental_clock_validation_after_handoff() {
+        let mut state = state_with_sequence(20_000);
+        play_ready(&mut state);
+        let epoch = state.playback_engine.snapshot().epoch;
+        let initial_observed_at = state.playback_engine.monotonic_high_water();
+        let initial = audio_device_clock_observation(
+            audio_snapshot(),
+            epoch,
+            initial_observed_at,
+            false,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("initial observation");
+        state
+            .playback_engine
+            .observe_audio_device_clock(initial)
+            .expect("initial AudioDevice handoff");
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice)
+        );
+
+        // About 156 ppm of cumulative lead exceeds the old activation-wide
+        // one-buffer allowance after two minutes. The adjacent observation is
+        // still inside its explicit 10 ms uncertainty and remains a valid
+        // device-clock progression.
+        let mut long_lived = audio_snapshot();
+        long_lived.callback_consumed_frames = 5_761_380;
+        long_lived.active_callback_consumed_frames = 5_760_900;
+        long_lived.active_duration = Some(Duration::from_secs(120));
+        long_lived.callback_count = 12_000;
+        let observed_at = initial_observed_at
+            .checked_add(Duration::from_secs(120))
+            .expect("two-minute observation time");
+        let observation = audio_device_clock_observation(
+            long_lived,
+            epoch,
+            observed_at,
+            true,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("long-lived observation");
+        assert_eq!(observation.state, AudioDeviceClockState::Running);
+        state
+            .playback_engine
+            .observe_audio_device_clock(observation)
+            .expect("incremental device-clock validation");
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice),
+            "snapshot={:?}",
+            state.playback_engine.snapshot()
+        );
+    }
+
+    #[test]
     fn underrun_recovery_consumes_final_device_position_before_synthetic_handoff() {
         let mut state = state_with_sequence(20);
         play_ready(&mut state);
@@ -2517,6 +3072,32 @@ mod tests {
     }
 
     #[test]
+    fn endurance_audio_failure_ledger_survives_terminal_owner_replacement() {
+        let mut retired = AudioPlaybackSnapshot::execution_unavailable();
+        retired.render_substitution_count = 2;
+        retired.render_generation_recovery_count = 3;
+        retired.underrun_recovery_count = 5;
+        retired.output_lifecycle.backend_loss_count = 7;
+        retired.output_lifecycle.deactivation_failed_count = 11;
+        let mut ledger = AudioEnduranceFailureLedger::default();
+        ledger.absorb(retired);
+
+        let mut replacement = AudioPlaybackSnapshot::execution_unavailable();
+        replacement.render_substitution_count = 13;
+        replacement.render_generation_recovery_count = 17;
+        replacement.underrun_recovery_count = 19;
+        replacement.output_lifecycle.backend_loss_count = 23;
+        replacement.output_lifecycle.deactivation_failed_count = 29;
+        let projected = ledger.project(replacement);
+
+        assert_eq!(projected.render_substitution_count, 15);
+        assert_eq!(projected.render_generation_recovery_count, 20);
+        assert_eq!(projected.underrun_recovery_count, 24);
+        assert_eq!(projected.output_lifecycle.backend_loss_count, 30);
+        assert_eq!(projected.output_lifecycle.deactivation_failed_count, 40);
+    }
+
+    #[test]
     fn production_adapter_reports_warm_seek_and_delivery_latency() {
         let mut state = state_with_sequence(40);
         play_ready(&mut state);
@@ -2540,7 +3121,7 @@ mod tests {
             Some(FrameDeliveryKind::Ready)
         );
         let demand = state.playback_engine.frame_demand().expect("warm seek demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, completed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, completed_at));
 
         let report = state.playback_evidence_report();
 
@@ -2745,6 +3326,67 @@ mod tests {
     }
 
     #[test]
+    fn already_visible_publication_observed_after_deadline_remains_presentable() {
+        let mut state = state_with_sequence(40);
+        state.set_playback_frame_running(4);
+        let ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("playing presentation ticket");
+        state.playback_observation_instant_anchor = Instant::now() - Duration::from_secs(10);
+        let observed_at = Instant::now();
+        let published = std::cell::Cell::new(false);
+
+        let disposition = state.finalize_already_visible_frame_presentation(
+            Some(ticket),
+            observed_at,
+            FramePresentationPublication::prepared(|| published.set(true)),
+        );
+
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::Presented(completion)
+                if completion.delivery().kind() == FrameDeliveryKind::Degraded
+                    && completion.delivery().completed_at()
+                        == state.playback_engine.monotonic_high_water()
+        ));
+        assert!(published.get());
+        assert_eq!(state.playback_evidence_report().deliveries.late, 0);
+        assert_eq!(state.playback_evidence_report().deliveries.degraded, 1);
+    }
+
+    #[test]
+    fn stale_already_visible_alias_cannot_consume_replacement_demand() {
+        let mut state = state_with_sequence(40);
+        state.set_playback_frame_running(4);
+        let stale = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("original presentation ticket");
+        state.set_playback_frame_running(5);
+        let replacement =
+            state.pending_playback_frame_demand_identity().expect("replacement demand");
+        let published = std::cell::Cell::new(false);
+        let rejected_before = state.playback_evidence_report().deliveries.rejected;
+
+        assert_eq!(
+            state.finalize_already_visible_frame_presentation(
+                Some(stale),
+                Instant::now(),
+                FramePresentationPublication::prepared(|| published.set(true)),
+            ),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert!(!published.get());
+        assert_eq!(
+            state.pending_playback_frame_demand_identity(),
+            Some(replacement)
+        );
+        assert_eq!(
+            state.playback_evidence_report().deliveries.rejected,
+            rejected_before
+        );
+    }
+
+    #[test]
     fn stale_epoch_publication_cannot_replace_current_output_or_evidence() {
         let mut state = state_with_sequence(40);
         state.set_playback_frame_running(4);
@@ -2924,6 +3566,62 @@ mod tests {
             deadline_at.duration_since(sampled_at),
             Duration::from_millis(10) + grace
         );
+    }
+
+    #[test]
+    fn bounded_recovery_deadline_is_shared_by_engine_and_preview_adapter() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
+        let original = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("original presentation ticket");
+        let late_at = state.playback_observation_instant_anchor + Duration::from_secs(1);
+        assert!(matches!(
+            state.preflight_frame_presentation(Some(original), late_at),
+            FramePresentationPreflight::DroppedLate(_)
+        ));
+        let snapshot = state.playback_engine.snapshot();
+        let recovery_deadline = late_at + Duration::from_secs(5);
+
+        let recovery_identity = state
+            .reissue_current_frame_demand_for_recovery_at(late_at, recovery_deadline)
+            .expect("reissue exact recovery picture");
+        let recovery = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("recovery presentation ticket");
+        assert_eq!(recovery.identity(), recovery_identity);
+        assert_ne!(recovery.identity(), original.identity());
+        assert_eq!(state.playback_engine.snapshot(), snapshot);
+        let grace = Duration::from_nanos(
+            state
+                .playback_engine
+                .pending_frame_demand()
+                .expect("pending recovery demand")
+                .late_presentation_grace_ns,
+        );
+        assert_eq!(
+            state
+                .playback_frame_deadline_at(late_at)
+                .expect("projected recovery work deadline"),
+            recovery_deadline + grace
+        );
+        assert_eq!(
+            state.finalize_frame_presentation_at_for_test(
+                Some(original),
+                late_at,
+                FramePresentationPublication::prepared(|| {})
+            ),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert!(matches!(
+            state.finalize_frame_presentation_at_for_test(
+                Some(recovery),
+                recovery_deadline - Duration::from_millis(1),
+                FramePresentationPublication::prepared(|| {})
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
     }
 
     #[test]
@@ -3121,7 +3819,14 @@ mod tests {
             .is_some());
         let priming_completed_at = observation_anchor + Duration::from_millis(17);
         let demand = state.playback_engine.frame_demand().expect("priming demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, priming_completed_at));
+        assert!(state.observe_video_preroll_at_wall(
+            demand,
+            0,
+            0,
+            true,
+            true,
+            priming_completed_at
+        ));
         assert_eq!(
             state.playback_engine.monotonic_high_water(),
             MonotonicTimestamp::from_duration(Duration::from_millis(17))

@@ -7,8 +7,12 @@
 
 mod model;
 mod paint;
+mod power_window;
 
-use mondrian_core::Color;
+use power_window::PowerWindowEditor;
+pub use power_window::{ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape};
+
+use mondrian_core::{Color, SampleAspectRatio};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -213,6 +217,22 @@ pub enum ViewerFrameContent {
     ExternalTexture(ViewerExternalTextureFrame),
 }
 
+/// Domain-light Viewer split/wipe layout for one frozen reference image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewerComparisonLayout {
+    WipeVertical { position: f32 },
+    WipeHorizontal { position: f32 },
+    SplitVertical,
+    SplitHorizontal,
+}
+
+/// Frozen raster and layout painted over the current Viewer frame.
+#[derive(Debug, Clone)]
+pub struct ViewerComparisonReference {
+    pub frame: ViewerFrameImage,
+    pub layout: ViewerComparisonLayout,
+}
+
 impl ViewerFrameContent {
     /// Source frame dimensions.
     pub fn dimensions(&self) -> (u32, u32) {
@@ -266,6 +286,9 @@ pub type ViewerPreviewQualityAction = dyn Fn(f32) -> Action;
 /// Maps a viewer zoom chip activation to an editor action.
 pub type ViewerZoomAction = dyn Fn(Option<f32>) -> Action;
 
+/// Maps one completed Viewer Power Window gesture to an authoring action.
+pub type ViewerPowerWindowAction = dyn Fn(ViewerPowerWindowShape) -> Action;
+
 /// One selectable viewer zoom mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerZoomOption {
@@ -305,9 +328,11 @@ pub struct ViewerSurface {
     preview_quality_label: String,
     source_width: u32,
     source_height: u32,
+    sample_aspect_ratio: f32,
     playing: bool,
     enabled: bool,
     frame_content: Option<ViewerFrameContent>,
+    comparison_reference: Option<ViewerComparisonReference>,
     canvas_background: ViewerCanvasBackground,
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
@@ -324,6 +349,8 @@ pub struct ViewerSurface {
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
+    power_window_editor: Option<PowerWindowEditor>,
+    on_power_window_edit: Option<Box<ViewerPowerWindowAction>>,
     overlay_viewport: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
@@ -347,9 +374,11 @@ impl ViewerSurface {
             preview_quality_label: "1/1".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
+            sample_aspect_ratio: 1.0,
             playing: false,
             enabled: true,
             frame_content: None,
+            comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             empty_message: None,
             hovered_control: None,
@@ -366,6 +395,8 @@ impl ViewerSurface {
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
+            power_window_editor: None,
+            on_power_window_edit: None,
             overlay_viewport: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
@@ -417,6 +448,12 @@ impl ViewerSurface {
         self
     }
 
+    /// Set the exact Sequence sample aspect ratio used for canvas presentation.
+    pub fn with_sample_aspect_ratio(mut self, ratio: SampleAspectRatio) -> Self {
+        self.sample_aspect_ratio = ratio.to_f64() as f32;
+        self
+    }
+
     /// Set the displayed preview quality / resolution mode label.
     pub fn with_preview_quality_label(mut self, label: impl Into<String>) -> Self {
         self.preview_quality_label = label.into();
@@ -455,6 +492,12 @@ impl ViewerSurface {
     /// Set the rendered preview content shown inside the fitted canvas.
     pub fn with_frame_content(mut self, frame_content: ViewerFrameContent) -> Self {
         self.frame_content = Some(frame_content);
+        self
+    }
+
+    /// Paint one frozen reference over the current frame using a wipe/split layout.
+    pub fn with_comparison_reference(mut self, reference: ViewerComparisonReference) -> Self {
+        self.comparison_reference = Some(reference);
         self
     }
 
@@ -531,6 +574,21 @@ impl ViewerSurface {
         self
     }
 
+    /// Present one selected Power Window in normalized canvas coordinates.
+    pub fn with_power_window(mut self, window: ViewerPowerWindow) -> Self {
+        self.power_window_editor = Some(PowerWindowEditor::new(window));
+        self
+    }
+
+    /// Set the one-action commit mapper for completed Power Window gestures.
+    pub fn on_power_window_edit(
+        mut self,
+        action: impl Fn(ViewerPowerWindowShape) -> Action + 'static,
+    ) -> Self {
+        self.on_power_window_edit = Some(Box::new(action));
+        self
+    }
+
     /// Set a vector icon used to paint one transport control.
     pub fn with_control_icon(mut self, control: ViewerControl, icon: VectorIcon) -> Self {
         if let Some((_, existing)) =
@@ -564,6 +622,7 @@ impl ViewerSurface {
             self.bounds,
             self.source_width,
             self.source_height,
+            self.sample_aspect_ratio,
             self.zoom_scale,
         )
     }
@@ -715,7 +774,8 @@ impl ViewerSurface {
             || self.hovered_dropdown_index.is_some()
             || self.pressed_dropdown_index.is_some()
             || self.focused
-            || self.focus_visible;
+            || self.focus_visible
+            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel);
         self.hovered_control = None;
         self.pressed_control = None;
         self.hovered_zoom = false;
@@ -755,6 +815,14 @@ impl Widget for ViewerSurface {
 
         match event {
             UiEvent::MouseMove { position, .. } => {
+                let canvas = self.canvas_rect();
+                if let Some(editor) = self.power_window_editor.as_mut()
+                    && (editor.is_dragging() || canvas.contains(*position))
+                    && editor.pointer_move(canvas, *position)
+                {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let hovered = self.control_at(*position);
                 let hovered_zoom = self.zoom_at(*position);
                 let hovered_preview_quality = self.preview_quality_at(*position);
@@ -800,6 +868,14 @@ impl Widget for ViewerSurface {
                     return EventResult::Ignored;
                 }
                 self.focus_from_pointer(ctx);
+                let canvas = self.canvas_rect();
+                if let Some(editor) = self.power_window_editor.as_mut()
+                    && editor.pointer_down(canvas, *position)
+                {
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(control) = self.control_at(*position) {
                     self.open_dropdown = None;
                     self.hovered_dropdown_index = None;
@@ -841,6 +917,21 @@ impl Widget for ViewerSurface {
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                let canvas = self.canvas_rect();
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                    let committed = self
+                        .power_window_editor
+                        .as_mut()
+                        .and_then(|editor| editor.pointer_up(canvas, *position));
+                    ctx.release_pointer_capture(self.id);
+                    if let (Some(shape), Some(mapper)) =
+                        (committed, self.on_power_window_edit.as_ref())
+                    {
+                        (ctx.dispatch)(mapper(shape));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let pressed_dropdown_index = self.pressed_dropdown_index.take();
                 if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position)
                     && pressed_dropdown_index == Some(hovered_index)
@@ -896,6 +987,9 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                    ctx.release_pointer_capture(self.id);
+                }
                 if self.clear_interaction_state() {
                     ctx.request_repaint();
                 }
@@ -993,6 +1087,55 @@ impl Widget for ViewerSurface {
                     },
                 }
             }
+            if self.frame_content.is_some()
+                && let Some(reference) = &self.comparison_reference
+            {
+                let (position, vertical) = match reference.layout {
+                    ViewerComparisonLayout::WipeVertical { position } => {
+                        (position.clamp(0.0, 1.0), true)
+                    }
+                    ViewerComparisonLayout::WipeHorizontal { position } => {
+                        (position.clamp(0.0, 1.0), false)
+                    }
+                    ViewerComparisonLayout::SplitVertical => (0.5, true),
+                    ViewerComparisonLayout::SplitHorizontal => (0.5, false),
+                };
+                let reference_clip = if vertical {
+                    Rect::new(canvas.x, canvas.y, canvas.width * position, canvas.height)
+                } else {
+                    Rect::new(canvas.x, canvas.y, canvas.width, canvas.height * position)
+                };
+                if reference_clip.width > 0.0 && reference_clip.height > 0.0 {
+                    ctx.push_clip(reference_clip);
+                    ctx.encoder.draw_raster_image(
+                        &reference.frame.key,
+                        canvas,
+                        reference.frame.width,
+                        reference.frame.height,
+                        reference.frame.color_space,
+                        Arc::clone(&reference.frame.rgba),
+                        Color::WHITE,
+                    );
+                    ctx.pop_clip();
+                }
+                if position > 0.0 && position < 1.0 {
+                    if vertical {
+                        let x = canvas.x + canvas.width * position;
+                        ctx.encoder.draw_rect(
+                            Rect::new(x - 0.5, canvas.y, 1.0, canvas.height),
+                            Color::WHITE,
+                            0.0,
+                        );
+                    } else {
+                        let y = canvas.y + canvas.height * position;
+                        ctx.encoder.draw_rect(
+                            Rect::new(canvas.x, y - 0.5, canvas.width, 1.0),
+                            Color::WHITE,
+                            0.0,
+                        );
+                    }
+                }
+            }
         }
         if self.frame_content.is_none()
             && let Some(message) =
@@ -1015,6 +1158,9 @@ impl Widget for ViewerSurface {
             );
         }
         paint::paint_safe_guides(ctx, canvas, self.enabled);
+        if let Some(editor) = &self.power_window_editor {
+            editor.paint(ctx, canvas);
+        }
         ctx.pop_clip();
         ctx.pop_clip();
 
@@ -1411,7 +1557,7 @@ fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, C
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
 
@@ -1806,6 +1952,79 @@ mod tests {
                 Action::GoToEnd
             ]
         );
+    }
+
+    #[test]
+    fn power_window_drag_captures_pointer_and_dispatches_once_on_release() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_power_window(ViewerPowerWindow {
+                shape: ViewerPowerWindowShape::Rectangle {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.4,
+                    height: 0.4,
+                    corner_radius: 0.05,
+                },
+                editable: true,
+            })
+            .on_power_window_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let start = Point::new(
+            canvas.x + canvas.width * 0.4,
+            canvas.y + canvas.height * 0.4,
+        );
+        let end = Point::new(start.x + 24.0, start.y + 12.0);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(viewer.id()))
+        );
+        ctx.requests.pointer_capture = None;
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "drag preview must not author intermediate actions"
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: end,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(viewer.id()))
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
     }
 
     #[test]
@@ -2566,6 +2785,50 @@ mod tests {
             "sequence canvas should be painted as a straight-edged rectangle"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn gallery_split_paints_frozen_raster_over_gpu_current_with_exact_clip() {
+        let current = ViewerExternalTextureFrame::new("viewer.current", 1920, 1080)
+            .expect("current GPU frame");
+        let reference = ViewerFrameImage::new(
+            "gallery.reference",
+            1920,
+            1080,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![128; 1920 * 1080 * 4],
+        )
+        .expect("reference raster");
+        let mut viewer = ViewerSurface::new("Compare", 1920, 1080)
+            .with_frame_content(ViewerFrameContent::ExternalTexture(current))
+            .with_comparison_reference(ViewerComparisonReference {
+                frame: reference,
+                layout: ViewerComparisonLayout::SplitVertical,
+            });
+        let bounds = Rect::new(0.0, 0.0, 500.0, 320.0);
+        viewer.layout(bounds);
+        let canvas = viewer.canvas_rect();
+        let expected_reference_clip =
+            Rect::new(canvas.x, canvas.y, canvas.width * 0.5, canvas.height);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        viewer.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: bounds,
+        });
+
+        assert_eq!(encoder.external_textures.len(), 1);
+        assert_eq!(
+            encoder.raster_images,
+            vec![("gallery.reference".to_owned(), canvas, 1920, 1080)]
+        );
+        assert!(encoder.clips.contains(&expected_reference_clip));
+        assert!(encoder.rects.iter().any(|rect| {
+            (rect.x - (canvas.x + canvas.width * 0.5 - 0.5)).abs() < f32::EPSILON
+                && rect.width == 1.0
+                && rect.height == canvas.height
+        }));
     }
 
     #[test]

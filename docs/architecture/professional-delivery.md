@@ -1,0 +1,423 @@
+# Professional Delivery
+
+The bounded Export queue also exposes a fixed-size long-duration snapshot with
+cumulative activity, rendered-frame, publication, failure, and active-job
+facts. Its explicit bounded shutdown terminalizes pending jobs, cancels
+reversible running work, waits for worker-loop return, and reports final queue
+closure. Shutdown is permanent admission state: later enqueue requests are
+rejected instead of creating work after the worker returned. Snapshot
+rejections, cancellations, durable publications, and independent verifications
+remain separate counters. The endurance snapshot is copied under the Queue's
+sole mutex, including mirrored shutdown/worker lifecycle, cumulative counters,
+activity count, and job gauges. Job/activity mutations publish both markers,
+while diagnostics-only mutations publish their revision, before releasing that
+mutex. The snapshot therefore cannot combine a newer job state with older
+lifecycle or activity facts. Durable publication remains distinct
+from the independent artifact re-open/content verification required by
+commercial endurance qualification; see
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
+
+The job-scoped Audio Source Cache now returns schema-6 raw closure, including
+its independent native-startup worker and producer leases. Queue consumers do
+not reinterpret audio construction or introduce a separate startup scheduler.
+The existing Export terminal owner counters still summarize that raw receipt;
+durable preservation of complete successful receipts is a separate outstanding
+COL-047 requirement, not implied by the schema update.
+
+The validation-only repeated-Export owner sits above this Queue rather than
+inside it. It freezes one ordinary `ExportConfig`, changes only a unique
+monotonic create-only output path, admits exactly one Job at a time, requires
+exact `Published` plus path-matching `Durable` evidence, and invokes the
+independent full-decode verifier before another Job is eligible. A fresh Queue
+is an invariant for the whole interval, not only startup. Closing stops new
+admission but finishes the active irreversible publication and verification;
+Continuous Export never requests cancellation. This owner must be dropped
+before App-wide consuming shutdown so its Queue reference cannot outlive the
+qualified phase.
+
+Each attempt also freezes the App resource coordinator's acceleration policy.
+During realtime playback, an Export closure with an exact Float32 CPU route
+uses that route and performs the delivery color/output boundary on CPU, so it
+does not contend with Preview or Reference Output for opportunistic GPU work.
+GPU-only Effect contracts retain GPU execution, and offline attempts retain
+normal GPU and resident-encoder qualification. This changes scheduling only;
+the frozen Timeline, Effect, color, codec, and artifact validation contracts
+are unchanged.
+
+The validation feature also exposes one persistent frozen Timeline visual
+Session for Reference Output correctness qualification. It owns the same
+`TimelineExportSnapshot` and `ExportVisualRenderSession` used by production
+Export, retaining decoder, title, prepared Program, Effect, color, and
+composite state across contiguous frames. It forces authored root/child
+rasters, executes the shared Prepared Visual closure, and returns only the
+canonical root Float32 working composite before Export delivery, codec, and
+publication. The existing one-shot visual validator delegates to the same
+private materializer. This seam is qualification-only reuse; it grants no
+Export publication authority and is not a long-term ownership claim for the
+Reference product path.
+
+Qualification separates the signal from the wait. `RenderQueue::begin_shutdown`
+atomically closes admission and requests cancellation before the App starts
+joining any owner. `RenderQueue` retains the dedicated worker's `JoinHandle`;
+the later authoritative `shutdown_until` call consumes that ownership against
+the App-wide absolute monotonic deadline instead of granting Export a renewed
+relative timeout. Schema-4 shutdown evidence distinguishes successful worker
+start and normal join from an outer worker panic, deadline miss, handle detach,
+and any worker-owned executor, hook, factory-error payload, or opaque panic
+payload deliberately abandoned because its destructor is not safe on a caller
+or worker thread.
+Executor panics caught around one Job remain Job failures and do not become
+worker panics. Canonical string panic payloads are destroyed normally; an opaque
+`panic_any` payload is abandoned, latches the owner-abandonment fact, and makes
+the terminal receipt fail closed. The worker may drain already-admitted work,
+but the failure latch prevents further admission and therefore bounds opaque
+payload abandonment to the workset accepted before that failure.
+
+The worker publishes a monotonic completion stamp only after its outer task
+boundary has classified any panic payload and all foreign executor/hook locals
+have unwound. A handle still active at the deadline is timed out and detached
+once; that terminal classification cannot be upgraded when the detached thread
+later returns. A handle already finished with a completion stamp after the
+deadline is joined to reclaim it, but remains timed out and is explicitly not
+detached.
+Only a successful start, completion no later than the deadline, normal join,
+zero pending/active jobs, and no failure or abandonment facts prove closure.
+The duration-based wrapper translates to one absolute deadline and delegates to
+the same path. Ordinary Queue `Drop` only signals shutdown: it joins an already
+finished handle without blocking or detaches an active one, and is never a
+consuming qualification receipt. One product coordinator exclusively owns the
+consuming call; sequential repeats observe latched facts, while concurrent
+consumers are outside the qualification contract and cannot supply clean proof.
+
+The Queue also inventories every lazily created job-scoped decoded-audio owner.
+`started`, `closed`, dirty-closure, and currently active counts share the Queue
+mutex with job and worker state. Clean shutdown additionally requires exact
+started/closed equality, zero dirty closures, and zero active owners. An
+executor panic cannot bypass this boundary: the production executor closes its
+audio owner before rethrowing to the Queue's per-job panic isolation.
+
+`mondrian-export` also owns an independent single-file artifact verifier for
+that post-publication boundary. It accepts only a direct regular file within an
+explicit byte limit, hashes the encoded bytes, derives the ordinary typed
+container/stream probe, and launches a separately supervised FFmpeg process
+against a verifier-owned immutable byte snapshot. It decodes every advertised
+video and audio stream through EOF. The child
+has an absolute deadline and strict stdout/stderr byte ceilings. Success
+requires a terminal progress record, a nonzero video-frame count when video is
+present, decoded duration evidence for a positive-duration artifact, and one
+FFmpeg SHA-256 over the decoded stream bytes. Metadata and encoded-byte SHA-256
+are rechecked against the published path after decode so a changing artifact
+cannot produce a receipt. Bounded snapshot copying reads at most one byte past
+the policy ceiling before rejecting a growing or oversized file.
+
+Command admission is a distinct failure before any probe/decode child exists.
+The public artifact-probe/validation Interfaces return `ExportValidationError`,
+retaining `CommandAdmission` and its Media-owned source separately from ordinary
+output validation errors. Smart Render may retry pixel rendering for an output
+contract mismatch, never for rejected FFprobe authority. Hardware encoder
+selection similarly admits its command before the opportunistic probe/fallback
+decision. Ordinary encoding and remux convert errors to diagnostic text at
+terminal failure/reporting Interfaces. Private stem and DPX validators still
+convert earlier, but their callers can only fail or cancel, never retry another
+route or publish success. Concurrent cancellation can take precedence over the
+diagnostic in those terminal-only paths; Smart Render retains admission failure
+before considering cancellation. The independent verifier retains typed command
+and probe causes in its own error.
+
+The result is a structured report plus the SHA-256 of its canonical JSON. The
+receipt fields are private and bind the caller's stable Export job/artifact
+identity, so App capture can construct
+`ExportArtifactVerified` only from completed verifier output rather than from
+caller-supplied strings. This proves bounded re-open, complete decodability,
+and stable content identity; it is not a pixel comparison against the source
+Timeline or an independent colorimetric oracle. Audio is covered by the
+combined decoded-stream hash and terminal duration rather than by a separately
+claimed sample-count qualification. The decoded terminal duration must agree
+with the independently probed duration under the validation tolerance. Direct
+symlinks and other non-regular
+objects are rejected; the admitted output path remains responsible for its
+already-canonical parent namespace.
+
+`mondrian-export::professional_delivery` is the deep Module for constrained
+IMF, AS-11, and DCP delivery. It deliberately exposes exact qualified product
+rows rather than claiming the complete standards families:
+
+| Product row | Picture | Audio | Artifact |
+|---|---|---|---|
+| IMF Application ProRes RDD 45, 1080p25 Rec.709 | ProRes 422 HQ, 10-bit 4:2:2 | stereo PCM24/48 kHz | immutable IMP directory |
+| AMWA AS-11 X9 NABA HD, 720p59.94 Rec.709 | AVC High 4:2:2 Intra, 10-bit | stereo PCM24/48 kHz | one OP1a MXF |
+| SMPTE DCP 2D 2K Flat, 24 fps | ST 428-1 XYZ12 JPEG 2000 | stereo PCM24/48 kHz | unencrypted, unsigned immutable DCP directory |
+
+An enum variant is a closed conformance row, not a friendly alias. Admission
+requires exact raster, rational cadence, progressive field order, sample
+representation, range, chroma, renderer color endpoint, stereo Program Output,
+48 kHz audio, and bounded non-empty metadata. A near match fails before
+rendering. DCP consumes display-linear Rec.709 from the shared Renderer and the
+Adapter alone applies the ST 428-1 transfer and matrix into MSB-aligned XYZ12;
+no DCP conversion is hidden in Timeline or the Viewer.
+
+This progressive restriction remains intentional for the current IMF, AS-11,
+and DCP catalog; generic interlaced media-file delivery does not widen those
+package rows. The separate qualified interlaced matrix is MOV-only: 1920x1080,
+25 or 30000/1001 encoded pictures per second, TFF, square-pixel Rec.709 Legal,
+10-bit 4:2:2, no alpha, and ProRes 422 LT/422/HQ or uncompressed v210 software
+encoding. HEVC/AV1/H.264, DNxHR, AVC-Intra, image/float masters, resident GPU
+encoding, Smart Render, BFF output, PsF, telecine, and mixed dominance remain
+fail-closed.
+
+## Execution and validation
+
+The author `ExportPreset` is frozen in the ordinary `TimelineExportSnapshot`.
+The queue resolves it once, renders picture and PCM through the existing
+Preview/Export visual and audio semantics, then enters explicit monotonic
+phases:
+
+```text
+Preparing -> Rendering -> Encoding -> Packaging -> Validating -> Publishing
+```
+
+`Packaging` is a cooperative cancellation boundary. `Publishing` remains the
+irreversible namespace boundary. A file deliverable uses
+`OwnedPublicationFile`; IMF and DCP use `OwnedPublicationDirectory`. External
+writers receive only an identity-bound sibling reservation. The final file or
+directory does not exist until validation succeeds and Storage durably
+publishes the exact staging object.
+
+The Toolchain Adapter resolves a profile-specific closure and fails closed if
+any required executable is missing or cannot return bounded identity evidence:
+
+- IMF: BBC BMX `raw2bmx`/`mxf2raw`, a private Java runtime, and Netflix Photon;
+- AS-11 X9: BBC BMX `raw2bmx`/`mxf2raw`;
+- DCP: CineCert `asdcp-wrap`/`asdcp-info` and the DCP-o-matic/libdcp package
+  verifier.
+
+Tools are searched beside the application and then on `PATH`. Photon is a
+private runtime closure under `professional-delivery/photon/{bin,lib}`; the
+development-only `MONDRIAN_PHOTON_JAVA` and `MONDRIAN_PHOTON_LIB` overrides
+must identify direct files/directories. A release must ship the qualified
+versions, transitive runtime libraries, licenses, and checksums as one tested
+deployment unit. Merely finding a similarly named executable is not package
+qualification; every job probes the selected identities before rendering.
+
+IMF picture and audio Track Files are wrapped separately by BMX and reimported
+by BMX. Photon then validates each actual Track File and supplies its bounded
+RegXML Essence Descriptor. Those descriptors, actual TrackFile UUIDs, exact
+native edit rates, intrinsic/source durations, and SHA-1 digests are the only
+inputs admitted to CPL construction. Placeholder descriptors are forbidden.
+After the IMP graph is built, Photon independently reimports the complete
+directory.
+
+AS-11 X9 is one OP1a file carrying the X9 Specification Identification UL.
+BMX reimport must prove OP1a, 60000/1001, AVC High 4:2:2 Intra, 10-bit 4:2:2,
+PCM24/48 kHz stereo, MCA labels, complete partitions, and the final sample.
+X9 does not invent a proprietary `X9Framework`; optional descriptive XML is a
+separate future product row.
+
+DCP picture and sound Track Files are independently wrapped and reimported by
+CineCert. The package builder emits SMPTE CPL/PKL/AssetMap documents, then the
+DCP-o-matic/libdcp verifier checks the complete directory, assets, hashes, XML,
+JPEG 2000, and MXF. The current row targets baseline SMPTE DCP, not the stricter
+SMPTE Bv2.1 profile: Bv2.1 findings are retained as a distinct verifier class,
+while any ordinary interoperability `Error` fails the export.
+
+## Package graph
+
+`ProfessionalPackageBuildRequest` freezes issue time and all strong document,
+composition, resource, virtual-track, descriptor, and Track File identities.
+Random identity allocation never occurs while serializing an individual XML
+reference. IMF uses a 2067-3 Segment/Sequence/TrackFileResource graph and RDD
+45 Application Identification. DCP uses a 429-7 Reel/MainPicture/MainSound
+graph. Both include one CPL, one PKL, one AssetMap, one picture Track File, and
+one primary audio Track File.
+
+The independent internal reimport is not an XML well-formedness check. It
+rejects DTD/entity declarations, files above 2 MiB, symlinks, nested or
+case-aliasing paths, duplicate IDs, extra filesystem objects, multi-chunk or
+non-zero-offset AssetMap objects, non-positive sizes/durations, wrong media
+types, unsupported hash algorithms, malformed SHA-1 values, broken
+AssetMap/PKL/CPL closure, CPL/PKL hash disagreement, wrong profile signaling,
+or picture/audio duration disagreement. IMF `SourceEncoding` references must
+close over exactly the included Essence Descriptors. Every declared size,
+path, and hash is recomputed from the staged files before publication.
+
+## Product and performance boundary
+
+The App Export panel edits the same `ExportPreset`: constrained codec/raster/
+cadence controls are read-only, while title, issuer, creator, and RFC 5646
+language remain editable. Availability resolves the complete request against
+the selected Sequence; a mismatched DCP or AS-11 request is disabled before
+dispatch, and queue admission repeats the same validation. File and directory
+suffixes are `.mxf`, `.imf`, and `.dcp` respectively.
+
+The Module has no second renderer, audio mixer, Timeline walker, or worker
+pool. It reuses the frozen visual/audio Programs and the bounded Export worker.
+External processes have bounded output capture, a six-hour attempt deadline,
+cooperative cancellation, and profile-local invocation. XML inventory is
+bounded to 32 assets and two MiB per document. Directory publication performs
+one durable tree synchronization after complete validation; it does not copy
+the package into the final namespace progressively.
+
+Real qualification tests generate essence with the production FFmpeg
+contracts, wrap actual MXF Track Files, reimport them through the independent
+readers, and validate the complete IMF/DCP package through Photon or
+DCP-o-matic. These ignored tests are deployment gates because their tools are
+licensed runtime artifacts rather than Rust test dependencies; ordinary unit
+tests retain deterministic negative coverage for graph, timing, digest, path,
+and XML attacks.
+
+## Broadcast QC publication gate
+
+An optional immutable `BroadcastQcProfile` is frozen with the ordinary Export
+snapshot. Export observes each real post-Legalizer, output-quantized delivery
+picture before handing it to the encoder and streams it through the shared
+Broadcast Module. `Fail` or `Incomplete` is terminal before durable publication;
+`Warn` publishes with the versioned report in job diagnostics. A requested scan
+disables Smart Render, byte-preserving Dynamic HDR, and GPU-resident encoding
+routes that cannot expose the exact observation tap.
+
+This gate proves the in-process delivery-picture sequence, not the final
+encoded/muxed artifact. Profiles may retain an explicit independent artifact
+revalidation obligation, just as regulatory flash analysis remains an external
+obligation. AS-11 ST 436 carriage and caption semantics are not inferred from
+the existing AS-11 picture/audio package. See
+[Broadcast QC And Ancillary Data](broadcast-qc-and-ancillary.md).
+
+## Dynamic HDR delivery qualification
+
+Dynamic HDR is a separate delivery Module from the fixed IMF/AS-11/DCP rows.
+Its immutable queue contract resolves one of three Sequence-authored paths:
+
+- `Omit` renders ordinary output and deliberately publishes no dynamic
+  metadata;
+- `PreserveSourceExact` requires a video-only complete-source identity, no
+  authored static-metadata rewrite, no Legalizer, and copies the whole file
+  byte-for-byte. Source/output SHA-256 equality and output metadata re-probe are
+  mandatory evidence. Any failure blocks publication and cannot select render;
+- `Remake` requires progressive Rec.2100 PQ Legal HEVC Main10 10-bit 4:2:0 plus
+  authored ST 2086/MaxCLL/MaxFALL for the first qualified row, and also requires
+  a licensed/adopter-qualified generator, independent validator, and human
+  HDR/SDR QC evidence. No such runtime Adapter is currently installed, so this
+  path fails closed before execution.
+
+ST 2094-40 Application #4 syntax is named as such in product state and evidence;
+Mondrian does not turn detection into an HDR10+ certification claim. Dolby
+Vision CM version, metadata levels, bitstream profile/level, licensed tooling,
+and delivery profile are retained as distinct qualifications. Open syntax tools
+or FFmpeg/x265 parameter availability alone do not establish either branded
+workflow.
+
+Export CLI construction uses Media's opaque `FfmpegCommand` throughout encoder,
+image/mezzanine, signal-validation and queue argument lowering. Native spawn
+retains the qualified capsule independently of command lifetime. Hardware
+probe errors preserve typed spawn-time authority rejection and cannot select
+software fallback after rejection. This type migration does not change codec,
+color, authoring snapshot or output publication semantics.
+### Frozen ANC attachment in AS-11
+
+The typed App export request and `ExportConfig` can carry an optional Broadcast
+`FrozenAncillaryProgram`. Queue admission rejects non-AS-11 profiles and any
+source-start, output-rate or duration mismatch before media preparation.
+AS-11 writes a bounded standard ST436 KLV stream into its owned temporary
+directory and attaches it to the same qualified BMX wrapping command. Export
+cancellation stops generation and final MXF scanning; cancellation errors are
+terminal rather than `Interrupted`, which `read_exact` would retry.
+
+Before publication, actual output MXF ANC elements are independently decoded
+and compared against the frozen canonical program, including explicitly empty
+frames. A successful wrapper exit or metadata-only reimport cannot substitute
+for this check. No ANC attachment is inferred from captions or filenames; the
+caller must author/select the canonical program. Exact arbitrary horizontal
+SDI positions cannot be carried by ST436 and fail admission instead of being
+quietly changed.
+
+Final-artifact QC freezes its deadline before snapshot admission. The new explicit
+until APIs carry it through bounded copy/hash loops and stream, opening-frame and
+GOP FFprobe owners; no per-probe renewal or thread-local state exists. Native probe
+errors retain supervised child/pipe receipts through their typed source chain.
+Snapshot preparation and consuming close keep independent errors, and a late close
+cannot produce success. Decoder autorotation and autoscaling are disabled; codec
+cropping remains allowed for coded padding, while unsupported container display
+matrix/rotation/cropping is rejected. Native regressions use a non-square rotated
+MP4, lossless 10-bit limited-range Y=0/Y=1023 excursions, and a real-time FFprobe
+that exceeds the original deadline.
+
+Caption-file import now shares `resolve_ancillary_export_selection` with ANC
+readiness and queue admission. SCC/CDP conversion receives that exact selection
+and writes the same immutable `FrozenAncillaryProgram` used by AS-11 ST436. Source
+provenance and transport qualification survive export freezing and final MXF
+reimport; no caption edit path or format-specific export timeline is added. See
+`broadcast-qc-and-ancillary.md` for the explicit supported syntax and bounded limits.
+
+The shared normal/AS-11 gate borrows OwnedPublicationFile for regulatory analysis.
+The provider clones its retained source handle while the publication owner remains
+borrowed; its existing deny-write protection continues throughout copy and native
+execution. This avoids a conflicting fresh strict read open against a legitimate
+publication writer. Path-only callers retain the stricter read-only identity lease.
+The read-only snapshot has its own strict lease, with exact hashes before and after
+provider execution. The native writer-owner regression proves snapshot admission
+and native invocation while separate write opens remain rejected.
+
+Qualified PSE configuration requires runtime_files: an explicitly approved complete
+non-system DLL list. None is NotRun before phase admission. Runtime files and the
+three approval-bound inputs form the sealed Media provider owner; ordinary product
+providers without a campaign retain their existing installation behavior. The
+fixed provider command now participates in the same native child ledger instead
+of attempting an unqualified Command bypass. Independent runtime_cleanup_error
+remains distinct from snapshot_cleanup_error in both successful and failed evidence.
+
+Independent finished-artifact verification v2 uses a single caller-owned Instant
+through snapshot admission, bounded copy, every FFprobe, complete decode, final
+source/snapshot hashes, serialization and consuming close. The legacy duration
+entry freezes that Instant once. Report schema 2 adds actual snapshot removal;
+its digest remains deterministic. The serializable receipt independently retains
+the decoder's original bounded stdout/stderr, native exit and child/pipe closure,
+so nondeterministic PIDs/progress do not contaminate the report digest. Failure
+`.evidence()` retains observed probe/decode output, typed native cleanup, snapshot
+admission/removal and independent removal errors. A preparation failure after
+acquisition also records whether its exact snapshot was consumed successfully.
+
+The independent receipt exposes its original native execution through a read-only
+accessor so the phase-owned asynchronous worker can project actual cleanup without
+reparsing JSON. Failure evidence supports structural equality without dropping raw
+native stdout/stderr or snapshot facts.
+Qualified AS-11 exports carry one phase-owned `BmxRuntimeHandle` through
+`ExportConfig.approved_bmx` (never deserialized as execution authority).
+Wrapping, ancillary attachment, reimport and version probes all use its exact
+approved executable objects and the existing Media supervisor. Tool identities
+include SHA-256 of bounded stdout followed by stderr and real native cleanup.
+Ordinary development discovery remains available, but a qualified process cannot
+turn PATH-discovered standard commands into provider authority. IMF and DCP need
+their additional approved runtime owners before campaign admission; BMX approval
+alone does not authorize CineCert, Photon or Java.
+
+The ignored `mondrian-export/tests/approved_bmx_ancillary.rs` regression exercises
+approved BMX commands beyond version probing: SCC 608, CDP 708 and sparse ANC
+are wrapped into actual OP1a MXF, reimported through the production command
+builder, and rescanned through both canonical word-verification entrypoints.
+`MONDRIAN_BMX_TOOL_DIR` selects the official binary directory and
+`MONDRIAN_BMX_ANC_EVIDENCE_DIR` selects an existing parent for a unique retained
+artifact directory. Raw native command cleanup, immutable tool hashes and the
+consuming runtime receipt accompany the MXF files. This ANC-only test does not
+claim full AS-11 picture/audio or physical broadcast qualification.
+
+Resident queue entry points compile with their native consumer. Windows uses
+D3D12 Video Process plus `hevc_d3d12va`; Linux NVIDIA uses an exact UUID-matched
+Vulkan/CUDA bridge plus FFmpeg CUDA surfaces and `hevc_nvenc`. Both consume the
+same visual closure and delivery contracts. A resident attempt requires that
+closure to stay GPU-native even when opportunistic acceleration is disabled;
+otherwise admission ends before the first encoded frame rather than inserting a
+CPU composite/upload. The Linux conversion and HEVC stream
+agree on explicit left-sited 4:2:0 chroma, and the final stream-copy publication
+is independently probed for that metadata. Neither route is physical SDI
+or broadcast-wire qualification. Other Linux GPU vendors remain explicit
+resident-route NotRun until an exact-device native encoder Adapter is present.
+
+### Cancel/retry route ownership coverage
+
+Queue lifecycle regression coverage exercises cancellation followed by both
+same-route and different-route retries. A still-active attempt reserves its
+normalized route; after its terminal release, a retry receives a fresh JobId,
+generation and cancellation token. Canceling the old terminal identity cannot
+cancel the retry. This queue-level executor test is not media-artifact or physical
+delivery qualification; create-only publication and independent full decode/hash
+verification remain separate production boundaries.

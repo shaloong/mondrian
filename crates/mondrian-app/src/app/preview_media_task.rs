@@ -19,12 +19,12 @@ use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
     PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeKey, PreviewDecodeOutcome,
     PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
-    PreviewHardwareDecodeRequest,
+    PreviewDecodeSessionFamily, PreviewHardwareDecodeRequest,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
-    CpuEncodedColorFrame, CpuSourceColorFrame, LinearFloatSource, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, RenderInputTransform,
+    color::RenderColorStageDiagnostics, prepare_decoded_cpu_source_frame,
+    RenderColorTransformDiagnostics,
 };
 
 use super::preview_access_mode::{
@@ -39,7 +39,8 @@ use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewSemanticIdentity, PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::{
-    MediaPreviewFrame, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
+    MediaPreviewCpuYuvSourceFrame, MediaPreviewFrame, MediaPreviewGpuSourceFrame,
+    MediaPreviewNativeSourceFrame,
 };
 use super::preview_scheduler_policy::{
     preview_decode_presentation_quality, MediaPreviewFailureReason,
@@ -369,26 +370,50 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     let mut decode_context = MediaPreviewWorkerDecodeContext::new(decode_context_bootstrap);
     let mut residency_revision = 0;
     // A family retirement whose native outputs are still leased (e.g. a
-    // hardware-decoded still frame retained by the Frame Store or Viewer) is
-    // acknowledged immediately so the family barrier cannot stall decode
-    // admission behind one renderer/lease lifetime; the codec context is then
-    // retired lazily once the last native lease drops.
-    let mut pending_native_retire = false;
+    // hardware-decoded still frame retained by the Frame Store or Viewer)
+    // remains pending until the last native lease drops and this worker
+    // destroys the codec. Native release wakes the existing Broker lifecycle
+    // transport; acknowledging earlier would overlap old and new surface pools.
+    let mut pending_native_retire = PendingMediaPreviewSessionRetirements::default();
     loop {
-        if pending_native_retire && decode_context.native_outputs_released() {
-            decode_context.clear();
-            pending_native_retire = false;
+        if pending_native_retire.clear_released(&mut decode_context) {
+            pending_native_retire.acknowledge_if_released(
+                &mut decode_context,
+                &residency,
+                lane,
+                residency_revision,
+            );
+            work_notifier.lifecycle_progressed();
         }
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
+            pending_native_retire.release_device_roots = directive.retire_all_contexts();
             if directive.retire_context() {
-                if decode_context.native_outputs_released() {
-                    decode_context.clear();
-                    pending_native_retire = false;
-                    residency.acknowledge_retirement(lane, directive.revision());
+                let families = if directive.retire_all_contexts() {
+                    [
+                        Some(PreviewDecodeSessionFamily::Playback),
+                        Some(PreviewDecodeSessionFamily::Interactive),
+                    ]
                 } else {
-                    residency.acknowledge_retirement(lane, directive.revision());
-                    pending_native_retire = true;
+                    if let Some(family) = directive.retired_family() {
+                        pending_native_retire
+                            .remove(opposite_preview_decode_session_family(family));
+                    }
+                    [directive.retired_family(), None]
+                };
+                for family in families.into_iter().flatten() {
+                    if decode_context.family_native_outputs_released(family) {
+                        decode_context.clear_family(family);
+                        pending_native_retire.remove(family);
+                    } else {
+                        pending_native_retire.insert(family);
+                    }
                 }
+                pending_native_retire.acknowledge_if_released(
+                    &mut decode_context,
+                    &residency,
+                    lane,
+                    directive.revision(),
+                );
             }
             residency_revision = directive.revision();
         }
@@ -398,10 +423,10 @@ fn media_preview_worker_with_decoder<DecodeJob>(
         {
             MediaPreviewJobQueueWait::Work(outcome) => outcome,
             MediaPreviewJobQueueWait::Lifecycle => continue,
-            MediaPreviewJobQueueWait::Idle => {
-                decode_context.clear();
-                continue;
-            }
+            // The active residency family is an explicit Runtime lifecycle
+            // owner. An arbitrary quiet interval cannot retire a cold-source
+            // Playback Session before its retained Timeline activation.
+            MediaPreviewJobQueueWait::Idle => continue,
             MediaPreviewJobQueueWait::Closed => break,
         };
         let job = match outcome {
@@ -670,8 +695,12 @@ impl MediaPreviewWorkerDecodeContext {
         self.recovery_revision
     }
 
-    fn native_outputs_released(&self) -> bool {
-        self.context.native_outputs_released()
+    fn family_native_outputs_released(&self, family: PreviewDecodeSessionFamily) -> bool {
+        self.context.family_native_outputs_released(family)
+    }
+
+    fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
+        self.context.clear_family(family);
     }
 
     fn clear(&mut self) {
@@ -688,6 +717,75 @@ impl MediaPreviewWorkerDecodeContext {
         self.context = self.bootstrap.clone_for_sequential_recovery().build();
         self.recovery_revision = self.recovery_revision.saturating_add(1);
         clear_panicked
+    }
+}
+
+const fn opposite_preview_decode_session_family(
+    family: PreviewDecodeSessionFamily,
+) -> PreviewDecodeSessionFamily {
+    match family {
+        PreviewDecodeSessionFamily::Playback => PreviewDecodeSessionFamily::Interactive,
+        PreviewDecodeSessionFamily::Interactive => PreviewDecodeSessionFamily::Playback,
+    }
+}
+
+#[derive(Default)]
+struct PendingMediaPreviewSessionRetirements {
+    playback: bool,
+    interactive: bool,
+    release_device_roots: bool,
+}
+
+impl PendingMediaPreviewSessionRetirements {
+    fn acknowledge_if_released(
+        &mut self,
+        context: &mut MediaPreviewWorkerDecodeContext,
+        residency: &PreviewDecodeResidencyCoordinator,
+        lane: MediaPreviewWorkerLane,
+        revision: u64,
+    ) {
+        if !self.playback && !self.interactive {
+            if self.release_device_roots {
+                // The all-context directive consumes idle device roots only
+                // after both families' native leases and codec owners retire.
+                context.clear();
+                self.release_device_roots = false;
+            }
+            residency.acknowledge_retirement(lane, revision);
+        }
+    }
+
+    fn insert(&mut self, family: PreviewDecodeSessionFamily) {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback = true,
+            PreviewDecodeSessionFamily::Interactive => self.interactive = true,
+        }
+    }
+
+    fn remove(&mut self, family: PreviewDecodeSessionFamily) {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback = false,
+            PreviewDecodeSessionFamily::Interactive => self.interactive = false,
+        }
+    }
+
+    fn clear_released(&mut self, context: &mut MediaPreviewWorkerDecodeContext) -> bool {
+        let mut progressed = false;
+        if self.playback
+            && context.family_native_outputs_released(PreviewDecodeSessionFamily::Playback)
+        {
+            context.clear_family(PreviewDecodeSessionFamily::Playback);
+            self.playback = false;
+            progressed = true;
+        }
+        if self.interactive
+            && context.family_native_outputs_released(PreviewDecodeSessionFamily::Interactive)
+        {
+            context.clear_family(PreviewDecodeSessionFamily::Interactive);
+            self.interactive = false;
+            progressed = true;
+        }
+        progressed
     }
 }
 
@@ -950,11 +1048,14 @@ fn decode_media_preview_inner(
 ) -> MediaPreviewResult {
     let decode_started_at = Instant::now();
     let logical_resolution = job.key.source_resolution;
+    let picture_geometry = job.key.picture_geometry;
     let priority = job.priority;
     let access_mode = job.access_mode;
     let deadline_at = job.deadline_at;
     let demand_identity = job.demand_identity;
     let execution_id = job.execution_id;
+    let render_cache_source_fingerprint =
+        super::preview_render_cache_identity::canonical_media_source_fingerprint(&job.key).ok();
     let hardware_decode_request = if job.key.source_has_alpha() {
         PreviewHardwareDecodeRequest::Auto
     } else {
@@ -1001,15 +1102,11 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let source = CpuEncodedColorFrame::source_rgba8_shared(
-                width,
-                height,
-                job.key.decode.source_color().color_space,
-                frame.into_shared_data(),
-            );
-            let source = match CpuSourceColorFrame::from(source)
-                .normalize_alpha(job.key.alpha_interpretation)
-            {
+            let prepared_source = match prepare_decoded_cpu_source_frame(
+                frame,
+                job.key.alpha_interpretation,
+                job.key.preparation_intent.clone(),
+            ) {
                 Ok(source) => source,
                 Err(error) => {
                     return media_preview_alpha_failure(
@@ -1021,14 +1118,8 @@ fn decode_media_preview_inner(
                     );
                 }
             };
-            let input_transform = RenderInputTransform::to_working(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                source,
-                input_transform,
+                prepared_source,
                 decode_diagnostics,
             );
             MediaPreviewResult {
@@ -1041,6 +1132,8 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,
@@ -1085,7 +1178,7 @@ fn decode_media_preview_inner(
             let height = frame.height;
             let frame_identity = media_preview_frame_identity(
                 &job.key,
-                MediaPreviewDecodedFrameEvidence::CpuLinearRgbaF32 {
+                MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
                     width,
                     height,
                     color_contract: frame.color_contract,
@@ -1095,15 +1188,11 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let source = LinearFloatSource::new_shared(
-                width,
-                height,
-                job.key.decode.source_color().color_space,
-                frame.into_shared_data(),
-            );
-            let source = match CpuSourceColorFrame::from(source)
-                .normalize_alpha(job.key.alpha_interpretation)
-            {
+            let prepared_source = match prepare_decoded_cpu_source_frame(
+                frame,
+                job.key.alpha_interpretation,
+                job.key.preparation_intent.clone(),
+            ) {
                 Ok(source) => source,
                 Err(error) => {
                     return media_preview_alpha_failure(
@@ -1115,14 +1204,8 @@ fn decode_media_preview_inner(
                     );
                 }
             };
-            let input_transform = RenderInputTransform::to_working(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                source,
-                input_transform,
+                prepared_source,
                 decode_diagnostics,
             );
             MediaPreviewResult {
@@ -1135,6 +1218,97 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
+                    .with_picture_geometry(picture_geometry)
+                    .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
+                ),
+                error: None,
+                failure_reason: None,
+                generation: job.generation,
+                priority,
+                access_mode,
+                queue_disposition: MediaPreviewQueueDisposition::Ready,
+                queue_wait_us,
+                decode_elapsed_us,
+                deadline_at,
+                logical_cancellation_observed: None,
+                canceled: false,
+                cancellation_phase: None,
+                cancel_reason: None,
+                concrete_media_checkpoint: None,
+                decode_diagnostics: Some(decode_diagnostics),
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
+                demand_identity,
+                execution_id,
+                residency_work: job.residency_work,
+            }
+        }
+        Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+            let decode_diagnostics = frame.diagnostics;
+            if job.key.source_has_alpha() {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "alpha-bearing media reached an opaque compact YUV preview payload".to_owned(),
+                );
+            }
+            let decode_execution = frame.decode_execution;
+            let presentation_quality =
+                match preview_decode_presentation_quality(&decode_diagnostics) {
+                    Ok(quality) => quality,
+                    Err(reason) => {
+                        return media_preview_temporal_failure(
+                            job,
+                            queue_wait_us,
+                            decode_elapsed_us,
+                            decode_diagnostics,
+                            reason,
+                        );
+                    }
+                };
+            let frame_identity = media_preview_frame_identity(
+                &job.key,
+                MediaPreviewDecodedFrameEvidence::CpuYuv {
+                    width: frame.width,
+                    height: frame.height,
+                    selected_pts: decode_diagnostics.selected_pts,
+                    surface_format: decode_diagnostics.decoded_surface_format,
+                    sampling: frame.video_sampling,
+                    execution: decode_execution,
+                },
+            );
+            let sampled_resolution = job
+                .key
+                .decode
+                .representation()
+                .materialization_extent_for_source(logical_resolution);
+            let Some(input_transform) = job.key.preparation_intent.color_transform().cloned()
+            else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "data-texture decode unexpectedly produced compact CPU YUV".to_owned(),
+                );
+            };
+            let cpu_yuv_source = MediaPreviewCpuYuvSourceFrame::from_decode(frame, input_transform);
+            MediaPreviewResult {
+                key: job.key,
+                frame: Some(
+                    MediaPreviewFrame::from_cpu_yuv(
+                        cpu_yuv_source,
+                        sampled_resolution,
+                        logical_resolution,
+                        frame_identity,
+                        presentation_quality,
+                        PreviewDecodeExecutionSummary::from_path(decode_execution),
+                    )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,
@@ -1196,11 +1370,26 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let input_transform = RenderInputTransform::to_working_gpu(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
+            let Some(input_transform) = job.key.preparation_intent.color_transform().cloned()
+            else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "data-texture decode unexpectedly produced a native GPU surface".to_owned(),
+                );
+            };
+            let Some(source_color_space) = job.key.decode.source_color().color_space() else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "native GPU decode contract is missing a color-managed source identity"
+                        .to_owned(),
+                );
+            };
             // The sampled extent is the native surface's own representation
             // extent, never an output/composition extent. Scaling to the
             // composition target is owned by the compositor/spatial stage.
@@ -1208,7 +1397,7 @@ fn decode_media_preview_inner(
                 mondrian_core::Resolution { width: frame.width, height: frame.height };
             let native_source = MediaPreviewNativeSourceFrame::from_native_frame(
                 frame,
-                job.key.decode.source_color().color_space,
+                source_color_space,
                 input_transform,
             );
             MediaPreviewResult {
@@ -1222,6 +1411,8 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,
@@ -1374,6 +1565,9 @@ fn media_preview_temporal_failure(
 fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReason {
     match err {
         MondrianError::DecodeTimeout { .. } => MediaPreviewFailureReason::Timeout,
+        MondrianError::MediaExecutionResourceUnavailable { operation, .. } => {
+            MediaPreviewFailureReason::ExecutionResourceUnavailable { operation }
+        }
         MondrianError::DecodeBudgetExhausted { .. } => {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
         }
@@ -1416,10 +1610,18 @@ enum MediaPreviewDecodedFrameEvidence {
         sampling: DecodedVideoSampling,
         execution: PreviewDecodeExecutionPath,
     },
-    CpuLinearRgbaF32 {
+    CpuRgbaF32 {
         width: u32,
         height: u32,
         color_contract: DecodedRgbaFrameContract,
+        selected_pts: Option<i64>,
+        surface_format: DecodedVideoSurfaceFormat,
+        sampling: DecodedVideoSampling,
+        execution: PreviewDecodeExecutionPath,
+    },
+    CpuYuv {
+        width: u32,
+        height: u32,
         selected_pts: Option<i64>,
         surface_format: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,

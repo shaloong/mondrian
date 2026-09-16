@@ -6,6 +6,7 @@
 //! evidence. Preview, Proxy, Thumbnail, Waveform, Import, and Export remain
 //! independently scheduled execution Modules.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -15,19 +16,25 @@ use mondrian_effects::{
     EffectExecutionSessionConfig, EffectGraphExecutionBudget, LutPreparationCacheConfig,
 };
 use mondrian_export::{
-    ExportExecutionResourcePolicy, EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
+    ExportExecutionResourcePolicy, ExportQueueDiagnostics,
+    EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
 };
 use mondrian_media::{HwDeviceContextPoolPolicy, PreviewSeekIndexCachePolicy};
 use mondrian_platform::{
     ExecutionMemoryProbe, PhysicalMemoryCapacityProbe, ProcessMemoryProbeResult,
     ProcessMemoryScope, SystemMemoryProbeResult, SystemPlatformService,
 };
+#[cfg(test)]
+use mondrian_playback::MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
 use mondrian_playback::{PreviewFrameStoreConfig, PreviewResolutionScale};
 use mondrian_renderer::{
-    HeterogeneousCpuPrefixBatchGrant, HeterogeneousGpuResourceGrant,
-    PreparedVisualProgramCacheConfig, RenderGpuOutputExecutionResourceGrant,
-    TimelineCpuWorkingSetGrant, ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
+    GpuVisualFrameExecutionResourceGrant, HeterogeneousCpuPrefixBatchGrant,
+    HeterogeneousGpuResourceGrant, PreparedVisualProgramCacheConfig,
+    RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant,
+    ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
 };
+
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use parking_lot::Mutex;
 
 use super::execution_resource_slots::{
@@ -40,7 +47,7 @@ use super::AppState;
 const MIB: usize = 1024 * 1024;
 
 /// Schema revision of the immutable execution-resource decision.
-pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 13;
+pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 15;
 const PROCESS_PRESSURE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_PRESSURE_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS: usize = 5;
@@ -68,6 +75,10 @@ pub(crate) enum MachineResourceClass {
 pub(crate) struct MachineResourceProfile {
     pub(crate) class: MachineResourceClass,
     pub(crate) installed_memory_bytes: Option<u64>,
+    /// Whether the active Viewer generation supplied a capacity observation.
+    pub(crate) viewer_gpu_capacity_observed: bool,
+    /// Total bytes in device-local heaps for the active Viewer GPU generation.
+    pub(crate) viewer_gpu_device_local_bytes: Option<u64>,
     pub(crate) logical_cpu_count: usize,
 }
 
@@ -87,6 +98,8 @@ impl MachineResourceProfile {
         Self {
             class,
             installed_memory_bytes,
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: logical_cpu_count.max(1),
         }
     }
@@ -462,10 +475,54 @@ struct ExecutionResourceCoordinationState {
     decision: Arc<ExecutionResourceDecisionSnapshot>,
 }
 
+/// Monotonic owner-derived native-memory observer facts sampled while the App
+/// is live. Queue and running gauges are derived from one atomic ownership
+/// state and therefore cannot describe the same request twice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(any(test, feature = "validation"))]
+pub(crate) struct NativeMemoryEnduranceRuntimeFacts {
+    pub(crate) queue_depth: u64,
+    pub(crate) running_work: u64,
+    pub(crate) owned_resources: u64,
+    pub(crate) cumulative_failures: u64,
+    pub(crate) worker_health_failures: u64,
+    pub(crate) startup_attempted: bool,
+    pub(crate) worker_started: bool,
+    pub(crate) startup_failures: u64,
+    pub(crate) unexpected_worker_exits: u64,
+}
+
+const NATIVE_MEMORY_OWNER_IDLE: u8 = 0;
+const NATIVE_MEMORY_OWNER_QUEUED: u8 = 1;
+const NATIVE_MEMORY_OWNER_RUNNING: u8 = 2;
+
+#[derive(Default)]
+struct NativeMemoryObservationInventory {
+    ownership: AtomicU8,
+}
+
+impl NativeMemoryObservationInventory {
+    fn snapshot(&self) -> (usize, usize) {
+        match self.ownership.load(Ordering::Acquire) {
+            NATIVE_MEMORY_OWNER_QUEUED => (1, 0),
+            NATIVE_MEMORY_OWNER_RUNNING => (0, 1),
+            _ => (0, 0),
+        }
+    }
+}
+
 /// Thread-safe owner of the latest immutable product resource decision.
 pub(crate) struct ExecutionResourceCoordinator {
     state: Mutex<ExecutionResourceCoordinationState>,
     native_memory_runtime: Mutex<Option<NativeMemoryObservationRuntime>>,
+    native_memory_inventory: Arc<NativeMemoryObservationInventory>,
+    native_memory_admission_closed: AtomicBool,
+    native_memory_start_attempted: AtomicBool,
+    native_memory_worker_started: AtomicBool,
+    native_memory_start_failures: AtomicU64,
+    native_memory_unexpected_exit_recorded: AtomicBool,
+    native_memory_unexpected_exits: AtomicU64,
+    native_memory_supported_probe_failures: AtomicU64,
     observation_origin: Instant,
 }
 
@@ -484,30 +541,63 @@ struct NativeMemoryObservationRuntime {
     command_sender: mpsc::Sender<NativeMemoryObservationCommand>,
     observation_receiver: mpsc::Receiver<NativeMemoryObservation>,
     worker: Option<JoinHandle<()>>,
+    inventory: Arc<NativeMemoryObservationInventory>,
+}
+
+struct NativeMemoryRunningGuard {
+    inventory: Arc<NativeMemoryObservationInventory>,
+}
+
+impl Drop for NativeMemoryRunningGuard {
+    fn drop(&mut self) {
+        self.inventory.ownership.store(NATIVE_MEMORY_OWNER_IDLE, Ordering::Release);
+    }
 }
 
 impl NativeMemoryObservationRuntime {
-    fn start() -> std::io::Result<Self> {
-        Self::start_with_probe(SystemPlatformService)
+    fn start(inventory: Arc<NativeMemoryObservationInventory>) -> std::io::Result<Self> {
+        Self::start_with_probe_and_inventory(SystemPlatformService, inventory)
     }
 
+    #[cfg(test)]
     fn start_with_probe<P>(probe: P) -> std::io::Result<Self>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        Self::start_with_probe_and_inventory(
+            probe,
+            Arc::new(NativeMemoryObservationInventory::default()),
+        )
+    }
+
+    fn start_with_probe_and_inventory<P>(
+        probe: P,
+        inventory: Arc<NativeMemoryObservationInventory>,
+    ) -> std::io::Result<Self>
     where
         P: ExecutionMemoryProbe + 'static,
     {
         let (command_sender, command_receiver) = mpsc::channel();
         let (observation_sender, observation_receiver) = mpsc::channel();
+        let worker_inventory = Arc::clone(&inventory);
         let worker = std::thread::Builder::new()
             .name("execution-memory-observer".to_owned())
             .spawn(move || {
                 while let Ok(command) = command_receiver.recv() {
                     match command {
                         NativeMemoryObservationCommand::Observe(observed_at) => {
+                            worker_inventory
+                                .ownership
+                                .store(NATIVE_MEMORY_OWNER_RUNNING, Ordering::Release);
+                            let running_guard = NativeMemoryRunningGuard {
+                                inventory: Arc::clone(&worker_inventory),
+                            };
                             let observation = NativeMemoryObservation {
                                 observed_at,
                                 product_process_tree: probe.product_process_tree_memory(),
                                 system: probe.current_system_memory(),
                             };
+                            drop(running_guard);
                             if observation_sender.send(observation).is_err() {
                                 break;
                             }
@@ -520,13 +610,34 @@ impl NativeMemoryObservationRuntime {
             command_sender,
             observation_receiver,
             worker: Some(worker),
+            inventory,
         })
     }
 
     fn request(&self, observed_at: Duration) -> bool {
-        self.command_sender
+        if self
+            .inventory
+            .ownership
+            .compare_exchange(
+                NATIVE_MEMORY_OWNER_IDLE,
+                NATIVE_MEMORY_OWNER_QUEUED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .command_sender
             .send(NativeMemoryObservationCommand::Observe(observed_at))
             .is_ok()
+        {
+            true
+        } else {
+            self.inventory.ownership.store(NATIVE_MEMORY_OWNER_IDLE, Ordering::Release);
+            false
+        }
     }
 
     fn drain_latest(&self) -> (Option<NativeMemoryObservation>, bool) {
@@ -540,6 +651,7 @@ impl NativeMemoryObservationRuntime {
         }
     }
 
+    #[cfg(test)]
     fn stop_worker(&mut self) {
         let Some(worker) = self.worker.take() else {
             return;
@@ -551,13 +663,25 @@ impl NativeMemoryObservationRuntime {
 
 impl Drop for NativeMemoryObservationRuntime {
     fn drop(&mut self) {
-        self.stop_worker();
+        let _ = self.command_sender.send(NativeMemoryObservationCommand::Stop);
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if worker.is_finished() {
+            let _ = worker.join();
+        } else {
+            // The system-memory probe is an external Adapter and may block.
+            // Qualification consumes it through the explicit deadline path;
+            // ordinary App teardown must leave the UI thread bounded.
+            drop(worker);
+        }
     }
 }
 
 impl ExecutionResourceCoordinator {
     pub(crate) fn new(profile: MachineResourceProfile) -> Arc<Self> {
         let observation_origin = Instant::now();
+        let native_memory_inventory = Arc::new(NativeMemoryObservationInventory::default());
         let pressure = ExecutionResourcePressure::Nominal;
         let pressure_source = ExecutionResourcePressureSource::Baseline;
         let demand = ExecutionResourceDemandSnapshot::default();
@@ -594,6 +718,14 @@ impl ExecutionResourceCoordinator {
                 decision,
             }),
             native_memory_runtime: Mutex::new(None),
+            native_memory_inventory,
+            native_memory_admission_closed: AtomicBool::new(false),
+            native_memory_start_attempted: AtomicBool::new(false),
+            native_memory_worker_started: AtomicBool::new(false),
+            native_memory_start_failures: AtomicU64::new(0),
+            native_memory_unexpected_exit_recorded: AtomicBool::new(false),
+            native_memory_unexpected_exits: AtomicU64::new(0),
+            native_memory_supported_probe_failures: AtomicU64::new(0),
             observation_origin,
         })
     }
@@ -648,6 +780,29 @@ impl ExecutionResourceCoordinator {
         Arc::clone(&self.state.lock().decision)
     }
 
+    /// Publish immutable capacity for the exact active Viewer GPU generation.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn observe_viewer_gpu_device_local_bytes(
+        &self,
+        device_local_bytes: Option<u64>,
+    ) -> Arc<ExecutionResourceDecisionSnapshot> {
+        let mut state = self.state.lock();
+        let measured = device_local_bytes.filter(|bytes| *bytes > 0);
+        if !state.profile.viewer_gpu_capacity_observed
+            || state.profile.viewer_gpu_device_local_bytes != measured
+        {
+            state.profile.viewer_gpu_capacity_observed = true;
+            state.profile.viewer_gpu_device_local_bytes = measured;
+            refresh_heavy_slots(
+                &mut state,
+                Instant::now(),
+                ExecutionResourceSlotDomains::empty(),
+            );
+            publish_decision(&mut state);
+        }
+        Arc::clone(&state.decision)
+    }
+
     fn acknowledge_heavy_slot_close(
         &self,
         decision: &ExecutionResourceDecisionSnapshot,
@@ -694,6 +849,16 @@ impl ExecutionResourceCoordinator {
         product_process_tree: ProcessMemoryProbeResult,
         system: SystemMemoryProbeResult,
     ) {
+        let supported_probe_failures = u64::from(
+            product_process_tree.discovery_available && product_process_tree.error.is_some(),
+        )
+        .saturating_add(u64::from(
+            system.discovery_available && system.error.is_some(),
+        ));
+        saturating_atomic_add(
+            &self.native_memory_supported_probe_failures,
+            supported_probe_failures,
+        );
         let mut state = self.state.lock();
         state.last_pressure_observation_at = Some(observed_at);
         state.native_pressure_request_pending = false;
@@ -753,12 +918,24 @@ impl ExecutionResourceCoordinator {
     }
 
     fn poll_native_memory_observation(&self, observed_at: Duration) {
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return;
+        }
         let (completed, observer_disconnected) = {
             let mut runtime = self.native_memory_runtime.lock();
             if runtime.is_none() {
-                match NativeMemoryObservationRuntime::start() {
-                    Ok(started) => *runtime = Some(started),
+                if self.native_memory_start_attempted.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                match NativeMemoryObservationRuntime::start(Arc::clone(
+                    &self.native_memory_inventory,
+                )) {
+                    Ok(started) => {
+                        self.native_memory_worker_started.store(true, Ordering::Release);
+                        *runtime = Some(started);
+                    }
                     Err(error) => {
+                        saturating_atomic_add(&self.native_memory_start_failures, 1);
                         drop(runtime);
                         self.state.lock().last_pressure_request_at = Some(observed_at);
                         self.apply_native_memory_observation(
@@ -775,14 +952,15 @@ impl ExecutionResourceCoordinator {
                     }
                 }
             }
-            let result = runtime
+            let (completed, receiver_disconnected) = runtime
                 .as_ref()
                 .map(NativeMemoryObservationRuntime::drain_latest)
                 .unwrap_or((None, true));
-            if result.1 {
-                runtime.take();
-            }
-            result
+            let worker_finished = runtime
+                .as_ref()
+                .and_then(|runtime| runtime.worker.as_ref())
+                .is_some_and(JoinHandle::is_finished);
+            (completed, receiver_disconnected || worker_finished)
         };
         let completed_missing = completed.is_none();
         if let Some(completed) = completed {
@@ -792,18 +970,22 @@ impl ExecutionResourceCoordinator {
                 completed.system,
             );
         }
-        if observer_disconnected && completed_missing {
-            self.state.lock().last_pressure_request_at = Some(observed_at);
-            self.apply_native_memory_observation(
-                observed_at,
-                ProcessMemoryProbeResult::unsupported(
-                    ProcessMemoryScope::ProductProcessTree,
-                    "native memory observer stopped before publishing its requested sample",
-                ),
-                SystemMemoryProbeResult::unsupported(
-                    "native memory observer stopped before publishing its requested sample",
-                ),
-            );
+        if observer_disconnected {
+            let newly_recorded = self.record_native_memory_unexpected_exit();
+            let request_pending = self.state.lock().native_pressure_request_pending;
+            if completed_missing && (newly_recorded || request_pending) {
+                self.state.lock().last_pressure_request_at = Some(observed_at);
+                self.apply_native_memory_observation(
+                    observed_at,
+                    ProcessMemoryProbeResult::unsupported(
+                        ProcessMemoryScope::ProductProcessTree,
+                        "native memory observer stopped before publishing its requested sample",
+                    ),
+                    SystemMemoryProbeResult::unsupported(
+                        "native memory observer stopped before publishing its requested sample",
+                    ),
+                );
+            }
             return;
         }
 
@@ -842,6 +1024,99 @@ impl ExecutionResourceCoordinator {
         }
     }
 
+    /// Snapshot native-observer ownership and monotonic failure/worker-health
+    /// facts without consuming the observer or changing admission.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn endurance_runtime_facts(&self) -> NativeMemoryEnduranceRuntimeFacts {
+        self.observe_native_memory_unexpected_exit();
+        let (queued, running) = self.native_memory_inventory.snapshot();
+        let pending = usize::from(self.state.lock().native_pressure_request_pending);
+        let owned = pending.max(queued.saturating_add(running));
+        let startup_failures = self.native_memory_start_failures.load(Ordering::Acquire);
+        let unexpected_worker_exits = self.native_memory_unexpected_exits.load(Ordering::Acquire);
+        NativeMemoryEnduranceRuntimeFacts {
+            queue_depth: u64::try_from(queued).unwrap_or(u64::MAX),
+            running_work: u64::try_from(running).unwrap_or(u64::MAX),
+            owned_resources: u64::try_from(owned).unwrap_or(u64::MAX),
+            cumulative_failures: self
+                .native_memory_supported_probe_failures
+                .load(Ordering::Acquire),
+            worker_health_failures: startup_failures.saturating_add(unexpected_worker_exits),
+            startup_attempted: self.native_memory_start_attempted.load(Ordering::Acquire),
+            worker_started: self.native_memory_worker_started.load(Ordering::Acquire),
+            startup_failures,
+            unexpected_worker_exits,
+        }
+    }
+
+    fn observe_native_memory_unexpected_exit(&self) {
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return;
+        }
+        let worker_finished = self
+            .native_memory_runtime
+            .lock()
+            .as_ref()
+            .and_then(|runtime| runtime.worker.as_ref())
+            .is_some_and(JoinHandle::is_finished);
+        if worker_finished {
+            let _ = self.record_native_memory_unexpected_exit();
+        }
+    }
+
+    fn record_native_memory_unexpected_exit(&self) -> bool {
+        let newly_recorded =
+            !self.native_memory_unexpected_exit_recorded.swap(true, Ordering::AcqRel);
+        if newly_recorded {
+            saturating_atomic_add(&self.native_memory_unexpected_exits, 1);
+        }
+        newly_recorded
+    }
+
+    pub(crate) fn finish_endurance_shutdown(
+        &self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut runtime = self.native_memory_runtime.lock().take();
+        let mut workers = Vec::new();
+        if let Some(runtime) = runtime.as_mut() {
+            let _ = runtime.command_sender.send(NativeMemoryObservationCommand::Stop);
+            workers.extend(runtime.worker.take());
+        }
+        let join = join_workers_until(&mut workers, deadline);
+        let mut state = self.state.lock();
+        if join.all_workers_returned_normally() {
+            state.native_pressure_request_pending = false;
+        }
+        let pending = usize::from(state.native_pressure_request_pending);
+        let (queued, running) = self.native_memory_inventory.snapshot();
+        let owned = pending.max(queued.saturating_add(running));
+        let unexpected_normal_exits = self
+            .native_memory_unexpected_exits
+            .load(Ordering::Acquire)
+            .saturating_sub(u64::from(join.panicked_workers()));
+        let unexpected_normal_exits = u32::try_from(unexpected_normal_exits).unwrap_or(u32::MAX);
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            self.native_memory_start_attempted.load(Ordering::Acquire),
+            join,
+            queued,
+            running,
+            owned,
+            self.native_memory_supported_probe_failures.load(Ordering::Acquire),
+        )
+        .with_unexpected_worker_exits(unexpected_normal_exits)
+    }
+
+    pub(crate) fn begin_endurance_shutdown(&self) {
+        self.observe_native_memory_unexpected_exit();
+        self.native_memory_admission_closed.store(true, Ordering::Release);
+        if let Some(runtime) = self.native_memory_runtime.lock().as_ref() {
+            let _ = runtime.command_sender.send(NativeMemoryObservationCommand::Stop);
+        }
+    }
+
     fn observation_now(&self) -> Duration {
         self.observation_origin.elapsed()
     }
@@ -865,6 +1140,7 @@ impl ExecutionResourceCoordinator {
 impl Default for ExecutionResourceCoordinator {
     fn default() -> Self {
         let observation_origin = Instant::now();
+        let native_memory_inventory = Arc::new(NativeMemoryObservationInventory::default());
         Self {
             state: {
                 let profile = MachineResourceProfile::default();
@@ -903,12 +1179,31 @@ impl Default for ExecutionResourceCoordinator {
                 })
             },
             native_memory_runtime: Mutex::new(None),
+            native_memory_inventory,
+            native_memory_admission_closed: AtomicBool::new(false),
+            native_memory_start_attempted: AtomicBool::new(false),
+            native_memory_worker_started: AtomicBool::new(false),
+            native_memory_start_failures: AtomicU64::new(0),
+            native_memory_unexpected_exit_recorded: AtomicBool::new(false),
+            native_memory_unexpected_exits: AtomicU64::new(0),
+            native_memory_supported_probe_failures: AtomicU64::new(0),
             observation_origin,
         }
     }
 }
 
 impl AppState {
+    /// Bind immutable capacity from the exact active Viewer GPU generation to
+    /// the existing product resource authority.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observe_viewer_gpu_device_local_bytes(
+        &self,
+        device_local_bytes: Option<u64>,
+    ) -> Arc<ExecutionResourceDecisionSnapshot> {
+        self.execution_resources
+            .observe_viewer_gpu_device_local_bytes(device_local_bytes)
+    }
+
     /// Apply optional whole-process pressure and immediately propagate the
     /// resulting policy to AppState-owned execution Modules.
     pub fn observe_execution_resource_pressure(&self, pressure: ExecutionResourcePressure) {
@@ -1020,15 +1315,7 @@ impl AppState {
                     .last()
                     .map_or(0, |terminal| terminal.operation_id),
             },
-            export: ExecutionDomainDemand {
-                queued: export.pending,
-                running: export.running + export.cancelling,
-                user_initiated: export.pending + export.running + export.cancelling,
-                terminal_generation: export
-                    .completions
-                    .saturating_add(export.failures)
-                    .saturating_add(export.cancellations),
-            },
+            export: export_execution_domain_demand(&export),
         };
         let fresh_demand_observations = if external_demand_is_fresh {
             ExecutionResourceSlotDomains::all()
@@ -1140,6 +1427,27 @@ impl AppState {
     }
 }
 
+fn export_execution_domain_demand(export: &ExportQueueDiagnostics) -> ExecutionDomainDemand {
+    let active = export.running.saturating_add(export.cancelling);
+    // A queue attempt blocked at its cooperative execution gate has already
+    // returned the heavy execution slot, but it remains runnable work. Keeping
+    // it in `running` makes the slot allocator wait for the attempt to finish
+    // before reopening dispatch, while the attempt itself waits for reopened
+    // dispatch: Critical -> Nominal pressure would deadlock permanently. Move
+    // only the bounded yielded population back to queued demand so a fresh
+    // observation can re-admit the same immutable attempt.
+    let yielded = export.running_yielded.min(active);
+    ExecutionDomainDemand {
+        queued: export.pending.saturating_add(yielded),
+        running: active.saturating_sub(yielded),
+        user_initiated: export.pending.saturating_add(active),
+        terminal_generation: export
+            .completions
+            .saturating_add(export.failures)
+            .saturating_add(export.cancellations),
+    }
+}
+
 fn publish_decision(state: &mut ExecutionResourceCoordinationState) {
     let revision = state.decision.revision.saturating_add(1);
     state.decision = Arc::new(derive_decision(
@@ -1181,11 +1489,17 @@ fn heavy_slot_capacity(
     pressure: ExecutionResourcePressure,
     demand: ExecutionResourceDemandSnapshot,
 ) -> usize {
-    if demand.preview_realtime
-        || demand.audio_realtime
-        || pressure == ExecutionResourcePressure::Critical
-    {
+    if pressure == ExecutionResourcePressure::Critical {
         return 0;
+    }
+    if demand.preview_realtime || demand.audio_realtime {
+        // Concurrent Recovery has one explicitly admitted offline Export owner.
+        // Keep every automatic/background domain closed, but allow the bounded
+        // allocator to hand one slot to that concrete user Export demand.
+        return usize::from(
+            demand.export.user_initiated > 0
+                && (demand.export.queued > 0 || demand.export.running > 0),
+        );
     }
     if pressure == ExecutionResourcePressure::Elevated {
         return 1;
@@ -1290,7 +1604,7 @@ fn derive_decision(
     } else {
         ResourceTrimRequest::None
     };
-    let minimum_runtime_scale = if critical
+    let pressure_runtime_scale = if critical
         || (realtime && profile.class == MachineResourceClass::BelowMinimum)
     {
         PreviewResolutionScale::Quarter
@@ -1305,6 +1619,21 @@ fn derive_decision(
     } else {
         PreviewResolutionScale::Full
     };
+    let gpu_runtime_scale = match (
+        profile.viewer_gpu_capacity_observed,
+        profile.viewer_gpu_device_local_bytes,
+    ) {
+        (true, Some(bytes)) if bytes < 2 * 1024 * MIB as u64 => PreviewResolutionScale::Quarter,
+        (true, Some(bytes)) if bytes < 3 * 1024 * MIB as u64 => PreviewResolutionScale::Half,
+        (true, None) => PreviewResolutionScale::Half,
+        (true, Some(_)) | (false, _) => PreviewResolutionScale::Full,
+    };
+    let minimum_runtime_scale =
+        if pressure_runtime_scale.dimension_divisor() >= gpu_runtime_scale.dimension_divisor() {
+            pressure_runtime_scale
+        } else {
+            gpu_runtime_scale
+        };
     let (
         title_cache,
         thumbnail_cache,
@@ -1457,7 +1786,7 @@ fn derive_decision(
             trim,
             frame_store,
             viewer_gpu: PreviewViewerGpuExecutionDecision {
-                grant: preview_viewer_gpu_resource_grant(profile.class, trim),
+                grant: preview_viewer_gpu_resource_grant(profile, trim),
                 clear_idle: trim == ResourceTrimRequest::Aggressive,
             },
             title_cache_budget_bytes: (title_cache / cache_divisor).max(1),
@@ -1520,7 +1849,12 @@ fn derive_decision(
         },
         export: ExportExecutionDecision {
             dispatch_enabled: export_dispatch,
-            resource_policy: export_resource_policy(profile.class, cache_divisor),
+            resource_policy: export_resource_policy(
+                profile.class,
+                cache_divisor,
+                realtime,
+                cpu_parallelism,
+            ),
         },
         ui: UiExecutionDecision {
             vector_icon_cache_entries: (vector_icon_entries / cache_divisor).max(1),
@@ -1610,35 +1944,75 @@ fn cpu_composite_working_set_grant(class: MachineResourceClass) -> TimelineCpuWo
 }
 
 fn preview_viewer_gpu_resource_grant(
-    class: MachineResourceClass,
+    profile: MachineResourceProfile,
     trim: ResourceTrimRequest,
 ) -> ViewerGpuExecutionResourceGrant {
-    let (max_idle_per_contract, max_idle_bytes) = match class {
-        MachineResourceClass::BelowMinimum => (1, 48 * MIB),
-        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (2, 128 * MIB)
-        }
-        MachineResourceClass::Standard => (3, 256 * MIB),
-        MachineResourceClass::Professional => (3, 384 * MIB),
-    };
-    let (max_active_texture_bytes, max_active_textures) = match class {
-        MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
-        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (768 * MIB as u64, 64)
-        }
-        MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
-        MachineResourceClass::Professional => (4 * 1024 * MIB as u64, 160),
-    };
-    let idle_grant = match trim {
-        ResourceTrimRequest::None => {
+    let class_grant =
+        if profile.class == MachineResourceClass::Professional {
+            ViewerGpuExecutionResourceGrant::professional_realtime()
+        } else {
+            let (max_idle_per_contract, max_idle_bytes) = match profile.class {
+                MachineResourceClass::BelowMinimum => (1, 48 * MIB),
+                MachineResourceClass::UnknownConservative
+                | MachineResourceClass::MinimumSupported => (2, 128 * MIB),
+                MachineResourceClass::Standard => (3, 256 * MIB),
+                MachineResourceClass::Professional => unreachable!("handled above"),
+            };
+            let (max_active_texture_bytes, max_active_textures) = match profile.class {
+                MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
+                MachineResourceClass::UnknownConservative
+                | MachineResourceClass::MinimumSupported => (768 * MIB as u64, 64),
+                MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
+                MachineResourceClass::Professional => unreachable!("handled above"),
+            };
             ViewerGpuExecutionResourceGrant::new(max_idle_per_contract, max_idle_bytes as u64)
+                .with_active_limits(max_active_texture_bytes, max_active_textures)
+        };
+    let capacity_bounded = match profile.viewer_gpu_device_local_bytes {
+        Some(device_local_bytes) => {
+            // The Viewer may consume at most three eighths of physical device-local
+            // memory: five sixteenths for one active closure and one sixteenth for
+            // reusable idle textures. The remaining five eighths belongs to the
+            // decoder surface pool, display compositor, driver, pipelines, and
+            // allocator fragmentation that are outside the Viewer texture table.
+            let active_capacity = (device_local_bytes / 16).saturating_mul(5);
+            let idle_capacity = device_local_bytes / 16;
+            class_grant
+                .with_active_limits(
+                    class_grant.max_active_texture_bytes().min(active_capacity),
+                    class_grant.max_active_textures(),
+                )
+                .with_idle_limits(
+                    class_grant.max_idle_per_contract(),
+                    class_grant.max_idle_bytes().min(idle_capacity),
+                )
         }
-        ResourceTrimRequest::Speculative => {
-            ViewerGpuExecutionResourceGrant::new(1, (max_idle_bytes / 2).max(1) as u64)
-        }
-        ResourceTrimRequest::Aggressive => ViewerGpuExecutionResourceGrant::new(0, 0),
+        None if profile.viewer_gpu_capacity_observed => class_grant
+            .with_active_limits(
+                class_grant.max_active_texture_bytes().min(384 * MIB as u64),
+                class_grant.max_active_textures().min(48),
+            )
+            .with_idle_limits(
+                class_grant.max_idle_per_contract().min(1),
+                class_grant.max_idle_bytes().min(48 * MIB as u64),
+            ),
+        None => class_grant,
     };
-    idle_grant.with_active_limits(max_active_texture_bytes, max_active_textures)
+    match trim {
+        ResourceTrimRequest::None => capacity_bounded,
+        ResourceTrimRequest::Speculative => {
+            // Speculative pressure may retire duplicate textures, but the
+            // byte grant must still hold one complete steady-state contract
+            // set. Halving this bound made UHD CPU-YUV playback evict its
+            // 126.6 MiB float working texture as the later 63.3 MiB display
+            // textures returned, forcing synchronous device allocations back
+            // into successor preparation. `max_per_contract = 1` removes the
+            // optional duplicates without turning frame-to-frame reuse into a
+            // disposable cache.
+            capacity_bounded.with_idle_limits(1, capacity_bounded.max_idle_bytes())
+        }
+        ResourceTrimRequest::Aggressive => capacity_bounded.with_idle_limits(0, 0),
+    }
 }
 
 fn export_gpu_output_active_grant(
@@ -1658,9 +2032,25 @@ fn export_gpu_output_active_grant(
     RenderGpuOutputExecutionResourceGrant::new(max_active_bytes, 4)
 }
 
+fn export_gpu_visual_active_grant(
+    class: MachineResourceClass,
+) -> GpuVisualFrameExecutionResourceGrant {
+    let (max_active_bytes, max_active_textures) = match class {
+        MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
+        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
+            (768 * MIB as u64, 64)
+        }
+        MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
+        MachineResourceClass::Professional => (4 * 1024 * MIB as u64, 160),
+    };
+    GpuVisualFrameExecutionResourceGrant::new(max_active_bytes, max_active_textures)
+}
+
 fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
+    realtime: bool,
+    cpu_parallelism: usize,
 ) -> ExportExecutionResourcePolicy {
     let (
         visual_program_entries,
@@ -1770,6 +2160,12 @@ fn export_resource_policy(
         MachineResourceClass::Professional => 512 * MIB,
     };
     ExportExecutionResourcePolicy {
+        // Realtime Preview/Audio owns GPU priority. An admitted explicit
+        // Export remains live, but equivalent CPU-capable visual work must not
+        // continuously submit a second GPU queue beside the realtime Session.
+        opportunistic_gpu_acceleration: !realtime,
+        ffmpeg_filter_threads: cpu_parallelism.clamp(1, 8),
+        ffmpeg_codec_threads: cpu_parallelism.clamp(1, 8),
         // Reachable-closure and per-frame working limits are correctness
         // admission grants, not optional residency. Pressure may delay the
         // next attempt and trim caches, but cannot make the same valid Export
@@ -1789,7 +2185,12 @@ fn export_resource_policy(
         cpu_color_processor_capacity: (cpu_color_processor_capacity / cache_divisor).max(1),
         gpu_output_idle_per_contract: gpu_output_idle_per_contract / cache_divisor,
         gpu_output_idle_bytes: (gpu_output_idle_bytes / cache_divisor) as u64,
+        gpu_visual_active: export_gpu_visual_active_grant(class),
         gpu_output_active: export_gpu_output_active_grant(class),
+        // The resident pool is a correctness grant frozen for the complete
+        // attempt, not optional idle residency that pressure may trim.
+        resident_encoder_surfaces: 8,
+        resident_encoder_surface_bytes: 512 * MIB as u64,
         title_cache_entries: (title_cache_entries / cache_divisor).max(1),
         title_cache_bytes: (title_cache_bytes / cache_divisor).max(1),
         // Font bytes are immutable snapshot dependencies, not evictable cache
@@ -1812,10 +2213,15 @@ fn preview_frame_store_config(
     let (media_entries, media_bytes, resource_units, viewer_entries, viewer_bytes) = match class {
         MachineResourceClass::BelowMinimum => (24, 96 * MIB, 4, 12, 48 * MIB),
         MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (48, 192 * MIB, 6, 24, 96 * MIB)
+            (48, 256 * MIB, 6, 24, 96 * MIB)
         }
-        MachineResourceClass::Standard => (96, 384 * MIB, 8, 48, 192 * MIB),
-        MachineResourceClass::Professional => (128, 512 * MIB, 12, 64, 256 * MIB),
+        // Twenty compact 4K 10-bit 4:2:2 CPU frames fit in 640 MiB: the
+        // current frame, the complete bounded future horizon, and three
+        // physical decode reservations. This makes the temporal policy a
+        // realizable Standard-machine contract instead of an abstract count
+        // that byte admission silently shortens.
+        MachineResourceClass::Standard => (96, 640 * MIB, 8, 48, 192 * MIB),
+        MachineResourceClass::Professional => (128, 1024 * MIB, 12, 64, 256 * MIB),
     };
     let (current_entries, current_bytes, current_resource_units) = match class {
         MachineResourceClass::BelowMinimum => (4, 256 * MIB, 4),
@@ -1905,6 +2311,12 @@ fn classify_memory_pressure(
     }
 }
 
+fn saturating_atomic_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1956,6 +2368,8 @@ mod tests {
         MachineResourceProfile {
             class,
             installed_memory_bytes: None,
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: 8,
         }
     }
@@ -1996,6 +2410,50 @@ mod tests {
                 .effect_cache
                 .max_working_bytes,
             128 * MIB
+        );
+    }
+
+    #[test]
+    fn two_gib_viewer_gpu_forces_half_scale_and_bounds_its_complete_texture_envelope() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MIB_U64: u64 = 1024 * 1024;
+        let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile::from_capacity(
+            Some(16 * GIB),
+            8,
+        ));
+        let baseline = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert_eq!(
+            baseline.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Full
+        );
+        let decision = coordinator.observe_viewer_gpu_device_local_bytes(Some(2 * GIB));
+
+        assert_eq!(
+            decision.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Half
+        );
+        assert_eq!(
+            decision.preview.viewer_gpu.grant.max_active_texture_bytes(),
+            640 * MIB_U64
+        );
+        assert_eq!(
+            decision.preview.viewer_gpu.grant.max_idle_bytes(),
+            128 * MIB_U64
+        );
+        let same = coordinator.observe_viewer_gpu_device_local_bytes(Some(2 * GIB));
+        assert_eq!(same.revision, decision.revision);
+        let unavailable = coordinator.observe_viewer_gpu_device_local_bytes(None);
+        assert!(unavailable.revision > same.revision);
+        assert_eq!(
+            unavailable.preview.minimum_runtime_scale,
+            PreviewResolutionScale::Half
+        );
+        assert_eq!(
+            unavailable.preview.viewer_gpu.grant.max_active_texture_bytes(),
+            384 * MIB_U64
         );
     }
 
@@ -2066,7 +2524,8 @@ mod tests {
             MachineResourceClass::MinimumSupported,
             MachineResourceClass::Standard,
         ] {
-            let grant = preview_viewer_gpu_resource_grant(class, ResourceTrimRequest::None);
+            let grant =
+                preview_viewer_gpu_resource_grant(profile(class), ResourceTrimRequest::None);
             assert!(
                 grant.max_active_texture_bytes() >= REQUIRED_BYTES,
                 "{class:?} must admit the basic UHD Main10 Float16 steady state"
@@ -2127,6 +2586,10 @@ mod tests {
             nominal.preview.viewer_gpu.grant.max_active_textures()
         );
         assert_eq!(
+            elevated.export.resource_policy.gpu_visual_active,
+            nominal.export.resource_policy.gpu_visual_active
+        );
+        assert_eq!(
             elevated.export.resource_policy.gpu_output_active,
             nominal.export.resource_policy.gpu_output_active
         );
@@ -2141,6 +2604,18 @@ mod tests {
         assert_eq!(
             elevated.export.resource_policy.audio_runtime_grant,
             nominal.export.resource_policy.audio_runtime_grant
+        );
+        assert_eq!(
+            elevated.export.resource_policy.ffmpeg_filter_threads,
+            nominal.export.resource_policy.ffmpeg_filter_threads
+        );
+        assert_eq!(
+            elevated.export.resource_policy.ffmpeg_codec_threads,
+            nominal.export.resource_policy.ffmpeg_codec_threads
+        );
+        assert_eq!(
+            nominal.export.resource_policy.ffmpeg_codec_threads,
+            nominal.export.resource_policy.ffmpeg_filter_threads
         );
         assert_eq!(elevated.audio.runtime_grant, nominal.audio.runtime_grant);
         assert!(
@@ -2166,7 +2641,7 @@ mod tests {
     }
 
     #[test]
-    fn realtime_demand_always_admits_preview_and_audio_and_pauses_background_dispatch() {
+    fn realtime_demand_admits_one_explicit_export_and_pauses_other_background_dispatch() {
         let coordinator =
             ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
         let decision = coordinator.update_demand(ExecutionResourceDemandSnapshot {
@@ -2184,9 +2659,48 @@ mod tests {
         assert!(!decision.proxy.automatic_dispatch_enabled);
         assert!(!decision.media_import.dispatch_enabled);
         assert!(!decision.media_asset_mutation.dispatch_enabled);
-        assert!(!decision.export.dispatch_enabled);
+        assert!(decision.export.dispatch_enabled);
+        assert!(
+            !decision.export.resource_policy.opportunistic_gpu_acceleration,
+            "realtime owners keep GPU priority while an equivalent CPU Export route remains live"
+        );
         assert_eq!(decision.audio.idle_warmup_windows, 0);
         assert!(!decision.audio.idle_warmup_dispatch_enabled);
+    }
+
+    #[test]
+    fn realtime_without_explicit_export_has_no_heavy_dispatch_and_critical_closes_export() {
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        assert!(
+            coordinator.decision().export.resource_policy.opportunistic_gpu_acceleration,
+            "offline Export retains GPU acceleration"
+        );
+        let realtime = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(!realtime.export.dispatch_enabled);
+
+        let export = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: ExecutionDomainDemand {
+                queued: 1,
+                user_initiated: 1,
+                ..ExecutionDomainDemand::default()
+            },
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(export.export.dispatch_enabled);
+
+        let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
+        assert!(!critical.export.dispatch_enabled);
+        assert!(critical
+            .heavy_slots
+            .domains_to_close()
+            .contains(ExecutionResourceSlotDomain::Export));
     }
 
     #[test]
@@ -2210,7 +2724,7 @@ mod tests {
         assert_eq!(decision.preview.viewer_gpu.grant.max_idle_per_contract(), 1);
         assert_eq!(
             decision.preview.viewer_gpu.grant.max_idle_bytes(),
-            64 * MIB as u64
+            128 * MIB as u64
         );
         assert!(!decision.preview.viewer_gpu.clear_idle);
     }
@@ -2287,7 +2801,7 @@ mod tests {
         );
         assert_eq!(
             professional.preview.viewer_gpu.grant.max_idle_bytes(),
-            384 * MIB as u64
+            mondrian_renderer::PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES
         );
         assert_eq!(
             minimum.preview.viewer_gpu.grant.max_active_texture_bytes(),
@@ -2310,6 +2824,26 @@ mod tests {
             (64, 96, 160)
         );
         assert_eq!(
+            minimum.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            768 * MIB as u64
+        );
+        assert_eq!(
+            standard.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            2 * 1024 * MIB as u64
+        );
+        assert_eq!(
+            professional.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            4 * 1024 * MIB as u64
+        );
+        assert_eq!(
+            (
+                minimum.export.resource_policy.gpu_visual_active.max_active_textures(),
+                standard.export.resource_policy.gpu_visual_active.max_active_textures(),
+                professional.export.resource_policy.gpu_visual_active.max_active_textures(),
+            ),
+            (64, 96, 160)
+        );
+        assert_eq!(
             minimum.export.resource_policy.gpu_output_active.max_active_bytes(),
             512 * MIB as u64
         );
@@ -2328,6 +2862,24 @@ mod tests {
                 professional.export.resource_policy.gpu_output_active.max_active_resources(),
             ),
             (4, 4, 4)
+        );
+        assert_eq!(minimum.export.resource_policy.resident_encoder_surfaces, 8);
+        assert_eq!(standard.export.resource_policy.resident_encoder_surfaces, 8);
+        assert_eq!(
+            professional.export.resource_policy.resident_encoder_surfaces,
+            8
+        );
+        assert_eq!(
+            minimum.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
+        );
+        assert_eq!(
+            standard.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
+        );
+        assert_eq!(
+            professional.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
         );
     }
 
@@ -2587,9 +3139,64 @@ mod tests {
         assert_eq!(fresh.preview.viewer_gpu.grant.max_idle_per_contract(), 3);
         assert_eq!(
             fresh.preview.viewer_gpu.grant.max_idle_bytes(),
-            384 * MIB as u64
+            mondrian_renderer::PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES
         );
         assert!(fresh.revision > critical.revision);
+    }
+
+    #[test]
+    fn yielded_export_is_queued_for_fresh_slot_reacquisition_after_critical_pressure() {
+        let active_queue =
+            ExportQueueDiagnostics { running: 1, ..ExportQueueDiagnostics::default() };
+        let active = export_execution_domain_demand(&active_queue);
+        assert_eq!(
+            (active.queued, active.running, active.user_initiated),
+            (0, 1, 1)
+        );
+
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: active,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        let critical = coordinator.observe_pressure(ExecutionResourcePressure::Critical);
+        assert!(critical
+            .heavy_slots
+            .domains_to_close()
+            .contains(ExecutionResourceSlotDomain::Export));
+        assert!(coordinator
+            .acknowledge_heavy_slot_close(&critical, ExecutionResourceSlotDomain::Export));
+        assert!(
+            !coordinator
+                .observe_pressure(ExecutionResourcePressure::Nominal)
+                .export
+                .dispatch_enabled
+        );
+
+        let yielded_queue = ExportQueueDiagnostics {
+            dispatch_enabled: false,
+            running_yield_requested: true,
+            running: 1,
+            running_yielded: 1,
+            ..ExportQueueDiagnostics::default()
+        };
+        let yielded = export_execution_domain_demand(&yielded_queue);
+        assert_eq!(
+            (yielded.queued, yielded.running, yielded.user_initiated),
+            (1, 0, 1),
+            "a cooperative yield returns its running slot without losing runnable work"
+        );
+        let resumed = coordinator.update_demand(ExecutionResourceDemandSnapshot {
+            preview_realtime: true,
+            audio_realtime: true,
+            export: yielded,
+            ..ExecutionResourceDemandSnapshot::default()
+        });
+        assert!(resumed.export.dispatch_enabled);
+        assert!(resumed.heavy_slots.allocation().admits(ExecutionResourceSlotDomain::Export));
     }
 
     #[test]
@@ -2678,6 +3285,25 @@ mod tests {
                 nominal.current_media_working_set_resource_unit_limit
             );
         }
+    }
+
+    #[test]
+    fn standard_preview_residency_physically_closes_the_4k_422_10_bit_horizon() {
+        const UHD_WIDTH: usize = 3840;
+        const UHD_HEIGHT: usize = 2160;
+        const YUV_422_10_BIT_BYTES_PER_PIXEL: usize = 4;
+        const STANDARD_DECODE_RESERVATIONS: usize = 3;
+
+        let compact_frame_bytes = UHD_WIDTH
+            .saturating_mul(UHD_HEIGHT)
+            .saturating_mul(YUV_422_10_BIT_BYTES_PER_PIXEL);
+        let required_owners = 1usize
+            .saturating_add(MAX_BOUNDED_VIDEO_PREROLL_FRAMES)
+            .saturating_add(STANDARD_DECODE_RESERVATIONS);
+        let standard =
+            preview_frame_store_config(MachineResourceClass::Standard, ResourceTrimRequest::None);
+
+        assert!(standard.media_byte_budget >= compact_frame_bytes.saturating_mul(required_owners));
     }
 
     #[test]
@@ -2808,6 +3434,8 @@ mod tests {
         let coordinator = ExecutionResourceCoordinator::new(MachineResourceProfile {
             class: MachineResourceClass::Standard,
             installed_memory_bytes: Some(16 * GIB),
+            viewer_gpu_capacity_observed: false,
+            viewer_gpu_device_local_bytes: None,
             logical_cpu_count: 8,
         });
         let probe = CountingMemoryProbe {
@@ -2875,9 +3503,12 @@ mod tests {
         .expect("start native memory runtime");
 
         assert!(runtime.request(Duration::from_secs(7)));
+        let admitted = runtime.inventory.snapshot();
+        assert_eq!(admitted.0.saturating_add(admitted.1), 1);
         entered_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("worker entered blocking probe after caller returned");
+        assert_eq!(runtime.inventory.snapshot(), (0, 1));
         let (observation, disconnected) = runtime.drain_latest();
         assert!(observation.is_none());
         assert!(!disconnected);
@@ -2895,6 +3526,7 @@ mod tests {
         };
 
         assert_eq!(observation.observed_at, Duration::from_secs(7));
+        assert_eq!(runtime.inventory.snapshot(), (0, 0));
         runtime.stop_worker();
     }
 
@@ -2938,6 +3570,88 @@ mod tests {
             Some("query failed")
         );
         assert_eq!(evidence.system.error.as_deref(), Some("query failed"));
+
+        let runtime = coordinator.endurance_runtime_facts();
+        assert_eq!(runtime.queue_depth, 0);
+        assert_eq!(runtime.running_work, 0);
+        assert_eq!(runtime.owned_resources, 0);
+        assert_eq!(runtime.cumulative_failures, 2);
+        assert_eq!(runtime.worker_health_failures, 0);
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.cumulative_failures, runtime.cumulative_failures);
+        assert!(terminal.lifecycle_closed());
+    }
+
+    #[test]
+    fn observer_panic_retains_started_identity_and_unexpected_exit_health() {
+        struct PanickingMemoryProbe;
+
+        impl ProcessMemoryProbe for PanickingMemoryProbe {
+            fn process_memory(
+                &self,
+                _scope: ProcessMemoryScope,
+            ) -> mondrian_platform::ProcessMemoryProbeResult {
+                panic!("injected native memory probe panic");
+            }
+        }
+
+        impl SystemMemoryProbe for PanickingMemoryProbe {
+            fn current_system_memory(&self) -> mondrian_platform::SystemMemoryProbeResult {
+                unreachable!("process probe panics first")
+            }
+        }
+
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        let runtime = NativeMemoryObservationRuntime::start_with_probe_and_inventory(
+            PanickingMemoryProbe,
+            Arc::clone(&coordinator.native_memory_inventory),
+        )
+        .expect("start injected native memory observer");
+        assert!(runtime.request(Duration::ZERO));
+        coordinator.native_memory_start_attempted.store(true, Ordering::Release);
+        coordinator.native_memory_worker_started.store(true, Ordering::Release);
+        coordinator.state.lock().native_pressure_request_pending = true;
+        *coordinator.native_memory_runtime.lock() = Some(runtime);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let finished = coordinator
+                .native_memory_runtime
+                .lock()
+                .as_ref()
+                .and_then(|runtime| runtime.worker.as_ref())
+                .is_some_and(JoinHandle::is_finished);
+            if finished {
+                break;
+            }
+            assert!(Instant::now() < deadline, "observer did not panic in time");
+            std::thread::yield_now();
+        }
+
+        let before_poll = coordinator.endurance_runtime_facts();
+        assert!(before_poll.startup_attempted);
+        assert!(before_poll.worker_started);
+        assert_eq!(before_poll.startup_failures, 0);
+        assert_eq!(before_poll.unexpected_worker_exits, 1);
+        assert_eq!(before_poll.worker_health_failures, 1);
+        assert_eq!(before_poll.queue_depth, 0);
+        assert_eq!(before_poll.running_work, 0);
+        assert_eq!(before_poll.owned_resources, 1);
+
+        coordinator.poll_native_memory_observation(Duration::ZERO);
+        let after_poll = coordinator.endurance_runtime_facts();
+        assert_eq!(after_poll.owned_resources, 0);
+        assert_eq!(after_poll.unexpected_worker_exits, 1);
+        assert_eq!(after_poll.cumulative_failures, 0);
+
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.started_workers, 1);
+        assert_eq!(terminal.panicked_workers, 1);
+        assert_eq!(terminal.unexpected_worker_exits, 0);
+        assert_eq!(terminal.cumulative_failures, after_poll.cumulative_failures);
     }
 
     #[test]

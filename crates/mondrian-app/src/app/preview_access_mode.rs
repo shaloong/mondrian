@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
-use mondrian_core::types::{AssetId, ColorEngine};
-use mondrian_core::{Resolution, SourceSampleTarget, WorkingColorSpace};
+use mondrian_core::types::AssetId;
+use mondrian_core::{Resolution, ResolvedPictureGeometry, SourceSampleTarget};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeKey,
@@ -20,7 +20,7 @@ use mondrian_media::{
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 2_000_000;
 pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
 /// Stable identity for one decoded media preview request.
@@ -35,11 +35,13 @@ pub(crate) struct MediaPreviewKey {
     /// physical raster while representing the original Asset's full logical
     /// extent on the Timeline.
     pub(crate) source_resolution: Resolution,
+    /// Resolved source SAR, orientation, and progressive scan contract.
+    /// This is semantic presentation identity, not physical decode geometry.
+    pub(crate) picture_geometry: ResolvedPictureGeometry,
     /// Author interpretation applied after physical decode.
     pub(crate) alpha_interpretation: AlphaInterpretation,
-    pub(crate) working_color_space: WorkingColorSpace,
-    pub(crate) input_tone_map: bool,
-    pub(crate) engine: ColorEngine,
+    /// Exact Renderer source admission and execution identity.
+    pub(crate) preparation_intent: mondrian_renderer::SourceFramePreparationIntent,
 }
 
 impl MediaPreviewKey {
@@ -66,7 +68,9 @@ impl MediaPreviewKey {
     /// Residency is charged at the decode representation's own extent
     /// (source or proxy raster), never a consumer/output extent.
     pub(crate) const fn residency_resolution(&self) -> Resolution {
-        self.decode.representation().extent_for_source(self.source_resolution)
+        self.decode
+            .representation()
+            .extent_for_source(self.decode.source().source_extent())
     }
 
     /// Build one exact CPU-addressable key for App unit tests.
@@ -99,10 +103,15 @@ impl MediaPreviewKey {
             asset_id: AssetId::new(),
             decode,
             source_resolution: resolution,
+            picture_geometry: ResolvedPictureGeometry::square(resolution)
+                .expect("non-empty synthetic Preview geometry"),
             alpha_interpretation: AlphaInterpretation::Straight,
-            working_color_space: WorkingColorSpace::LinearRec709,
-            input_tone_map: false,
-            engine: ColorEngine::mondrian_standard(),
+            preparation_intent: mondrian_renderer::RenderInputTransform::to_working(
+                mondrian_core::WorkingColorSpace::LinearRec709,
+                false,
+                mondrian_core::ColorEngine::mondrian_standard(),
+            )
+            .into(),
         }
     }
 
@@ -466,6 +475,12 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub pruned_obsolete_requests: u64,
     /// Older unstarted playback-current jobs superseded by a newer demand.
     pub superseded_queued_playback_current: u64,
+    /// Running jobs invalidated by a non-locality-preserving generation rotation.
+    pub in_flight_generation_invalidations: u64,
+    /// Running jobs invalidated because their exact pending binding disappeared.
+    pub in_flight_binding_invalidations: u64,
+    /// Same-generation Playback jobs retained for decoder locality after binding removal.
+    pub in_flight_binding_locality_detachments: u64,
     /// Pending prefetch requests removed so a current-frame request can run.
     pub evicted_prefetch_requests: u64,
     /// Pending still-frame requests removed so real-time current work can run.
@@ -482,6 +497,9 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) adaptive_hints: PreviewDecodeAdaptiveHints,
     pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
     pub(crate) hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
+    /// Effective request-binding admission instant used for queue-wait evidence.
+    /// Metadata-only priority/class/generation rebinding refreshes this value at
+    /// dequeue without replacing the physical execution payload.
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
     /// Opaque Playback Session identity; media workers only carry it.
@@ -564,7 +582,7 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub in_flight_scrub_lane_jobs: usize,
     /// Execution leases on the still-frame-reserved lane.
     pub in_flight_still_lane_jobs: usize,
-    /// Execution leases on the shared non-playback lane.
+    /// Execution leases on the shared lane reserved from ordinary playback-current work.
     pub in_flight_non_playback_lane_jobs: usize,
     /// Current execution leases whose lane does not accept their work class.
     pub in_flight_cross_lane_current_jobs: usize,
@@ -576,7 +594,7 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_scrub_lane_eligible_jobs: usize,
     /// Jobs directly eligible for a deterministic still worker lane.
     pub queued_still_lane_eligible_jobs: usize,
-    /// Jobs eligible for a shared non-playback worker lane.
+    /// Jobs eligible for the shared worker lane, including playback Prefetch.
     pub queued_non_playback_lane_eligible_jobs: usize,
     /// Whether the broker has closed worker transport.
     pub closed: bool,
@@ -652,6 +670,10 @@ impl MediaPreviewJobQueueSender {
         self.broker.interrupt_worker_waits();
     }
 
+    pub(crate) fn lifecycle_waker(&self) -> std::task::Waker {
+        self.broker.worker_lifecycle_waker()
+    }
+
     #[cfg(test)]
     pub(crate) fn prune_obsolete_jobs(&self, generation: u64) -> usize {
         self.broker.prune_before(generation)
@@ -672,6 +694,7 @@ impl MediaPreviewJobQueueSender {
         map_enqueue_submission(self.broker.submit(frame_work_request(
             job,
             mondrian_playback::FrameWorkResourceScope::Shared,
+            None,
         )))
     }
 
@@ -800,12 +823,14 @@ impl MediaPreviewJobQueueReceiver {
 fn frame_work_request(
     job: MediaPreviewJob,
     resource_scope: mondrian_playback::FrameWorkResourceScope,
+    worker_affinity: Option<MediaPreviewWorkerLane>,
 ) -> mondrian_playback::FrameWorkRequest<MediaPreviewKey, Instant, MediaPreviewJob> {
     mondrian_playback::FrameWorkRequest {
         key: job.key.clone(),
         generation: job.generation,
         priority: frame_work_priority(job.priority),
         work_class: media_preview_frame_work_class(job.access_mode),
+        worker_affinity: worker_affinity.map(frame_worker_lane),
         resource_scope,
         demand_identity: job.demand_identity,
         deadline: frame_work_deadline(job.deadline_at),
@@ -866,6 +891,8 @@ fn media_preview_job_from_execution(
     execution: mondrian_playback::FrameWorkExecution<MediaPreviewKey, Instant, MediaPreviewJob>,
 ) -> MediaPreviewJob {
     let mut job = execution.payload;
+    let dequeued_at = Instant::now();
+    job.enqueued_at = dequeued_at.checked_sub(execution.queue_wait).unwrap_or(dequeued_at);
     job.key = execution.key;
     job.generation = execution.generation;
     job.priority = media_preview_priority(execution.priority);
@@ -937,9 +964,7 @@ fn media_preview_job_queue_diagnostics(
         queued_playback_lane_eligible_jobs: state.queued_playback,
         queued_scrub_lane_eligible_jobs: state.queued_interactive,
         queued_still_lane_eligible_jobs: state.queued_still,
-        queued_non_playback_lane_eligible_jobs: state
-            .queued_interactive
-            .saturating_add(state.queued_still),
+        queued_non_playback_lane_eligible_jobs: state.queued_non_playback_lane_eligible,
         closed: state.closed,
     }
 }
@@ -958,6 +983,7 @@ fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWo
         MediaPreviewWorkerLane::Any => mondrian_playback::FrameWorkerLane::Any,
         MediaPreviewWorkerLane::Playback => mondrian_playback::FrameWorkerLane::Playback,
         MediaPreviewWorkerLane::NonPlayback => mondrian_playback::FrameWorkerLane::NonPlayback,
+        MediaPreviewWorkerLane::Still => mondrian_playback::FrameWorkerLane::Still,
     }
 }
 
@@ -1017,6 +1043,8 @@ pub(crate) enum MediaPreviewWorkerLane {
     Any,
     Playback,
     NonPlayback,
+    /// Worker reserved for static-image and deterministic still decode.
+    Still,
 }
 
 pub(crate) fn media_preview_worker_lane(
@@ -1028,7 +1056,8 @@ pub(crate) fn media_preview_worker_lane(
     } else {
         match worker_index {
             0 => MediaPreviewWorkerLane::Playback,
-            _ => MediaPreviewWorkerLane::NonPlayback,
+            1 => MediaPreviewWorkerLane::NonPlayback,
+            _ => MediaPreviewWorkerLane::Still,
         }
     }
 }
@@ -1064,11 +1093,16 @@ impl MediaPreviewScheduler {
     pub(crate) fn job_queue(&self) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
         (
             MediaPreviewJobQueueSender { broker: self.broker.clone() },
-            MediaPreviewJobQueueReceiver {
-                observed_lifecycle_revision: Cell::new(self.broker.worker_lifecycle_revision()),
-                broker: self.broker.clone(),
-            },
+            self.job_receiver(),
         )
+    }
+
+    /// Derive a worker receiver without creating another admission-closing owner.
+    pub(crate) fn job_receiver(&self) -> MediaPreviewJobQueueReceiver {
+        MediaPreviewJobQueueReceiver {
+            observed_lifecycle_revision: Cell::new(self.broker.worker_lifecycle_revision()),
+            broker: self.broker.clone(),
+        }
     }
 
     /// Close admission and wake every worker waiting on this scheduler.
@@ -1084,13 +1118,18 @@ impl MediaPreviewScheduler {
         self.broker.begin_generation_preserving_playback_locality()
     }
 
+    pub(crate) fn begin_generation_preserving_in_flight_playback_locality(&self) -> u64 {
+        self.broker.begin_generation_preserving_in_flight_playback_locality()
+    }
+
     pub(crate) fn submit_job(
         &self,
         mut job: MediaPreviewJob,
         resource_scope: mondrian_playback::FrameWorkResourceScope,
+        worker_affinity: Option<MediaPreviewWorkerLane>,
     ) -> MediaPreviewRequestStatus {
         job.execution_id = None;
-        match self.broker.submit(frame_work_request(job, resource_scope)) {
+        match self.broker.submit(frame_work_request(job, resource_scope, worker_affinity)) {
             mondrian_playback::FrameWorkSubmission::Queued { evicted_prefetch, evicted_still } => {
                 MediaPreviewRequestStatus::Scheduled {
                     evicted_prefetch: evicted_prefetch.map(Box::new),
@@ -1229,6 +1268,7 @@ impl MediaPreviewScheduler {
                 residency_work: None,
             },
             mondrian_playback::FrameWorkResourceScope::Shared,
+            None,
         );
         match status {
             MediaPreviewRequestStatus::UpdatedQueued { access_mode_changed, .. } => {
@@ -1480,6 +1520,9 @@ impl MediaPreviewScheduler {
             canceled_requests: state.canceled_requests,
             pruned_obsolete_requests: state.pruned_queued,
             superseded_queued_playback_current: state.superseded_queued_playback_current,
+            in_flight_generation_invalidations: state.in_flight_generation_invalidations,
+            in_flight_binding_invalidations: state.in_flight_binding_invalidations,
+            in_flight_binding_locality_detachments: state.in_flight_binding_locality_detachments,
             evicted_prefetch_requests: state.evicted_prefetch,
             evicted_still_requests: state.evicted_still,
         }
@@ -1490,7 +1533,6 @@ impl MediaPreviewScheduler {
         self.diagnostics().pending_requests
     }
 
-    #[cfg(test)]
     pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
         self.broker.has_pending_key(key)
     }

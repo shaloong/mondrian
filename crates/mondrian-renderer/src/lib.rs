@@ -8,34 +8,57 @@
 //! - `GpuFrameCompositor`：类型化工作域合成
 //! - `ViewerGpuExecutionRuntime`：有界 Viewer GPU 执行
 
+pub mod color;
 pub mod color_accuracy;
 pub mod color_frame;
 pub mod color_reference;
 pub mod color_report_vocab;
-pub mod color_stage;
+mod color_stage;
 pub mod color_transform;
 pub mod context;
+mod cpu_quantization;
+mod cpu_visual_execution;
+mod cpu_yuv;
+mod creative_lut_gpu;
+pub mod cross_application_qualification;
 pub mod display_calibration;
+pub mod gpu_composite_execution;
 pub mod gpu_compositor;
+pub mod gpu_memory_capacity;
 pub mod gpu_output_working_set;
+pub mod gpu_qualification;
+pub mod gpu_visual_frame;
 mod heterogeneous_cpu;
 pub mod heterogeneous_gpu;
 pub mod native_video;
 pub mod ocio_gpu;
+pub mod picture_sampling;
+pub mod prepared_visual_execution;
 pub mod prepared_visual_frame_closure;
 pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
+#[doc(hidden)]
+pub mod qualification_attestation;
+pub mod realtime_performance;
+pub mod reference_output;
+mod resident_encode;
+mod resolved_visual_identity;
+pub mod shot_match;
+pub mod signal_monitor;
+pub mod source_frame_preparation;
 pub mod timeline_composite;
 mod timeline_effect_routes;
 pub mod timeline_render_plan;
 pub mod timeline_temporal;
 pub mod viewer_execution;
+mod viewer_retirement;
 pub mod viewer_runtime;
 pub mod viewer_working_set;
 #[cfg(feature = "validation")]
 mod visual_execution_validation;
+pub mod working_float_policy;
 pub use heterogeneous_cpu::{
     HeterogeneousCpuPrefixBatchCompletion, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchExecutor, HeterogeneousCpuPrefixBatchGrant,
@@ -45,13 +68,17 @@ pub use heterogeneous_cpu::{
 };
 pub mod viewer_spatial;
 
+pub use gpu_memory_capacity::{query_gpu_device_memory_capacity, GpuDeviceMemoryCapacity};
+
 pub use color_accuracy::{
-    compare_linear_rgba, compare_pq_hdr_display_rgba, compare_srgb_display_rgba8,
-    LinearAccuracyBudget, LinearAccuracyChannelGroup, LinearAccuracyError,
-    LinearAccuracyGroupReport, LinearAccuracyStatistics, LinearRgbaAccuracyBudget,
-    LinearRgbaAccuracyReport, PqHdrDisplayAccuracyBudget, PqHdrDisplayAccuracyError,
-    PqHdrDisplayAccuracyReport, PqHdrDisplayAccuracyStatistics, SrgbDisplayAccuracyBudget,
-    SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
+    compare_code_values, compare_linear_rgba, compare_pq_hdr_display_rgba,
+    compare_srgb_display_rgba8, CodeValueAccuracyBudget, CodeValueAccuracyError,
+    CodeValueAccuracyReport, CodeValueAccuracyStatistics, LinearAccuracyBudget,
+    LinearAccuracyChannelGroup, LinearAccuracyError, LinearAccuracyGroupReport,
+    LinearAccuracyStatistics, LinearRgbaAccuracyBudget, LinearRgbaAccuracyReport,
+    PqHdrDisplayAccuracyBudget, PqHdrDisplayAccuracyError, PqHdrDisplayAccuracyReport,
+    PqHdrDisplayAccuracyStatistics, SrgbDisplayAccuracyBudget, SrgbDisplayAccuracyError,
+    SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
 };
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
@@ -68,18 +95,22 @@ pub use color_frame::{
     GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportExecution,
     GpuNativeDecodedFrameImportMode, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportRoute,
+    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameImportSupportError, GpuNativeDecodedFrameSourceDescriptor,
     GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
+    GpuNativeDecodedFrameVideoSampling, GpuNativeRgbDecodePlan, GpuNativeRgbDecodePlanError,
+    GpuResidentEncoderInputLease, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
     SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
-    import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
-    ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin, ColorReferencePayloadFormat,
+    import_external_color_reference, import_external_color_reference_with_limits,
+    ColorReferenceDecoder, ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceFrame,
+    ColorReferenceImportLimits, ColorReferenceOrigin, ColorReferencePayloadFormat,
     ColorReferencePixels, ColorReferenceValidationError,
 };
-pub use color_stage::{
+#[allow(unused_imports)]
+pub(crate) use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float,
     execute_cpu_input_stage_float_with_session, execute_cpu_input_stage_with_session,
     execute_cpu_output_boundary, execute_cpu_output_boundary_float,
@@ -89,9 +120,11 @@ pub use color_stage::{
     execute_cpu_program_monitor_boundary_rgba8,
     execute_cpu_program_monitor_boundary_rgba8_with_session,
     execute_cpu_program_monitor_presentation_rgba8,
-    execute_cpu_program_monitor_presentation_rgba8_with_session, execute_cpu_source_input_stage,
-    execute_cpu_source_input_stage_with_session, execute_cpu_working_transform,
-    execute_cpu_working_transform_with_session, CpuRenderColorStageExecutor, RenderColorStage,
+    execute_cpu_program_monitor_presentation_rgba8_with_session,
+    execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_with_session,
+    execute_cpu_source_input_stage, execute_cpu_source_input_stage_with_session,
+    execute_cpu_working_transform, execute_cpu_working_transform_with_session,
+    CpuRenderColorStageExecutor, CpuSignalMonitoringError, RenderColorStage,
     RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown,
     RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
     RenderGpuColorPassExecutionError, RenderGpuColorPassResolvedResources,
@@ -136,12 +169,33 @@ pub use context::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference,
 };
+pub use creative_lut_gpu::{
+    GpuCreativeLutCacheConfig, GpuCreativeLutCacheDiagnostics, GpuCreativeLutError,
+};
+pub use cross_application_qualification::{
+    CrossApplicationAccuracyBudget, CrossApplicationArtifactEvidence, CrossApplicationCaseReport,
+    CrossApplicationComparisonStatistics, CrossApplicationFrameCoordinate,
+    CrossApplicationMissingArtifact, CrossApplicationPairComparison,
+    CrossApplicationPixelOrientation, CrossApplicationProducer,
+    CrossApplicationProducerRequirement, CrossApplicationProducerScope,
+    CrossApplicationQualificationArtifact, CrossApplicationQualificationCase,
+    CrossApplicationQualificationError, CrossApplicationQualificationLimits,
+    CrossApplicationQualificationProfile, CrossApplicationQualificationReport,
+    CrossApplicationQualificationRun, CrossApplicationQualificationStatus,
+    PreparedCrossApplicationQualification,
+};
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,
     GpuDisplayCalibrationPlan, GpuDisplayCalibrationPlanError, GpuDisplayCalibrationPrepareError,
     GpuDisplayCalibrationPreparedPass, GpuDisplayCalibrationRecordError,
     GpuDisplayCalibrationRuntime, GpuDisplayCalibrationRuntimeDiagnostics,
     GpuDisplayCalibrationRuntimeError,
+};
+pub use gpu_composite_execution::{
+    GpuCompositeExecutionDiagnostics, GpuCompositeExecutionPlan, GpuCompositeExecutionPlanError,
+    GpuCompositeExecutionPlanner, GpuCompositeExecutionPolicy, GpuCompositeLayerExecution,
+    GpuCompositeLayerFootprint, GpuCompositeRect, GpuCompositeSourceCrop,
+    DEFAULT_GPU_COMPOSITE_TILE_DIMENSION, MAX_GPU_COMPOSITE_TILES,
 };
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
@@ -156,6 +210,19 @@ pub use gpu_output_working_set::{
     RenderGpuOutputActiveWorkingSetEstimateError, RenderGpuOutputActiveWorkingSetStage,
     RenderGpuOutputExecutionResourceGrant,
 };
+pub use gpu_qualification::{
+    GpuColorQualificationError, GpuColorQualificationExecutionPolicy,
+    GpuColorQualificationPolicyError, GPU_COLOR_QUALIFICATION_POLICY_ENV,
+    SEALED_GPU_COLOR_QUALIFICATION_POLICY,
+};
+pub use gpu_visual_frame::{
+    estimate_gpu_visual_frame_active_working_set, GpuVisualFrameActiveTextureDemand,
+    GpuVisualFrameActiveWorkingSetAdmissionError, GpuVisualFrameActiveWorkingSetEstimate,
+    GpuVisualFrameActiveWorkingSetEstimateError, GpuVisualFrameActiveWorkingSetStage,
+    GpuVisualFrameElement, GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant,
+    GpuVisualFrameExecutor, GpuVisualFrameRecord, GpuVisualFrameRequest, GpuVisualFrameSource,
+    GpuVisualSourceLayer, GpuVisualTransitionInput,
+};
 pub use heterogeneous_gpu::{
     record_heterogeneous_gpu_continuation, HeterogeneousGpuBatchId,
     HeterogeneousGpuCompletedContinuation, HeterogeneousGpuCompletedEvidence,
@@ -168,6 +235,7 @@ pub use heterogeneous_gpu::{
     HeterogeneousGpuSubmissionAuthority, HeterogeneousGpuSubmittedContinuation,
     HeterogeneousGpuSubmittedEvidence,
 };
+pub use mondrian_core::{ResolvedVisualFrameIdentity, ResolvedVisualNodeMaterializationIdentity};
 #[cfg(target_os = "windows")]
 pub use native_video::{
     inspect_d3d12_native_decoded_frame, D3D12NativeDecodedFrameInspection,
@@ -176,9 +244,11 @@ pub use native_video::{
     NativeVideoAdapterError, NativeVideoAdapterLuid,
 };
 pub use native_video::{
-    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
-    GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass, NativeVideoImportCandidateTimingReceipt,
+    GpuNativeRgbDecodeRecordError, GpuNativeRgbDecoder, GpuNativeRgbPrepareError,
+    GpuNativeRgbPreparedPass, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
+    GpuNativeYuvDecodePlanError, GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder,
+    GpuNativeYuvPlaneViews, GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout,
+    GpuYuvChromaSubsampling, GpuYuvCodeAlignment, NativeVideoImportCandidateTimingReceipt,
     NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
     NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
     NativeVideoImportGpuTimingSample, NativeVideoImportToken,
@@ -239,6 +309,10 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperShaderModuleCacheDiagnostics, OcioGpuWgpuWrapperShaderModules,
     OcioGpuWgpuWrapperShaderSourceArtifact,
 };
+pub use prepared_visual_execution::{
+    execute_prepared_visual_closure, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    PreparedVisualExecutionNodeInputs, PreparedVisualExecutionStructureError,
+};
 pub use prepared_visual_frame_closure::{
     prepare_bound_visual_frame_closure, prepare_visual_frame_closure,
     PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureError,
@@ -259,13 +333,46 @@ pub use prepared_visual_program::{
     DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES, DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY,
 };
 pub use prepared_visual_range_closure::{
-    next_bound_prepared_visual_media_demand_frame, next_prepared_visual_media_demand_frame,
-    prepare_bound_visual_range_closure, prepare_visual_range_closure, PreparedVisualRangeClosure,
-    PreparedVisualRangeClosureError,
+    next_bound_prepared_visual_media_demand_frame, next_bound_prepared_visual_new_asset_frame,
+    next_prepared_visual_media_demand_frame, prepare_bound_visual_range_closure,
+    prepare_visual_range_closure, PreparedVisualRangeClosure, PreparedVisualRangeClosureError,
 };
 pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
     GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+};
+pub use realtime_performance::{
+    evaluate_realtime_visual_performance, RealtimePerformanceExecutionPolicy,
+    RealtimePerformancePolicyError, RealtimeVisualAdapterIdentity, RealtimeVisualCheckRelation,
+    RealtimeVisualFrameEvidence, RealtimeVisualPerformanceCheck,
+    RealtimeVisualPerformanceObservation, RealtimeVisualPerformanceReport,
+    RealtimeVisualPerformanceVerdict, RealtimeVisualQuantiles, RealtimeVisualScenarioId,
+    RealtimeVisualStageQuantiles, RealtimeVisualWarmPathEvidence, RealtimeVisualWorkload,
+    REALTIME_PERFORMANCE_EXECUTION_POLICY_ENV, REALTIME_VISUAL_PERFORMANCE_PROFILE,
+    REALTIME_VISUAL_PERFORMANCE_REPORT_SCHEMA_VERSION,
+    SEALED_REALTIME_PERFORMANCE_EXECUTION_POLICY,
+};
+pub use reference_output::{ReferenceOutputProgram, ReferenceOutputProgramError};
+pub use resident_encode::{
+    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
+    D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
+    D3D12ResidentEncodeSubmissionError, ResidentEncodeAdapterContract,
+};
+#[cfg(target_os = "linux")]
+pub use resident_encode::{
+    VulkanCudaResidentEncodeAdapter, VulkanCudaResidentEncodeAdapterDiagnostics,
+};
+pub use resolved_visual_identity::{resolved_visual_frame_identity, ResolvedVisualIdentityError};
+pub use shot_match::{
+    analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,
+};
+pub use signal_monitor::{
+    GpuSignalMonitorError, GpuSignalMonitorRequest, GpuSignalMonitorRuntime,
+    GpuSignalMonitorRuntimeDiagnostics,
+};
+pub use source_frame_preparation::{
+    prepare_decoded_cpu_source_frame, DecodedCpuSourceFrame, PreparedSourceFrame,
+    PreparedSourceFrameExecution, SourceFramePreparationError, SourceFramePreparationIntent,
 };
 pub use timeline_composite::{
     admit_timeline_render_plan_for_cpu_compositor, composite_path_diagnostics,
@@ -277,10 +384,10 @@ pub use timeline_composite::{
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeError,
     TimelineCompositeExecutionDiagnostics, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCpuCompositeAdmission, TimelineCpuCompositePrecision, TimelineCpuWorkingSetDiagnostics,
-    TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetGrant,
-    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
-    TimelineSolidColorLayer, TimelineTransitionInput,
+    TimelineCpuCompositeAdmission, TimelineCpuCompositePrecision, TimelineCpuExecutionPolicy,
+    TimelineCpuWorkingSetDiagnostics, TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate,
+    TimelineCpuWorkingSetGrant, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineMediaLayer, TimelineSolidColorLayer, TimelineTransitionInput,
 };
 pub use timeline_effect_routes::{
     PreparedTimelinePreviewEffectRoute, PreparedTimelinePreviewEffectRoutes,
@@ -290,7 +397,7 @@ pub use timeline_render_plan::{
     evaluate_prepared_visual_program, evaluate_prepared_visual_program_with_session,
     mat3_to_affine, project_affine_to_sampled_extents, TimelineAdjustmentPlan,
     TimelineBasicTitlePlan, TimelineColorDiagnostic, TimelineCrossDissolvePlan,
-    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
+    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineGradePlan, TimelineMediaPlan,
     TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan, TimelineTransitionInputPlan,
@@ -302,9 +409,12 @@ pub use timeline_temporal::{
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
-    ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
+    ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer,
+    ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
     ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
+};
+pub use viewer_retirement::{
+    ViewerCpuYuvUploadWorkerExit, ViewerGpuExecutionRetirement, ViewerGpuRetirementReceipt,
 };
 pub use viewer_runtime::{
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,
@@ -319,6 +429,10 @@ pub use viewer_working_set::{
     ViewerGpuActiveWorkingSetAdmissionError, ViewerGpuActiveWorkingSetDiagnostics,
     ViewerGpuActiveWorkingSetEstimate, ViewerGpuActiveWorkingSetEstimateError,
     ViewerGpuActiveWorkingSetStage, ViewerGpuExecutionResourceGrant,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES,
 };
 #[cfg(feature = "validation")]
 pub use visual_execution_validation::{
@@ -328,6 +442,15 @@ pub use visual_execution_validation::{
     PreparedVisualExecutionSemanticTrace, PreparedVisualExecutionTemporalBatchTrace,
     PreparedVisualExecutionTemporalSourceKindTrace, PreparedVisualExecutionTemporalSourceTrace,
 };
+pub use working_float_policy::{
+    product_gpu_working_bytes_per_pixel, product_gpu_working_texture_device_features,
+    product_gpu_working_texture_format, GpuWorkingFloat16ImplementationQualification,
+    GpuWorkingFloatAdapterAdmissionError, GpuWorkingFloatBlockers, GpuWorkingFloatDecision,
+    GpuWorkingFloatDecisionReason, GpuWorkingFloatFormat, GpuWorkingFloatPerformanceEvidence,
+    GpuWorkingFloatPolicy, GpuWorkingFloatPreference, GpuWorkingFloatQualityEvidence,
+    PRODUCT_GPU_WORKING_FLOAT_DECISION, PRODUCT_GPU_WORKING_FLOAT_POLICY,
+    PRODUCT_GPU_WORKING_TEXTURE_USAGES,
+};
 mod basic_title;
 pub use basic_title::{
     basic_title_raster_request_identity, project_basic_title_transform, BasicTitleFontQuery,
@@ -335,3 +458,5 @@ pub use basic_title::{
     BasicTitleRasterIdentity, BasicTitleRasterRequestIdentity, BasicTitleRasterizer,
     PreparedBasicTitleFontFace, PreparedBasicTitleFontSet,
 };
+
+pub use context::request_device_with_native_video_support;

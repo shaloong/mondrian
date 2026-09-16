@@ -6,19 +6,25 @@
 //! boundary. Window and Headless Adapters only project the returned state.
 
 use super::*;
+use sha2::Digest;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Arbitrate the exact output for the Adapter's physical carrier. A GPU
+    /// carrier admits raster publication only after explicit CPU fallback.
     pub(crate) fn presentation(
         &self,
         request: PreviewFrameExecutionRequest<'_>,
+        carrier: PreviewPresentationCarrier,
     ) -> PreviewPresentationState<O> {
-        if self.media_existing_work_retry_pending.replace(false) {
-            bump(&self.media_existing_work_retry_acknowledgements);
+        if self.media_retry_pending.replace(false) {
+            bump(&self.media_retry_acknowledgements);
         }
         let snapshot = request.snapshot();
         let proxy_demands = request.proxy_demands();
         let transport = snapshot.transport();
         let running_without_demand = transport.is_playing() && transport.demand().is_none();
+        let raster_admitted = carrier == PreviewPresentationCarrier::CpuRaster
+            || self.viewer_cpu_fallback_active.get();
         bump(&self.metrics.render_requests);
         self.synchronize_visual_program_authoring_session(snapshot);
         self.synchronize_transport_intent(transport.intent());
@@ -49,6 +55,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
+            authoring.color_environment().engine(),
             snapshot.viewer_display(),
             display_snapshot.as_ref(),
         ) {
@@ -65,7 +72,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
+            match sequence.settings.root_program_color_context(authoring.color_environment()) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.scheduler.prune_obsolete();
+                    return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                        PreviewUnavailability::blocked(
+                            PreviewOutputStage::ProgramOutput,
+                            format!("invalid Program color context: {error}"),
+                        ),
+                    ));
+                }
+            };
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
             snapshot,
             sequence,
@@ -73,7 +91,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             width,
             height,
             display_color_space,
-            display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_identity),
+            self.display_snapshot_identity.get(),
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
@@ -89,9 +107,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             runtime_scale: transport.runtime_scale(),
             display_color_space,
-            display_contract_identity: display_snapshot
-                .as_ref()
-                .map(DisplayOutputSnapshot::contract_identity),
+            display_contract_identity: self.display_snapshot_identity.get(),
         };
         let resolved = self.acquire_frame_evaluation(
             snapshot,
@@ -109,7 +125,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let preview_state = match resolved {
             FrameResolutionOutcome::Ready(evaluation) => {
-                let output_key =
+                let base_output_key =
                     if matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable) {
                         evaluation.output_key.clone()
                     } else {
@@ -120,6 +136,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         let execution_nonce = self.execution.borrow_mut().issue_candidate_id();
                         evaluation.output_key.with_execution_nonce(execution_nonce)
                     };
+                let (monitoring_tap, monitoring_settings) = self.viewer_signal_monitoring.get();
+                let output_key =
+                    base_output_key.with_signal_monitoring(monitoring_tap, monitoring_settings);
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&evaluation.elements),
                 );
@@ -130,16 +149,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 let external_cache_key =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
                         .then(|| {
-                            evaluation.color_context.output_color_space.color().and_then(
+                            evaluation.color_context.output_color_space().color().and_then(
                                 |program_output_color_space| {
                                     RenderMonitorAdaptation::new(
                                         program_output_color_space,
                                         display_color_space,
-                                        evaluation.color_context.engine.clone(),
+                                        evaluation.color_context.engine().clone(),
                                     )
                                     .ok()
                                     .map(|adaptation| {
-                                        output_key.with_monitor_adaptation(&adaptation)
+                                        base_output_key
+                                            .with_monitor_adaptation(&adaptation)
+                                            .with_signal_monitoring(
+                                                monitoring_tap,
+                                                monitoring_settings,
+                                            )
                                     })
                                 },
                             )
@@ -160,10 +184,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         PreviewPresentationContent::Gpu(frame),
                         self.playback_presentation_ticket(snapshot),
                     ))
-                } else if let Some(frame) =
-                    matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
-                        .then(|| self.cached_viewer_frame(&output_key))
-                        .flatten()
+                } else if let Some(frame) = (raster_admitted
+                    && matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable))
+                .then(|| self.cached_viewer_frame(&output_key))
+                .flatten()
                 {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -187,7 +211,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             self.playback_presentation_ticket(snapshot),
                         ))
                     }
-                } else if transport.is_playing() || self.viewer_cpu_fallback_active.get() {
+                } else if !raster_admitted
+                    || transport.is_playing()
+                    || self.viewer_cpu_fallback_active.get()
+                {
+                    // An external GPU Adapter owns the presentation ticket even
+                    // while paused. A raster cache hit or inline CPU composite
+                    // must not consume it before that owner submits its output.
                     // Playback presentation is a read/projection seam on the
                     // UI thread. A cache miss must be executed by the GPU
                     // candidate path (or a future bounded fallback worker),
@@ -215,13 +245,47 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 );
                             }
                         };
-                    let output = match composite_resolved_preview(
-                        width,
-                        height,
-                        &evaluation.elements,
-                        &evaluation.color_context,
-                        &mut self.scratch.borrow_mut(),
+                    let cached_working = evaluation.render_cache_identity.and_then(|identity| {
+                        self.timeline_render_cache.borrow().ready_frame(identity)
+                    });
+                    if let Err(error) = self.scratch.borrow().admit_cpu_active_working_set(
+                        evaluation.cpu_materialization_active_bytes,
+                        mondrian_renderer::TimelineCpuCompositePrecision::Float32,
                     ) {
+                        return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                            PreviewUnavailability::blocked(
+                                PreviewOutputStage::TimelineComposite,
+                                error.to_string(),
+                            ),
+                        ));
+                    }
+                    let render_cache_hit = cached_working.is_some();
+                    let execution = match cached_working {
+                        Some(frame) => present_preview_working_with_signal_monitoring(
+                            PreviewWorkingCompositeOutput {
+                                frame,
+                                composite_diagnostics: TimelineCompositeDiagnostics::default(),
+                                input_color_diagnostics: Vec::new(),
+                                input_color_stage_diagnostics: RenderColorStageDiagnostics::default(
+                                ),
+                                execution_durations: PreviewCpuExecutionDurations::default(),
+                            },
+                            &evaluation.color_context,
+                            monitoring_tap,
+                            monitoring_settings,
+                            &mut self.scratch.borrow_mut(),
+                        ),
+                        None => composite_resolved_preview_with_signal_monitoring(
+                            width,
+                            height,
+                            &evaluation.elements,
+                            &evaluation.color_context,
+                            monitoring_tap,
+                            monitoring_settings,
+                            &mut self.scratch.borrow_mut(),
+                        ),
+                    };
+                    let output = match execution {
                         Ok(rgba) => rgba,
                         Err(err) => {
                             let reason = err.unavailability();
@@ -235,6 +299,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             );
                         }
                     };
+                    let presentation_fingerprint =
+                        sha2::Sha256::digest(format!("{}", output_key).as_bytes()).into();
+                    match crate::app::gallery_authoring::gallery_capture_payload_from_preview(
+                        "Still",
+                        presentation_fingerprint,
+                        &output,
+                    ) {
+                        Ok(payload) => {
+                            self.last_gallery_capture.borrow_mut().replace(payload);
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "latest CPU Viewer output could not become a Gallery capture"
+                        ),
+                    }
                     render_stage_durations.accumulate_cpu_execution(output.execution_durations);
                     self.record_cpu_execution_evidence(&output);
                     self.record_composite(output.composite_diagnostics);
@@ -243,6 +322,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.record_color_transform(diagnostics);
                     }
                     self.record_color_stage(output.color_stage_diagnostics);
+                    if !render_cache_hit && let Some(identity) = evaluation.render_cache_identity {
+                        match mondrian_render_cache::TimelineRenderCacheFrame::new(
+                            identity,
+                            output.working_frame.into_rgba_f32(),
+                        ) {
+                            Ok(frame) => self.timeline_render_cache.borrow_mut().publish(frame),
+                            Err(error) => tracing::warn!(
+                                %identity,
+                                %error,
+                                "rejected invalid Timeline render-cache publication"
+                            ),
+                        }
+                    }
                     let frame_packaging_started_at = Instant::now();
                     let key = preview_raster_resource_key(&output_key);
                     match PreviewRasterFrame::new(
@@ -312,7 +404,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
         if matches!(&preview_state, PreviewPresentationState::Loading) {
-            self.publish_existing_work_retry_if_actionable();
+            self.publish_media_retry_if_actionable();
         }
         self.observe_preview_state(preview_state)
     }

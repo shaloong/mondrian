@@ -17,10 +17,238 @@ use mondrian_timeline::sequence::{MissingColorMetadataPolicy, SequenceSettings};
 use super::analysis::{color_manage_rgba, thumbnail_key, ThumbnailColorContract};
 use super::*;
 
+#[test]
+fn thumbnail_shutdown_retains_real_worker_and_revokes_shared_admission() {
+    let service = AssetThumbnailService::new();
+    let observer = Arc::clone(&service);
+    service.set_color_context(Some(color_context()));
+    let receipt: ThumbnailShutdownEvidence = service
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
+        .expect("sole closer");
+    assert!(receipt.all_resources_released(), "{receipt:?}");
+    observer.set_color_context(Some(color_context()));
+    observer.set_resource_policy(true, true, THUMBNAIL_CACHE_BYTE_BUDGET);
+    assert!(matches!(
+        observer.admit(key(AssetId::new(), 990), 1),
+        ThumbnailLookupState::Unavailable
+    ));
+    assert!(!observer.poll_finished());
+    assert!(observer.state.lock().color_context.is_none());
+    assert_eq!(Ok(receipt), observer.shutdown_until(Instant::now()));
+}
+
+#[test]
+fn thumbnail_prepared_shutdown_is_not_successful_production_start() {
+    let service = AssetThumbnailService::prepare();
+    let receipt = service.shutdown_until(Instant::now()).expect("sole closer");
+    assert!(receipt.all_created_resources_released());
+    assert!(!receipt.all_resources_released());
+    service.start_in_place();
+    assert_eq!(Ok(receipt), service.shutdown_until(Instant::now()));
+    assert!(!service.lifecycle.lock().started);
+}
+
+#[test]
+fn thumbnail_shutdown_unblocks_full_result_transport_and_cancels_deferred_work() {
+    let service = AssetThumbnailService::new();
+    service.set_color_context(Some(color_context()));
+    let generation = service.diagnostics().generation;
+    // Pre-canceled actual jobs exercise the production worker and bounded sender,
+    // without requiring a media fixture or entering native decode.
+    for seed in 0..(THUMBNAIL_JOB_QUEUE_CAPACITY + 2) {
+        let request = key(AssetId::new(), seed as u64 + 1200);
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.cancel();
+        service.state.lock().pending.insert(
+            request.clone(),
+            PendingThumbnail { generation, cancellation: cancellation.clone() },
+        );
+        let mut job = ThumbnailJob { key: request, generation, cancellation };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.send_job(job) {
+                ThumbnailDispatchOutcome::Sent => break,
+                ThumbnailDispatchOutcome::Full(returned) => {
+                    job = returned;
+                }
+                ThumbnailDispatchOutcome::Closed(_) => panic!("actual worker disconnected"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not drain bounded jobs"
+            );
+            std::thread::yield_now();
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while service.diagnostics().awaiting_publication < THUMBNAIL_JOB_QUEUE_CAPACITY + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "actual result queue did not saturate"
+        );
+        std::thread::yield_now();
+    }
+    service.set_resource_policy(false, false, THUMBNAIL_CACHE_BYTE_BUDGET);
+    assert!(matches!(
+        service.admit(key(AssetId::new(), 1400), generation),
+        ThumbnailLookupState::Loading
+    ));
+    assert_eq!(service.diagnostics().deferred_requests, 1);
+    let receipt = service
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
+        .expect("sole closer");
+    assert!(receipt.all_resources_released(), "{receipt:?}");
+    assert_eq!(service.diagnostics().running_requests, 0);
+    assert!(
+        service.worker_activity.snapshot().awaiting_publication.is_empty(),
+        "joined thumbnail shutdown retained queued publication identities"
+    );
+}
+
+#[test]
+fn thumbnail_timeout_and_opaque_panic_receipts_cannot_be_repaired() {
+    use crate::app::owned_worker_lifecycle::OwnedWorkerShutdown;
+    let service = AssetThumbnailService::prepare();
+    let (release, blocked) = mpsc::channel();
+    let (finished, finish) = mpsc::channel();
+    {
+        let mut lifecycle = service.lifecycle.lock();
+        lifecycle.attempted = true;
+        lifecycle.started = true;
+        lifecycle.worker = Some(std::thread::spawn(move || {
+            let _ = blocked.recv_timeout(Duration::from_secs(5));
+            let _ = finished.send(());
+        }));
+    }
+    let receipt = service.shutdown_until(Instant::now()).expect("sole closer");
+    let _ = release.send(());
+    finish.recv_timeout(Duration::from_secs(5)).expect("late worker returned");
+    assert_eq!(receipt.worker, OwnedWorkerShutdown::TimedOutDetached);
+    assert!(!receipt.all_resources_released());
+    assert_eq!(
+        Ok(receipt),
+        service.shutdown_until(Instant::now() + Duration::from_secs(5))
+    );
+
+    struct HostilePayload;
+    impl Drop for HostilePayload {
+        fn drop(&mut self) {
+            panic!("must not run opaque destructor");
+        }
+    }
+    let service = AssetThumbnailService::prepare();
+    {
+        let mut lifecycle = service.lifecycle.lock();
+        lifecycle.attempted = true;
+        lifecycle.started = true;
+        lifecycle.worker = Some(std::thread::spawn(|| std::panic::panic_any(HostilePayload)));
+    }
+    let receipt = service
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
+        .expect("sole closer");
+    assert_eq!(
+        receipt.worker,
+        OwnedWorkerShutdown::PanickedPayloadAbandoned
+    );
+    assert!(!receipt.all_resources_released());
+}
+
+#[test]
+fn thumbnail_shared_poll_and_admission_cannot_reopen_closed_owner() {
+    let service = AssetThumbnailService::new();
+    service.set_color_context(Some(color_context()));
+    service.set_resource_policy(false, false, THUMBNAIL_CACHE_BYTE_BUDGET);
+    let generation = service.diagnostics().generation;
+    let gate = Arc::new(std::sync::Barrier::new(3));
+    let closed = Arc::new(AtomicBool::new(false));
+    let mut threads = Vec::new();
+    for index in 0..2 {
+        let service = Arc::clone(&service);
+        let gate = Arc::clone(&gate);
+        let closed = Arc::clone(&closed);
+        threads.push(std::thread::spawn(move || {
+            gate.wait();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !closed.load(Ordering::Acquire) && Instant::now() < deadline {
+                if index == 0 {
+                    let _ = service.admit(key(AssetId::new(), 1600), generation);
+                } else {
+                    service.poll_finished();
+                }
+                std::thread::yield_now();
+            }
+            service.set_color_context(Some(color_context()));
+            service.set_resource_policy(true, true, THUMBNAIL_CACHE_BYTE_BUDGET);
+            matches!(
+                service.admit(key(AssetId::new(), 1601), generation),
+                ThumbnailLookupState::Unavailable
+            ) && !service.poll_finished()
+        }));
+    }
+    gate.wait();
+    service.begin_shutdown();
+    closed.store(true, Ordering::Release);
+    let observed = threads.into_iter().map(|thread| thread.join()).collect::<Vec<_>>();
+    let receipt = service
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
+        .expect("sole closer");
+    assert!(receipt.all_resources_released(), "{receipt:?}");
+    for result in observed {
+        assert!(result.expect("shared caller returned"));
+    }
+    assert_eq!(receipt.awaiting_publication_remaining, 0);
+    assert_eq!(receipt.active_requests_remaining, 0);
+    assert_eq!(Ok(receipt), service.shutdown_until(Instant::now()));
+}
+
+#[test]
+fn thumbnail_concurrent_closer_is_rejected_without_waiting_for_other_deadline() {
+    let service = AssetThumbnailService::prepare();
+    let (release, blocked) = mpsc::channel();
+    {
+        let mut lifecycle = service.lifecycle.lock();
+        lifecycle.attempted = true;
+        lifecycle.started = true;
+        lifecycle.worker = Some(std::thread::spawn(move || {
+            let _ = blocked.recv_timeout(Duration::from_secs(10));
+        }));
+    }
+    let owner = Arc::clone(&service);
+    let closer =
+        std::thread::spawn(move || owner.shutdown_until(Instant::now() + Duration::from_secs(10)));
+    let observation_deadline = Instant::now() + Duration::from_secs(5);
+    let observed = loop {
+        if service.dispatch_gate.shutdown.load(Ordering::Acquire)
+            && service.lifecycle.try_lock().is_none()
+        {
+            break true;
+        }
+        if Instant::now() >= observation_deadline {
+            break false;
+        }
+        std::thread::yield_now();
+    };
+    let started = Instant::now();
+    let competing = service.shutdown_until(started);
+    let elapsed = started.elapsed();
+    let _ = release.send(());
+    let receipt = closer.join().expect("first closer returned").expect("sole lifecycle owner");
+    assert!(observed, "first closer did not acquire native ownership");
+    assert_eq!(competing, Err(ThumbnailShutdownUnavailable::LifecycleBusy));
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "competing closer waited: {elapsed:?}"
+    );
+    assert!(receipt.all_resources_released(), "{receipt:?}");
+    assert_eq!(Ok(receipt), service.shutdown_until(Instant::now()));
+}
+
 fn color_context() -> ProgramColorContext {
     let mut settings = SequenceSettings::default();
     settings.color.program_output.color_space = ColorSpace::Srgb;
-    settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+    settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid thumbnail context")
 }
 
 fn color_contract() -> ThumbnailColorContract {
@@ -30,7 +258,9 @@ fn color_contract() -> ThumbnailColorContract {
         source_range: DecodedVideoRangeContract::Automatic {
             probed_range: DecodedVideoRange::Limited,
         },
+        camera_raw: None,
         working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
         output_color_space: ColorSpace::Srgb,
         tone_map: true,
         engine: ColorEngine::mondrian_standard(),
@@ -79,8 +309,9 @@ fn isolated_service() -> AssetThumbnailService {
     let (_result_tx, result_rx) = mpsc::sync_channel(1);
     AssetThumbnailService {
         state: Mutex::new(ThumbnailState::default()),
-        jobs: job_tx,
-        results: Mutex::new(result_rx),
+        jobs: Mutex::new(Some(job_tx)),
+        results: Mutex::new(Some(result_rx)),
+        lifecycle: Mutex::new(lifecycle::ThumbnailLifecycle::default()),
         dispatch_gate: ThumbnailDispatchGate::new(),
         worker_activity: Arc::new(SingleWorkerActivity::default()),
     }
@@ -92,8 +323,9 @@ fn service_with_result_transport() -> (AssetThumbnailService, mpsc::SyncSender<T
     (
         AssetThumbnailService {
             state: Mutex::new(ThumbnailState::default()),
-            jobs: job_tx,
-            results: Mutex::new(result_rx),
+            jobs: Mutex::new(Some(job_tx)),
+            results: Mutex::new(Some(result_rx)),
+            lifecycle: Mutex::new(lifecycle::ThumbnailLifecycle::default()),
             dispatch_gate: ThumbnailDispatchGate::new(),
             worker_activity: Arc::new(SingleWorkerActivity::default()),
         },
@@ -107,8 +339,9 @@ fn service_with_job_transport() -> (AssetThumbnailService, mpsc::Receiver<Thumbn
     (
         AssetThumbnailService {
             state: Mutex::new(ThumbnailState::default()),
-            jobs: job_tx,
-            results: Mutex::new(result_rx),
+            jobs: Mutex::new(Some(job_tx)),
+            results: Mutex::new(Some(result_rx)),
+            lifecycle: Mutex::new(lifecycle::ThumbnailLifecycle::default()),
             dispatch_gate: ThumbnailDispatchGate::new(),
             worker_activity: Arc::new(SingleWorkerActivity::default()),
         },
@@ -131,6 +364,7 @@ fn video_media_info(file_size: u64) -> MediaInfo {
         codec_profile: mondrian_media::VideoCodecProfile::Unknown,
         width: 1920,
         height: 1080,
+        picture: Default::default(),
         frame_rate: Rational::FPS_24,
         frame_rate_proven: true,
         pixel_format: PixelFormat::Yuv420p,
@@ -156,6 +390,7 @@ fn video_media_info(file_size: u64) -> MediaInfo {
         color_metadata: None,
         color_metadata_hints: Vec::new(),
         hdr_metadata: Vec::new(),
+        camera_raw: None,
         bit_depth: 8,
         has_alpha: false,
         avg_bitrate: 10_000_000,
@@ -231,7 +466,7 @@ fn raster_contract_rejects_invalid_extent_and_payload() {
 #[test]
 fn boundary_resolves_shared_standard_output_intent() {
     let boundary = color_contract().output_boundary().expect("thumbnail boundary");
-    let display_view = boundary.display_view.expect("standard display/view");
+    let display_view = boundary.ocio_display_view().expect("standard display/view");
     assert_eq!(display_view.display, "sRGB - Display");
     assert_eq!(display_view.view, "Mondrian Standard SDR v2");
 }
@@ -353,18 +588,21 @@ fn dispatch_gate_holds_already_transported_work_until_resume() {
     let request_key = key(AssetId::new(), 701);
     mark_pending(&service, &request_key, 1);
     service.set_resource_policy(false, false, THUMBNAIL_CACHE_BYTE_BUDGET);
-    service
-        .jobs
-        .try_send(ThumbnailJob {
-            key: request_key,
-            generation: 1,
-            cancellation: ExecutionCancellationToken::new(),
-        })
-        .expect("transport one paused thumbnail");
+    assert!(
+        matches!(
+            service.send_job(ThumbnailJob {
+                key: request_key,
+                generation: 1,
+                cancellation: ExecutionCancellationToken::new(),
+            }),
+            ThumbnailDispatchOutcome::Sent
+        ),
+        "transport one paused thumbnail"
+    );
 
     std::thread::sleep(Duration::from_millis(20));
     assert!(matches!(
-        service.results.lock().try_recv(),
+        service.results.lock().as_ref().expect("open result transport").try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
 
@@ -404,8 +642,13 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         interpretation.method = VideoColorDetectionMethod::MissingMetadata;
         interpretation.evidence.clear();
     });
-    let mut rejecting_context = context.clone();
-    rejecting_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
+    let mut rejecting_settings = SequenceSettings::default();
+    rejecting_settings.color.program_output.color_space = ColorSpace::Srgb;
+    rejecting_settings.color.input.missing_metadata_policy =
+        MissingColorMetadataPolicy::RejectMedia;
+    let rejecting_context = rejecting_settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid rejecting thumbnail context");
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &rejecting_context)
             .expect_err("missing metadata must be rejected")
@@ -433,10 +676,12 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         DecodedVideoRangeContract::OverrideFull
     );
 
-    let mut internal_context = context.clone();
-    internal_context.output_color_space = mondrian_core::OcioColorSpaceIdentity::Working(
-        mondrian_core::WorkingColorSpace::LinearRec709,
-    );
+    let internal_context = SequenceSettings::default()
+        .nested_render_color_context(
+            &context,
+            mondrian_core::timeline_data::NestedColorProcessing::ForceParentWorkingSpace,
+        )
+        .expect("valid nested working context");
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &internal_context)
             .expect_err("internal identity cannot cross the raster boundary")
@@ -460,8 +705,9 @@ fn unsupported_encoded_output_is_rejected_before_decode() {
     let asset = missing_video_asset();
     let mut settings = SequenceSettings::default();
     settings.color.program_output.color_space = ColorSpace::DisplayP3;
-    let context =
-        settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+    let context = settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid Display P3 context");
     let failure = ThumbnailColorContract::resolve(&asset, &context)
         .expect_err("Widget raster currently supports only sRGB");
     assert_eq!(

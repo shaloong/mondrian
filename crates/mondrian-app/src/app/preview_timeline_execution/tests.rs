@@ -36,6 +36,7 @@ fn color_context(sequence: &Sequence) -> ProgramColorContext {
     sequence
         .settings
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid test context")
 }
 
 fn temporal_blend_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {
@@ -185,6 +186,66 @@ fn ready_temporal_media_frame(
 }
 
 #[test]
+fn deferred_root_cpu_materialization_does_not_block_uhd_semantics() {
+    let mut sequence = solid_sequence("deferred UHD root", Color::from_rgba8(20, 40, 80, 255));
+    sequence.settings.resolution = Resolution { width: 3840, height: 2160 };
+    let programs = RefCell::new(PreparedVisualProgramCache::default());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    scratch.borrow_mut().reconfigure_cpu_working_set(
+        mondrian_renderer::TimelineCpuWorkingSetGrant {
+            max_active_bytes: 0,
+            max_retained_scratch_bytes: 0,
+        },
+    );
+    let cancellation = ExecutionCancellationToken::new();
+    let graph = PreviewTimelineGraph {
+        programs: &programs,
+        scratch: &scratch,
+        dependency_observer: None,
+        generation: 1,
+        cancellation: &cancellation,
+        author_snapshot: None,
+        heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
+    };
+    let result = resolve_preview_timeline_with_graph(
+        PreviewTimelineFrameRequest::new(
+            &sequence,
+            &[],
+            0,
+            sequence.settings.resolution,
+            PreviewResolutionScale::Full,
+            color_context(&sequence),
+        ),
+        PreviewTimelineSourceAdapters::new(&mut |_| panic!("no media"), &mut |_| {
+            panic!("no title")
+        }),
+        graph,
+    );
+    let PreviewTimelineResolution::Ready(resolved) = result else {
+        panic!("unrendered GPU root must not reserve CPU canvases");
+    };
+    assert!(
+        resolved.facts.is_empty(),
+        "semantic resolution must not allocate a CPU working frame"
+    );
+    assert_eq!(resolved.plan.cpu_materialization_active_bytes, 663_552_000);
+    assert_eq!(
+        scratch.borrow().cpu_working_set_diagnostics().retained_scratch_bytes,
+        0
+    );
+    assert!(
+        scratch
+            .borrow()
+            .admit_cpu_active_working_set(
+                resolved.plan.cpu_materialization_active_bytes,
+                TimelineCpuCompositePrecision::Float32
+            )
+            .is_err(),
+        "later CPU execution still requires its full grant"
+    );
+}
+
+#[test]
 fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
     ensure_mondrian_default_ocio_loaded().expect("default OCIO");
     let sequence = solid_sequence("root", Color::from_rgba8(20, 40, 80, 255));
@@ -222,6 +283,63 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
         panic!("solid Timeline should resolve twice");
     };
     assert_eq!(first.plan.cache_key, second.plan.cache_key);
+    assert_eq!(
+        first.plan.render_cache_identity,
+        second.plan.render_cache_identity
+    );
+    assert!(first.plan.render_cache_identity.is_some());
+
+    let mut cache_disabled = sequence.clone();
+    cache_disabled.settings.preview.cache_enabled = false;
+    let disabled = resolve_preview_timeline(
+        &cache_disabled,
+        &[],
+        3,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&cache_disabled),
+        &mut |_| panic!("solid plan must not request media"),
+        &mut |_| panic!("solid plan must not request titles"),
+    );
+    let PreviewTimelineResolution::Ready(disabled) = disabled else {
+        panic!("cache-disabled Timeline should resolve");
+    };
+    assert!(disabled.plan.render_cache_identity.is_none());
+}
+
+#[test]
+fn program_output_only_change_reuses_pre_output_working_cache_identity() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let sequence = solid_sequence("program-output-cache", Color::from_rgba8(30, 60, 90, 255));
+    let target = Resolution { width: 64, height: 36 };
+    let resolve = |sequence: &Sequence| {
+        let mut unexpected_media = |_| panic!("solid plan must not request media");
+        let result = resolve_preview_timeline(
+            sequence,
+            &[],
+            3,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(sequence),
+            &mut unexpected_media,
+            &mut |_| panic!("solid plan must not request titles"),
+        );
+        let PreviewTimelineResolution::Ready(result) = result else {
+            panic!("solid Timeline should resolve");
+        };
+        result
+    };
+
+    let rec709 = resolve(&sequence);
+    let mut display_p3 = sequence.clone();
+    display_p3.settings.color.program_output.color_space = ColorSpace::DisplayP3;
+    let display_p3 = resolve(&display_p3);
+
+    assert_ne!(rec709.plan.cache_key, display_p3.plan.cache_key);
+    assert_eq!(
+        rec709.plan.render_cache_identity, display_p3.plan.render_cache_identity,
+        "encoded Program Output must remain downstream of cached working pixels"
+    );
 }
 
 #[test]
@@ -617,6 +735,55 @@ fn nested_child_still_requires_a_complete_cpu_materialization_route() {
 }
 
 #[test]
+fn ordinary_current_layers_are_admitted_together_before_pending_is_returned() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let mut sequence = Sequence::new("video and static Current batch");
+    sequence.settings.resolution = Resolution { width: 2, height: 1 };
+    let video = AssetId::new();
+    let still = AssetId::new();
+    let duration = tt(60, sequence.time_base());
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(video, TimelineTime::ZERO, duration).expect("video"))
+        .expect("insert video");
+    sequence.video_tracks[1]
+        .add_clip(Clip::new_still_image(still, TimelineTime::ZERO, duration).expect("still"))
+        .expect("insert still");
+    for all_ready in [false, true] {
+        let mut requests = Vec::new();
+        let result = resolve_preview_timeline(
+            &sequence,
+            &[],
+            5,
+            sequence.settings.resolution,
+            PreviewResolutionScale::Full,
+            color_context(&sequence),
+            &mut |request: PreviewTimelineMediaRequest| {
+                requests.push(request.clone());
+                if all_ready || request.asset_id == still {
+                    ready_temporal_media_frame(&request, 0.25, 87)
+                } else {
+                    pending_media_frame()
+                }
+            },
+            &mut |_| panic!("no title"),
+        );
+        assert_eq!(
+            requests.len(),
+            2,
+            "each exact layer is admitted once per evaluation"
+        );
+        assert!(requests.iter().any(|request| request.asset_id == video));
+        assert!(requests.iter().any(|request| request.asset_id == still
+            && request.source_sample.time() == TimelineTime::ZERO));
+        if all_ready {
+            assert!(matches!(result, PreviewTimelineResolution::Ready(_)));
+        } else {
+            assert!(matches!(result, PreviewTimelineResolution::Pending { .. }));
+        }
+    }
+}
+
+#[test]
 fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
     let (sequence, asset_id, clip_id) = temporal_media_sequence();
     let target = sequence.settings.resolution;
@@ -640,7 +807,8 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
             dependency: PreviewTimelinePendingDependency::Temporal {
                 clip_id: pending_clip,
                 pending_sources: 2,
-            }
+            },
+            ..
         } if pending_clip == clip_id
     ));
     assert_eq!(scheduled.len(), 2);
@@ -716,7 +884,8 @@ fn temporal_preview_schedules_and_publishes_finite_lookahead() {
     assert!(matches!(
         pending,
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Temporal { pending_sources: 2, .. }
+            dependency: PreviewTimelinePendingDependency::Temporal { pending_sources: 2, .. },
+            ..
         }
     ));
     assert_eq!(
@@ -1371,7 +1540,8 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     assert!(matches!(
         result,
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. },
+            ..
         } if pending_id == asset_id
     ));
     assert_eq!(
@@ -1449,7 +1619,8 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             &mut |_| panic!("media plan must not request titles"),
         ),
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. },
+            ..
         } if pending_id == asset_id
     ));
 
@@ -1666,13 +1837,76 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         !frame.permits_cross_call_reuse() && !resolved.plan.cache_reusable,
         "a nested stateful/uncacheable dependency must prevent outer Viewer reuse"
     );
+    assert!(resolved.plan.render_cache_identity.is_none());
+}
+
+#[test]
+fn nested_child_source_change_rotates_root_render_cache_identity() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let target = Resolution { width: 1, height: 1 };
+    let asset_id = AssetId::new();
+    let mut child = Sequence::new("nested-identity-child");
+    child.settings.resolution = target;
+    let child_time_base = child.time_base();
+    child.video_tracks[0]
+        .add_clip(
+            Clip::new(asset_id, TimelineTime::ZERO, tt(24, child_time_base)).expect("child media"),
+        )
+        .expect("insert child media");
+
+    let mut root = Sequence::new("nested-identity-root");
+    root.settings.resolution = target;
+    let root_time_base = root.time_base();
+    root.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(child.id, TimelineTime::ZERO, tt(24, root_time_base), None)
+                .expect("nested placement"),
+        )
+        .expect("insert nested placement");
+
+    let resolve = |salt: u64| {
+        let mut media_frame = |request: PreviewTimelineMediaRequest| {
+            let mut identity =
+                PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-nested-identity.v1");
+            std::hash::Hash::hash(&request.asset_id, &mut identity);
+            std::hash::Hasher::write_u64(&mut identity, salt);
+            PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
+                CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    width: 1,
+                    height: 1,
+                    data: vec![[0.25, 0.5, 0.75, 1.0]],
+                    color_space: request.input_color.working_color_space,
+                }),
+                target,
+                identity.finish_identity(),
+                FramePresentationQuality::Ready,
+                PreviewDecodeExecutionSummary::default(),
+            ))
+        };
+        let result = resolve_preview_timeline(
+            &root,
+            std::slice::from_ref(&child),
+            0,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(&root),
+            &mut media_frame,
+            &mut |_| panic!("media-only nesting must not request titles"),
+        );
+        let PreviewTimelineResolution::Ready(result) = result else {
+            panic!("nested Preview must resolve");
+        };
+        result.plan.render_cache_identity.expect("reusable identity")
+    };
+
+    assert_ne!(resolve(1), resolve(2));
 }
 
 #[test]
 fn preview_materializer_has_no_raw_sequence_relookup_seam() {
     let source = include_str!("../preview_timeline_execution.rs");
     let context = source
-        .split("struct PreviewTimelineExecutionContext")
+        .split("struct PreviewTimelineExecutionAdapter")
         .nth(1)
         .and_then(|suffix| suffix.split("fn prepared_visual_node").next())
         .expect("Preview materialization context source");

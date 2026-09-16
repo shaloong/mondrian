@@ -6,8 +6,8 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, JobId};
 use mondrian_core::{
-    ColorEngine, ColorSpace, DisplayToneMapPolicy, FramePosition, Rational, Resolution,
-    TimelineDisplayFormat, WorkingColorSpace,
+    ColorEngine, ColorSpace, DisplayManagementPolicy, DisplayToneMapPolicy, FramePosition,
+    Rational, Resolution, TimelineDisplayFormat, WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -22,7 +22,7 @@ use mondrian_timeline::{
     PixelAspectRatio, PreviewRenderFormat,
 };
 use mondrian_ui_theme::ThemePreference;
-use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
+use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -35,12 +35,13 @@ pub use super::product_action::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
     ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
     ClipSetRatePayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
-    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineDropAssetPayload, TimelineInOutPointKind, TimelineInsertAssetPayload,
-    TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
-    TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
+    GalleryApplyShotMatchPayload, GalleryCaptureStillPayload, GalleryRenameStillPayload,
+    GallerySetComparisonPayload, GalleryStillTargetPayload, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
+    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
+    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
     TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
     TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
     TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
@@ -51,36 +52,38 @@ pub use super::product_action::{
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
-    VisualMaskTargetPayload, VisualMaskWriteShapePayload, ASSET_CREATE_FOLDER,
-    ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE,
-    ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK,
-    ASSET_REMOVE_ENTRIES, ASSET_RENAME, ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION,
-    ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE,
-    CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR,
-    CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT,
-    EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
-    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_OPEN_NESTED, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION,
-    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET,
-    TIMELINE_PRECOMPOSE_SELECTION, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL,
-    TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
-    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    VisualMaskStartTrackingPayload, VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+    ASSET_CREATE_FOLDER, ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES,
+    ASSET_NAMESPACE, ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT,
+    ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK, ASSET_REMOVE_ENTRIES, ASSET_RENAME,
+    ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT,
+    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
+    CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL,
+    EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+    PROJECT_UPDATE_COLOR_ENVIRONMENT, PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE,
+    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_OPEN_NESTED,
+    SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION, TIMELINE_INSERT_ASSET,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_TRIM_CLIPS, TRACK_ADD,
+    TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
+    VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
+    VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
     VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
     VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_NAMESPACE,
-    VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER, VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED,
-    VISUAL_MASK_SET_LOCKED, VISUAL_MASK_SET_PARAMETER_VALUE,
-    VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED, VISUAL_MASK_WRITE_SHAPE,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_CANCEL_TRACKING,
+    VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING, VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER,
+    VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED, VISUAL_MASK_SET_LOCKED,
+    VISUAL_MASK_SET_PARAMETER_VALUE, VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED,
+    VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
-    AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
-    ProjectProductAction, SequenceProductAction, TimelineProductAction, TrackProductAction,
-    VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
-    VisualMaskProductAction,
+    AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction,
+    GalleryProductAction, ProductAction, ProjectProductAction, SequenceProductAction,
+    TimelineProductAction, TrackProductAction, VideoTransitionProductAction, ViewerProductAction,
+    VisualEffectProductAction, VisualMaskProductAction,
 };
 
 /// Shell-local action name for cycling viewer canvas zoom.
@@ -136,6 +139,10 @@ pub const APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG: &str = "confirm_interpret_as
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
 /// App-shell request to choose a timeline export output file.
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
+/// Native file selection for one canonical ANC export attachment.
+pub const APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG: &str = "import_export_ancillary_dialog";
+/// Native file selection for a regulatory PSE provider/QC configuration.
+pub const APP_SHELL_IMPORT_EXPORT_PSE_DIALOG: &str = "import_export_pse_dialog";
 /// App-shell request to show product about information.
 pub const APP_SHELL_ABOUT: &str = "about";
 /// App-shell request to show app UI preferences.
@@ -158,9 +165,17 @@ pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
 /// App-shell request to switch the presentation-only Viewer canvas background.
 pub const APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED: &str =
     "preferences_viewer_background_changed";
+/// App-shell request to persist the professional Scopes control contract.
+pub const APP_SHELL_SCOPES_SETTINGS_CHANGED: &str = "scopes_settings_changed";
 /// App-shell request to switch the runtime audio output-device intent.
 pub const APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED: &str =
     "preferences_audio_output_device_changed";
+/// App-shell request to apply one validated machine-local display policy.
+pub const APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED: &str =
+    "preferences_display_management_changed";
+/// App-shell request to choose an explicit monitor ICC profile.
+pub const APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE: &str =
+    "preferences_select_display_icc_profile";
 /// App-shell request to rediscover physical audio output devices.
 pub const APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES: &str =
     "preferences_refresh_audio_output_devices";
@@ -188,6 +203,8 @@ pub const APP_SHELL_WINDOW_MINIMIZE: &str = "window_minimize";
 pub const APP_SHELL_WINDOW_TOGGLE_MAXIMIZE: &str = "window_toggle_maximize";
 /// App-shell request to begin native window dragging from custom chrome.
 pub const APP_SHELL_WINDOW_DRAG: &str = "window_drag";
+/// App-shell request to capture the exact current Viewer result into the Gallery.
+pub const APP_SHELL_GALLERY_CAPTURE_CURRENT: &str = "gallery_capture_current";
 /// App-shell request to relocate one dock panel tab in the workspace layout.
 pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 
@@ -196,6 +213,7 @@ pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 pub enum PreferencesTabPayload {
     General,
     Media,
+    Display,
     Shortcuts,
     Developer,
 }
@@ -225,11 +243,23 @@ pub struct PreferencesViewerBackgroundPayload {
     pub background: ViewerCanvasBackground,
 }
 
+/// Professional Scopes settings selected directly in the Scopes panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopesSettingsPayload {
+    pub settings: VideoScopesSettings,
+}
+
 /// Runtime audio output-device intent selected by the preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesAudioOutputDevicePayload {
     /// Follow-system-default or exact stable-device selection.
     pub selection: RealtimeAudioOutputDeviceSelection,
+}
+
+/// Validated machine-local display policy selected by Preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesDisplayManagementPayload {
+    pub policy: DisplayManagementPolicy,
 }
 
 /// Stable shortcut descriptor selected in the app UI preferences UI.
@@ -415,6 +445,9 @@ pub struct AppShellVideoSignalDiagnostics {
     /// Raw container/stream/file-name hints captured by the same media probe.
     #[serde(default)]
     pub color_metadata_hints: Vec<VideoColorMetadataHint>,
+    /// Camera RAW facts proven by the media Adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_raw: Option<mondrian_core::CameraRawMetadata>,
 }
 
 /// Effective input-to-working identities resolved before opening Interpret Footage.
@@ -868,6 +901,24 @@ pub fn visual_mask_set_parameter_value_action(
     .into_external_action()
 }
 
+/// Build an action that starts one bounded Mask tracking analysis.
+pub fn visual_mask_start_tracking_action(payload: VisualMaskStartTrackingPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::StartTracking(payload))
+        .into_external_action()
+}
+
+/// Build an action that cancels the target's latest tracking attempt.
+pub fn visual_mask_cancel_tracking_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::CancelTracking(payload))
+        .into_external_action()
+}
+
+/// Build an action that recomputes the target's persisted tracking recipe.
+pub fn visual_mask_recompute_tracking_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::RecomputeTracking(payload))
+        .into_external_action()
+}
+
 /// Build an action that prepares one Asset for Timeline drag/drop.
 pub fn asset_prepare_drag_action(payload: AssetTargetPayload) -> Action {
     ProductAction::Asset(AssetProductAction::PrepareDrag(payload)).into_external_action()
@@ -1072,6 +1123,11 @@ pub fn export_enqueue_action(request: TimelineExportRequest) -> Action {
     ProductAction::Export(ExportProductAction::Enqueue(Box::new(request))).into_external_action()
 }
 
+/// Freeze the application-owned export draft once at user dispatch.
+pub fn export_enqueue_draft_action() -> Action {
+    ProductAction::Export(ExportProductAction::EnqueueDraft).into_external_action()
+}
+
 /// Build an action that updates one export draft field.
 pub fn export_edit_draft_action(edit: ExportDraftEdit) -> Action {
     ProductAction::Export(ExportProductAction::EditDraft(Box::new(edit))).into_external_action()
@@ -1092,6 +1148,33 @@ pub fn viewer_set_preview_resolution_scale_action(
     payload: ViewerSetPreviewResolutionScalePayload,
 ) -> Action {
     ProductAction::Viewer(ViewerProductAction::SetPreviewResolutionScale(payload))
+        .into_external_action()
+}
+
+/// Persist one exact CPU Viewer result as a portable Project Gallery still.
+pub fn gallery_capture_still_action(payload: GalleryCaptureStillPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::CaptureStill(Box::new(payload)))
+        .into_external_action()
+}
+
+/// Rename one Project Gallery still.
+pub fn gallery_rename_still_action(payload: GalleryRenameStillPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::RenameStill(payload)).into_external_action()
+}
+
+/// Remove one Project Gallery still.
+pub fn gallery_remove_still_action(payload: GalleryStillTargetPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::RemoveStill(payload)).into_external_action()
+}
+
+/// Select or clear one Viewer wipe/split comparison.
+pub fn gallery_set_comparison_action(payload: GallerySetComparisonPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::SetComparison(payload)).into_external_action()
+}
+
+/// Author one deterministic Shot Match Grade Version.
+pub fn gallery_apply_shot_match_action(payload: GalleryApplyShotMatchPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::ApplyShotMatch(Box::new(payload)))
         .into_external_action()
 }
 
@@ -1288,6 +1371,16 @@ pub fn app_shell_export_output_dialog_action(payload: ExportOutputDialogPayload)
     custom_app_shell_action_with_payload(APP_SHELL_EXPORT_OUTPUT_DIALOG, payload)
 }
 
+/// Choose a canonical ANC JSON attachment through the native open-file dialog.
+pub fn app_shell_import_export_ancillary_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG)
+}
+
+/// Choose an explicit regulatory PSE provider/QC JSON configuration.
+pub fn app_shell_import_export_pse_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_IMPORT_EXPORT_PSE_DIALOG)
+}
+
 /// Build an app-shell request for showing product about information.
 pub fn app_shell_about_action() -> Action {
     custom_app_shell_action(APP_SHELL_ABOUT)
@@ -1353,6 +1446,14 @@ pub fn app_shell_preferences_viewer_background_changed_action(
     )
 }
 
+/// Build an app-shell request for changing professional Scopes controls.
+pub fn app_shell_scopes_settings_changed_action(settings: VideoScopesSettings) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_SCOPES_SETTINGS_CHANGED,
+        ScopesSettingsPayload { settings },
+    )
+}
+
 /// Build an app-shell request for switching the runtime audio output device.
 pub fn app_shell_preferences_audio_output_device_changed_action(
     selection: RealtimeAudioOutputDeviceSelection,
@@ -1361,6 +1462,21 @@ pub fn app_shell_preferences_audio_output_device_changed_action(
         APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
         PreferencesAudioOutputDevicePayload { selection },
     )
+}
+
+/// Build an action that applies and persists a complete display policy.
+pub fn app_shell_preferences_display_management_changed_action(
+    policy: DisplayManagementPolicy,
+) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
+        PreferencesDisplayManagementPayload { policy },
+    )
+}
+
+/// Build a request for selecting an explicit monitor ICC profile file.
+pub fn app_shell_preferences_select_display_icc_profile_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE)
 }
 
 /// Build an app-shell request for a fresh physical output-device observation.
@@ -1437,6 +1553,11 @@ pub fn app_shell_window_toggle_maximize_action() -> Action {
 /// Build an app-shell request for beginning native window drag from custom chrome.
 pub fn app_shell_window_drag_action() -> Action {
     custom_app_shell_action(APP_SHELL_WINDOW_DRAG)
+}
+
+/// Build a shell request for one exact current-frame Gallery capture.
+pub fn app_shell_gallery_capture_current_action() -> Action {
+    custom_app_shell_action(APP_SHELL_GALLERY_CAPTURE_CURRENT)
 }
 
 /// Build an app-shell request for relocating one dock panel tab.

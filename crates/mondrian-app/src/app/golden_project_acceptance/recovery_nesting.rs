@@ -40,7 +40,7 @@ use mondrian_core::{
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_prepared_visual_program, PreparedVisualProgram, RenderColorStageDiagnostics,
+    color::RenderColorStageDiagnostics, evaluate_prepared_visual_program, PreparedVisualProgram,
     TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineRenderPlanElement,
 };
@@ -406,8 +406,9 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
     // complete collection here would fabricate a second root snapshot with
     // the same durable identity, which correctly fails closed as ambiguous.
     let sequences = state.sequences();
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let mut media_frame = |_request| PreviewTimelineMediaFrame::Unavailable {
         reason: PreviewUnavailability::blocked(
             PreviewOutputStage::MediaResolution,
@@ -892,17 +893,17 @@ fn new_run_paths(root: &Path) -> anyhow::Result<GoldenRunPaths> {
 fn execute_recovery_nesting_slice(
     root: &Path,
     paths: &GoldenRunPaths,
-) -> anyhow::Result<GoldenRecoveryNestingReport> {
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenRecoveryNestingReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Recovery + Nesting",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    execute_recovery_nesting_stage(&contract, &mut workflow)
+    workflow.run_with(|workflow| execute_recovery_nesting_stage(&contract, workflow))
 }
 
 #[test]

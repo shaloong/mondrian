@@ -3,13 +3,17 @@
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
+pub mod color_curves;
+pub mod coverage;
 pub mod effect;
 pub mod execution;
 pub mod execution_contract;
 pub mod execution_planning;
 mod execution_session;
+pub mod gamut_mapping;
 pub mod gpu_plan;
 pub mod graph;
+pub mod hdr_grading;
 pub mod heterogeneous_execution;
 pub mod lut;
 pub mod mask;
@@ -17,12 +21,20 @@ pub mod mask_raster;
 pub mod plugin_contract;
 pub mod plugin_sdk;
 pub mod prepared;
+pub mod primary_grade;
+pub mod qualifier;
 pub mod temporal_execution;
+pub mod tracking;
 pub mod transition;
 
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
 };
+pub use color_curves::{
+    ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,
+    COLOR_CURVE_SAMPLE_ROWS,
+};
+pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
@@ -64,6 +76,7 @@ pub use execution_planning::{
 pub use execution_session::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectExecutionSessionDiagnostics,
 };
+pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use gpu_plan::{
     get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_node_to_gpu_point_plan,
     lower_effect_graph_nodes_to_gpu_plan, lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan,
@@ -76,6 +89,11 @@ pub use graph::{
     EffectDomainBlockerKind, EffectDomainTransition, EffectGraphBuilderState, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
     PreparedEffectGraphTopology,
+};
+pub use hdr_grading::{
+    HdrGradingAuthoring, HdrGradingError, HdrGradingZone, HdrZoneControl, PreparedHdrGrading,
+    HDR_GRADING_MAX_STOPS, HDR_GRADING_MIN_STOPS, HDR_GRADING_SAMPLE_COUNT,
+    HDR_GRADING_SAMPLE_ROWS, HDR_GRADING_ZONE_COUNT,
 };
 pub use heterogeneous_execution::{
     plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan, EffectCompletionToken,
@@ -105,7 +123,12 @@ pub use plugin_contract::{
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectProgram,
-    PreparedEffectStack,
+    PreparedEffectStack, PreparedGradeGraph,
+};
+pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBalanceGrade};
+pub use qualifier::{
+    PreparedQualifier, QualifierAuthoring, QualifierError, QualifierMode,
+    MAX_QUALIFIER_BLUR_RADIUS, MAX_QUALIFIER_DENOISE_RADIUS,
 };
 pub use temporal_execution::{
     collect_temporal_frame_demands, prepare_temporal_frame_execution, EffectExecutionContinuity,
@@ -113,5 +136,9 @@ pub use temporal_execution::{
     EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider,
     EffectTemporalFrameProviderError, EffectTemporalFrameRequest, EffectTemporalSourceIdentity,
     PreparedEffectTemporalExecution, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
+};
+pub use tracking::{
+    canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
+    TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
 pub use transition::Transition;

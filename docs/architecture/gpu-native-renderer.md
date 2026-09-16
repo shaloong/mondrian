@@ -12,6 +12,154 @@ The working compositor clears its accumulation target to transparent black.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
+## GPU color execution ownership
+
+`GpuColorExecutionSession` is the public owner-scoped GPU color Interface. Its
+four semantic facets are source, working, Program Output, and monitor; all
+facets share one internal runtime, shader/backend caches, frame-id namespace,
+resource table, and exact-contract texture pool. Export records nested working
+conversion and Program Output through this Session and receives only the output
+handle, optional requested readback, and aggregate diagnostics. It cannot
+borrow the frame table or backend caches. `GpuVisualFrameExecutor` accepts the
+same Session, preserving resident visual output without a transfer.
+
+`RenderGpuOutputBoundaryRuntime` and owned backend contexts are private
+Implementation. Existing references below describe that internal recorder,
+not a product-level App/Export Interface. The hidden `color::qualification`
+Adapter exposes exact internals only to ignored real-device gates that must
+measure cache reuse and resource residency. Production code cannot use it.
+
+## Viewer execution retirement
+
+`ViewerGpuExecutionRuntime::into_retirement` consumes recording/upload authority
+and returns a poll-only `ViewerGpuExecutionRetirement`. Runtime construction
+prepares every fallible GPU component and bounded upload state before spawning
+the upload worker; only move assembly follows successful spawn. Retirement
+disconnects both upload admission and the bounded result receiver, retains the
+actual JoinHandle and GPU envelope, and joins only an already finished worker.
+Late map callbacks may retain return-channel senders and cannot hold worker exit
+hostage. Repeated polls preserve the same typed terminal receipt.
+
+The receipt closes Renderer-owned native copy fences and the upload worker only.
+Window/Headless still own submission lifecycle and the independent whole-queue
+barrier. Joined upload panic is safe release but unhealthy qualification; typed
+native device removal is also preserved as a fault. An ordinary progress-channel
+disconnect is not a Renderer retirement. Final owner release invalidates its pool
+generation so escaped presentation/encoder leases cannot repopulate a retired
+cache; admission closure itself does not prematurely evict retained resources.
+
+Generation teardown has an explicit foreign-resource ordering contract. Window
+and Headless retirement first release staged, active, completed, quarantined, and
+published frame owners that can retain FFmpeg `AVFrame` leases. The native D3D12
+backend likewise clears its wgpu-pending, direct-fence-pending, and poisoned source
+tables while its qualified FFmpeg device root and wgpu/raw D3D12 device and queue
+leases are still alive. Only then may the renderer runtime and device envelope be
+dropped. This order applies to successful shutdown, deadline expiry, and device
+loss; Rust field order is only a fallback, not the primary teardown mechanism.
+
+Native encoded input accepts both RGBA16F and RGBA32F without inserting a
+conversion to half precision. Compact-YUV and native materialization currently
+produce the product RGBA32F intermediate and feed the same OCIO input boundary.
+
+App's shared `ViewerGpuStartupOwner` covers the interval before a complete
+Window/Headless Adapter exists. It starts the sole progress owner with retained
+device/queue handles and immediately owns any successfully constructed Renderer.
+Failure or unwind transfers that exact partial envelope to the existing progress
+worker; absence of a Renderer is explicit, not an invented upload-worker receipt.
+No UI Window/Surface or second reaper thread enters the envelope. Window callers
+establish this guard before Preview waker installation or old-generation reopen
+retirement, not merely inside the session constructor. All remaining UI assembly
+precedes activation and publication of native decode authority. Headless prepares
+fallible CPU-only timing metadata before worker creation. Successful activation
+moves the progress/Renderer pair once and clears the guard's device/queue handles,
+so an initial-window guard cannot pin a later-retired device during the event loop.
+Reopen retirement spends the existing validation deadline, never a fresh timeout.
+
+This guard is a lifetime-safety prerequisite, not complete startup qualification:
+ordinary failure still uses asynchronous Drop. Owning failure propagation and
+public terminal receipts must close the remaining constructor/bind/campaign seams
+before such a failure can claim synchronously verified cleanup.
+
+## Working Float Policy
+
+`working_float_policy` is the single Renderer Module deciding the transient
+scene-linear GPU storage representation. Its Interface separates project
+working-color identity from `Rgba16Float`/`Rgba32Float` execution storage and
+publishes an immutable `GpuWorkingFloatDecision` with the exact reason and
+admitted report fingerprints. Viewer compositing/spatial processing,
+`GpuVisualFrameExecutor`, nested Export working transforms, and their active
+resource estimates consume the same decision. Both execution records carry it;
+Export retains it in job diagnostics. A recorded working handle whose texture
+format differs from the decision fails before it can be described as a valid
+Viewer or Export result.
+
+The production decision remains RGBA32F. RGBA16F is eligible only when a sealed
+independent end-to-end quality report, a same-device same-suite performance
+report proving lower p95 GPU time and active bytes, and complete Float16
+qualification of compositor, Effects, AlphaMask, heterogeneous execution, and
+Viewer/Export parity are all present. Missing, mismatched, failed, or
+non-beneficial evidence selects RGBA32F; memory pressure is never permission to
+reduce precision. The current Effects GPU lowering and heterogeneous
+CPU-prefix/GPU-suffix Implementation are Float32-only, so their explicit
+contracts remain qualification blockers rather than being mechanically
+relabeled.
+
+Device creation resolves the fixed product working texture through one adapter
+admission seam. The adapter must report `COPY_SRC`, `COPY_DST`,
+`TEXTURE_BINDING`, and `RENDER_ATTACHMENT` for that exact format. RGBA32F also
+requires `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`, which Viewer, Headless,
+and standalone/Export device constructors explicitly enable. A supplied device
+that omitted the returned feature is rejected by
+`ViewerGpuExecutionRuntime::new` before any pipeline is created. Unsupported
+adapters therefore produce a typed admission error; they do not enter wgpu
+validation, silently select RGBA16F, or claim a CPU fallback as GPU execution.
+
+Before a Window device generation is published, startup resolves the active
+production Program Output and monitor contract and prepares its exact OCIO
+device objects in that generation's `ViewerGpuExecutionRuntime`. Headless
+cold-activation validation uses the same production method and candidate
+contract. The method fills the runtime's existing output cache without frame
+allocation or command recording, so it introduces neither a second color
+planner nor a second submission lifecycle. Pipeline preparation stays ordered
+with generation startup; it is not dispatched beside the active device-poll
+worker because driver pipeline creation and wgpu polling can contend on Linux.
+
+Renderer unit tests that create independent native devices share one bounded
+process admission, including timestamp tests that request a device directly
+instead of constructing `GpuContext`. This prevents the parallel Rust test
+harness from bypassing the bound through helper-specific device creation and
+overwhelming a platform driver before an assertion can be reported. Linux uses
+one exclusive test-device owner because repeated Vulkan device destruction and
+creation can overlap below wgpu; other platforms admit two owners. A single
+test may still validate multiple devices under that one owner. These bounds
+change only test provisioning; production generation admission and retirement
+evidence remain authoritative for the application.
+
+Program Output, monitor/presentation carriers, encoded native-video sources,
+Export pipe formats, RGBA32F LUTs, typed DataTextures/AlphaMasks, and the
+lossless Render Cache have separate storage contracts. They do not inherit the
+working-float decision. In particular, an encoded output `Rgba16Float` is not
+evidence that scene-linear compositing is Float16-qualified.
+
+The compositor records through one checked **Composite Execution Plan**. The
+planner is a pure Renderer Module: it owns transformed Layer ROI, conservative
+per-Layer damage, unchanged-accumulator preservation, bounded tile draws, and
+pass-fusion evidence. The wgpu recorder is its Implementation and cannot derive
+a second spatial interpretation. Preview and Export use this same Seam.
+
+A bounded first Layer uses transparent clear plus scissored draws. A bounded
+later Layer copies the non-overlapping complement of its damage rectangle from
+the previous accumulator, loads that destination, and shades only damage. This
+is required because render-pass clear ignores scissor and a ping-pong target's
+untouched pixels are otherwise undefined. Full-canvas Layers retain the normal
+pass. Tiles are at most 4096 pixels per axis and remain draws within one render
+pass. A 4,096-tile hard limit fails before allocation. The plan reports actual
+shaded pixels, avoided full-frame shader pixels, preserved-copy work, tile
+draws, eliminated Layers, and fused point operations.
+Its damage is intra-frame Layer-versus-accumulator evidence only; temporal
+damage reuse remains unavailable until a caller can prove exact prior-output
+identity and lifetime.
+
 ## Target Principle
 
 Old model:
@@ -27,6 +175,12 @@ GPU owns frame -> display/export consume GPU result -> readback only at explicit
 ```
 
 ## RendererContext / GpuContext
+
+Linux executables establish the [graphics process startup policy](linux-graphics-process.md)
+before loading Vulkan. Driver code libraries have process lifetime to avoid the
+reproduced concurrent loader/ICD unload crash; this does not extend any GPU
+resource owner or grant shutdown/physical qualification. Embedded renderer
+consumers establish that policy in their own process entrypoint.
 
 `GpuContext` owns shared `wgpu::Device`, `Queue`, and `Adapter`. Higher renderer contexts should own:
 
@@ -56,8 +210,8 @@ an unbounded active frame. `ViewerGpuExecutionRuntime` separately holds a
 `ViewerGpuExecutionResourceGrant` with a pressure-sensitive idle pool and a
 pressure-stable active texture byte/count limit. Before recording,
 `estimate_viewer_gpu_active_working_set()` lowers the complete Viewer request
-into checked per-stage demand. It includes source upload; the renderer-owned
-native bridge, encoded-RGB, and working outputs; heterogeneous GPU plan peak
+into checked per-stage demand. It includes source upload; native-import
+encoded-RGB and working outputs; heterogeneous GPU plan peak
 residency; Effect-domain intermediates; Cross Dissolve branches;
 Adjustment/composite accumulators; the exact spatial pyramid; Program
 Output/scopes; monitor output; and display-calibration output plus its RGBA32F
@@ -66,6 +220,38 @@ native-resource grant. An idle-pool hit still counts as active while checked
 out; a heterogeneous sub-grant does not replace the enclosing Viewer grant;
 and returning an intermediate to the idle pool does not authorize the next
 frame.
+Every scene-working term uses the policy-selected bytes per pixel. CPU source
+upload demand instead uses its actual upload Implementation format, and the
+display-calibration LUT retains its own RGBA32F byte contract; neither is
+guessed from a generic color descriptor.
+
+Offline deliverables use the sibling `GpuVisualFrameExecutor` Module. It accepts
+only resolved working sources, typed DataTextures, already-resident nested
+working handles, procedural solids, adjustments, and Cross Dissolve. The
+Export Adapter owns decode and closure traversal but cannot reinterpret those
+pixel domains. A whole-closure preflight selects GPU before any GPU pixel work;
+nested results remain in the shared frame table, cross-working conversion uses
+the same OCIO GPU runtime, and the root passes directly into the output boundary
+for one encoder-pipe readback. Temporal and heterogeneous closures currently
+select CPU before start.
+
+`GpuVisualFrameExecutionResourceGrant` is independent from idle pooling and the
+final output/readback grant. Before each node records, the executor adds exact
+current frame-table bytes/count to conservative new upload, external-domain,
+Transition, and composite demand. Arithmetic overflow or either exceeded limit
+fails before allocating that node. Export freezes the grant per attempt and
+reports its active high-water bytes/textures; it may not reduce precision or
+fall back after GPU execution has begun.
+
+Software-decoded compact YUV follows that same ownership rule. Its encoded-RGB
+intermediate is acquired from the shared exact-contract pool and returned when
+the submitted candidate's frame resource table clears on the next record; it
+must not be removed and dropped immediately after input-color commands are
+recorded. A failed pre-submit candidate returns that resource directly. Only
+the compact plane transfer buffers use
+the separate bounded asynchronous upload pool. A frame-local intermediate must
+not bypass pooling with a direct device allocation, because deferred backend
+allocator growth would otherwise re-enter realtime candidate preparation.
 
 If bytes or resource count exceed the active grant, recording returns
 `ViewerGpuExecutionError::ActiveWorkingSet` before any texture creation.
@@ -88,56 +274,199 @@ handles directly into Renderer resources or ask Platform code to probe a second
 graphics device.
 
 Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
-they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
-contract records the decoder handle family, source texture format, source color
+they may be multi-plane, packed YCbCr, or packed RGB resources. Media owns the
+canonical `DecodedVideoSurfaceDescriptor`: color model, chroma subsampling,
+plane layout, numeric encoding/alignment, component bit depth, alpha, and native
+payload eligibility. Renderer format validation and Viewer working-set estimates
+derive from that descriptor rather than maintaining independent NV12/P010
+switches. The renderer import contract records the decoder handle family, source texture format, source color
 space, target working color space, and a
 `GpuNativeDecodedFrameVideoSampling` contract. That sampling contract is the
 single place where the renderer learns limited/full range, YCbCr matrix,
 transfer characteristic, effective bit depth, and chroma siting. When a
-concrete backend reports readiness and support for that handle/format, the plan
+concrete backend reports readiness for that exact `(handle kind, source format,
+transfer mode)` route, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
-pass.
-The request-only native estimate reserves up to twice the visible NV12/P010
-texel bytes for codec-aligned bridge storage. D3D12 descriptor validation
-rejects a decoder storage extent above that same 2:1 pixel envelope before a
-bridge pool can grow. This paired estimate/validation rule makes padding
-bounded without teaching the pure Viewer estimator to inspect platform
-handles. The already-created decoder surface is governed by media residency,
-not counted again as a renderer-owned texture.
+pass. Aggregate handle and format lists are diagnostic projections only; they
+must never be crossed as a Cartesian product. Conflicting duplicate route facts
+fail support construction, and a missing exact pair fails admission.
+The request-only native estimate charges only the renderer-owned encoded-RGB
+and working outputs. The already-created decoder surface is governed by Media
+Frame Store residency and is not counted again as a renderer texture; direct
+import owns no duplicate YUV bridge allocation. D3D12 descriptor validation
+still rejects codec-aligned storage above a 2:1 visible-pixel envelope so a
+malformed or unexpectedly padded surface cannot escape bounded admission.
 Native YCbCr conversion and OCIO input conversion remain two explicit renderer
 passes with one color contract. `GpuNativeYuvDecoder` samples the native luma
-and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
+and chroma plane views into a renderer-owned `Rgba32Float` source frame whose
 descriptor is `Source + EncodedFloat`; this frame is encoded RGB in the resolved
 source color space, not linear working data. `RenderGpuInputStageResourcePlan`
 then consumes that already GPU-resident frame without an upload and executes the
 same OCIO source-to-working processor used by CPU-uploaded source frames into a
 renderer-owned `Rgba32Float` working texture. Callers cannot lower working
-precision. The native import plan owns distinct encoded-source and
+precision. Native RGBA16F/RGBA32F follows the parallel `GpuNativeRgbDecoder`
+Module: the Adapter-provided texture must exactly match the planned wgpu format,
+extent, and `TEXTURE_BINDING` usage; bilinear materialization preserves alpha,
+negative values, and values above one in RGBA32F before OCIO. No current FFmpeg
+platform Adapter advertises that RGB route, so the execution Seam is qualified
+but physical decoder support remains fail-closed. The native import plan owns distinct encoded-source and
 linear-working handles so a
-backend cannot skip, reorder, or mislabel either pass.
+backend cannot skip, reorder, or mislabel either semantic stage.
 
-The YUV shader uses unfiltered `textureLoad` operations because NV12/P010 plane
-formats are not assumed filterable. It performs renderer-defined bilinear 4:2:0
-chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
+Compact CPU YUV and shared direct native materialization fuse these two semantic stages into one
+physical draw. The shared YUV reconstruction function returns encoded Float32
+RGB directly to the existing OCIO-generated input callable, preserving alpha;
+only the Working Float32 texture is allocated. OCIO lowering, processor identity,
+LUT/uniform uploads and refresh remain owned by the same color runtime. Its
+bounded device-owned pipeline cache keys the fused shader by the complete OCIO
+identity and input source, and retires with that runtime. The GLSL frontend's
+required dummy entry is removed from validated IR before callable WGSL emission;
+no custom transfer function or color-engine fallback is introduced. The Windows
+D3D12-specific import backend retains its explicit two-pass physical path.
+
+The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
+observes exact UHD frames through the production decoder and Viewer using the
+Standard 256 MiB idle grant and unchanged active limits. It checks that texture
+allocation misses stop after warmup. The previous two-intermediate CPU YUV path
+failed this test: returning two UHD Float32 textures evicted the reusable display
+texture, producing one allocation and eviction per subsequent frame. Native
+texture eviction blocked the realtime caller. The fused path keeps Working
+Float32 plus display Float16 within that same grant, eliminating the unnecessary
+encoded-RGB texture rather than enlarging the cache. Active demand charges the
+retained plane extent and one Working texture, with the exact physical planar
+or interleaved texture count. Allocation stability does not itself qualify
+playback deadlines or physical HDR presentation.
+
+The same YUV shader is also the sole materializer for media-owned compact CPU
+YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
+CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
+luma/CbCr views; FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2, and 4:4:4 bind
+stride-preserving luma/Cb/Cr views
+without expanding or converting them into an RGB staging image. The compact
+plane textures and their immutable views survive ordinary Viewer candidate
+clears. A frame clones the slot-owned views rather than creating native views
+again; slot replacement or explicit clear retires the views together with their
+textures, so a new generation cannot recover an old view. Each physical slot
+also owns one immutable YUV uniform buffer and bind group. Reuse compares the
+native decoder's canonical sampling contract and actual bind-group layout;
+range, matrix, transfer, bit depth, chroma layout/location, storage/output extent,
+layout or plane-generation changes cannot reuse stale bindings. These checks
+reuse the native YUV contract rather than maintaining another color key.
+The active estimate includes the retained uniform's logical bytes. This removes
+per-frame uniform allocation from the CPU-plane route: on Linux a tiny uniform
+allocation can block behind the same device's large background upload allocation.
+It does not claim that required native allocations are nonblocking.
+`persistent_upload_slot_reuses_native_yuv_bindings` verifies physical binding
+identity reuse, range invalidation and generation retirement on a real adapter.
+A bounded
+renderer-owned upload worker copies visible plane rows into reusable mapped,
+256-byte-aligned transfer buffers before realtime candidate recording. The
+runtime distinguishes bounded ticketless prewarming from complete current
+candidate preparation. Window and Headless lookahead use `prewarm_cpu_yuv_upload_horizon`;
+this retains four speculative results and cannot replace the current candidate's
+protected physical input set. `prepare_cpu_yuv_uploads` consumes a complete
+Viewer request and performs the same pure active-resource admission as recording
+before protecting or allocating its transfers. The estimate includes each
+candidate's exact padded staging extent; the worker reuses only matching buffer
+capacities so a larger old allocation cannot escape that charge.
+
+The Adapter borrows CPU-staged frames in the exact next-use order of its existing
+transport intent horizon. The upload owner retains only the first four distinct
+physical inputs of that projection, without interpreting Timeline coordinates.
+Farther CPU-staged frames do not evict nearer mapped preparations. Refreshing the
+horizon recycles obsolete completed speculation before replacement admission;
+already pending work still occupies its original bounded transport until its
+result is consumed. Standalone cold prewarming cannot displace the selected
+horizon, and full current candidate admission keeps its independent protection.
+An empty horizon retires speculation; generation clear removes the projection.
+The native `farther_prewarm_does_not_evict_nearest_staged_input` regression first
+reproduced nearest-input eviction on the unranked seam and verifies retention
+through the explicit ordered horizon on the same production upload owner.
+
+The worker reads the same generation and retained candidate-input table as the
+upload owner before starting each transfer. Within a bounded receive batch from
+the existing transport, current inputs precede unstarted speculative inputs;
+generation-invalid work is discarded before allocation. Promotion does not
+resubmit the input or create another admission queue. Native calls and discarded
+payload destruction occur outside the shared interest lock. The worker retains
+only this interest table, not the result receiver, so consuming retirement still
+closes publication and joins the original worker.
+`queued_current_upload_precedes_speculative_uploads` pauses the real worker,
+promotes the last queued prewarm and verifies that it completes next before
+consuming the worker's shutdown receipt.
+
+Unsubmitted preparations retain their CPU mapping after the worker finishes
+copying. Speculative replacement returns that same mapped buffer to the existing
+worker pool before scheduling its replacement; no GPU remap or native allocation
+is needed for matching capacity. The speculative bound includes pending work as
+well as completed results, so a fifth allocation cannot be justified by delaying
+result eviction until completion. Current candidate admission may reclaim an
+unprotected matching preparation, but never another input of its own admitted
+set. The first actual recording consumes the CPU mapping exactly once; only
+submitted storage uses the existing completion-bound remap. Generation clear and
+consuming retirement retain their original ownership boundaries.
+The native `unsubmitted_prewarm_recycles_native_storage_without_growing_capacity`
+regression checks both physical buffer identity and changing source bytes across
+eight unsubmitted preparations under the unchanged four-entry bound.
+
+The upload owner protects every distinct contributing input of the admitted
+candidate and retains its source Arc together with its physical key, including
+inputs that have not yet entered the bounded worker transport. Caller release
+therefore cannot leave an address-only identity that aliases a later allocation.
+Replacement, generation clear and consuming retirement release these references.
+The native `admitted_candidate_retains_unscheduled_source_identity` regression
+pauses the real worker, drops the caller's inputs and checks both retention and
+release through the production owner. This protection is independent of the
+unchanged four-entry worker transport. Readiness is read atomically from that owner after the whole set is admitted. Recording
+keeps one immutable transfer lease per input until the candidate finishes; a
+source reused at multiple materialization extents does not consume or copy its
+CPU preparation twice. Successful candidates install one submission-bound remap
+and worker-pool return per transfer. Abandoned candidates release their recorded
+leases. All scheduling, cancellation, generation clearing and worker retirement
+remain inside the existing Viewer runtime; this adds no Timeline or Playback
+coordinator. The realtime caller records the existing `copy_buffer_to_texture`
+commands in the same command buffer as YUV sampling.
+Its encoded source output also uses the product RGBA32F policy; compact 10/12-bit
+YUV must not take an otherwise hidden RGBA16F shortcut. The explicit layout contract distinguishes
+two-plane from three-plane storage, 4:2:0, 4:2:2, and 4:4:4, and most-significant-bit
+P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layouts produce the same typed
+`Source + EncodedFloat` intermediate and therefore share color validation,
+OCIO execution, spatial scaling, and Viewer composition semantics.
+
+The opt-in native `five_compact_inputs_can_prepare_and_record_one_candidate`
+regression first reproduced starvation for five small inputs that passed the
+Standard grant. It now covers complete recording despite competing speculative
+prewarm. `shared_compact_input_can_materialize_two_extents` covers one input's
+multiple uses in that same candidate. Both consume the production retirement
+owner before reporting the result; they do not turn missing GPU execution into
+qualification evidence.
+
+The YUV shader uses unfiltered `textureLoad` operations because YUV plane
+formats are not assumed filterable. It performs renderer-defined bilinear
+4:2:0, 4:2:2, or 4:4:4 chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
 expands full or limited range in coded-value space, and applies BT.709 or
-BT.2020 non-constant-luminance matrix coefficients. P010 samples are first
-converted from normalized 16-bit storage (`code10 << 6`) back to exact 10-bit
-code values; treating `R16Unorm` directly as normalized 10-bit data is invalid.
+BT.2020 non-constant-luminance matrix coefficients. The same code path derives
+8/10/12/16-bit scaling and most/least-significant-bit alignment from the physical
+descriptor. P010/P012 MSB-aligned samples are converted from normalized 16-bit
+storage back to their exact code range; treating `R16Unorm` directly as normalized
+10/12-bit data is invalid.
 RGB values are not clipped before OCIO, preserving undershoot, overshoot, and
-HDR signal precision. A real-wgpu accuracy test covers shader compilation,
-plane bindings, range expansion, neutral chroma, and `Rgba16Float` readback.
+HDR signal precision. A small integration target executes P012 4:2:0, P212
+4:2:2, P416 4:4:4, and RGBA32F on real wgpu, covers shader compilation, plane
+bindings, range expansion, neutral chroma, exact texture validation, alpha, and
+extended-range RGBA32F readback without linking the renderer's giant unit target.
 The contract carries the complete `RenderInputTransform`, not only the target
 working color space. OCIO engine selection, tone-map policy, working space, and
 the required GPU backend therefore remain explicit through import planning.
 Native import rejects CPU OCIO backends so platform adapters cannot substitute
 an independent source-to-working transform.
-NV12 must validate as 8-bit YCbCr and P010 must validate as 10-bit YCbCr.
-Future 12/16-bit paths must add an explicit renderer format such as P016; they
-must not reinterpret P010. RGB/BGRA native surfaces must validate with an RGB
-matrix. YCbCr surfaces must fail closed when matrix or chroma siting is
-unspecified, because silent platform defaults are not acceptable for HDR/PQ/HLG
-playback.
+Every YCbCr format must validate its descriptor bit depth and subsampling;
+P012/P016, P210/P212/P216, P410/P412/P416, Y210/Y212, and XV30/XV36 are distinct
+identities and must not be reinterpreted as P010. RGB/BGRA/float native surfaces
+must validate with an RGB matrix. Subsampled YCbCr fails closed when chroma
+siting is unspecified; 4:4:4 permits `Unspecified` because it has no subsampled
+grid whose origin needs interpretation. Matrix and transfer remain mandatory.
 The sampling matrix and transfer must also exactly match the resolved source
 color space encoding; conflicting source labels and sampling facts are rejected
 before backend execution or GPU frame allocation.
@@ -152,7 +481,13 @@ potentially importable family, is not enough by itself to claim hardware decode
 playback, zero-copy, or low-copy frame residency. Diagnostics report the
 specific missing layer: decoder GPU handle absent, renderer backend not ready,
 unsupported handle kind, or unsupported source format.
-Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
+The Windows D3D12VA Adapter remains intentionally NV12/P010-only because the
+linked FFmpeg D3D12 frames contract exposes only those formats. Metal adds
+P210/P216 and P410/P416 plane views when 16-bit normalized texture support is
+enabled. The Linux Vulkan DRM-PRIME Adapter adds P012 under the same
+feature condition. Packed Y210/Y212/XV30/XV36, P212/P216/P410/P412/P416 on
+unimplemented backends, and renderer-native RGB float remain explicit blockers;
+being modeled in the shared descriptor is not execution support. Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
 be presented as the modern GPU-native renderer import path.
 
 The app layer owns the combined readiness report because it is the first layer
@@ -162,10 +497,10 @@ one playback admission and one stable readiness report; Window and Headless
 Adapters only project the result into their telemetry. This avoids giving media
 a renderer dependency or making a Widget module the owner of execution
 admission. CPU-decoded frames remain `CpuDecodedMedia`. Every ready support
-contract declares `GpuNativeDecodedFrameImportMode`: Metal/Vulkan direct
-external-texture backends may report `ZeroCopy`, while the current D3D12VA
-shared-texture bridge reports `GpuBridgeCopy` and App readiness is
-`ReadyLowCopy`. A missing mode fails closed; backend construction or a native
+contract declares `GpuNativeDecodedFrameImportMode`: D3D12VA, Metal, and Vulkan
+direct-texture backends report `ZeroCopy`. A future Adapter that requires one
+GPU pixel copy must explicitly report `GpuBridgeCopy`/`ReadyLowCopy`; the
+production Windows path does not. A missing mode fails closed; backend construction or a native
 handle alone can never imply zero-copy. D3D11VA remains a media
 hardware-decode CPU-transfer
 fallback; the renderer does not advertise the rejected D3D11-to-D3D12
@@ -177,13 +512,25 @@ device. The concrete import runtime created from that active Adapter/Device/Queu
 is the sole capability authority. Any copy step must be reported from actual
 execution evidence rather than a preflight label.
 Media may report a platform-preferred hardware decode candidate such as
-D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
+D3D12VA, D3D11VA, VideoToolbox, VA-API, or CUDA/NVDEC plus its backend-specific surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
-VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
+VA-API, CUDA/NVDEC, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
 to the next backend. Windows support becomes ready only after
-`D3D12NativeVideoImportBackend` binds the active adapter/device/queue;
-unimplemented platform backends remain unavailable.
+`D3D12NativeVideoImportBackend` binds the active adapter/device/queue and
+publishes its renderer-qualified FFmpeg device root. Linux Vulkan support is
+ready only after the active non-NVIDIA renderer exposes and matches its DRM
+render node for VA-API DMA-BUF import, or the active NVIDIA renderer UUID
+matches a CUDA ordinal with external-memory and semaphore support. Missing
+device identity or native interop remains unavailable.
+
+Linux direct-import CPU attribution records physical-handle validation,
+synchronization, adoption, and any CUDA device-to-device plane copy in
+`bridge_acquire_us`. Shared plan/source validation completed before entry into
+the platform backend is not relabeled as bridge-free work. The manual production
+latency diagnostic separates the first preroll candidate from warm frames,
+waits for GPU completion and native-owner release, and can enforce an explicit
+p95 deadline. Generated fixtures establish only local software execution.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
 `native_video_texture_device_features` contract. P010 is admitted only when
@@ -192,11 +539,11 @@ chroma plane views are `R16Unorm` and `Rg16Unorm`. Enabling those features is
 only a texture-format prerequisite: it does not prove that a decoder resource can be
 shared, synchronized, adopted by the active wgpu device, sampled, or transformed.
 Readiness therefore remains fail-closed until backend construction validates
-the complete platform import bridge. Diagnostics distinguish missing device
+the complete platform import path. Diagnostics distinguish missing device
 format features, non-DX12 adapters, and backend construction failures.
 Adapter selection enumerates the backends enabled on the wgpu instance. On
 Windows it prefers a DX12 adapter exposing native NV12/P010 formats, so the
-D3D12VA bridge is not accidentally disabled by selecting a Vulkan
+D3D12VA direct path is not accidentally disabled by selecting a Vulkan
 representation of the same GPU. An explicit `WGPU_BACKEND` restriction remains
 authoritative because excluded backends are absent from instance enumeration;
 if enumeration yields no usable adapter, selection falls back to wgpu's normal
@@ -209,62 +556,51 @@ equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, Core, and generic Platform code must not duplicate or weaken
 these Renderer resource invariants.
-Backend construction also resolves the active DX12 adapter LUID to the same
-DXGI enumeration index consumed by FFmpeg's D3D12VA device creator. The
-backend-specific `D3D12VaAdapterIndex` selector travels through renderer support, app playback
-admission, and media session creation. It keeps decode surfaces on the renderer's physical adapter
-on hybrid-GPU systems; the per-frame LUID check remains the final fail-closed
-guard against stale, ignored, or incorrectly enumerated device selection.
-Validated D3D12VA sources can enter a reusable same-API low-copy bridge entry.
-Each entry owns a renderer-created shareable NV12/P010 texture, a shared D3D12
-timeline fence, reusable direct command allocators/lists on both devices, and
-one wgpu multi-plane texture with explicit luma/chroma views. A decoder-device
-queue waits on FFmpeg's per-frame decode fence entirely on the GPU, transitions
-the source and shared destination, copies the resource, returns both to
-`COMMON`, and signals `copy_ready`. The renderer queue waits on `copy_ready`,
-transitions `COMMON -> RESOURCE`, and only then exposes the plane views. The
-renderer submit is followed by `RESOURCE -> COMMON` and `renderer_complete`.
-The decoder source keeps a distinct short residency lease until a non-blocking
-`copy_ready` fence query proves completion. If `GetCompletedValue` returns
-D3D's `u64::MAX` device-removed sentinel, that sentinel is a second explicit
-physical terminal: the bridge clears only the source guarded by that removed
-device and preserves typed
-`GpuNativeDecodedFrameImportError::NativeDeviceRemoved` evidence through the
-backend/runtime. It is not flattened to `BackendRejected`. No other query,
-string error, wgpu loss, timeout, or teardown request releases that source.
-Fence values are strictly
-monotonic, command allocators are reset only after completion, busy entries fail
-without a CPU wait, and any partially submitted failure permanently poisons the
-entry. The complete import backend pools entries by source device, storage,
-color, and sampling contract; it grows the pool for bounded in-flight work,
-returns busy at the configured limit, and never reuses poisoned entries.
-Pool exhaustion is exposed as typed `GpuNativeDecodedFrameImportError::Backpressure`,
-not flattened into a terminal backend rejection. The shared Viewer runtime
-propagates that retryable state as `ViewerGpuExecutionError::Backpressure` so
-presentation adapters can keep the last completed output visible and let the
-scheduler retry or discard the obsolete candidate. Capability mismatches,
-protocol violations, and device errors remain terminal structured failures;
-backpressure must never trigger a surprise CPU transfer or an unbounded pool.
-Retirement callers may accept only successful copy-fence progress or the typed
-native-device-removed terminal as source-release proof; ordinary backend errors
-remain fail-closed. This native proof is independent of the Viewer wgpu
-generation terminal and its work-done callback.
-Decoder device identities are also bounded: the backend retains at most eight
-source-contract pools and evicts the least-recently-used pool only after every
-bridge fence in it has completed. This prevents playback/interactive session
-churn from retaining one D3D12 decoder context, shared texture, and NT handle set per
-historical decoder. If every contract pool is still in flight, admission returns
-typed backpressure instead of waiting or allocating a ninth pool. Headless GPU
-evidence records peak contract-pool and bridge-entry residency so long-run gates
-can distinguish bounded reuse from handle accumulation.
-The bridge never relies on a CPU fence wait, `Flush`, implicit sRGB, or an
-undocumented resource-state assumption. Production-path real-media gates must
-prove decoded D3D12VA/P010 residency, native import execution, GPU timestamp
-coverage, absence of readback/fallback, and bounded pool reuse; one-off machine
-diagnostic tests are removed after that evidence is collected.
+Backend construction resolves the active DX12 adapter LUID to the DXGI index
+used as typed admission identity, then constructs an FFmpeg D3D12VA device root
+over the exact wgpu `ID3D12Device`. App installs that root into the worker-family
+pool before it publishes native-decode admission. The pool replacement is
+generation-safe: active FFmpeg `AVBufferRef` leases remain valid, but old
+Sessions fail current-generation compatibility and App cancels old Broker
+bindings plus decoder-resource cache residency. A late old-device result is
+therefore stale rather than cache-only.
+
+Every admitted D3D12 surface must report the same raw device pointer and adapter
+LUID as the Renderer. The single Renderer queue waits on FFmpeg's per-frame
+decode fence without a CPU wait, records `COMMON -> WGPU shader resource`,
+adopts the original multi-plane `ID3D12Resource` into wgpu, runs YUV sampling
+and OCIO, then records `WGPU shader resource -> COMMON`. It signals one strictly
+monotonic renderer-completion fence after the release transition. The Media
+frame lease and both transition command allocators/lists remain retained until
+a nonblocking fence query proves the final renderer read. There is no shared
+handle, renderer-created YUV texture, NT handle, decoder-device queue, or pixel
+copy in this path.
+
+At most four source leases may be in renderer flight. Exhaustion returns typed
+`GpuNativeDecodedFrameImportError::Backpressure`; presentation keeps the last
+completed output and may retry or discard the obsolete candidate without a
+surprise CPU transfer. If queue execution or completion signaling becomes
+ambiguous, the source and command objects are poisoned and retained for the
+backend lifetime rather than being released unsafely. A device-removed
+completion-fence sentinel remains a typed physical terminal. Compatibility
+diagnostics retain the old `(contract pools, bridge entries)` schema, but the
+Windows implementation reports `(1, 0)`; retained-source count is the actual
+in-flight lifetime evidence.
+
+Metal and Vulkan use the same shared direct-plane Module. Their platform
+Adapters wrap CVPixelBuffer/IOSurface or DMA-BUF planes, while the shared Module
+retains the complete Media frame handle through `on_submitted_work_done`; wgpu
+texture drop alone is not treated as proof of the final GPU read.
+
+Production-path real-media gates must prove native D3D12VA/P010 residency,
+zero bridge-copy/readback/upload counts, native import execution, GPU timestamp
+coverage, bounded retained-source reuse, and final zero retained sources. The
+device-root integration gate separately proves real DX12 runtime construction,
+FFmpeg adoption, idempotent install, replacement generation, `ZeroCopy`, and
+zero bridge residency; it does not substitute for the real-media cadence gate.
 
 Native-import GPU attribution is independent from the semantically fixed
-Viewer suffix timer because the bridge submits its YUV/input-color prefix
+Viewer suffix timer because native import submits its YUV/input-color prefix
 before the caller-owned Viewer command buffer. Timestamp capability and
 activation are separate: the default
 `NativeVideoImportGpuTimingPolicy::Disabled` allocates nothing even on a
@@ -282,8 +618,8 @@ process-global. The two reported deltas are
 `input_color_marker_bracket_us`; they must never be inferred from CPU recording
 time or the later Viewer suffix.
 Because the start counter is written in the wgpu import command buffer, these
-deltas intentionally exclude decoder execution, the decoder-device copy,
-queue-wait latency, and the raw acquire transition that orders that command
+deltas intentionally exclude decoder execution, decode-fence wait latency, and
+the raw acquire transition that orders that command
 buffer. Each bracket can still contain implicit barriers, scheduler gaps, and
 backend command placement/reordering within its marker boundaries; neither
 field claims pure shader time. The optional fence-ready fact helps classify
@@ -295,7 +631,7 @@ diagnostics separate `capability_supported`, `activated`, and
 `inactive_reason`, then report `samples`/`pending`/`missing`/`dropped`. Those
 accounting categories are disjoint and sum to valid-output imports.
 Here `submitted_imports` means imports that returned a valid renderer working
-frame. A bridge failure after ambiguous queue acceptance is excluded even
+frame. A native-import failure after ambiguous queue acceptance is excluded even
 though the GPU may have accepted its command buffer; timing diagnostics are
 usable-output coverage, not an inventory of all possible GPU work.
 Ring exhaustion drops only telemetry, and disabled policy, unsupported
@@ -332,8 +668,9 @@ config for H.264/HEVC/etc., but it does not create an OS device, expose a
 native surface handle, or satisfy renderer import support by itself.
 The cached FFmpeg hardware device-context probe goes one step deeper by creating
 and releasing an `AVHWDeviceContext`, but it is still not a decoded-frame
-residency contract. Renderer readiness requires an actual decoded NV12/P010
-surface handle plus a platform import path that can sample that surface.
+residency contract. Renderer readiness requires an actual decoded surface handle
+plus one exact renderer-qualified handle/format route that can sample that
+surface; a descriptor-supported high-bit format alone proves no route.
 `HardwareDecodeCpuTransfer` is also not renderer readiness: it proves FFmpeg
 hardware decode can be configured and hardware frames can be transferred back to
 CPU RGBA, but the compositor still receives CPU-uploaded RGBA rather than a
@@ -352,7 +689,7 @@ resource identity and lifetime required by the renderer import backend. Both
 preview source contracts expose `DecodedGpuFrameHandleKind`,
 `DecodedVideoSurfaceFormat`, and `DecodedVideoSampling` (range, chroma location,
 and effective bit depth) when the decoder reported them. The window layer maps
-GPU-resident NV12/P010/RGBA facts into `GpuNativeDecodedFrameTextureFormat` and
+GPU-resident YCbCr/RGBA facts into `GpuNativeDecodedFrameTextureFormat` and
 combines decoder sampling with the resolved source color space into
 `GpuNativeDecodedFrameVideoSampling` only at the app readiness seam. Unknown
 range, unsupported chroma siting, bit depth mismatches, or RGB surfaces whose
@@ -367,7 +704,9 @@ swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
 contract; construction failure remains unavailable with its exact reason. The
 runtime survives surface-format/UI-renderer rebuilds so display changes do not
-discard decoder bridge pools. It allocates native import frame ids from the same
+discard the device-bound import runtime. A Renderer device rebuild publishes a
+new decoder-device generation and retires old native decode/cache authority. It
+allocates native import frame ids from the same
 `RenderGpuOutputBoundaryRuntime` namespace that will receive the returned
 working resources, preventing resource-table id collisions.
 Renderer readiness must remain in
@@ -444,12 +783,51 @@ weighted source without inventing pixels. Preview execution records a distinct
 shader with the Export/CPU reference formula. An ordinary source-over opacity
 pair remains an invalid lowering.
 
-The first native subset is a bounded single-source chain of ColorAdjust,
-Vignette, and deterministic Grain. White Balance has authoring/schema support
-but no executable GPU lowering and therefore cannot enter the effect library as
-visually supported. Unsupported topology, spatial sampling, LUT resources, and
-custom operations remain explicit lowering blockers until dedicated renderer
-graph passes provide their resource and alpha contracts.
+The native point subset is a bounded single-source chain of ColorAdjust,
+creative LUT, White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color
+Curves, Vignette, deterministic Grain, and Crop. Effects compiles white balance into a working-space Bradford matrix
+and supplies already validated Primaries/CDL vectors; the renderer only lowers
+those immutable values into the common point uniform and WGSL. One pass accepts
+at most sixteen operations, remains far below the 64 KiB uniform limit, and
+splits longer admitted tails through the heterogeneous execution plan.
+Unsupported topology, neighborhood spatial sampling, and custom operations
+remain explicit lowering blockers until dedicated renderer graph passes provide
+their resource and alpha contracts.
+
+Qualifier is a dedicated non-preserving-domain GPU graph path. It is not
+inserted into the point-operation uniform: the heterogeneous suffix lowers the
+Effects-owned `PreparedQualifier` as `SceneLinearRgb -> AlphaMask`, then records
+the existing GPU Mask pass or a dedicated Matte Preview pass. HSL and 3D
+Include/Exclude sampling, Clean Black/White, inversion, box denoise, and
+Gaussian feather mirror the CPU Float32 algorithm. The qualifier owns exactly
+one pass without refinement, two passes with one separable refinement, or four
+passes with both; every output/private RGBA32F texture is retained through the
+submission and enters physical byte/texture admission. A real-wgpu parity gate
+covers HSL, 3D, negative/HDR input, refinement, Mask output, and opaque
+grayscale preview at `1e-4` maximum per-channel error, and proves the runtime
+materialization table is empty afterward.
+
+Power Window is a separate grade-matte GPU graph path. `MaskSource` geometry is
+rasterized once in the cancellable CPU Float32 prefix and uploaded as
+`AlphaMask + NonColorData`; `MaskCombine` reduces multiple Window textures with
+Add, Subtract, Intersect, or Difference, and `MatteMix` combines an ungraded
+base with its graded branch. The dedicated WGSL pass writes
+`mix(base.rgb, graded.rgb, matte.a)` and copies `base.a`, so it cannot turn a
+Window into programme transparency. The plan, token/live-set validator,
+physical texture/byte admission, and runtime materialization table cover both
+passes. A real-wgpu parity gate exercises the complete route, HDR/negative RGB,
+and alpha preservation against the CPU Float32 reference at `1e-4` maximum
+per-channel error.
+
+Compiled curves do not consume per-operation uniform capacity beyond their
+small location/mode/luminance descriptor. The compositor's device-resident
+RGBA32F grade-resource atlas packs each curve set as a `256 x 3 x 1` slab beside
+creative LUT cubes and keys residency by complete semantic fingerprint. WGSL
+uses explicit texel loads and linear interpolation, including endpoint-slope
+HDR extrapolation. A neutral-secondary flag bypasses the HSV stage exactly.
+The real-wgpu point-chain parity test includes non-neutral Hue/Luma/Saturation
+curves plus negative and greater-than-one values under the same `3e-5` Float32
+channel budget.
 
 Non-scene-linear point plans carry their exact `EffectColorDomain` into the
 renderer. `RenderEffectColorDomainGpuPlanner` resolves that declaration into a
@@ -473,7 +851,10 @@ A real-wgpu readback test compares the fused media and adjustment outputs
 against `apply_compiled_effect_graph_rgba_f32(...)` and
 `apply_compiled_effect_graph_pass_rgba_f32(...)` per channel. This is the
 numerical contract for extending the GPU subset; shader parsing or successful
-command recording alone is not sufficient evidence of effect correctness.
+command recording alone is not sufficient evidence of effect correctness. The
+qualified chain includes working-space White Balance, Primaries, and no-clamp
+ASC CDL and holds the same `3e-5` maximum per-channel Float32 budget while
+retaining extended values.
 An additional real-wgpu round-trip test compares
 `Working -> OCIO -> display-encoded point effect -> OCIO -> Working` against the
 stock-OCIO CPU processor with a `3e-5` maximum channel budget and asserts zero
@@ -937,6 +1318,17 @@ selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map
 headroom diagnostics, present modes, alpha modes, and monitor fingerprint.
+The validation-only real-window recovery seam assigns separate monotonic
+identities to that native Surface and to the wgpu Device/progress generation.
+It can replace both only after the previous Device's complete Adapter envelope
+and whole queue are retired. A reopened generation must submit the Viewer
+external texture through the ordinary UI renderer and return
+`AppUiFrameResult::Presented` for the exact pre-reopen Timeline/color/display
+contract. Surface configuration, a Headless render, or a new Device without a
+presented matching picture is not recovery evidence. The narrow local runner
+accepts low-copy CPU upload as a valid Surface exercise but preserves its
+`Degraded` residency facts; native decoder-surface residency is qualified by
+the separate high-bit-depth/native-surface matrix.
 Viewer preview evaluation now splits at the correct boundary:
 `app::preview_runtime::PreviewProductionRuntime` resolves the timeline and
 composites a working-space
@@ -964,6 +1356,14 @@ ticket, and drops late generation/epoch results. This is real execution rather
 than a diagnostic-only `CpuFallbackRequested` state. Creation of a replacement
 healthy GPU generation explicitly exits fallback and invalidates the old
 execution generation before GPU admission resumes.
+That Adapter's single scheduling worker is not the pixel-kernel parallelism
+authority. Its retained `TimelineCompositeScratch` owns the bounded CPU Visual
+Execution Module used by Export as well: full-frame Normal blends and Cross
+Dissolve may dispatch to that owner-local pool, opaque Dissolve may use
+runtime-selected SIMD, Adjustment passes reuse the transferred base allocation,
+and Transition endpoints reuse grant-bounded scratch. The pool, SIMD choice,
+and scratch Implementation remain behind the compositor Interface so Window,
+media, and Export Adapters cannot acquire a second execution interpretation.
 Preview resolution is sampling density, not timeline geometry. Source and
 sequence transforms are evaluated in their full authoring extents, then
 `project_affine_to_sampled_extents` projects that affine into the decoded and
@@ -1100,17 +1500,55 @@ local "works well enough" path. A successful export path must not assume that a
 scheduled GPU plan executed if the runtime returns no materialized readback handle or
 no recorded stage/runtime evidence.
 
-Exporting still reads back encoded pixels for encoder interoperability today, but
-that readback must remain explicit in the plan and report. A future encoder path
-may move readback behind an API that still reports parity or staged transfer
-intent. Until that exists, readback reasons and blockers stay part of the
-export color health contract.
+The generic encoder path still reads back encoded pixels and reports that
+residency boundary explicitly. A separately qualified Windows HEVC route may
+instead detach the root GPU output from the Renderer pool and pass it through
+`D3D12ResidentEncodeAdapter`. That Adapter records one D3D12 Video Processor
+conversion from RGBA8/RGBA32F to an FFmpeg-owned NV12/P010 surface on the exact
+Renderer device. The route is GPU-resident and performs zero host readbacks,
+rawvideo writes, or CPU-to-encoder uploads; it is not described as literal
+zero-copy because the RGB-to-YCbCr conversion remains a real GPU operation.
+
+The Windows same-device import submission retains both the decoder's AVFrame
+lease and an explicit `ID3D12Resource` COM lease through a two-stage renderer
+completion protocol. Acquire, wgpu sampling, and release command lists all
+refer to that physical resource, so abstract decoder ownership alone cannot be
+used as queue-lifetime evidence. The wgpu work-done callback first proves the
+shader read completed. Only then may the Adapter submit the transition back to
+`COMMON` and its completion fence. The AVFrame and COM resource retire after
+that second fence completes, so FFmpeg cannot reuse the surface on a Video
+Decode command list while Direct work still owns shader-resource state. Failed
+or uncertain submissions quarantine both leases for the backend lifetime. The
+in-flight table is also exclusive by physical `ID3D12Resource` identity: a
+second Viewer candidate for an already-submitted decoder surface receives
+backpressure until the first candidate completes both stages, preventing
+overlapping independent state-transition chains for one texture.
+
+The Adapter owns the cross-queue contract. The direct queue signals source
+readiness, the Video Process queue waits, transitions source and destination to
+VIDEO_PROCESS_READ/WRITE, executes conversion, restores the source to
+RENDER_TARGET and destination to COMMON, then signals both the FFmpeg surface
+fence and a completion fence. A direct-queue wait is enqueued before the
+detached source lease may return to the Renderer pool. Any error after native
+submission retains the source and destination as poisoned resources until
+Adapter retirement; they cannot be silently recycled under unknown state.
+
+Only the narrow exact HEVC contract is admitted. HLG, full-range PQ, authored
+static HDR metadata, active Legalizer/VBV constraints, unsupported codecs or
+pixel formats, and non-D3D12 platforms use the complete reported rawvideo path.
+Failure before the first resident frame submission may fall back to that path;
+failure after submission is terminal. Renderer and Media diagnostics count
+resident submissions while proving zero host-transfer operations, and the
+ordinary post-encode validation remains authoritative.
 
 ## Viewer Resource Reuse
 
-Viewer spatial prefilter, separable Lanczos, working composite, OCIO output, and
-optional ICC display-calibration output textures share one device-scoped,
-exact-contract, byte-bounded resource pool.
+Viewer spatial prefilter, separable Lanczos, working composite, OCIO output,
+fused signal-monitoring output, and optional ICC display-calibration output
+textures share one device-scoped, exact-contract, byte-bounded resource pool.
+Signal monitoring adds at most one active output texture, retains its pipeline
+and uniform buffer, updates the uniform payload through `Queue::write_buffer`,
+and performs no pass or texture allocation when every warning is disabled.
 Renderer caches must use a security-supported `lru` dependency. Dependency
 upgrades must preserve VRAM budgets, eviction order, and exact cache-key
 semantics; renderer tests and `cargo deny` jointly guard that contract.
@@ -1126,3 +1564,230 @@ Frame-local handles remain strongly typed and monotonic, while submitted texture
 storage is returned to the pool without a CPU completion wait and reused only
 through ordered queue semantics. Device reset first returns every stage's frame
 resources and then clears the shared pool, preventing stale-device reuse.
+## Platform-matrix GPU evidence
+
+The platform/driver/display matrix uses one checked-in, backend-neutral GPU
+gate profile for DX12, Metal, and Vulkan. Each of its eight exact Cargo tests
+emits a create-only schema-1 measurement file from inside the real-device test:
+adapter name/vendor/device/backend plus finite measured values. The external
+serial supervisor preserves stdout/stderr, requires exactly one passing and no
+skipped test, applies the profile's `at_most`/`at_least` limits, and wraps the
+test-emitted bytes in a row-bound schema-2 receipt. Source replay verifies the
+profile bytes, exact test target/name, Cargo result, measurement hash/value,
+runtime image, and active adapter again. A hand-authored passing wrapper or a
+test exit code without measurements cannot qualify a row.
+Every measurement also carries an attestation emitted inside the exact test
+process: the pre-issued authority challenge, row/source/runtime identity,
+current test-image SHA, process ID, and trusted supervisor SHA. The supervisor
+records exact argv and bounded start/end/exit evidence, so synthetic stdout or
+a detached measurement envelope cannot satisfy source replay.
+
+# Realtime visual performance qualification
+
+The Renderer owns the versioned `realtime_visual_gpu_matrix_v1` decision
+contract. Its ignored hardware producer records the production
+`ViewerGpuExecutionRuntime`, rather than a standalone shader microbenchmark,
+for two immutable workloads: four-layer 3840×2160 at 60 fps and two-layer
+7680×4320 at 30 fps. Every contributing layer executes two fused point
+Effects; both workloads produce PQ Program Output in an RGBA16F carrier and
+run demand-driven RGB-parade scopes from the Program Output tap.
+
+The producer uses the bounded asynchronous Viewer timestamp-query ring. It
+reports complete-frame and per-stage GPU timestamps separately from CPU
+command-recording time, and records composite, fusion, color-stage, scope,
+presentation-lease, fallback, blocker, and output-format evidence. A warm
+snapshot and measured snapshot of the texture pool, OCIO shader/static
+pipeline/backend caches, and scopes resources prove that the measured interval
+does not allocate or prepare new GPU resources. Missing timestamp support,
+partial samples, a weakened workload, warm-path creation, a readback/upload,
+or a deadline miss fails closed under `sealed-required` policy.
+
+The professional Viewer texture grant is Renderer-owned so the App and the
+hardware gate cannot qualify different resource policies. Its 4 GiB idle and
+active byte limits are demand ceilings, not eager allocations; memory-pressure
+coordination may trim idle retention without changing active precision or
+semantic admission. This budget is deliberately large enough to retain an 8K
+RGBA32F working contract between frames. The gate cannot substitute an
+unlimited test-only grant.
+
+The ignored `gpu_alpha_quantization` integration diagnostic isolates the
+production sRGB Program Output boundary from upstream composition. It uploads
+the same 64×64 Float32 working raster for separate `Rgba32Float` and
+`Rgba8Unorm` executions, then records every source/CPU/GPU Float32 bit pattern
+and output byte. Four exact coverage bands (0, 0.25, 0.5, 1) expose whether
+coverage changes before quantization or whether native UNORM conversion differs
+from the CPU nearest rule. `MONDRIAN_GPU_ALPHA_DIAGNOSTIC_OUTPUT` names a
+create-new JSON artifact; GPU absence and readback deadlines are errors, while
+observed pixel differences remain diagnostic facts with `qualified: false`.
+The test changes neither production quantization nor qualification tolerances.
+
+## Linux VA-API DRM PRIME plane layout
+
+The VA-API Vulkan plane Adapter accepts both one composed NV12/P010/P012
+layer and FFmpeg's normal separate-layer DRM PRIME export. Separate NV12
+uses R8 with GR88/RG88; P010/P012 use R16 with RG1616, matching FFmpeg's
+VA-API DRM mappings. Each separate layer must contain exactly one plane in
+luma/chroma order. The existing decoder surface contract supplies effective
+bit depth and UV order; the Adapter does not infer color semantics from the
+generic DRM channel names. Object indices, offsets, pitches, modifiers and
+retained frame ownership flow unchanged into the existing Vulkan imports.
+Wrong formats, missing or extra planes and unsupported auxiliary-plane layouts
+remain explicit errors. This normalizes a legal descriptor representation,
+without repacking pixels, CPU download or a second color path. Descriptor
+regressions prove this contract only; real VA-API import still requires a
+compatible device, driver, modifier and independent native qualification.
+
+The producer contracts are documented by
+[libva's DRM PRIME descriptor](https://github.com/intel/libva/blob/master/va/va_drmcommon.h)
+and [FFmpeg 6.1 VA-API mapping](https://ffmpeg.org/doxygen/6.1/hwcontext__vaapi_8c_source.html).
+
+The shared direct native Adapter now uses the same fused YUV + compiled OCIO
+input pass as CPU YUV materialization. Texture-backed VA-API/Metal and CUDA
+storage-buffer inputs differ only in physical sample fetching. The logical
+encoded-source handle still validates the original color contract, but no
+full-raster encoded RGB texture is allocated. The output remains the original
+Float32 working contract. Native synchronization, queue submission and source
+retirement are unchanged. Buffer and texture shaders have distinct canonical
+pipeline identities; both consume the same YUV math and OCIO callable.
+The fused pass is prewarmed through the original native import preparation.
+CPU attribution records the combined pass in `yuv_record_us`; separate color
+recording and frame-table extraction are absent (zero), not unmeasured work.
+Real GPU parity compares both physical fetch routes against the original two
+passes for SDR/PQ/HLG, full/limited range and scaled sampling. This removes one
+126.6 MiB UHD intermediate without raising idle or active grants.
+
+## Linux CUDA storage-buffer import
+
+The shared production device creation entry adds external-memory and external-
+semaphore FD extensions on NVIDIA Vulkan only when physically enumerated. It
+preserves wgpu's requested limits, features and sole renderer queue; ordinary
+unsupported devices retain explicit native admission failure. Window, Headless
+and standalone Renderer use this same creation entry.
+
+CUDA import matches the retained FFmpeg context UUID to the renderer UUID for
+every frame. A CUDA producer event orders the Adapter's own transfer stream,
+which clears allocation padding, copies the two visible NV12/P010 planes once,
+and signals an exported Vulkan semaphore. The production wgpu submission waits
+before acquiring the private buffer from external ownership and sampling it.
+The raw acquisition barrier has its own command buffer; wgpu 30 forbids mixing
+raw and wgpu encoding on one encoder. Both buffers use the same queue submission.
+FFmpeg safe output performs a separate GPU copy before this bridge; the one-copy
+claim applies to the bridge only. There is no CPU pixel download or
+buffer-to-texture copy. The YUV decoder selects
+a storage-buffer fetch implementation but shares interpolation, chroma location,
+code-range interpretation, matrix conversion and subsequent OCIO with texture
+inputs. P010 reads retain the existing MSB-aligned UNORM interpretation.
+
+The move-only native transfer owner retains the source AVFrame, CUDA context
+lease, stream/event, mapped external allocation, semaphore and Vulkan handles.
+Pending queue waits are revoked on abandonment; an already consumed wait keeps
+its semaphore owner through actual queue completion, including a concurrent
+submit or unwind. Partial-open cleanup consumes the transfer stream before its
+storage. Cleanup failure remains an unclosed owner, so Renderer retirement
+cannot issue a successful closure receipt for it. A session-owned release worker
+consumes foreign destructors outside wgpu resource/queue locks. It is joined by
+the existing Viewer retirement owner; it submits no GPU work and owns no
+Timeline, color, or playback decisions.
+
+Storage capacity follows an explicit 256-byte row / 64-KiB allocation policy.
+The active SourcePreparation byte estimate includes that capacity, in addition
+to the two encoded/working textures. The existing texture count stays exact;
+its byte budget also covers this native transfer storage. Vulkan requirements
+must fit the admitted capacity before memory allocation, and physical device
+storage limits remain admission constraints. This does not enlarge the grant
+or retain an unbounded auxiliary pool.
+
+CUDA import is reported as GpuBridgeCopy. Real device tests must separately prove
+native decoding, pixel correctness, seek and lifecycle closure; compilation and
+provider-only memory-transfer experiments do not establish product qualification.
+
+CUDA foreign acquisitions publish memory, mapped-buffer, semaphore, stream and
+event ownership only after the driver returns success. Failed calls cannot arm
+cleanup with an unspecified output parameter. The shared acquisition seam has
+fault-injection coverage for failed calls that modify both pointer and device
+address outputs; this proves error-path ownership, not physical device qualification.
+
+### Linux decoded-pixel agreement
+
+The opt-in `linux_decode_pixel_parity` integration test feeds explicit 30 fps SDR
+fixtures through the production isolated demux and both compact CPU YUV and CUDA
+decode. Both routes use the same Viewer input, Program Output, and monitor stages
+at seek targets across GOP boundaries. The existing typed readback implementation
+can borrow a presentation lease without detaching its ownership; the test keeps
+that lease until copy completion and consumes Renderer retirement afterward.
+Half-float output comparison permits one half-float ULP at unity; it does not
+qualify a display, original media, a different GPU provider, or sustained playback.
+
+CUDA teardown is dependency ordered. A synchronization or release failure stops
+all dependent destruction, retains the unproved native handles and their device,
+driver-library and source-context lifetimes, and leaves the runtime owner count
+unclosed. This exceptional quarantine is not reusable storage and cannot produce
+a successful shutdown receipt. Fault-injected release-order tests cover failure
+at each step; normal real-device tests separately require zero retained owners.
+The synchronous CUDA driver completion call remains a foreign blocking boundary;
+these ordering tests do not establish a driver-hang timeout guarantee.
+
+CUDA transfer retirement consumes the retained FFmpeg source before publishing
+zero retained transfers. Rust field destruction after the destructor body is
+not sufficient ordering for this counter: the source can still execute native
+release work. Other Viewer and Media owner counts remain independent barriers.
+
+Shared direct native import acquires only its working output from the existing
+exact-contract color-frame texture pool. Merely pooling an encoded RGB
+intermediate still churned at the 128 MiB idle grant: one UHD Float32 texture
+fits, but two do not. Fusing the semantic stages removes that intermediate
+without changing color precision, materialization extent, pool budget or native
+source completion ownership. The real CUDA import regression checks exactly one
+working acquisition and no intermediate return, alongside GPU output readback
+and zero retained native owners. The general Viewer admission estimate remains
+a conservative two-pass upper bound for backend compatibility.
+
+A failed CUDA cleanup also poisons subsequent transfer admission in that
+adapter's existing lifecycle. Rejected requests acquire no additional native
+owner, while quarantined owners remain counted. This prevents repeated failed
+cleanups from growing unbounded quarantined residency. The fault-injected
+lifecycle regression checks both rejection and the retained owner count;
+normal GPU execution and zero-owner retirement are tested separately.
+
+CUDA HAL callbacks release only a deferred owner. The final reference transfers
+the entire native allocation, including its retained FFmpeg source, to the
+release worker; partial-open and pending-wait abandonment use the same owner.
+The shared direct-input layer does not add a second queue-callback source retain
+for these buffers. Native transfer counts remain live through actual destruction.
+Admission rejects replacements with typed Backpressure while destruction is
+pending, so deferred release cannot create an additional allocation pool outside
+existing frame grants. Closing admission retains late release senders, drains
+all admitted owners and joins the worker before Viewer emits a receipt. A panic,
+failed release or abandoned retirement cannot establish successful closure.
+Moving destruction off the callback stack does not prove bounded foreign-driver
+execution or identify the cause of every observed playback stall.
+
+Ordinary Headless completion keeps native import admission open, but it does not
+equate wgpu submission completion with platform-owner destruction. After the
+completed candidate is dropped, the production runtime waits on the release
+worker's condition notification and the direct-texture queue callback, using the
+same absolute GPU completion deadline. A nonzero owner count at that deadline is
+returned as `NativeReleaseDeadlineExceeded`; it cannot be serialized as a zero
+residency receipt. This applies to the CUDA buffer bridge and Linux direct-texture
+adapters such as VA-API. Full Viewer retirement remains the separate consuming
+operation that closes admission and joins the worker.
+
+
+### CPU materialization admission follows executed nodes
+
+The canonical prepared visual closure exposes both its complete CPU estimate
+and the estimate for CPU children with an unrendered root. Both use the same
+checked output/scratch accounting. Preview's semantic executor materializes
+nested CPU nodes but returns root elements for later backend selection, so it
+admits the child estimate there. A GPU root consumes the existing Viewer GPU
+grant; it must not also reserve hypothetical CPU root canvases. This matters
+at UHD, where a conservative five-canvas Float32 CPU root exceeds 512 MiB even
+though the GPU route never allocates those CPU canvases.
+
+The complete CPU estimate remains attached to the single resolved evaluation.
+Actual inline CPU root execution and background CPU fallback admit that estimate
+before allocating pixels. The fallback request also carries the admitting
+owner's CPU working-set grant, which the worker installs instead of retaining
+an unbounded default. CPU adaptation of cached working frames retains the same
+conservative complete estimate and existing cache residency contracts.
+CPU child and root limits, retained-scratch limits, and GPU budgets are unchanged.

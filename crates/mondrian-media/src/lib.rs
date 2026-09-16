@@ -7,56 +7,87 @@
 //! - 预览帧缓存与解码调度
 //! - 代理文件生成（Proxy）
 
+mod approved_bmx;
+mod approved_provider_command;
+pub use approved_bmx::{
+    prepare_bmx_runtime, prepare_bmx_runtime_for_phase, ApprovedBmxCommand, ApprovedBmxTool,
+    BmxRuntimeHandle, PreparedBmxRuntime,
+};
 pub mod audio;
+pub use approved_provider_command::{
+    prepare_regulatory_pse_runtime, ApprovedProviderFile, ApprovedProviderRuntimeCleanupReceipt,
+    ApprovedRegulatoryPseCommand, PreparedRegulatoryPseRuntime, RegulatoryPseRuntimeAdmission,
+};
 mod audio_device;
 mod audio_output;
 mod audio_playback;
 pub mod audio_source;
+mod camera_raw;
 pub mod decoder;
+mod ffmpeg_command;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
+#[cfg(windows)]
+mod native_process_job;
+mod owner_lifetime;
+mod packet_identity;
 pub mod preview;
 mod process_supervisor;
 pub mod proxy;
+#[cfg(feature = "validation")]
+mod qualified_ffmpeg;
+mod resident_encode;
 pub mod waveform;
 
 pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
 pub use audio_device::{
-    discover_realtime_audio_output_devices, RealtimeAudioCandidateCounts,
-    RealtimeAudioChannelSemantics, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceCatalog,
-    RealtimeAudioOutputDeviceDescriptor, RealtimeAudioOutputDeviceEvidence,
-    RealtimeAudioOutputDeviceId, RealtimeAudioOutputDeviceIdError,
-    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputDiscoveryFailure,
-    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    discover_realtime_audio_output_devices, probe_realtime_audio_output_contract,
+    RealtimeAudioCandidateCounts, RealtimeAudioChannelSemantics, RealtimeAudioOutputContract,
+    RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceDescriptor,
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceId,
+    RealtimeAudioOutputDeviceIdError, RealtimeAudioOutputDeviceSelection,
+    RealtimeAudioOutputDiscoveryFailure, RealtimeAudioOutputOpenFailure,
+    RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
-pub use audio_output::RealtimeAudioOutputLossReason;
+pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
 #[cfg(feature = "validation")]
 pub use audio_playback::AudioPlaybackValidationError;
 pub use audio_playback::{
-    validate_audio_playback_anchor, AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot,
-    AudioPcmContinuity, AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest,
-    AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError,
-    AudioPlaybackCreateError, AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode,
-    AudioPlaybackPoll, AudioPlaybackShutdownError, AudioPlaybackSnapshot, AudioPlaybackState,
-    AudioRenderRecoveryDisposition,
+    handoff_unqualified_audio_pcm_renderer, validate_audio_playback_anchor,
+    AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot, AudioPcmContinuity,
+    AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest, AudioPcmRenderer,
+    AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError, AudioPlaybackCreateError,
+    AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
+    AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence, AudioPlaybackSnapshot,
+    AudioPlaybackState, AudioRenderRecoveryDisposition,
 };
 pub use audio_source::{
-    AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics, AudioSourceReader,
+    AudioDecoderStartupShutdownEvidence, AudioSourceCache, AudioSourceCacheConfig,
+    AudioSourceCacheDiagnostics, AudioSourceCacheShutdownEvidence, AudioSourceReader,
     AudioSourceSelection,
 };
+pub use camera_raw::probe_camera_raw_metadata;
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
-    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigMethods,
+    DecodedVideoSampling, DecodedVideoSurfaceChromaSubsampling, DecodedVideoSurfaceColorModel,
+    DecodedVideoSurfaceDescriptor, DecodedVideoSurfaceFormat, DecodedVideoSurfaceNumericEncoding,
+    DecodedVideoSurfacePlaneLayout, HwAccelBackend, HwAccelCodecConfigMethods,
     HwAccelCodecConfigProbe, HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat,
     HwAccelProbe, HwDeviceContextPool, HwDeviceContextPoolDiagnostics, HwDeviceContextPoolPolicy,
+    RendererHwAccelDeviceContext, RendererHwAccelDeviceContextCreateError,
+    RendererHwAccelDeviceContextInstallError,
+};
+pub use ffmpeg_command::{
+    media_helper_command, qualified_media_helper_path, FfmpegChild, FfmpegCommand,
+    SupervisedCommand,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
-pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command};
+pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command, FfmpegCommandError};
 pub use info::{
     interpret_video_color_metadata, is_picture_file_extension, parse_video_color_metadata_hint,
     probe_media_info, AudioStreamInfo, DetectedColorInterpretation, MediaInfo, MediaProbeSnapshot,
@@ -73,15 +104,20 @@ pub use media_probe_process::{
     IsolatedMediaProbeSnapshot, MEDIA_PROBE_WORKER_ARGUMENT,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
+pub use packet_identity::{
+    capture_video_packet_identity, capture_video_packet_identity_cancellable, VideoPacketIdentity,
+    VideoPacketIdentityError,
+};
 pub use preview::{
     clear_thread_local_preview_decode_session, decode_preview_frame_cancellable,
     preview_decode_backend, preview_decode_cpu_budget, run_preview_demux_worker,
-    DecodedRgbaAlphaMode, DecodedRgbaEncoding, DecodedRgbaFrameContract, FfmpegD3D11TextureView,
-    FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame, MediaFileChangeStamp,
-    MediaFileFingerprint, MediaFileObjectIdentity, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeBackend,
-    PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
+    CameraRawDecodeIntent, CpuYuvChromaPlaneLayout, CpuYuvChromaPlanes, CpuYuvChromaSubsampling,
+    CpuYuvFrame, CpuYuvPlane, CpuYuvSampleFormat, DecodedRgbaAlphaMode, DecodedRgbaEncoding,
+    DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegD3D12TextureView,
+    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
+    MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity, PreviewCompactCpuYuvHint,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence,
+    PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
     PreviewDecodeCancellationCheckpointEvidence, PreviewDecodeCancellationEvidence,
     PreviewDecodeCancellationSource, PreviewDecodeContractError, PreviewDecodeCpuBudget,
     PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath,
@@ -89,15 +125,17 @@ pub use preview::{
     PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodePayloadRequirement,
     PreviewDecodeRepresentation, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
-    PreviewDecodeSessionDisposition, PreviewDecodeSource, PreviewDecodeStageDurations,
+    PreviewDecodeSessionDisposition, PreviewDecodeSessionFamily,
+    PreviewDecodeSessionResidencyConfig, PreviewDecodeSource, PreviewDecodeStageDurations,
     PreviewDecodeTemporalSelection, PreviewDecodeThreadingKind, PreviewDecodeWorkerResources,
     PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
     PreviewIsolatedDemuxExecutionEvidence, PreviewNativeDecodeFallback, PreviewNativeDecodedFrame,
     PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint, PreviewRepresentationQuality,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics,
-    PreviewSeekIndexCachePolicy, PreviewSeekIndexSource, PreviewSourceColorContract,
+    PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint, PreviewPlaybackDirection,
+    PreviewRepresentationQuality, PreviewScrubAdaptiveClass, PreviewSeekIndexCache,
+    PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy, PreviewSeekIndexSource,
+    PreviewSourceColorContract, PreviewSourceFieldProcessing, PreviewSourceSampleIdentity,
     PreviewTemporalExtentSource, RgbaFrame,
 };
 #[cfg(target_os = "linux")]
@@ -105,9 +143,10 @@ pub use preview::{
     FfmpegDrmPrimeFrame, FfmpegDrmPrimeLayer, FfmpegDrmPrimeObject, FfmpegDrmPrimePlane,
 };
 pub use process_supervisor::{
-    run_supervised_command, run_supervised_command_while, SupervisedChild, SupervisedProcessError,
+    run_supervised_command, run_supervised_command_streaming_stdout, run_supervised_command_while,
+    SupervisedChild, SupervisedProcessCleanupReceipt, SupervisedProcessError,
     SupervisedProcessOutput, SupervisedProcessPolicy, SupervisedProcessStage,
-    SupervisedProcessStream, SupervisedStreamCapture,
+    SupervisedProcessStream, SupervisedProcessTerminationEvidence, SupervisedStreamCapture,
 };
 pub use proxy::{
     ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract,
@@ -116,6 +155,28 @@ pub use proxy::{
     ProxyPublicationFailureKind, ProxyPublicationPhase, ProxyResolution, ProxySourceFingerprint,
     ProxyStatus,
 };
+#[cfg(feature = "validation")]
+pub use qualified_ffmpeg::{
+    install_process_ffmpeg_toolchain, shutdown_process_ffmpeg_toolchain_until,
+    PreparedFfmpegToolchain, QualifiedFfmpegRuntimeFileExpectation,
+    QualifiedFfmpegRuntimeFileReceipt, QualifiedFfmpegShutdownReceipt,
+    QualifiedFfmpegToolExpectation, QualifiedFfmpegToolKind, QualifiedFfmpegToolReceipt,
+    QualifiedFfmpegToolchainError,
+};
+#[cfg(target_os = "linux")]
+pub use resident_encode::{
+    CudaResidentEncodeInputFrame, CudaResidentEncodeReadyFrame, CudaResidentEncodeSurfaceView,
+    CudaResidentHevcEncoderSession, CudaResidentHevcEncoderSessionDiagnostics,
+};
+pub use resident_encode::{
+    D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,
+    D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth,
+    ResidentEncodeChromaLocation, ResidentEncodeColorimetry, ResidentEncodeError,
+    ResidentHevcEncoderConfig,
+};
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,
 };
+
+#[cfg(target_os = "linux")]
+pub use preview::FfmpegCudaFrameView;

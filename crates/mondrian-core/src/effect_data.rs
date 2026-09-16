@@ -19,7 +19,12 @@ pub enum EffectType {
     WhiteBalance,
     Lut3D,
     ColorWheel,
+    HdrGrading,
+    AscCdl,
     Curves,
+    GamutCompression,
+    HighlightRecovery,
+    Qualifier,
     HueSaturationLightness,
     Crop,
     GaussianBlur,
@@ -39,7 +44,12 @@ impl EffectType {
             Self::WhiteBalance => "builtin.white_balance".to_string(),
             Self::Lut3D => "builtin.lut_3d".to_string(),
             Self::ColorWheel => "builtin.color_wheel".to_string(),
+            Self::HdrGrading => "builtin.hdr_grading".to_string(),
+            Self::AscCdl => "builtin.asc_cdl".to_string(),
             Self::Curves => "builtin.curves".to_string(),
+            Self::GamutCompression => "builtin.gamut_compression".to_string(),
+            Self::HighlightRecovery => "builtin.highlight_recovery".to_string(),
+            Self::Qualifier => "builtin.qualifier".to_string(),
             Self::HueSaturationLightness => "builtin.hue_saturation_lightness".to_string(),
             Self::Crop => "builtin.crop".to_string(),
             Self::GaussianBlur => "builtin.gaussian_blur".to_string(),
@@ -59,7 +69,12 @@ impl EffectType {
             "builtin.white_balance" => Self::WhiteBalance,
             "builtin.lut_3d" => Self::Lut3D,
             "builtin.color_wheel" => Self::ColorWheel,
+            "builtin.hdr_grading" => Self::HdrGrading,
+            "builtin.asc_cdl" => Self::AscCdl,
             "builtin.curves" => Self::Curves,
+            "builtin.gamut_compression" => Self::GamutCompression,
+            "builtin.highlight_recovery" => Self::HighlightRecovery,
+            "builtin.qualifier" => Self::Qualifier,
             "builtin.hue_saturation_lightness" => Self::HueSaturationLightness,
             "builtin.crop" => Self::Crop,
             "builtin.gaussian_blur" => Self::GaussianBlur,
@@ -78,8 +93,13 @@ impl EffectType {
             Self::BasicCorrection => "基础调色",
             Self::WhiteBalance => "白平衡",
             Self::Lut3D => "3D LUT",
-            Self::ColorWheel => "色轮",
+            Self::ColorWheel => "Primaries",
+            Self::HdrGrading => "HDR Grading",
+            Self::AscCdl => "ASC CDL",
             Self::Curves => "曲线",
+            Self::GamutCompression => "色域压缩",
+            Self::HighlightRecovery => "高光恢复",
+            Self::Qualifier => "Qualifier",
             Self::HueSaturationLightness => "色相/饱和度/亮度",
             Self::Crop => "裁切",
             Self::GaussianBlur => "高斯模糊",
@@ -99,12 +119,16 @@ impl EffectType {
             | Self::WhiteBalance
             | Self::Lut3D
             | Self::ColorWheel
+            | Self::HdrGrading
+            | Self::AscCdl
             | Self::Curves
+            | Self::GamutCompression
+            | Self::HighlightRecovery
             | Self::HueSaturationLightness => vec!["颜色", "调色"],
             Self::Crop => vec!["变换"],
             Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
-            Self::ChromaKey | Self::LumaKey => vec!["抠像"],
+            Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
             Self::Plugin(_) => vec!["插件"],
         }
     }
@@ -115,7 +139,12 @@ impl EffectType {
             Self::WhiteBalance => "white_balance".to_string(),
             Self::Lut3D => "lut_3d".to_string(),
             Self::ColorWheel => "color_wheel".to_string(),
+            Self::HdrGrading => "hdr_grading".to_string(),
+            Self::AscCdl => "asc_cdl".to_string(),
             Self::Curves => "curves".to_string(),
+            Self::GamutCompression => "gamut_compression".to_string(),
+            Self::HighlightRecovery => "highlight_recovery".to_string(),
+            Self::Qualifier => "qualifier".to_string(),
             Self::HueSaturationLightness => "hue_saturation_lightness".to_string(),
             Self::Crop => "crop".to_string(),
             Self::GaussianBlur => "gaussian_blur".to_string(),
@@ -222,17 +251,60 @@ impl EffectNode {
             .unwrap_or(fallback)
     }
 
+    /// Evaluate one three-component parameter by stable schema identity.
+    pub fn evaluate_vec3_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+        fallback: glam::Vec3,
+    ) -> glam::Vec3 {
+        self.evaluate_parameter(parameter_id, time)
+            .and_then(|value| value.as_vec3())
+            .unwrap_or(fallback)
+    }
+
+    /// Evaluate one structured normalized curve by stable schema identity.
+    pub fn evaluate_curve_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<crate::automation::NormalizedCurve> {
+        self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
+            PropertyValue::Curve(curve) => Some(curve),
+            _ => None,
+        })
+    }
+
+    /// Evaluate a structured three-dimensional qualifier sample set by stable schema identity.
+    pub fn evaluate_qualifier_samples_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<crate::automation::QualifierSampleSet> {
+        self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
+            PropertyValue::QualifierSamples(samples) => Some(samples),
+            _ => None,
+        })
+    }
+
     /// Namespace all property paths with an effect instance prefix.
+    ///
+    /// Definition-owned Inspector groups are preserved. `fallback_group_name`
+    /// is assigned only to older properties that do not define a group.
     /// Called when an effect is placed on a clip to avoid path collisions.
     ///
     /// Not idempotent: calling twice double-prefixes property paths.
     /// Callers must ensure this is called exactly once per clip placement.
-    pub fn instantiate_for_clip(&mut self, group_name: String) {
+    pub fn instantiate_for_clip(&mut self, fallback_group_name: String) {
         let mut namespaced = PropertyBag::default();
         for (_, property) in self.properties.iter() {
             let mut property = property.clone();
             property.descriptor.path = namespaced_effect_path(self.id, &property.descriptor.path);
-            property.descriptor.ui_metadata.group_name = Some(group_name.clone());
+            property
+                .descriptor
+                .ui_metadata
+                .group_name
+                .get_or_insert_with(|| fallback_group_name.clone());
             namespaced.upsert(property);
         }
         self.properties = namespaced;
@@ -352,7 +424,12 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::WhiteBalance
             | Self::Lut3D
             | Self::ColorWheel
+            | Self::HdrGrading
+            | Self::AscCdl
             | Self::Curves
+            | Self::GamutCompression
+            | Self::HighlightRecovery
+            | Self::Qualifier
             | Self::HueSaturationLightness
             | Self::Crop
             | Self::GaussianBlur
@@ -441,5 +518,32 @@ mod tests {
 
         assert_eq!(reopened, effect);
         assert_eq!(reopened.effect_type.key(), "builtin.crop");
+    }
+
+    #[test]
+    fn clip_instantiation_preserves_definition_owned_property_groups() {
+        let mut effect = EffectNode::new(EffectType::HdrGrading);
+        let mut grouped = PropertyDescriptor::new(
+            EffectType::HdrGrading.property_path("global_exposure"),
+            "Exposure",
+            PropertyValue::Float(0.0),
+        );
+        grouped.ui_metadata.group_name = Some("HDR · Global".to_owned());
+        effect.define_property(grouped);
+        effect.define_property(PropertyDescriptor::new(
+            EffectType::HdrGrading.property_path("legacy"),
+            "Legacy",
+            PropertyValue::Float(0.0),
+        ));
+
+        effect.instantiate_for_clip("HDR Grading".to_owned());
+
+        let groups = effect
+            .properties
+            .iter()
+            .map(|(_, property)| property.descriptor.ui_metadata.group_name.as_deref())
+            .collect::<Vec<_>>();
+        assert!(groups.contains(&Some("HDR · Global")));
+        assert!(groups.contains(&Some("HDR Grading")));
     }
 }

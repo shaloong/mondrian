@@ -153,6 +153,8 @@ pub enum PreparedVisualExecutionTemporalSourceKindTrace {
         source_sample: mondrian_core::SourceSampleTarget,
         /// Explicit authored input override.
         color_space_override: Option<ColorSpace>,
+        /// Placement-local picture interpretation overrides.
+        picture_overrides: mondrian_core::PictureInterpretationOverrides,
         /// Explicit alpha interpretation.
         alpha_interpretation: AlphaInterpretation,
         /// Sequence input tone-map policy.
@@ -254,12 +256,14 @@ fn trace_temporal_batch<T>(
                     asset_id,
                     source_sample,
                     color_space_override,
+                    picture_overrides,
                     alpha_interpretation,
                     auto_tone_map,
                 } => PreparedVisualExecutionTemporalSourceKindTrace::Media {
                     asset_id: *asset_id,
                     source_sample: *source_sample,
                     color_space_override: *color_space_override,
+                    picture_overrides: *picture_overrides,
                     alpha_interpretation: *alpha_interpretation,
                     auto_tone_map: *auto_tone_map,
                 },

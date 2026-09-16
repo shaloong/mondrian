@@ -1,8 +1,9 @@
 //! Monitor ICC calibration LUT generation and CPU reference sampling.
 
+use crate::color_models::IccRenderingIntent;
 use crate::types::ColorSpace;
 use moxcms::{
-    CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients,
+    CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients, RenderingIntent,
     TransferCharacteristics, TransformOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -151,10 +152,24 @@ impl DisplayCalibrationLut3d {
         source_color_space: ColorSpace,
         icc_bytes: &[u8],
     ) -> Result<Self, DisplayCalibrationError> {
-        Self::from_icc_bytes_with_edge(
+        Self::from_icc_bytes_with_intent(
+            source_color_space,
+            icc_bytes,
+            IccRenderingIntent::Perceptual,
+        )
+    }
+
+    /// Build a default-size calibration LUT with an explicit ICC rendering intent.
+    pub fn from_icc_bytes_with_intent(
+        source_color_space: ColorSpace,
+        icc_bytes: &[u8],
+        rendering_intent: IccRenderingIntent,
+    ) -> Result<Self, DisplayCalibrationError> {
+        Self::from_icc_bytes_with_edge_and_intent(
             source_color_space,
             icc_bytes,
             DEFAULT_DISPLAY_CALIBRATION_LUT_EDGE,
+            rendering_intent,
         )
     }
 
@@ -164,6 +179,21 @@ impl DisplayCalibrationLut3d {
         icc_bytes: &[u8],
         edge_size: u16,
     ) -> Result<Self, DisplayCalibrationError> {
+        Self::from_icc_bytes_with_edge_and_intent(
+            source_color_space,
+            icc_bytes,
+            edge_size,
+            IccRenderingIntent::Perceptual,
+        )
+    }
+
+    /// Build a calibration LUT with explicit edge size and rendering intent.
+    pub fn from_icc_bytes_with_edge_and_intent(
+        source_color_space: ColorSpace,
+        icc_bytes: &[u8],
+        edge_size: u16,
+        rendering_intent: IccRenderingIntent,
+    ) -> Result<Self, DisplayCalibrationError> {
         let destination = ColorProfile::new_from_slice(icc_bytes)
             .map_err(|error| DisplayCalibrationError::InvalidIccProfile(error.to_string()))?;
         Self::from_profiles(
@@ -171,6 +201,7 @@ impl DisplayCalibrationLut3d {
             IccProfileFingerprint::from_bytes(icc_bytes),
             edge_size,
             &destination,
+            rendering_intent,
         )
     }
 
@@ -179,18 +210,23 @@ impl DisplayCalibrationLut3d {
         profile_fingerprint: IccProfileFingerprint,
         edge_size: u16,
         destination: &ColorProfile,
+        rendering_intent: IccRenderingIntent,
     ) -> Result<Self, DisplayCalibrationError> {
         validate_edge_size(edge_size)?;
         let source = cms_profile_for_color_space(source_color_space).ok_or(
             DisplayCalibrationError::UnsupportedSourceColorSpace(source_color_space),
         )?;
+        let transform_options = TransformOptions {
+            rendering_intent: match rendering_intent {
+                IccRenderingIntent::Perceptual => RenderingIntent::Perceptual,
+                IccRenderingIntent::RelativeColorimetric => RenderingIntent::RelativeColorimetric,
+                IccRenderingIntent::Saturation => RenderingIntent::Saturation,
+                IccRenderingIntent::AbsoluteColorimetric => RenderingIntent::AbsoluteColorimetric,
+            },
+            ..TransformOptions::default()
+        };
         let transform = source
-            .create_transform_f32(
-                Layout::Rgb,
-                destination,
-                Layout::Rgb,
-                TransformOptions::default(),
-            )
+            .create_transform_f32(Layout::Rgb, destination, Layout::Rgb, transform_options)
             .map_err(|error| DisplayCalibrationError::CreateTransform(error.to_string()))?;
 
         let edge = usize::from(edge_size);
@@ -541,6 +577,7 @@ mod tests {
             IccProfileFingerprint::from_bytes(b"synthetic-srgb"),
             33,
             &destination,
+            IccRenderingIntent::Perceptual,
         )
         .expect("sRGB calibration LUT");
         let direct = cms_profile_for_color_space(ColorSpace::Srgb)

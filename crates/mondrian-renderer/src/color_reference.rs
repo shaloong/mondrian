@@ -12,6 +12,22 @@ use thiserror::Error;
 
 const COLOR_REFERENCE_SCHEMA_VERSION: u32 = 1;
 
+/// Resource limits applied before an untrusted reference payload is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorReferenceImportLimits {
+    /// Largest encoded payload accepted by the decoder.
+    pub max_encoded_bytes: usize,
+    /// Largest declared raster accepted by the decoder.
+    pub max_pixels: usize,
+}
+
+impl ColorReferenceImportLimits {
+    /// Construct explicit encoded-byte and decoded-pixel limits.
+    pub const fn new(max_encoded_bytes: usize, max_pixels: usize) -> Self {
+        Self { max_encoded_bytes, max_pixels }
+    }
+}
+
 /// Provenance class for a color reference frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +248,22 @@ pub enum ColorReferenceValidationError {
         /// Frame height.
         height: u32,
     },
+    /// The encoded payload exceeded the caller's admission limit.
+    #[error("color reference payload has {actual} bytes, exceeding limit {maximum}")]
+    EncodedPayloadTooLarge {
+        /// Observed encoded byte count.
+        actual: usize,
+        /// Largest accepted encoded byte count.
+        maximum: usize,
+    },
+    /// The declared raster exceeded the caller's admission limit.
+    #[error("color reference raster has {actual} pixels, exceeding limit {maximum}")]
+    PixelLimitExceeded {
+        /// Declared pixel count.
+        actual: usize,
+        /// Largest accepted pixel count.
+        maximum: usize,
+    },
     /// HDR luminance metadata was missing or contradictory.
     #[error(
         "invalid color reference luminance contract: reference_white_nits={reference_white_nits:?}, nominal_peak_nits={nominal_peak_nits:?}"
@@ -314,7 +346,37 @@ pub fn import_external_color_reference(
     encoded: &[u8],
     decoder: &dyn ColorReferenceDecoder,
 ) -> Result<ColorReferenceFrame, ColorReferenceValidationError> {
+    import_external_color_reference_with_limits(
+        descriptor,
+        encoded,
+        decoder,
+        ColorReferenceImportLimits::new(usize::MAX, usize::MAX),
+    )
+}
+
+/// Import a reference frame while bounding encoded and decoded resource demand.
+///
+/// Admission occurs before hashing or invoking the decoder, which keeps an
+/// untrusted qualification corpus from allocating an unbounded raster.
+pub fn import_external_color_reference_with_limits(
+    descriptor: ColorReferenceDescriptor,
+    encoded: &[u8],
+    decoder: &dyn ColorReferenceDecoder,
+    limits: ColorReferenceImportLimits,
+) -> Result<ColorReferenceFrame, ColorReferenceValidationError> {
     let expected_pixel_count = descriptor.validate()?;
+    if encoded.len() > limits.max_encoded_bytes {
+        return Err(ColorReferenceValidationError::EncodedPayloadTooLarge {
+            actual: encoded.len(),
+            maximum: limits.max_encoded_bytes,
+        });
+    }
+    if expected_pixel_count > limits.max_pixels {
+        return Err(ColorReferenceValidationError::PixelLimitExceeded {
+            actual: expected_pixel_count,
+            maximum: limits.max_pixels,
+        });
+    }
     let actual_sha256 = sha256_hex(encoded);
     if actual_sha256 != descriptor.content_sha256 {
         return Err(ColorReferenceValidationError::ContentHashMismatch {

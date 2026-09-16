@@ -10,6 +10,15 @@ binding under another delivery label.
 `mondrian-editor-state::AuthoringSession` owns project transactions and bounded
 Undo/Redo; the Timeline crate has no second mutable document or command history.
 
+Foreign editorial formats never deserialize directly into this author model.
+`mondrian-interchange` first inspects a bounded native artifact through a
+profile Adapter, lowers it into one private exact representation, requires
+product-owned strong Asset bindings, and only then materializes a detached
+candidate. The App appends that candidate through one Project author
+transaction. Export projects an immutable canonical Sequence in the opposite
+direction and attaches explicit preservation/loss evidence. See
+[Timeline Interchange](timeline-interchange.md).
+
 Persisted positions, ranges, automation keys, and temporal handles use canonical
 exact rational `TimelineTime`. `FramePosition` is an evaluation/display adapter,
 not an author coordinate, and the former `TimeTicks = frame * 1000` path has
@@ -17,6 +26,13 @@ been deleted. Sequence frame rate remains a
 video evaluation/snap grid and display-timecode input, not the universal storage
 time base; audio edits may therefore retain sample-accurate boundaries without
 creating a second Timeline model.
+
+`MediaInterpretation::editorial_source` retains optional reel identity, exact
+source SMPTE reference, and foreign item identity for conform and round trip.
+These are source-interpretation facts, not Asset identity, placement authority,
+or a replacement for canonical `TimelineTime`. The Core display-timecode
+contract owns the exact inverse label parser used at interchange seams,
+including drop-frame legality and negative-label handling.
 
 The semantic Move/Trim/Seek inputs receive a complete `FramePosition` from an
 input Adapter, and its `time_base` is never discarded.
@@ -39,6 +55,7 @@ A `Sequence` contains:
 - `settings`
 - ordered video and audio tracks
 - Sequence-owned explicit video Transitions
+- Sequence-owned Grade Definitions, Grade Groups, and one optional Timeline Grade reference
 - playhead
 - optional exact in/out range
 - a Sequence-owned `AudioProgram`
@@ -47,6 +64,51 @@ Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates
 resolution, frame rate, audio sample rate/layout, preview settings, and
 color-management constraints. Audio layout is the sole persisted channel
 authority; no parallel channel-count field can diverge from it.
+
+### Grade Hierarchy
+
+Creative grading uses one Sequence-owned catalog of `GradeDefinition` values.
+Clips retain optional `GradeDefinitionId` and `GradeGroupId` references; each
+`GradeGroup` retains optional pre-Clip and post-Clip Definition references; the
+Sequence retains one optional full-composite Timeline Grade reference. Reusing
+one Definition identity from several scopes is Shared Grade and never copies
+author state.
+
+Every Definition owns one to 128 named `GradeVersion` values and one active
+Version identity. A Version owns a Core `GradeGraph` bounded to 256 nodes and
+32 inputs per Parallel node. Graph validation requires exactly one Input, one
+selected Output, closed references, acyclicity, complete output reachability,
+finite blend opacity, and unique node/Effect identities inside the graph.
+Sequence validation additionally prevents node or Effect identity aliasing
+across Versions. Creating a Version copies the current graph once and forks
+node, Effect, and automation identities while preserving topology; switching
+active Version is an identity change and performs no graph copy. Sequence
+duplication independently rekeys the complete catalog and hierarchy while
+preserving its internal sharing.
+
+The semantic order is fixed and author-independent:
+
+```text
+Group Pre -> Clip Effects/Masks -> Clip Grade -> Group Post
+          -> Track Composite -> Timeline Grade
+```
+
+Clip-scope assignment and group attachment are placement edits: the Clip must
+exist on an unlocked video Track. Group/Timeline assignment and Definition
+content edits are Sequence-level operations and do not inherit one referencing
+Clip's Track lock. Every App mutation still commits through one Authoring
+Transaction, advances Sequence revision/generation once, and participates in
+bounded Undo/Redo.
+
+Sequence Program Output admits progressive scan plus the closed interlaced
+qualification rows 1920x1080 at 25 or 30000/1001 encoded pictures per second,
+TFF only. BFF, UHD interlace, and unqualified cadences fail before author commit.
+Clip-local media interpretation may explicitly bind progressive, TFF, or BFF;
+the Media Field Processing Module owns physical execution and rejects unknown,
+mixed, or contradictory decoded evidence. Explicit unknown PAR remains invalid.
+Source SAR, scan processing, and orientation are evaluated before the authored
+Clip transform; Sequence PAR never mutates a Clip's X/Y, anchor, scale, or Auto
+Fit values.
 
 ### Structurally Shared Author Collections
 
@@ -262,7 +324,7 @@ Sequence commands retain typed before/after `AuthoringSnapshot<Sequence>`
 endpoints; structural Project commands retain typed
 `AuthoringSnapshot<ProjectRestorePoint>` endpoints. A Project restore point
 contains Project identity and Project-owned authored fields, canonical Sequence
-order/default and the structural active fallback, plus exact body-or-absence
+order/default, the structurally shared Project Gallery, and the structural active fallback, plus exact body-or-absence
 state only for affected Sequence identities. It deliberately excludes
 `document_revision` and `ProjectMeta.updated_at`; JSON serialization is neither
 the endpoint representation nor the restoration path.
@@ -397,6 +459,14 @@ external input and output `ColorSpace` values. Root color contexts carry a
 display-referred output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
 boundary.
+`ProgramColorContext` exposes read-only queries, not authorable fields. Its
+closed output representation distinguishes `Encoded` from `Working`, and only
+`root_program_color_context`, `nested_render_color_context`,
+`for_export_output`, and `for_rendering_view_output` may create or derive one.
+Every constructor validates the selected engine/working pair and output intent.
+Rendering-View presence is the authority for the reported tone-map state, so
+invalid View-without-tone-map and tone-map-without-View combinations cannot
+exist between validation and execution.
 Sequence validation rejects scene-linear and scene-Log source identities as
 presentation outputs even if a project file is authored outside the UI; the
 sequence output must be one of the display-referred SDR/HDR identities. This
@@ -447,6 +517,12 @@ decode/cache key. Local monitor adaptation is resolved after Program Output and
 does not create another Sequence context. Export either follows the Program
 context or resolves an explicit `ExportColorTarget`; it never mutates the
 Sequence to obtain a different deliverable.
+Nested construction consumes the already validated parent context rather than
+separate caller-supplied engine/output fields. Preserve-child mode validates the
+child working space against that exact engine; force-parent mode inherits the
+parent working/workflow semantics. Both produce only a colorimetric
+parent-working-space endpoint, so recursive evaluation cannot turn an internal
+frame into a Program or delivery boundary.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
 the fully pinned `MondrianStandard { package }` product intent. ACES carries its
@@ -574,11 +650,20 @@ Bus and Route collections are likewise not public mutation surfaces.
 `AudioRoutingEditRequest` is the sole authoring Interface for Bus lifecycle,
 typed Route endpoints, enabled state, static send level, and stable
 Route identity. Principal paths and parallel sends are the same `AudioRoute`
-type. Bus deletion names its strong-reference disposition explicitly; a
+type. Processor sidechains remain a distinct
+`AudioProcessorSidechainRoute`: the source is the same stable Track/Bus port,
+but the destination is one strong Processor Instance identity plus a bounded
+definition-owned auxiliary bus key, never a main summing endpoint. The Routing
+Interface creates, rewires, enables, gains, and removes these edges; their
+Sequence-time gain curves use the same `AudioAutomationTarget::RouteGain`
+authority. Bus deletion names its strong-reference disposition explicitly; a
 disconnecting delete removes the Bus and every incident Route in one candidate,
 while reject-if-connected preserves all state. Track locks protect every Route
 sourced from that Track, including a Route removed indirectly by Bus deletion.
-Full candidate validation remains the authority for cross-Bus cycle detection.
+Sidechain targets are strong references, and Sequence duplication rekeys both
+their Route and Processor identities. Full candidate validation remains the
+authority for instantaneous cycles across main and sidechain dependencies,
+including disabled edges.
 For bulk product menus, `inspect_audio_route_candidates` validates existing
 addresses once and returns a snapshot-local reachability inspection. It applies
 Track locks and treats enabled and disabled Routes as structural edges, so
@@ -622,6 +707,16 @@ owns one placement range, one closed `ClipSourceTimeMap`, a stable
 `clip_time_in`, transform, visual effects, masks, optional link-group
 membership, blend mode, and placement-local audio Component Edits. Its content
 is one closed `ClipContent` payload:
+
+Picture transforms use one explicit authoring-space contract:
+`T(position) * R(rotation) * S(scale) * T(-anchor)`. Anchor is measured in
+full source-authoring pixels; position is the canvas-pixel coordinate where
+that anchor is placed; scale is independent and unitless on X and Y. Decode
+quality, proxy extent, Viewer zoom, and Preview output extent never mutate
+these values. Product auto-fit sets anchor to source center, position to canvas
+center, and one uniform `min(canvas/source)` scale. Equal source and canvas
+extents therefore produce 100% scale and the identity matrix, filling the
+canvas exactly.
 
 Visual-effect insertion accepts a complete `EffectNode`, not only an
 `EffectType`. The effects domain owns registered definitions and canonical
@@ -746,6 +841,12 @@ the ordinary exact automation model in Clip-local visual time; discrete text,
 font, and alignment values remain static until the product defines an explicit
 discrete-edit workflow. Unknown, missing, removed, type-divergent, or
 out-of-contract properties are rejected before an author snapshot commits.
+
+New Linux Basic Titles explicitly author `Noto Sans CJK SC`, which covers the
+default Chinese title text. This is a concrete font dependency, not permission
+to substitute fonts: a missing family or undeclared glyph fallback still fails
+closed in the shared Preview/Export rasterizer. Existing projects retain their
+authored font family.
 
 The Sequence `title_safe_margin` is a total width/height fraction: `0.20`
 means 10% per edge. Both action/title safe margins must be finite and in
@@ -1322,6 +1423,15 @@ and complete shape writes do not expose vector indexes or parse UUIDs from
 property strings. A locked Mask still permits execution enable/disable and
 unlocking, but rejects parameter, geometry, order, and removal edits.
 
+Completed motion analysis enters this same Interface through
+`Clip::apply_mask_tracking_result`. Timeline rechecks Track/Mask lock, validates
+the complete recipe and ordered generated range on a detached candidate, then
+atomically replaces that range. An existing exact-time shape key retains its
+`KeyframeId`; failure leaves every key and the prior recipe untouched. Manual
+shape writes or disabling shape animation clear tracking provenance. Clip copy,
+split and fragmentation fork `TrackingId` together with Mask and generated-key
+identities so two author objects never share one analysis lineage.
+
 Every structural Timeline command ends by compacting the three dependent
 author graphs as one invariant-restoration step: Clip link groups, visual
 Transition strong references, and the Sequence audio program. The resulting
@@ -1346,3 +1456,40 @@ Preview and Export consume that closure. Their Modules retain media adaptation,
 pixel materialization/compositing, and consumer-specific scheduling, but may
 only resolve the closure's typed child bindings; they cannot own another nested
 Timeline walker or reinterpret recursion.
+
+`PreparedVisualSchedule::source_identity(...)` is the sole range-level author
+proof used by Smart Render. Behind that small Interface it checks the complete
+half-open interval against visible/unmuted Track activity, enabled Clip and
+Transition intervals, effective Blend state, static Track/Clip Opacity and
+Transform, source-time scale, placement interpretation, and enabled
+Effect/Mask state. It returns only one Asset plus one exact 1x source range.
+Gaps, overlaps, generated/nested content, Transition endpoints, animation,
+retime, or processing produce no candidate. Export therefore consumes a deep
+prepared-Timeline fact instead of rescanning Tracks and Clips or maintaining a
+second list of passthrough rules.
+
+## Dynamic HDR Program Module
+
+`Sequence::dynamic_hdr` is the only authoring authority for final-Program
+dynamic metadata. It is independent of `SequenceSettings`, Tracks, and Clips:
+metadata describes the composited Program Output after group/clip/timeline
+grading, transitions, nesting, and effects. The closed author state contains an
+explicit delivery intent plus at most 8 analyzed Programs, each with at most
+4,096 exact frame-grid-aligned, contiguous shots. ST 2094-40 Application #4 and
+Dolby Vision use distinct payload models; a generic key/value metadata bag is
+not accepted.
+
+Each Program binds Adapter identity/version/schema, the complete Prepared
+Visual author fingerprint analyzed, and the canonical metadata SHA-256. Any
+picture edit makes projection stale. `Remake` is a strong Program reference;
+removing its target fails atomically. Range projection intersects and rebases
+exact half-open shot ranges, and Sequence duplication rekeys Program and Shot
+IDs while retaining analysis provenance. Product edits enter the normal
+Authoring Session, validate the detached complete state, advance one revision,
+and produce one Undo receipt. Machine-local executable paths, licenses, adopter
+status, and entitlement secrets are never persisted in Timeline author state.
+
+Direct Asset placement treats a coherent still-image picture as timeless: it
+requires an admitted primary picture and valid geometry, not nonzero probed
+media duration. The existing Timeline still-clip duration remains authoritative.
+Timed Video and Audio Assets continue to require a positive media duration.

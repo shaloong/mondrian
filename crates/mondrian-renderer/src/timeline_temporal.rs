@@ -53,6 +53,8 @@ pub enum TimelineTemporalSource {
         /// Explicit alpha interpretation that must be normalized before the
         /// tile enters the frozen set.
         alpha_interpretation: AlphaInterpretation,
+        /// Placement-local scan and sample-geometry interpretation.
+        picture_overrides: mondrian_core::PictureInterpretationOverrides,
         /// Sequence input policy for automatic tone mapping.
         auto_tone_map: bool,
     },
@@ -265,6 +267,9 @@ pub enum TimelineTemporalPreparationError {
         /// Adjustment Clip.
         clip_id: mondrian_core::ClipId,
     },
+    /// Timeline Grade also consumes the accumulated lower Timeline stack.
+    #[error("Timeline Grade temporal stack-input execution is not yet admitted")]
+    TimelineGradeUnsupported,
     /// The canonical no-op graph was unavailable while lowering prepared
     /// temporal output into ordinary compositing.
     #[error("the canonical identity Effect graph is unavailable")]
@@ -468,6 +473,11 @@ fn collect_timeline_temporal_demands_inner(
                     });
                 }
             }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                if graph_requires_temporal(&grade.effect_graph) {
+                    return Err(TimelineTemporalPreparationError::TimelineGradeUnsupported);
+                }
+            }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 for input in [&transition.left, &transition.right] {
                     match input {
@@ -584,6 +594,10 @@ fn collect_media_batch(
                 source_sample,
                 color_space_override: media.color_space_override,
                 alpha_interpretation: media.alpha_interpretation,
+                picture_overrides: mondrian_core::PictureInterpretationOverrides {
+                    pixel_aspect_ratio: media.pixel_aspect_ratio_override,
+                    field_order: media.field_order_override,
+                },
                 auto_tone_map: media.auto_tone_map,
             })
         },
@@ -804,6 +818,7 @@ fn replace_effect_graph(
             }
             TimelineRenderPlanElement::Media(_)
             | TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_)
             | TimelineRenderPlanElement::NestedSequence(_) => {}

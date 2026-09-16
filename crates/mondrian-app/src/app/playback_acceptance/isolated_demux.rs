@@ -25,7 +25,14 @@ pub(super) struct PreviewIsolatedDemuxGateEvidence {
 impl PreviewIsolatedDemuxGateEvidence {
     fn from_workers(workers: PreviewDecodeWorkerExecutionDiagnostics) -> Self {
         let mut aggregate = Self::default();
-        for progress in [workers.any, workers.playback, workers.non_playback].into_iter().flatten()
+        for progress in [
+            workers.any,
+            workers.playback,
+            workers.non_playback,
+            workers.still,
+        ]
+        .into_iter()
+        .flatten()
         {
             aggregate.accumulate(progress.isolated_demux);
         }

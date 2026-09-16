@@ -9,8 +9,9 @@ use mondrian_editor_state::Action;
 
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
-    APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
+    APP_SHELL_GALLERY_CAPTURE_CURRENT, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SEQUENCE_SETTINGS,
 };
 use crate::app::AppState;
 use mondrian_core::types::ClipId;
@@ -67,6 +68,9 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::MarkInAtPlayhead
         | Action::MarkOutAtPlayhead
         | Action::TogglePlay
+        | Action::ShuttleReverse
+        | Action::ShuttleStop
+        | Action::ShuttleForward
         | Action::StepForward
         | Action::StepBack
         | Action::GoToStart
@@ -85,6 +89,11 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
+        {
+            state.has_open_project()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_GALLERY_CAPTURE_CURRENT =>
         {
             state.has_open_project()
         }
@@ -251,8 +260,8 @@ mod tests {
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
     }
     use crate::app::ui_actions::{
-        app_shell_project_settings_action, assets_delete_selection_action,
-        assets_import_files_action, assets_move_selection_action,
+        app_shell_gallery_capture_current_action, app_shell_project_settings_action,
+        assets_delete_selection_action, assets_import_files_action, assets_move_selection_action,
         clip_write_parameter_values_action, export_cancel_action,
         export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
         project_create_with_settings_action, sequence_new_action, sequence_switch_active_action,
@@ -303,6 +312,16 @@ mod tests {
         state.test_set_sequence(Some(Sequence::new("Edit")));
         assert!(app_state_action_enabled(&action, &state));
         state.test_set_project_path(std::path::PathBuf::from("project.mdp"));
+        assert!(app_state_action_enabled(&action, &state));
+    }
+
+    #[test]
+    fn gallery_capture_requires_an_open_authoring_session() {
+        let action = app_shell_gallery_capture_current_action();
+        let mut state = AppState::new();
+
+        assert!(!app_state_action_enabled(&action, &state));
+        state.test_set_sequence(Some(Sequence::new("Edit")));
         assert!(app_state_action_enabled(&action, &state));
     }
 
@@ -650,6 +669,9 @@ mod tests {
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: std::path::PathBuf::from("delivery.mp4"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             }),
             &state,
         ));

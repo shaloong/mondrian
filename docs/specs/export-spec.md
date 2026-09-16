@@ -148,11 +148,37 @@ free-form strings. A ProRes profile, H.264/HEVC profile, bit depth, or chroma
 combination that has no verified lowering is unrepresentable or rejected; it
 does not fall back to another profile.
 
+The professional mezzanine catalog adds four stable built-ins and a larger
+typed codec menu:
+
+- `dnxhr-hqx`: MOV, DNxHR HQX, 10-bit 4:2:2 Legal, PCM24;
+- `avc-intra-100`: video-only MXF, AVC-Intra Class 100, 1920x1080 square-pixel
+  progressive 25 fps, 10-bit 4:2:2 Legal;
+- `uncompressed-v210`: MOV, v210 10-bit 4:2:2 Legal, PCM24;
+- `uncompressed-r210`: MOV, r210 10-bit RGB Full, PCM24.
+
+The editable catalog also contains DNxHR LB/SQ/HQ/HQX/444, AVC-Intra Class
+100/200, and 2vuy/v210/raw RGB/r210. DNxHR supports qualified MOV and MXF;
+AVC-Intra supports MOV and video-only MXF but is restricted to 1920x1080,
+square pixels, progressive scan, and 23.976/24/25/29.97/30 fps; uncompressed
+essence is MOV-only. All are software-only, Intra-only, and Flatten-Alpha
+contracts. Finished-output QC checks exact container, codec/profile, AVC level,
+stable MOV codec tag, pixel format, bit depth, cadence, SAR, color fields, and a
+decoded progressive first frame before publication. Every profile/container
+row has a real encode/re-probe test and the media probe must reimport DNxHR and
+raw essence identities correctly.
+
+XAVC is not a supported alias. The current FFmpeg MXF Adapter's ability to mux
+generic H.264 does not prove Sony XAVC UL/metadata or conformance. AVC-Intra
+Class 50 is also absent until Export can own its anamorphic storage raster and
+sample-aspect-ratio override. These fail closed rather than degrading to an
+all-I H.264 file with a branded label.
+
 Single-pass CRF quality may optionally add a complete VBV pair
 (`max_bitrate_kbps` and `buffer_size_kbits`). Supplying only one is invalid.
 The encoder receives `-maxrate/-bufsize`; Mondrian does not mix CRF with an
-ambiguous average `-b:v` request. GOP structure, two-pass encoding, additional
-professional profiles, and other advanced controls must be added as typed
+ambiguous average `-b:v` request. Two-pass encoding, additional professional
+profiles, and other advanced controls must be added as typed
 contracts with argument and roundtrip evidence before a UI can expose them.
 
 Subsampled raster constraints are checked at admission: 4:2:0 requires even

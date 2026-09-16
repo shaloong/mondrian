@@ -116,6 +116,47 @@
       ]
     },
     {
+      "id": "generated-performance-4k60-hevc-main10-rec709-v1",
+      "path": "large/performance-4k60-hevc-main10-rec709-12s-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-realtime-performance-media.ps1",
+        "recipe_sha256": "50feb61dfbfd5c9def405b92daf1af34022798fe01d3ca0be6e960647b0fcc84",
+        "profile": "Realtime4k60",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 4K60 code-pattern recipe; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "hevc-main10",
+        "width": 3840,
+        "height": 2160,
+        "frame_rate": "60/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 10,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 11.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "realtime-performance-4k60",
+        "4k60-playback",
+        "10-bit-decode",
+        "multilayer-playback"
+      ]
+    },
+    {
       "id": "generated-golden-rec709-h264-25fps-v1",
       "path": "large/golden-rec709-h264-25fps-v1.mp4",
       "availability": "generated",

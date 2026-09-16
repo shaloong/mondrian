@@ -19,7 +19,9 @@ use crate::types::{
     AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
     WorkingColorSpace,
 };
-use crate::{BasicTitle, Result, SequenceRevision, SourceSampleTarget, TimelineTime};
+use crate::{
+    BasicTitle, Result, SequenceRevision, SmpteTimecodeReference, SourceSampleTarget, TimelineTime,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -156,6 +158,9 @@ pub struct AssetMediaInterpretation {
     /// Payload kind that decides whether color management applies at all.
     #[serde(default)]
     pub payload: AssetColorPayload,
+    /// Camera RAW controls used only when the media probe admits a RAW Adapter.
+    #[serde(default)]
+    pub camera_raw: crate::CameraRawInterpretation,
 }
 
 /// Overrides for media asset metadata.
@@ -171,6 +176,144 @@ pub struct MediaInterpretation {
     pub field_order_override: Option<FieldOrder>,
     #[serde(default)]
     pub alpha: AlphaInterpretation,
+    /// Placement-local source identity used by editorial interchange.
+    ///
+    /// This does not own a file locator. The same physical Asset can carry a
+    /// different reel/Mob identity at different editorial placements, while
+    /// the Asset Library remains the sole locator authority.
+    #[serde(default)]
+    pub editorial_source: Option<EditorialSourceIdentity>,
+}
+
+impl MediaInterpretation {
+    /// Closed picture-geometry override projection for execution Adapters.
+    pub const fn picture_overrides(&self) -> crate::PictureInterpretationOverrides {
+        crate::PictureInterpretationOverrides {
+            pixel_aspect_ratio: self.pixel_aspect_ratio_override,
+            field_order: self.field_order_override,
+        }
+    }
+}
+
+/// Maximum UTF-8 bytes retained for one editorial reel/tape name.
+pub const MAX_EDITORIAL_REEL_NAME_BYTES: usize = 255;
+/// Maximum UTF-8 bytes retained for a foreign source identity such as an AAF
+/// MobID or an OTIO/XML source object identifier.
+pub const MAX_EDITORIAL_EXTERNAL_SOURCE_ID_BYTES: usize = 1_024;
+
+/// Placement-local identity carried across EDL/XML/OTIO/AAF round trips.
+///
+/// The value deliberately excludes file paths and URLs. External locators are
+/// untrusted interchange inputs and must be resolved through the product's
+/// Asset Library binding Interface before a Clip can enter author state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorialSourceIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_timecode: Option<SmpteTimecodeReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_source_id: Option<String>,
+}
+
+impl EditorialSourceIdentity {
+    /// Construct a validated placement-local editorial identity.
+    pub fn new(
+        reel_name: Option<String>,
+        source_timecode: Option<SmpteTimecodeReference>,
+        external_source_id: Option<String>,
+    ) -> std::result::Result<Self, EditorialSourceIdentityError> {
+        let value = Self { reel_name, source_timecode, external_source_id };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Validate persisted length and text-safety bounds.
+    pub fn validate(&self) -> std::result::Result<(), EditorialSourceIdentityError> {
+        if self.is_empty() {
+            return Err(EditorialSourceIdentityError::Empty);
+        }
+        validate_editorial_text(
+            self.reel_name.as_deref(),
+            MAX_EDITORIAL_REEL_NAME_BYTES,
+            EditorialSourceIdentityError::InvalidReelName,
+        )?;
+        validate_editorial_text(
+            self.external_source_id.as_deref(),
+            MAX_EDITORIAL_EXTERNAL_SOURCE_ID_BYTES,
+            EditorialSourceIdentityError::InvalidExternalSourceId,
+        )?;
+        if self.source_timecode.is_some_and(|reference| reference.validate().is_err()) {
+            return Err(EditorialSourceIdentityError::InvalidSourceTimecode);
+        }
+        Ok(())
+    }
+
+    /// External reel/tape name, preserved without normalization.
+    pub fn reel_name(&self) -> Option<&str> {
+        self.reel_name.as_deref()
+    }
+
+    /// Exact SMPTE label origin for media source time zero.
+    pub const fn source_timecode(&self) -> Option<SmpteTimecodeReference> {
+        self.source_timecode
+    }
+
+    /// Foreign stable source identity, such as an AAF MobID.
+    pub fn external_source_id(&self) -> Option<&str> {
+        self.external_source_id.as_deref()
+    }
+
+    /// Whether this value carries no external source identity at all.
+    pub fn is_empty(&self) -> bool {
+        self.reel_name.is_none()
+            && self.source_timecode.is_none()
+            && self.external_source_id.is_none()
+    }
+}
+
+fn validate_editorial_text(
+    value: Option<&str>,
+    max_bytes: usize,
+    invalid: EditorialSourceIdentityError,
+) -> std::result::Result<(), EditorialSourceIdentityError> {
+    if value.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > max_bytes
+            || value.chars().any(|character| character.is_control())
+    }) {
+        Err(invalid)
+    } else {
+        Ok(())
+    }
+}
+
+/// Invalid placement-local editorial identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EditorialSourceIdentityError {
+    /// An absent identity is represented by `None`, never by an empty value.
+    #[error("editorial source identity is empty")]
+    Empty,
+    /// Reel names must be non-empty, bounded UTF-8 without control characters.
+    #[error("editorial reel name is empty, too long, or contains control characters")]
+    InvalidReelName,
+    /// Foreign source identifiers must be non-empty, bounded safe text.
+    #[error("editorial external source id is empty, too long, or contains control characters")]
+    InvalidExternalSourceId,
+    /// Source timecode must use a supported exact rate/counting combination.
+    #[error("editorial source timecode has an invalid rate or counting mode")]
+    InvalidSourceTimecode,
+}
+
+impl crate::AuthoringFootprint for EditorialSourceIdentity {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        collector.collect(&self.reel_name)?;
+        collector.collect(&self.external_source_id)
+    }
 }
 
 /// Closed set of authored Clip payloads.
@@ -304,8 +447,10 @@ impl crate::AuthoringFootprint for ClipContent {
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
         match self {
             Self::BasicTitle { title } => collector.collect(title),
-            Self::Media { asset_id: _, interpretation: _ }
-            | Self::AdjustmentLayer { asset_id: _ }
+            Self::Media { interpretation, .. } => {
+                collector.collect(&interpretation.editorial_source)
+            }
+            Self::AdjustmentLayer { asset_id: _ }
             | Self::NestedSequence { sequence_id: _, color_processing: _ }
             | Self::SolidColor { asset_id: _, color: _ } => Ok(()),
         }
@@ -313,7 +458,7 @@ impl crate::AuthoringFootprint for ClipContent {
 }
 
 /// Pixel aspect ratio presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum PixelAspectRatio {
     #[default]
     Square,
@@ -328,23 +473,29 @@ pub enum PixelAspectRatio {
 }
 
 impl PixelAspectRatio {
+    /// Exact sample aspect ratio used by execution and delivery.
+    pub fn exact_ratio(self) -> Option<crate::SampleAspectRatio> {
+        let (numerator, denominator) = match self {
+            Self::Square => (1, 1),
+            Self::D1DvNtsc => (10, 11),
+            Self::D1DvNtscWidescreen => (40, 33),
+            Self::D1DvPal => (12, 11),
+            Self::D1DvPalWidescreen => (16, 11),
+            Self::Anamorphic2x => (2, 1),
+            Self::HdAnamorphic1080 => (4, 3),
+            Self::DvcproHd => (3, 2),
+            Self::Unknown => return None,
+        };
+        crate::SampleAspectRatio::new(numerator, denominator)
+    }
+
     pub fn ratio(self) -> Option<f32> {
-        match self {
-            Self::Square => Some(1.0),
-            Self::D1DvNtsc => Some(0.9091),
-            Self::D1DvNtscWidescreen => Some(1.2121),
-            Self::D1DvPal => Some(1.0940),
-            Self::D1DvPalWidescreen => Some(1.4587),
-            Self::Anamorphic2x => Some(2.0),
-            Self::HdAnamorphic1080 => Some(1.333),
-            Self::DvcproHd => Some(1.5),
-            Self::Unknown => None,
-        }
+        self.exact_ratio().map(|ratio| ratio.to_f64() as f32)
     }
 }
 
 /// Field order for interlaced media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FieldOrder {
     #[default]
     Progressive,
@@ -508,6 +659,9 @@ pub struct FlatVideoTransition {
 /// A Transition replaces its two endpoint placements at that track position;
 /// consumers must not independently composite those endpoints a second time.
 #[derive(Debug, Clone)]
+// Clips dominate this execution list; retaining them inline avoids one heap
+// allocation per visible placement. The uncommon Transition is already boxed.
+#[allow(clippy::large_enum_variant)]
 pub enum FlatVisualItem {
     /// One ordinary active Clip.
     Clip(FlatActiveClip),

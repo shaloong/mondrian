@@ -7,6 +7,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     emit_cargo_build_attestation();
 
+    #[cfg(target_os = "linux")]
+    emit_linux_link_resource_policy();
+
     #[cfg(target_os = "windows")]
     {
         if let Err(err) = embed_windows_icon() {
@@ -16,6 +19,18 @@ fn main() {
             println!("cargo:warning=部署 Windows 媒体运行时失败: {err}");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_linux_link_resource_policy() {
+    // Rust 1.97's Linux GNU target uses bundled lld, whose default is every
+    // available hardware thread. App tests, binaries, and examples link the
+    // complete product and validation harness, so bound lld itself in addition
+    // to Cargo's job count. This changes neither code generation nor runtime
+    // behavior.
+    println!("cargo:rustc-link-arg-tests=-Wl,--threads=1");
+    println!("cargo:rustc-link-arg-bins=-Wl,--threads=1");
+    println!("cargo:rustc-link-arg-examples=-Wl,--threads=1");
 }
 
 fn emit_cargo_build_attestation() {

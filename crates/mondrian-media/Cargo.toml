@@ -7,15 +7,17 @@ license.workspace    = true
 
 [features]
 default = []
-validation = []
+validation = ["dep:mondrian-platform-core", "dep:mondrian-validation-launcher"]
 
 [dependencies]
+mondrian-validation-launcher = { workspace = true, optional = true }
 mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }
+mondrian-platform-core = { workspace = true, optional = true }
 
 # FFmpeg bindings link dynamically for source builds. Product packages carry
 # their own verified private runtime closure; end users do not install FFmpeg.
-ffmpeg-next = "8"
+ffmpeg-next = { version = "8", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling"] }
 
 # 音频
 cpal    = "0.18.1"  # 跨平台音频输出与稳定设备身份
@@ -39,6 +41,7 @@ anyhow     = { workspace = true }
 # 序列化
 serde      = { workspace = true }
 serde_json = { workspace = true }
+sha2       = { workspace = true }
 
 # 日志
 tracing    = { workspace = true }
@@ -52,6 +55,10 @@ lru = "0.18"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_JobObjects"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

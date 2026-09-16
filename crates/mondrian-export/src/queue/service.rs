@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use mondrian_audio::AudioRuntimeResourceGrant;
@@ -12,14 +14,23 @@ use mondrian_core::{
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, JobId,
 };
 use mondrian_media::AudioSourceCacheConfig;
-use mondrian_renderer::{RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant};
+use mondrian_renderer::{
+    GpuVisualFrameExecutionResourceGrant, RenderGpuOutputExecutionResourceGrant,
+    TimelineCpuWorkingSetGrant,
+};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::preset::{AudioCodecConfig, ExportConfig, ExportOutputPolicy};
-use crate::{prepare_timeline_export_dependencies, validate_timeline_export_execution_snapshot};
+use crate::preset::{ExportConfig, ExportOutputPolicy};
+use crate::{
+    prepare_timeline_export_dependencies_with_audio_selection,
+    validate_timeline_export_execution_snapshot_with_audio_selection,
+};
 
-use super::{ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure, JobExecutionResult};
+use super::{
+    ExportExecutionOwnerEvent, ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure,
+    JobExecutionResult,
+};
 
 /// Maximum number of admitted jobs that may be pending or executing.
 pub const EXPORT_IN_FLIGHT_CAPACITY: usize = 64;
@@ -35,6 +46,22 @@ const EXPORT_FAILURE_DETAIL_CHARS: usize = 4_096;
 /// after crossing the Preparing gate. Preview resources are never borrowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportExecutionResourcePolicy {
+    /// Permit equivalent CPU-capable visual work to use opportunistic GPU
+    /// acceleration.
+    ///
+    /// The product resource coordinator disables this while realtime Preview
+    /// or Audio is active. Export still uses the GPU when the immutable visual
+    /// closure has no exact CPU Float32 route, so scheduling policy never
+    /// reinterprets an authored Effect contract.
+    pub opportunistic_gpu_acceleration: bool,
+    /// Maximum FFmpeg filter workers admitted for the external encoding
+    /// process owned by this attempt.
+    ///
+    /// FFmpeg otherwise expands filter pools from the host CPU topology, which
+    /// can exceed a container or qualification process task grant.
+    pub ffmpeg_filter_threads: usize,
+    /// Maximum FFmpeg codec workers admitted for each input or output codec.
+    pub ffmpeg_codec_threads: usize,
     /// Maximum prepared Sequence visual programs in the frozen reachable closure.
     pub visual_program_entries: usize,
     /// Maximum aggregate conservative logical bytes for that visual closure.
@@ -72,11 +99,20 @@ pub struct ExportExecutionResourcePolicy {
     pub gpu_output_idle_per_contract: usize,
     /// Aggregate approximate idle GPU output texture bytes.
     pub gpu_output_idle_bytes: u64,
+    /// Hard active texture grant for the complete GPU visual closure.
+    ///
+    /// Existing nested outputs and every new upload/Effect/Transition/composite
+    /// texture are admitted together before each node records.
+    pub gpu_visual_active: GpuVisualFrameExecutionResourceGrant,
     /// Hard active texture/readback grant for one final GPU output boundary.
     ///
     /// Unlike idle retention, this grant is frozen for the accepted Export
     /// attempt and must not shrink in response to online memory pressure.
     pub gpu_output_active: RenderGpuOutputExecutionResourceGrant,
+    /// Maximum FFmpeg-owned NV12/P010 encoder surfaces in one resident Session.
+    pub resident_encoder_surfaces: u32,
+    /// Hard logical byte grant for the complete resident encoder surface pool.
+    pub resident_encoder_surface_bytes: u64,
     /// Maximum retained Basic Title raster identities.
     pub title_cache_entries: usize,
     /// Aggregate Basic Title frame and glyph cache bytes.
@@ -92,6 +128,9 @@ pub struct ExportExecutionResourcePolicy {
 impl Default for ExportExecutionResourcePolicy {
     fn default() -> Self {
         Self {
+            opportunistic_gpu_acceleration: true,
+            ffmpeg_filter_threads: 1,
+            ffmpeg_codec_threads: 1,
             visual_program_entries: 32,
             visual_program_bytes: 64 * 1024 * 1024,
             lut_cache_entries: 8,
@@ -110,7 +149,13 @@ impl Default for ExportExecutionResourcePolicy {
             cpu_color_processor_capacity: 32,
             gpu_output_idle_per_contract: 1,
             gpu_output_idle_bytes: 96 * 1024 * 1024,
+            gpu_visual_active: GpuVisualFrameExecutionResourceGrant::new(
+                2 * 1024 * 1024 * 1024,
+                128,
+            ),
             gpu_output_active: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
+            resident_encoder_surfaces: 8,
+            resident_encoder_surface_bytes: 512 * 1024 * 1024,
             title_cache_entries: 16,
             title_cache_bytes: 64 * 1024 * 1024,
             title_font_bytes: 128 * 1024 * 1024,
@@ -134,6 +179,8 @@ pub enum ExportProgressPhase {
     Rendering,
     /// Encode or mux media.
     Encoding,
+    /// Wrap encoded essence and construct a delivery package.
+    Packaging,
     /// Validate the complete temporary deliverable.
     Validating,
     /// Atomically publish the validated deliverable.
@@ -183,6 +230,14 @@ impl ExportProgress {
     pub(crate) const fn encoding(fraction: f32) -> Self {
         Self {
             phase: ExportProgressPhase::Encoding,
+            fraction,
+            detail: ExportProgressDetail::None,
+        }
+    }
+
+    pub(crate) const fn packaging(fraction: f32) -> Self {
+        Self {
+            phase: ExportProgressPhase::Packaging,
             fraction,
             detail: ExportProgressDetail::None,
         }
@@ -269,8 +324,9 @@ impl ExportProgressPhase {
             Self::Preparing => 0,
             Self::Rendering => 1,
             Self::Encoding => 2,
-            Self::Validating => 3,
-            Self::Publishing => 4,
+            Self::Packaging => 3,
+            Self::Validating => 4,
+            Self::Publishing => 5,
         }
     }
 }
@@ -374,6 +430,7 @@ impl JobStatus {
                     phase: ExportProgressPhase::Preparing
                         | ExportProgressPhase::Rendering
                         | ExportProgressPhase::Encoding
+                        | ExportProgressPhase::Packaging
                         | ExportProgressPhase::Validating
                 }
             )
@@ -447,13 +504,19 @@ pub enum ExportArtifactPublicationEvidence {
 pub struct RenderJob {
     id: JobId,
     pub(crate) config: ExportConfig,
+    pub(crate) regulatory_pse: Mutex<Option<crate::PreparedRegulatoryPseProvider>>,
     created_at: DateTime<Utc>,
 }
 
 impl RenderJob {
     /// Create one immutable export submission.
     pub fn new(config: ExportConfig) -> Self {
-        Self { id: JobId::new(), config, created_at: Utc::now() }
+        Self {
+            id: JobId::new(),
+            config,
+            regulatory_pse: Mutex::new(None),
+            created_at: Utc::now(),
+        }
     }
 
     /// Stable identity assigned before admission.
@@ -501,6 +564,8 @@ pub struct ExportJobSnapshot {
 /// Structured reason why a submission was not admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportAdmissionError {
+    /// Required regulatory PSE work never started because its external prerequisites are absent.
+    RegulatoryPseNotRun { reason: crate::RegulatoryPseNotRun },
     /// Preset and immutable Sequence delivery intent cannot form a legal output.
     InvalidDelivery { detail: String },
     /// The bounded in-flight budget is exhausted.
@@ -515,11 +580,17 @@ pub enum ExportAdmissionError {
     WorkerUnavailable { detail: String },
     /// The queue can no longer issue a unique monotonic attempt generation.
     GenerationExhausted,
+    /// The queue has entered its permanent shutdown state.
+    QueueShutdown,
 }
 
 impl std::fmt::Display for ExportAdmissionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RegulatoryPseNotRun { reason } => write!(
+                formatter,
+                "regulatory PSE NotRun before export admission: {reason:?}"
+            ),
             Self::InvalidDelivery { detail } => formatter.write_str(detail),
             Self::CapacityExceeded { capacity } => {
                 write!(
@@ -544,6 +615,7 @@ impl std::fmt::Display for ExportAdmissionError {
             Self::GenerationExhausted => {
                 formatter.write_str("export attempt generation space is exhausted")
             }
+            Self::QueueShutdown => formatter.write_str("export queue has shut down"),
         }
     }
 }
@@ -607,8 +679,127 @@ pub struct ExportQueueDiagnostics {
     pub failures: u64,
     /// Canceled admitted attempts.
     pub cancellations: u64,
+    /// Timeline frames accepted through monotonic job progress.
+    pub rendered_frames: u64,
+    /// Completed jobs carrying durable artifact publication evidence.
+    pub durable_artifacts: u64,
     /// Current lightweight job snapshots in admission order.
     pub jobs: Vec<ExportJobSnapshot>,
+}
+
+/// Fixed-size long-duration observation of the Export queue.
+///
+/// Heavy job payloads and bounded terminal history never enter this snapshot.
+/// A qualification Adapter samples it on its own cadence and maps the fields
+/// into the platform-neutral endurance contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportEnduranceSnapshot {
+    /// Snapshot schema version.
+    pub schema_version: u32,
+    /// Monotonic observation offset owned by the capture Adapter.
+    pub observed_at_us: u64,
+    /// Whether shutdown was requested.
+    pub shutdown_requested: bool,
+    /// Whether the dedicated worker is currently alive.
+    pub worker_running: bool,
+    /// Whether the dedicated worker returned normally and its handle was joined.
+    pub worker_terminated: bool,
+    /// Monotonic accepted queue/job activity count.
+    pub activity_events: u64,
+    /// Successful admissions.
+    pub admissions: u64,
+    /// Rejected admissions.
+    pub rejections: u64,
+    /// Successful durable publications.
+    pub completions: u64,
+    /// Failed admitted attempts.
+    pub failures: u64,
+    /// Canceled admitted attempts.
+    pub cancellations: u64,
+    /// Frames truthfully reported by retained job progress.
+    pub rendered_frames: u64,
+    /// Completed jobs carrying durable artifact evidence.
+    pub durable_artifacts: u64,
+    /// Pending jobs.
+    pub pending_jobs: u64,
+    /// Running, cancelling, or committing jobs.
+    pub active_jobs: u64,
+    /// Whether worker startup failed.
+    pub worker_failed: bool,
+    /// Job-scoped decoded-audio source owners created since Queue start.
+    pub audio_source_owners_started: u64,
+    /// Job-scoped decoded-audio source owners closed since Queue start.
+    pub audio_source_owners_closed: u64,
+    /// Audio-source closures that retained or abandoned resources.
+    pub audio_source_owner_failures: u64,
+    /// Audio-source owners currently live inside an executing job.
+    pub active_audio_source_owners: u64,
+}
+
+/// Terminal evidence returned by explicit queue retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportQueueShutdownEvidence {
+    /// Shutdown evidence schema version.
+    pub schema_version: u32,
+    /// Whether the dedicated worker entered its owned execution closure.
+    pub worker_started: bool,
+    /// Whether creating the dedicated worker failed before it could start.
+    pub worker_start_failed: bool,
+    /// Whether the worker handle was joined after a normal return.
+    pub worker_terminated: bool,
+    /// Whether the worker's terminal guard or joined handle observed a panic
+    /// outside the per-Job executor panic boundary.
+    pub worker_panicked: bool,
+    /// Whether the worker missed the caller's absolute shutdown deadline.
+    ///
+    /// A worker that had already finished after the deadline can still be
+    /// joined and therefore need not be detached.
+    pub worker_timed_out: bool,
+    /// Whether the Queue relinquished a still-running worker handle.
+    pub worker_detached: bool,
+    /// Whether a worker-owned executor, hook, factory error, or opaque panic
+    /// payload had to be abandoned rather than destroyed on a latency-sensitive
+    /// thread.
+    pub worker_owner_abandoned: bool,
+    /// Pending jobs remaining after the wait.
+    pub pending_jobs: u64,
+    /// Active jobs remaining after the wait.
+    pub active_jobs: u64,
+    /// Final activity-event count.
+    pub activity_events: u64,
+    /// Job-scoped decoded-audio source owners created over Queue lifetime.
+    pub audio_source_owners_started: u64,
+    /// Job-scoped decoded-audio source owners closed over Queue lifetime.
+    pub audio_source_owners_closed: u64,
+    /// Audio-source closures that retained or abandoned resources.
+    pub audio_source_owner_failures: u64,
+    /// Audio-source owners still live after Queue retirement.
+    pub active_audio_source_owners: u64,
+}
+
+impl ExportQueueShutdownEvidence {
+    /// Whether the queue proved that its worker and all admitted work were retired.
+    ///
+    /// A failed or never-observed worker start is deliberately not equivalent to
+    /// normal worker termination, even when no jobs were admitted.
+    #[must_use]
+    pub const fn all_resources_released(&self) -> bool {
+        self.schema_version == 4
+            && self.worker_started
+            && !self.worker_start_failed
+            && self.worker_terminated
+            && !self.worker_panicked
+            && !self.worker_timed_out
+            && !self.worker_detached
+            && !self.worker_owner_abandoned
+            && self.pending_jobs == 0
+            && self.active_jobs == 0
+            && self.audio_source_owners_started == self.audio_source_owners_closed
+            && self.audio_source_owner_failures == 0
+            && self.active_audio_source_owners == 0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -620,6 +811,11 @@ struct ExportQueueCounters {
     completions: u64,
     failures: u64,
     cancellations: u64,
+    rendered_frames: u64,
+    durable_artifacts: u64,
+    audio_source_owners_started: u64,
+    audio_source_owners_closed: u64,
+    audio_source_owner_failures: u64,
 }
 
 struct ExportJobEntry {
@@ -638,6 +834,18 @@ struct ExportQueueState {
     resource_policy: ExportExecutionResourcePolicy,
     worker_failure: Option<String>,
     counters: ExportQueueCounters,
+    activity_events: u64,
+    shutdown_requested: bool,
+    worker_started: bool,
+    worker_start_failed: bool,
+    worker_running: bool,
+    worker_terminated: bool,
+    worker_completed_at: Option<Instant>,
+    worker_panicked: bool,
+    worker_timed_out: bool,
+    worker_detached: bool,
+    worker_owner_abandoned: bool,
+    active_audio_source_owners: u64,
 }
 
 struct RenderQueueInner {
@@ -649,14 +857,94 @@ struct RenderQueueInner {
 }
 
 impl RenderQueueInner {
-    fn mark_diagnostics_changed(&self) {
+    fn mark_diagnostics_changed_locked(&self, _state: &ExportQueueState) {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn mark_jobs_changed(&self) {
+    fn mark_jobs_changed_locked(&self, state: &mut ExportQueueState) {
+        state.activity_events = state.activity_events.saturating_add(1);
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.jobs_revision.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn mark_export_worker_started(inner: &RenderQueueInner) {
+    let mut state = inner.state.lock();
+    state.worker_started = true;
+    state.worker_running = true;
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_completed(
+    inner: &RenderQueueInner,
+    completed_at: Instant,
+    unwind_observed: bool,
+) {
+    let mut state = inner.state.lock();
+    state.worker_running = false;
+    state.worker_completed_at.get_or_insert(completed_at);
+    if unwind_observed {
+        state.worker_panicked = true;
+        if state.worker_failure.is_none() {
+            state.worker_failure =
+                Some("export worker panicked outside the per-Job executor boundary".to_owned());
+        }
+    }
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_start_failed(inner: &RenderQueueInner, detail: String) {
+    let mut state = inner.state.lock();
+    state.worker_running = false;
+    state.worker_start_failed = true;
+    state.worker_owner_abandoned = true;
+    state.worker_failure = Some(detail);
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_owner_abandoned(inner: &RenderQueueInner, detail: &str) {
+    let mut state = inner.state.lock();
+    state.worker_owner_abandoned = true;
+    if state.worker_failure.is_none() {
+        state.worker_failure = Some(detail.to_owned());
+    }
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn update_execution_owner_event(inner: &RenderQueueInner, event: ExportExecutionOwnerEvent) {
+    let mut state = inner.state.lock();
+    match event {
+        ExportExecutionOwnerEvent::AudioSourceStarted => {
+            state.counters.audio_source_owners_started =
+                state.counters.audio_source_owners_started.saturating_add(1);
+            state.active_audio_source_owners = state.active_audio_source_owners.saturating_add(1);
+        }
+        ExportExecutionOwnerEvent::AudioSourceClosed { all_resources_released } => {
+            state.counters.audio_source_owners_closed =
+                state.counters.audio_source_owners_closed.saturating_add(1);
+            if state.active_audio_source_owners == 0 {
+                state.counters.audio_source_owner_failures =
+                    state.counters.audio_source_owner_failures.saturating_add(1);
+            } else {
+                state.active_audio_source_owners -= 1;
+            }
+            if !all_resources_released {
+                state.counters.audio_source_owner_failures =
+                    state.counters.audio_source_owner_failures.saturating_add(1);
+            }
+        }
+    }
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
 }
 
 /// Queue-owned cooperative execution authority for one exact export attempt.
@@ -776,7 +1064,7 @@ fn wait_at_queue_execution_boundary(
         {
             if state.jobs[index].execution_yielded {
                 state.jobs[index].execution_yielded = false;
-                inner.mark_diagnostics_changed();
+                inner.mark_diagnostics_changed_locked(&state);
             }
             return false;
         }
@@ -792,23 +1080,74 @@ fn wait_at_queue_execution_boundary(
                     JobStatus::Running { phase: ExportProgressPhase::Publishing };
             }
             if phase == ExportProgressPhase::Publishing {
-                inner.mark_jobs_changed();
+                inner.mark_jobs_changed_locked(&mut state);
             } else if changed {
-                inner.mark_diagnostics_changed();
+                inner.mark_diagnostics_changed_locked(&state);
             }
             return true;
         }
         if !state.jobs[index].execution_yielded {
             state.jobs[index].execution_yielded = true;
-            inner.mark_diagnostics_changed();
+            inner.mark_diagnostics_changed_locked(&state);
         }
         inner.wake.wait(&mut state);
+    }
+}
+
+type ExportWorkerTask = Box<dyn FnOnce() + Send + 'static>;
+type ExportWorkerEntryHook = Box<dyn FnOnce() + Send + 'static>;
+
+struct ExportWorkerPayload {
+    inner: Arc<RenderQueueInner>,
+    executor: Arc<dyn ExportExecutor>,
+    entry_hook: Option<ExportWorkerEntryHook>,
+}
+
+impl ExportWorkerPayload {
+    fn run(self) {
+        mark_export_worker_started(&self.inner);
+        let Self { inner, executor, entry_hook } = self;
+        if let Some(entry_hook) = entry_hook {
+            entry_hook();
+        }
+        export_worker_loop(Arc::clone(&inner), executor);
+    }
+}
+
+fn abandon_export_worker_payload(retained_payload: &Arc<Mutex<Option<ExportWorkerPayload>>>) {
+    let Some(payload) = retained_payload.lock().take() else {
+        return;
+    };
+    let ExportWorkerPayload { inner, executor, entry_hook } = payload;
+    drop(inner);
+    // A worker factory failure normally drops the task closure on this caller.
+    // The retained slot keeps the potentially foreign executor out of that
+    // destructor path. Qualification records this deliberate abandonment and
+    // can therefore never mistake it for a clean start or a worker detach.
+    std::mem::forget(executor);
+    if let Some(entry_hook) = entry_hook {
+        std::mem::forget(entry_hook);
+    }
+}
+
+fn dispose_canonical_or_abandon_opaque_panic_payload(
+    payload: Box<dyn std::any::Any + Send>,
+) -> bool {
+    if payload.is::<&'static str>() || payload.is::<String>() {
+        drop(payload);
+        false
+    } else {
+        // An arbitrary `panic_any` payload can own a blocking or panicking
+        // destructor. Never run it on the queue worker or shutdown caller.
+        std::mem::forget(payload);
+        true
     }
 }
 
 /// Instance-owned bounded offline export queue.
 pub struct RenderQueue {
     inner: Arc<RenderQueueInner>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RenderQueue {
@@ -818,7 +1157,13 @@ impl RenderQueue {
     }
 
     pub(crate) fn new_with_executor(executor: Arc<dyn ExportExecutor>) -> Arc<Self> {
-        let queue = Arc::new(Self {
+        let queue = Self::new_unstarted();
+        queue.spawn_worker(executor);
+        queue
+    }
+
+    fn new_unstarted() -> Arc<Self> {
+        Arc::new(Self {
             inner: Arc::new(RenderQueueInner {
                 state: Mutex::new(ExportQueueState {
                     next_generation: 1,
@@ -831,36 +1176,142 @@ impl RenderQueue {
                 revision: AtomicU64::new(0),
                 jobs_revision: AtomicU64::new(0),
             }),
-        });
-        queue.spawn_worker(executor);
+            worker: Mutex::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_executor_and_spawner(
+        executor: Arc<dyn ExportExecutor>,
+        entry_hook: Option<ExportWorkerEntryHook>,
+        spawner: impl FnOnce(ExportWorkerTask) -> std::io::Result<JoinHandle<()>>,
+    ) -> Arc<Self> {
+        let queue = Self::new_unstarted();
+        queue.spawn_worker_with(executor, entry_hook, spawner);
         queue
     }
 
     fn spawn_worker(&self, executor: Arc<dyn ExportExecutor>) {
-        let inner = Arc::clone(&self.inner);
-        if let Err(error) = std::thread::Builder::new()
-            .name("mondrian-export-worker".to_owned())
-            .spawn(move || export_worker_loop(inner, executor))
-        {
-            let mut state = self.inner.state.lock();
-            state.worker_failure = Some(bounded_detail(format!(
-                "failed to start export worker: {error}"
-            )));
-            drop(state);
-            self.mark_diagnostics_changed();
+        self.spawn_worker_with(executor, None, |task| {
+            thread::Builder::new().name("mondrian-export-worker".to_owned()).spawn(task)
+        });
+    }
+
+    fn spawn_worker_with(
+        &self,
+        executor: Arc<dyn ExportExecutor>,
+        entry_hook: Option<ExportWorkerEntryHook>,
+        spawner: impl FnOnce(ExportWorkerTask) -> std::io::Result<JoinHandle<()>>,
+    ) {
+        let retained_payload = Arc::new(Mutex::new(Some(ExportWorkerPayload {
+            inner: Arc::clone(&self.inner),
+            executor,
+            entry_hook,
+        })));
+        let worker_payload = Arc::clone(&retained_payload);
+        let task_inner = Arc::clone(&self.inner);
+        let task: ExportWorkerTask = Box::new(move || {
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(payload) = worker_payload.lock().take() else {
+                    panic!("export worker started without its retained owner payload");
+                };
+                payload.run();
+            }));
+            let panicked = match run_result {
+                Ok(()) => false,
+                Err(payload) => {
+                    if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                        mark_export_worker_owner_abandoned(
+                            &task_inner,
+                            "export worker panicked with an opaque payload whose owner was abandoned",
+                        );
+                    }
+                    true
+                }
+            };
+            mark_export_worker_completed(&task_inner, Instant::now(), panicked);
+        });
+        let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawner(task)));
+        match spawn_result {
+            Ok(Ok(worker)) => {
+                *self.worker.lock() = Some(worker);
+            }
+            Ok(Err(error)) => {
+                let error_kind = error.kind();
+                // `io::Error::other` may carry an arbitrary foreign Error with
+                // a blocking or panicking destructor. Startup already failed
+                // closed, so retain only the stable kind and abandon that
+                // opaque owner with the executor payload.
+                std::mem::forget(error);
+                abandon_export_worker_payload(&retained_payload);
+                mark_export_worker_start_failed(
+                    &self.inner,
+                    bounded_detail(format!("failed to start export worker: {error_kind:?}")),
+                );
+            }
+            Err(payload) => {
+                let _ = dispose_canonical_or_abandon_opaque_panic_payload(payload);
+                abandon_export_worker_payload(&retained_payload);
+                mark_export_worker_start_failed(
+                    &self.inner,
+                    "export worker spawner panicked before returning ownership".to_owned(),
+                );
+            }
         }
     }
 
     /// Admit a heavy immutable submission or return a structured rejection.
     pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
-        let include_audio = !matches!(job.config.preset.audio, AudioCodecConfig::Disabled);
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            return self.reject(ExportAdmissionError::QueueShutdown);
+        }
+        if let Err(detail) = super::final_broadcast_qc::validate_admission(&job.config) {
+            return self.reject(ExportAdmissionError::InvalidDelivery { detail });
+        }
+        if let Some(profile) = job
+            .config
+            .broadcast_qc
+            .as_ref()
+            .filter(|profile| profile.require_regulatory_flash_analysis)
+        {
+            let fingerprint = profile.fingerprint().map_err(|error| {
+                ExportAdmissionError::InvalidDelivery { detail: error.to_string() }
+            })?;
+            let Some(deadline) = Instant::now().checked_add(Duration::from_secs(30)) else {
+                return self.reject(ExportAdmissionError::InvalidDelivery {
+                    detail: "regulatory PSE admission deadline overflow".to_owned(),
+                });
+            };
+            match crate::admit_regulatory_pse_provider(
+                job.config.regulatory_pse.as_ref(),
+                fingerprint,
+                deadline,
+                &ExecutionCancellationToken::new(),
+            ) {
+                Ok(crate::RegulatoryPseAdmission::Available(prepared)) => {
+                    *job.regulatory_pse.get_mut() = Some(*prepared)
+                }
+                Ok(crate::RegulatoryPseAdmission::NotRun(reason)) => {
+                    return self.reject(ExportAdmissionError::RegulatoryPseNotRun { reason })
+                }
+                Err(error) => {
+                    return self.reject(ExportAdmissionError::InvalidDelivery {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+        if let Err(detail) = super::validate_frozen_ancillary(&job.config) {
+            return self.reject(ExportAdmissionError::InvalidDelivery { detail });
+        }
+        let audio_selection = job.config.preset.audio_program_selection();
         let resource_policy = self.inner.state.lock().resource_policy;
         if job.config.timeline.prepared_execution().is_none() {
-            let prepared = match prepare_timeline_export_dependencies(
+            let prepared = match prepare_timeline_export_dependencies_with_audio_selection(
                 &job.config.timeline.sequence,
                 &job.config.timeline.sequences,
                 job.config.timeline.range,
-                include_audio,
+                audio_selection,
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -920,12 +1371,12 @@ impl RenderQueue {
                 detail: "immutable export visual execution snapshot is unavailable".to_owned(),
             });
         };
-        if let Err(error) = validate_timeline_export_execution_snapshot(
+        if let Err(error) = validate_timeline_export_execution_snapshot_with_audio_selection(
             &job.config.timeline.sequence,
             &job.config.timeline.sequences,
             &job.config.timeline.color_environment,
             job.config.timeline.range,
-            include_audio,
+            audio_selection,
             prepared_execution,
             &job.config.timeline.media,
         ) {
@@ -960,11 +1411,17 @@ impl RenderQueue {
         job.config.output_path = output_path.clone();
 
         let mut state = self.inner.state.lock();
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
+            drop(state);
+            return Err(ExportAdmissionError::QueueShutdown);
+        }
         if let Some(detail) = &state.worker_failure {
             let error = ExportAdmissionError::WorkerUnavailable { detail: detail.clone() };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
         let in_flight =
@@ -973,8 +1430,8 @@ impl RenderQueue {
             let error =
                 ExportAdmissionError::CapacityExceeded { capacity: EXPORT_IN_FLIGHT_CAPACITY };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
         if state
@@ -984,16 +1441,16 @@ impl RenderQueue {
         {
             let error = ExportAdmissionError::OutputPathBusy { path: output_path };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
 
         let generation = state.next_generation.max(1);
         let Some(next_generation) = generation.checked_add(1) else {
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(ExportAdmissionError::GenerationExhausted);
         };
         state.next_generation = next_generation;
@@ -1023,8 +1480,8 @@ impl RenderQueue {
             execution_yielded: false,
         });
         state.counters.admissions = state.counters.admissions.saturating_add(1);
+        self.inner.mark_jobs_changed_locked(&mut state);
         drop(state);
-        self.mark_jobs_changed();
         self.inner.wake.notify_one();
         Ok(id)
     }
@@ -1032,8 +1489,8 @@ impl RenderQueue {
     fn reject<T>(&self, error: ExportAdmissionError) -> Result<T, ExportAdmissionError> {
         let mut state = self.inner.state.lock();
         state.counters.rejections = state.counters.rejections.saturating_add(1);
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
         Err(error)
     }
 
@@ -1121,12 +1578,15 @@ impl RenderQueue {
                 ExportCancelOutcome::AlreadyTerminal
             }
         };
-        drop(state);
         if outcome == ExportCancelOutcome::Requested {
-            self.mark_jobs_changed();
+            self.inner.mark_jobs_changed_locked(&mut state);
+            drop(state);
             self.inner.wake.notify_all();
         } else if outcome == ExportCancelOutcome::TooLateCommitting {
-            self.mark_diagnostics_changed();
+            self.inner.mark_diagnostics_changed_locked(&state);
+            drop(state);
+        } else {
+            drop(state);
         }
         outcome
     }
@@ -1139,10 +1599,10 @@ impl RenderQueue {
         let before = state.jobs.len();
         state.jobs.retain(|entry| !entry.snapshot.status.is_terminal());
         let removed = before - state.jobs.len();
-        drop(state);
         if removed > 0 {
-            self.mark_jobs_changed();
+            self.inner.mark_jobs_changed_locked(&mut state);
         }
+        drop(state);
         removed
     }
 
@@ -1177,8 +1637,8 @@ impl RenderQueue {
             return;
         }
         state.dispatch_enabled = enabled;
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
         self.inner.wake.notify_all();
     }
 
@@ -1193,8 +1653,8 @@ impl RenderQueue {
             return;
         }
         state.resource_policy = policy;
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
     }
 
     /// Snapshot bounded queue health and lightweight job evidence.
@@ -1212,6 +1672,8 @@ impl RenderQueue {
             completions: state.counters.completions,
             failures: state.counters.failures,
             cancellations: state.counters.cancellations,
+            rendered_frames: state.counters.rendered_frames,
+            durable_artifacts: state.counters.durable_artifacts,
             jobs: state.jobs.iter().map(|entry| entry.snapshot.clone()).collect(),
             ..ExportQueueDiagnostics::default()
         };
@@ -1238,28 +1700,276 @@ impl RenderQueue {
         diagnostics
     }
 
-    fn mark_diagnostics_changed(&self) {
-        self.inner.mark_diagnostics_changed();
+    /// Capture one fixed-size queue observation for a long-duration producer.
+    pub fn endurance_snapshot(&self, observed_at_us: u64) -> ExportEnduranceSnapshot {
+        let state = self.inner.state.lock();
+        let pending_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
+            .count() as u64;
+        let active_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.snapshot.status,
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                )
+            })
+            .count() as u64;
+        ExportEnduranceSnapshot {
+            schema_version: 2,
+            observed_at_us,
+            shutdown_requested: state.shutdown_requested,
+            worker_running: state.worker_running,
+            worker_terminated: state.worker_terminated,
+            activity_events: state.activity_events,
+            admissions: state.counters.admissions,
+            rejections: state.counters.rejections,
+            completions: state.counters.completions,
+            failures: state.counters.failures,
+            cancellations: state.counters.cancellations,
+            rendered_frames: state.counters.rendered_frames,
+            durable_artifacts: state.counters.durable_artifacts,
+            pending_jobs,
+            active_jobs,
+            worker_failed: state.worker_failure.is_some(),
+            audio_source_owners_started: state.counters.audio_source_owners_started,
+            audio_source_owners_closed: state.counters.audio_source_owners_closed,
+            audio_source_owner_failures: state.counters.audio_source_owner_failures,
+            active_audio_source_owners: state.active_audio_source_owners,
+        }
     }
 
-    fn mark_jobs_changed(&self) {
-        self.inner.mark_jobs_changed();
+    /// Request queue shutdown and wait a bounded interval for worker return.
+    ///
+    /// Publication that already crossed the irreversible namespace boundary is
+    /// allowed to finish; every other live attempt receives cancellation.
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> ExportQueueShutdownEvidence {
+        let started_at = Instant::now();
+        let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
+        self.shutdown_until(deadline)
+    }
+
+    /// Request queue shutdown and consume worker ownership through one absolute deadline.
+    ///
+    /// Normal termination is accepted only after the owned handle is joined and
+    /// its worker-published monotonic completion stamp is no later than
+    /// `deadline`. A handle still running at the deadline is relinquished once,
+    /// with timeout and detach facts latched permanently. If the handle is
+    /// already finished but its completion stamp is late, it is still joined to
+    /// reclaim ownership; timeout remains true while detach remains false.
+    ///
+    /// Exactly one product coordinator owns this consuming call. Sequential
+    /// repeats return the latched terminal receipt; concurrent consumers are
+    /// unsupported and any receipt observed while another caller owns the
+    /// handle is fail-closed rather than qualification evidence.
+    pub fn shutdown_until(&self, deadline: Instant) -> ExportQueueShutdownEvidence {
+        self.begin_shutdown();
+        let worker = self.worker.lock().take();
+        if let Some(worker) = worker {
+            self.finish_worker_until(worker, deadline);
+        }
+        self.shutdown_evidence()
+    }
+
+    fn finish_worker_until(&self, worker: JoinHandle<()>, deadline: Instant) {
+        if worker.thread().id() == thread::current().id() {
+            self.mark_worker_detached(
+                Instant::now() >= deadline,
+                "export worker cannot join its own thread",
+            );
+            drop(worker);
+            return;
+        }
+
+        loop {
+            if worker.is_finished() {
+                self.join_finished_worker(worker, Some(deadline));
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                // Completion wins the observation race at the exact boundary,
+                // but its own monotonic stamp still decides whether it was late.
+                if worker.is_finished() {
+                    self.join_finished_worker(worker, Some(deadline));
+                } else {
+                    self.mark_worker_detached(
+                        true,
+                        "export worker exceeded the absolute shutdown deadline",
+                    );
+                    drop(worker);
+                }
+                return;
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let mut state = self.inner.state.lock();
+            if !worker.is_finished() {
+                // The outer supervisor publishes completion before the final
+                // trivial closure captures are destroyed, so retain a short
+                // bounded poll to observe JoinHandle completion without ever
+                // blocking join.
+                self.inner.wake.wait_for(&mut state, remaining.min(Duration::from_millis(1)));
+            }
+        }
+    }
+
+    fn join_finished_worker(&self, worker: JoinHandle<()>, deadline: Option<Instant>) {
+        debug_assert!(worker.is_finished());
+        let (worker_panicked, panic_payload_abandoned) = match worker.join() {
+            Ok(()) => (false, false),
+            Err(payload) => (
+                true,
+                dispose_canonical_or_abandon_opaque_panic_payload(payload),
+            ),
+        };
+        let mut state = self.inner.state.lock();
+        state.worker_running = false;
+        let completed_at = state.worker_completed_at;
+        let missed_deadline = deadline.is_some_and(|deadline| {
+            completed_at.is_none_or(|completed_at| completed_at > deadline)
+        });
+        state.worker_timed_out |= missed_deadline;
+        state.worker_owner_abandoned |= panic_payload_abandoned;
+        let logical_worker_panicked = worker_panicked || state.worker_panicked;
+        match (logical_worker_panicked, completed_at) {
+            (false, Some(_)) => {
+                state.worker_terminated = true;
+            }
+            (false, None) => {
+                state.worker_failure =
+                    Some("export worker returned without a monotonic completion stamp".to_owned());
+            }
+            (true, _) => {
+                state.worker_panicked = true;
+                state.worker_failure =
+                    Some("export worker panicked outside the per-Job executor boundary".to_owned());
+            }
+        }
+        self.inner.mark_diagnostics_changed_locked(&state);
+        drop(state);
+        self.inner.wake.notify_all();
+    }
+
+    fn mark_worker_detached(&self, timed_out: bool, detail: &str) {
+        let mut state = self.inner.state.lock();
+        state.worker_timed_out |= timed_out;
+        state.worker_detached = true;
+        if state.worker_failure.is_none() {
+            state.worker_failure = Some(detail.to_owned());
+        }
+        self.inner.mark_diagnostics_changed_locked(&state);
+        drop(state);
+        self.inner.wake.notify_all();
+    }
+
+    fn shutdown_evidence(&self) -> ExportQueueShutdownEvidence {
+        let state = self.inner.state.lock();
+        let pending_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
+            .count() as u64;
+        let active_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.snapshot.status,
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                )
+            })
+            .count() as u64;
+        ExportQueueShutdownEvidence {
+            schema_version: 4,
+            worker_started: state.worker_started,
+            worker_start_failed: state.worker_start_failed,
+            worker_terminated: state.worker_terminated,
+            worker_panicked: state.worker_panicked,
+            worker_timed_out: state.worker_timed_out,
+            worker_detached: state.worker_detached,
+            worker_owner_abandoned: state.worker_owner_abandoned,
+            pending_jobs,
+            active_jobs,
+            activity_events: state.activity_events,
+            audio_source_owners_started: state.counters.audio_source_owners_started,
+            audio_source_owners_closed: state.counters.audio_source_owners_closed,
+            audio_source_owner_failures: state.counters.audio_source_owner_failures,
+            active_audio_source_owners: state.active_audio_source_owners,
+        }
+    }
+
+    /// Close queue admission and cooperatively cancel every reversible attempt.
+    ///
+    /// This is the non-waiting half of [`Self::shutdown_and_wait`]. A caller
+    /// coordinating several owners can signal all of them before spending one
+    /// shared absolute shutdown deadline on terminal receipts.
+    pub fn begin_shutdown(&self) {
+        let mut state = self.inner.state.lock();
+        let first_request = !self.inner.shutdown.swap(true, Ordering::AcqRel);
+        state.shutdown_requested = true;
+        let mut pending_cancellations = 0_u64;
+        if first_request {
+            for entry in &mut state.jobs {
+                match entry.snapshot.status {
+                    JobStatus::Pending => {
+                        entry.cancellation.cancel();
+                        entry.payload = None;
+                        entry.snapshot.status = JobStatus::Cancelled;
+                        entry.snapshot.publication = ExportPublicationState::NotPublished;
+                        entry.snapshot.completed_at = Some(Utc::now());
+                        entry.snapshot.terminal_evidence = Some(ExecutionTerminalEvidence {
+                            generation: entry.snapshot.generation,
+                            priority: ExecutionPriority::UserInitiated,
+                            disposition: ExecutionTerminalDisposition::Canceled,
+                            deadline: ExecutionDeadlineStatus::NotApplicable,
+                        });
+                        pending_cancellations = pending_cancellations.saturating_add(1);
+                    }
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                        if entry.snapshot.publication != ExportPublicationState::Committing =>
+                    {
+                        entry.cancellation.cancel();
+                    }
+                    JobStatus::Running { .. }
+                    | JobStatus::Cancelling { .. }
+                    | JobStatus::Completed
+                    | JobStatus::Failed(_)
+                    | JobStatus::Cancelled => {}
+                }
+            }
+            state.counters.cancellations =
+                state.counters.cancellations.saturating_add(pending_cancellations);
+            if pending_cancellations > 0 {
+                trim_terminal_history(&mut state);
+            }
+        }
+        if first_request {
+            self.inner.mark_jobs_changed_locked(&mut state);
+        }
+        drop(state);
+        self.inner.wake.notify_all();
     }
 }
 
 impl Drop for RenderQueue {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        let state = self.inner.state.lock();
-        for entry in &state.jobs {
-            if !entry.snapshot.status.is_terminal()
-                && entry.snapshot.publication != ExportPublicationState::Committing
-            {
-                entry.cancellation.cancel();
-            }
+        self.begin_shutdown();
+        let Some(worker) = self.worker.lock().take() else {
+            return;
+        };
+        if worker.thread().id() == thread::current().id() {
+            self.mark_worker_detached(false, "export worker dropped its own Queue owner");
+            drop(worker);
+        } else if worker.is_finished() {
+            self.join_finished_worker(worker, None);
+        } else {
+            self.mark_worker_detached(false, "export Queue dropped while its worker was active");
+            drop(worker);
         }
-        drop(state);
-        self.inner.wake.notify_all();
     }
 }
 
@@ -1282,23 +1992,37 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
         let mut report_diagnostics = move |diagnostics: ExportJobDiagnostics| {
             update_job_diagnostics(&diagnostics_inner, job_id, generation, diagnostics);
         };
+        let owner_inner = Arc::clone(&inner);
+        let mut report_owner = move |event: ExportExecutionOwnerEvent| {
+            update_execution_owner_event(&owner_inner, event);
+        };
         let execution_gate = ExportExecutionGate::for_attempt(
             Arc::clone(&inner),
             job_id,
             generation,
             work.resource_policy,
         );
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             executor.execute(
                 &work.job,
                 &work.cancellation,
                 &execution_gate,
                 &mut report,
                 &mut report_diagnostics,
+                &mut report_owner,
             )
-        }))
-        .map(ExportWorkerOutcome::Execution)
-        .unwrap_or(ExportWorkerOutcome::Panicked);
+        })) {
+            Ok(outcome) => ExportWorkerOutcome::Execution(outcome),
+            Err(payload) => {
+                if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                    mark_export_worker_owner_abandoned(
+                        &inner,
+                        "export executor panicked with an opaque payload whose owner was abandoned",
+                    );
+                }
+                ExportWorkerOutcome::Panicked
+            }
+        };
         publish_terminal(&inner, job_id, generation, outcome);
     }
 }
@@ -1337,7 +2061,7 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 });
                 state.counters.failures = state.counters.failures.saturating_add(1);
                 trim_terminal_history(&mut state);
-                inner.mark_jobs_changed();
+                inner.mark_jobs_changed_locked(&mut state);
                 continue;
             };
             let resource_policy = state.resource_policy;
@@ -1351,8 +2075,8 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 cancellation: entry.cancellation.clone(),
                 resource_policy,
             };
+            inner.mark_jobs_changed_locked(&mut state);
             drop(state);
-            inner.mark_jobs_changed();
             return Some(work);
         }
         inner.wake.wait(&mut state);
@@ -1382,15 +2106,27 @@ fn update_job_progress(
     if progress.phase.rank() < entry.snapshot.progress.phase.rank() {
         return;
     }
+    let previous_rendered_frames = progress_completed_frames(entry.snapshot.progress.detail);
     let progress = progress.normalized(entry.snapshot.progress);
+    let rendered_frame_delta =
+        progress_completed_frames(progress.detail).saturating_sub(previous_rendered_frames);
     let status = JobStatus::Running { phase: progress.phase };
     if entry.snapshot.progress == progress && entry.snapshot.status == status {
         return;
     }
     entry.snapshot.progress = progress;
     entry.snapshot.status = status;
+    state.counters.rendered_frames =
+        state.counters.rendered_frames.saturating_add(rendered_frame_delta);
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
+}
+
+fn progress_completed_frames(detail: ExportProgressDetail) -> u64 {
+    match detail {
+        ExportProgressDetail::Frames { completed, .. } => completed,
+        ExportProgressDetail::None | ExportProgressDetail::MediaTimeMicros { .. } => 0,
+    }
 }
 
 fn update_job_diagnostics(
@@ -1414,8 +2150,8 @@ fn update_job_diagnostics(
         return;
     }
     entry.snapshot.diagnostics = diagnostics;
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
 }
 
 fn publish_terminal(
@@ -1453,6 +2189,7 @@ fn publish_terminal(
         }
         ExportWorkerOutcome::Execution(JobExecutionResult::Published(evidence)) => {
             state.counters.completions = state.counters.completions.saturating_add(1);
+            state.counters.durable_artifacts = state.counters.durable_artifacts.saturating_add(1);
             (
                 JobStatus::Completed,
                 ExecutionTerminalDisposition::Completed,
@@ -1589,8 +2326,8 @@ fn publish_terminal(
         deadline: ExecutionDeadlineStatus::NotApplicable,
     });
     trim_terminal_history(&mut state);
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
     inner.wake.notify_all();
 }
 
@@ -1647,6 +2384,125 @@ fn bounded_detail(detail: String) -> String {
         format!("{bounded}…")
     } else {
         bounded
+    }
+}
+
+#[cfg(test)]
+mod shutdown_evidence_contract_tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_evidence_requires_started_terminated_worker_and_empty_workset() {
+        let clean = ExportQueueShutdownEvidence {
+            schema_version: 4,
+            worker_started: true,
+            worker_start_failed: false,
+            worker_terminated: true,
+            worker_panicked: false,
+            worker_timed_out: false,
+            worker_detached: false,
+            worker_owner_abandoned: false,
+            pending_jobs: 0,
+            active_jobs: 0,
+            activity_events: 0,
+            audio_source_owners_started: 1,
+            audio_source_owners_closed: 1,
+            audio_source_owner_failures: 0,
+            active_audio_source_owners: 0,
+        };
+
+        assert!(clean.all_resources_released());
+        assert!(
+            !ExportQueueShutdownEvidence { schema_version: 3, ..clean }.all_resources_released()
+        );
+        assert!(!ExportQueueShutdownEvidence { pending_jobs: 1, ..clean }.all_resources_released());
+        assert!(!ExportQueueShutdownEvidence { active_jobs: 1, ..clean }.all_resources_released());
+        assert!(
+            !ExportQueueShutdownEvidence { worker_started: false, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_start_failed: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_terminated: false, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_panicked: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_timed_out: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_detached: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_owner_abandoned: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { audio_source_owners_closed: 0, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { audio_source_owner_failures: 1, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { active_audio_source_owners: 1, ..clean }
+                .all_resources_released()
+        );
+    }
+
+    #[test]
+    fn shutdown_evidence_schema_four_round_trips_exact_owner_facts() {
+        let evidence = ExportQueueShutdownEvidence {
+            schema_version: 4,
+            worker_started: false,
+            worker_start_failed: true,
+            worker_terminated: false,
+            worker_panicked: false,
+            worker_timed_out: false,
+            worker_detached: false,
+            worker_owner_abandoned: true,
+            pending_jobs: 0,
+            active_jobs: 0,
+            activity_events: 7,
+            audio_source_owners_started: 1,
+            audio_source_owners_closed: 1,
+            audio_source_owner_failures: 1,
+            active_audio_source_owners: 0,
+        };
+
+        let encoded = serde_json::to_string(&evidence).expect("serialize shutdown evidence");
+        let decoded = serde_json::from_str::<ExportQueueShutdownEvidence>(&encoded)
+            .expect("deserialize shutdown evidence");
+
+        assert_eq!(decoded, evidence);
+        assert!(encoded.contains("\"worker_started\":false"));
+        assert!(encoded.contains("\"worker_start_failed\":true"));
+        assert!(encoded.contains("\"worker_owner_abandoned\":true"));
+        assert!(encoded.contains("\"audio_source_owner_failures\":1"));
+    }
+
+    #[test]
+    fn legacy_schema_two_json_without_exact_worker_facts_is_rejected() {
+        let encoded = r#"{
+            "schema_version": 2,
+            "worker_started": true,
+            "worker_start_failed": false,
+            "worker_terminated": true,
+            "pending_jobs": 0,
+            "active_jobs": 0,
+            "activity_events": 1
+        }"#;
+
+        assert!(serde_json::from_str::<ExportQueueShutdownEvidence>(encoded).is_err());
     }
 }
 

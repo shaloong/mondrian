@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::preview_work_notification::PreviewWorkNotifier;
+use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
 const OBSERVED_PROGRAM_CAPACITY: usize = 128;
 const OBSERVATION_COMMAND_CAPACITY: usize = 128;
@@ -38,6 +39,8 @@ enum ObservationCommand {
     Observe(Arc<PreparedVisualProgram>),
     Forget(SequenceId),
     Shutdown,
+    #[cfg(test)]
+    PanicForTest,
 }
 
 struct ObservationEntry {
@@ -79,6 +82,15 @@ pub(crate) struct PreviewVisualDependencyObserver {
     shutdown: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    startup: Option<ObserverStartup>,
+}
+
+/// Inert transports retained by the observer before native worker creation.
+struct ObserverStartup {
+    command_rx: mpsc::Receiver<ObservationCommand>,
+    result_tx: mpsc::SyncSender<DependencyRefreshResult>,
+    timing: ObservationTiming,
+    notifier: PreviewWorkNotifier,
 }
 
 struct DependencyRefreshResult {
@@ -93,14 +105,23 @@ enum DueObservationOutcome {
 }
 
 impl PreviewVisualDependencyObserver {
-    /// Start an observer publishing refresh readiness into a shared work watch.
-    pub(crate) fn new_with_notifier(work_notifier: PreviewWorkNotifier) -> Self {
-        Self::with_configuration(
+    /// Prepare an unpublished, unhealthy observer without starting a worker.
+    pub(crate) fn prepare(work_notifier: PreviewWorkNotifier) -> Self {
+        Self::prepare_with_configuration(
             ObservationTiming::default(),
             OBSERVATION_COMMAND_CAPACITY,
             REFRESH_RESULT_CAPACITY,
             work_notifier,
         )
+    }
+
+    /// Install the returned native handle before any caller-side diagnostics.
+    pub(crate) fn start_in_place(&mut self) -> std::io::Result<()> {
+        self.start_with_spawn(|task| {
+            std::thread::Builder::new()
+                .name("mondrian-preview-visual-dependencies".to_owned())
+                .spawn(task)
+        })
     }
 
     #[cfg(test)]
@@ -121,7 +142,49 @@ impl PreviewVisualDependencyObserver {
         )
     }
 
+    #[cfg(test)]
     fn with_configuration(
+        timing: ObservationTiming,
+        command_capacity: usize,
+        result_capacity: usize,
+        work_notifier: PreviewWorkNotifier,
+    ) -> Self {
+        Self::with_configuration_and_spawn(
+            timing,
+            command_capacity,
+            result_capacity,
+            work_notifier,
+            |task| {
+                std::thread::Builder::new()
+                    .name("mondrian-preview-visual-dependencies".to_owned())
+                    .spawn(task)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn with_configuration_and_spawn(
+        timing: ObservationTiming,
+        command_capacity: usize,
+        result_capacity: usize,
+        work_notifier: PreviewWorkNotifier,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> Self {
+        let mut observer = Self::prepare_with_configuration(
+            timing,
+            command_capacity,
+            result_capacity,
+            work_notifier,
+        );
+        if let Err(error) = observer.start_with_spawn(spawn) {
+            tracing::warn!(%error,
+                "failed to start Preview visual dependency observer; dependent Preview execution will fail closed"
+            );
+        }
+        observer
+    }
+
+    fn prepare_with_configuration(
         timing: ObservationTiming,
         command_capacity: usize,
         result_capacity: usize,
@@ -130,28 +193,6 @@ impl PreviewVisualDependencyObserver {
         let (command_tx, command_rx) = mpsc::sync_channel::<ObservationCommand>(command_capacity);
         let (result_tx, result_rx) = mpsc::sync_channel::<DependencyRefreshResult>(result_capacity);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown);
-        let healthy = Arc::new(AtomicBool::new(true));
-        let worker_health = Arc::clone(&healthy);
-        let worker = std::thread::Builder::new()
-            .name("mondrian-preview-visual-dependencies".to_owned())
-            .spawn(move || {
-                let _health_guard = WorkerHealthGuard(worker_health);
-                dependency_observer_worker(
-                    command_rx,
-                    result_tx,
-                    work_notifier,
-                    worker_shutdown,
-                    timing,
-                );
-            })
-            .ok();
-        if worker.is_none() {
-            healthy.store(false, Ordering::Release);
-            tracing::warn!(
-                "failed to start Preview visual dependency observer; dependent Preview execution will fail closed"
-            );
-        }
         Self {
             command_tx,
             result_rx: RefCell::new(result_rx),
@@ -159,8 +200,57 @@ impl PreviewVisualDependencyObserver {
             pending: RefCell::new(HashMap::new()),
             recency: RefCell::new(VecDeque::new()),
             shutdown,
-            healthy,
-            worker,
+            healthy: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            startup: Some(ObserverStartup {
+                command_rx,
+                result_tx,
+                timing,
+                notifier: work_notifier,
+            }),
+        }
+    }
+
+    fn start_with_spawn(
+        &mut self,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> std::io::Result<()> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(std::io::Error::other(
+                "Preview dependency observer is already closed",
+            ));
+        }
+        let startup = self.startup.take().ok_or_else(|| {
+            std::io::Error::other("Preview dependency observer startup already attempted")
+        })?;
+        let worker_shutdown = Arc::clone(&self.shutdown);
+        let worker_health = Arc::clone(&self.healthy);
+        let failed_start_notifier = startup.notifier.clone();
+        // Publish before spawn so a worker that immediately exits cannot have
+        // its terminal unhealthy state overwritten by the construction caller.
+        self.healthy.store(true, Ordering::Release);
+        match spawn(Box::new(move || {
+            let _health_guard = WorkerHealthGuard {
+                healthy: worker_health,
+                notifier: startup.notifier.clone(),
+            };
+            dependency_observer_worker(
+                startup.command_rx,
+                startup.result_tx,
+                startup.notifier,
+                worker_shutdown,
+                startup.timing,
+            );
+        })) {
+            Ok(worker) => {
+                self.worker = Some(worker);
+                Ok(())
+            }
+            Err(error) => {
+                self.healthy.store(false, Ordering::Release);
+                failed_start_notifier.retry_became_actionable();
+                Err(error)
+            }
         }
     }
 
@@ -168,6 +258,29 @@ impl PreviewVisualDependencyObserver {
     /// fail-closed invalidation evidence.
     pub(crate) fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
+    }
+
+    /// Close observation admission before any Preview owner starts joining.
+    pub(crate) fn begin_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.command_tx.try_send(ObservationCommand::Shutdown);
+    }
+
+    /// Consume the actual handle with the caller's unchanged absolute deadline.
+    pub(crate) fn shutdown_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(PreviewOwnedWorkerShutdown::NotStarted, |worker| {
+            PreviewOwnedWorkerShutdown::join_until(worker, deadline)
+        })
+    }
+
+    /// Join the actual worker for the explicitly unbounded shutdown interface.
+    pub(crate) fn shutdown_and_wait(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
     }
 
     /// Observe the exact immutable program used for one Sequence evaluation.
@@ -278,38 +391,30 @@ impl PreviewVisualDependencyObserver {
     }
 }
 
-struct WorkerHealthGuard(Arc<AtomicBool>);
+struct WorkerHealthGuard {
+    healthy: Arc<AtomicBool>,
+    notifier: PreviewWorkNotifier,
+}
 
 impl Drop for WorkerHealthGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.healthy.store(false, Ordering::Release);
+        self.notifier.retry_became_actionable();
     }
 }
 
 impl Drop for PreviewVisualDependencyObserver {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = self.command_tx.try_send(ObservationCommand::Shutdown);
         // Resource checks may be blocked in an operating-system filesystem
         // call. Give an ordinary worker a small bounded opportunity to finish,
         // but never make application shutdown depend on unbounded filesystem
         // latency.
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-        let deadline = Instant::now() + WORKER_JOIN_GRACE;
-        while !worker.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        if worker.is_finished() {
-            if worker.join().is_err() {
-                tracing::warn!("Preview visual dependency observer panicked during shutdown");
-            }
-        } else {
-            tracing::warn!(
-                "Preview visual dependency observer did not stop within the bounded shutdown grace; detaching a possibly blocked filesystem observation"
-            );
-            drop(worker);
+        match self.shutdown_until(Instant::now() + WORKER_JOIN_GRACE) {
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
+            outcome => tracing::warn!(
+                ?outcome,
+                "Preview visual dependency observer did not return cleanly"
+            ),
         }
     }
 }
@@ -326,6 +431,8 @@ fn dependency_observer_worker(
     while !shutdown.load(Ordering::Acquire) {
         let timeout = next_worker_timeout(&entries, timing.shutdown_poll);
         match command_rx.recv_timeout(timeout) {
+            #[cfg(test)]
+            Ok(ObservationCommand::PanicForTest) => panic!("injected observer body panic"),
             Ok(ObservationCommand::Observe(program)) => {
                 let sequence_id = program.sequence_id();
                 let changed = entries
@@ -437,183 +544,5 @@ fn touch_worker_recency(recency: &mut VecDeque<SequenceId>, sequence_id: Sequenc
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use mondrian_core::automation::{ParameterResourceReference, PropertyValue};
-    use mondrian_core::{AssetId, Color, FramePosition, Rational, TimelineTime};
-    use mondrian_effects::{EffectNode, EffectNodeExt, EffectType};
-    use mondrian_renderer::PreparedVisualProgram;
-    use mondrian_timeline::{Clip, Sequence, Track};
-
-    fn test_timing() -> ObservationTiming {
-        ObservationTiming {
-            initial_delay: Duration::ZERO,
-            stable_interval: Duration::from_millis(5),
-            result_retry: Duration::from_millis(2),
-            shutdown_poll: Duration::from_millis(5),
-        }
-    }
-
-    fn timeline_time(frame: i64, rate: Rational) -> TimelineTime {
-        TimelineTime::from_frame_position(FramePosition::new(frame, rate)).expect("valid test time")
-    }
-
-    fn single_solid_sequence(effect: Option<EffectNode>) -> Sequence {
-        let mut sequence = Sequence::new("dependency observer");
-        sequence.video_tracks.clear();
-        let rate = sequence.time_base();
-        let mut track = Track::new_video("V1");
-        let mut clip = Clip::new_solid_color(
-            AssetId::new(),
-            Color::BLACK,
-            timeline_time(0, rate),
-            timeline_time(20, rate),
-        )
-        .expect("solid Clip");
-        if let Some(effect) = effect {
-            clip.add_effect_node(effect);
-        }
-        track.add_clip(clip).expect("add solid Clip");
-        sequence.video_tracks.push(track);
-        sequence
-    }
-
-    fn prepare_stable(sequence: &Sequence) -> Arc<PreparedVisualProgram> {
-        for _ in 0..32 {
-            match PreparedVisualProgram::prepare(sequence) {
-                Ok(program) => return Arc::new(program),
-                Err(mondrian_renderer::PreparedVisualProgramError::EffectRegistryChanged {
-                    ..
-                }) => {}
-                Err(error) => panic!("visual preparation failed: {error}"),
-            }
-        }
-        panic!("Effect registry did not stabilize during test")
-    }
-
-    fn lut_effect(path: std::path::PathBuf) -> EffectNode {
-        let mut lut = EffectNode::with_defaults(EffectType::Lut3D);
-        let processing_space_id = EffectType::Lut3D
-            .parameter_id("processing_space")
-            .expect("processing-space parameter ID");
-        let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
-        lut.set_static_value_by_parameter(
-            &processing_space_id,
-            PropertyValue::Enum("scene_linear".to_owned()),
-        )
-        .expect("set processing space");
-        lut.set_static_value_by_parameter(
-            &path_id,
-            PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
-        )
-        .expect("bind LUT");
-        lut
-    }
-
-    fn wait_for_refresh(
-        observer: &PreviewVisualDependencyObserver,
-    ) -> Option<PreviewVisualDependencyRefresh> {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while Instant::now() < deadline {
-            if let Some(refresh) = observer.poll_refreshes().into_iter().next() {
-                return Some(refresh);
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        None
-    }
-
-    #[test]
-    fn identity_program_does_not_publish_false_refresh() {
-        let observer = PreviewVisualDependencyObserver::with_timing(test_timing());
-        observer.observe(prepare_stable(&single_solid_sequence(None)));
-        std::thread::sleep(Duration::from_millis(25));
-        assert!(observer.poll_refreshes().is_empty());
-    }
-
-    #[test]
-    fn retryable_external_blocker_publishes_exact_program_refresh() {
-        let missing_path =
-            std::env::temp_dir().join(format!("mondrian-observer-missing-{}.cube", AssetId::new()));
-        let _ = std::fs::remove_file(&missing_path);
-        let program = prepare_stable(&single_solid_sequence(Some(lut_effect(missing_path))));
-        let expected_sequence_id = program.sequence_id();
-        let expected_revision = program.sequence_revision();
-        let work_notifier = PreviewWorkNotifier::default();
-        let work_watch = work_notifier.watch();
-        let work_revision_before = work_watch.revision();
-        let observer =
-            PreviewVisualDependencyObserver::with_timing_and_notifier(test_timing(), work_notifier);
-        observer.observe(program);
-
-        let refresh = wait_for_refresh(&observer).expect("external blocker refresh");
-        assert_ne!(
-            work_watch.wait_for_change(work_revision_before, Duration::from_secs(1)),
-            work_revision_before
-        );
-        assert_eq!(refresh.sequence_id, expected_sequence_id);
-        assert_eq!(refresh.sequence_revision, expected_revision);
-    }
-
-    #[test]
-    fn result_backpressure_retries_the_cached_refresh_without_rechecking_the_resource() {
-        const IDENTITY_LUT: &str = "LUT_3D_SIZE 2\n\
-0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
-        const CHANGED_LUT: &str = "LUT_3D_SIZE 2\n\
-1 1 1\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n0 0 0\n";
-        let unique = AssetId::new();
-        let path =
-            std::env::temp_dir().join(format!("mondrian-observer-backpressure-{unique}.cube"));
-        std::fs::write(&path, IDENTITY_LUT).expect("write initial LUT");
-        let changed_program =
-            prepare_stable(&single_solid_sequence(Some(lut_effect(path.clone()))));
-        let changed_sequence_id = changed_program.sequence_id();
-        std::fs::write(&path, CHANGED_LUT).expect("change observed LUT");
-        let timing = test_timing();
-        let now = Instant::now();
-        let mut entry = ObservationEntry {
-            program: Arc::clone(&changed_program),
-            next_check: now,
-            pending_refresh_reason: None,
-        };
-        let (result_tx, result_rx) = mpsc::sync_channel(1);
-        result_tx
-            .try_send(DependencyRefreshResult {
-                program: Arc::clone(&changed_program),
-                reason: Arc::from("occupy the bounded result slot"),
-            })
-            .expect("fill result slot");
-
-        assert!(matches!(
-            process_due_observation(&mut entry, &result_tx, now, timing),
-            DueObservationOutcome::Retained
-        ));
-        assert!(
-            entry.pending_refresh_reason.is_some(),
-            "backpressure must cache already-proven refresh evidence"
-        );
-        let _ = result_rx.try_recv().expect("drain occupying result");
-        std::fs::write(&path, IDENTITY_LUT).expect("restore LUT before result retry");
-
-        assert!(matches!(
-            process_due_observation(&mut entry, &result_tx, Instant::now(), timing),
-            DueObservationOutcome::Published
-        ));
-        let refreshed = result_rx.try_recv().expect("cached refresh result");
-        assert_eq!(refreshed.program.sequence_id(), changed_sequence_id);
-        std::fs::remove_file(path).expect("remove LUT");
-    }
-
-    #[test]
-    fn ordinary_drop_joins_the_observer_worker_within_the_bounded_grace() {
-        let observer = PreviewVisualDependencyObserver::with_timing(test_timing());
-        let healthy = Arc::clone(&observer.healthy);
-
-        drop(observer);
-
-        assert!(
-            !healthy.load(Ordering::Acquire),
-            "the joined worker health guard must publish terminal state"
-        );
-    }
-}
+#[path = "../../tests/protocol/preview_visual_dependencies.rs"]
+mod tests;

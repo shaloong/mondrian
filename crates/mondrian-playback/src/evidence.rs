@@ -2,8 +2,8 @@
 
 use crate::{
     timeline_position_ns_floor, ClockMaster, FrameDeliveryApplication, FrameDeliveryKind,
-    FrameDemand, FrameDemandIdentity, MonotonicTimestamp, PlaybackEpoch, PlaybackSnapshot,
-    PreviewResolutionScale, TransportState,
+    FrameDemand, FrameDemandIdentity, MonotonicTimestamp, PlaybackEpoch, PlaybackRate,
+    PlaybackSnapshot, PreviewResolutionScale, TransportState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 4;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 5;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,11 @@ pub enum PlaybackEvidenceEventKind {
     ClockMasterChanged {
         from: Option<ClockMaster>,
         to: Option<ClockMaster>,
+    },
+    /// Exact signed Timeline phase rate changed.
+    PlaybackRateChanged {
+        from: PlaybackRate,
+        to: PlaybackRate,
     },
     /// Runtime preview scale changed.
     PreviewScaleChanged {
@@ -306,6 +311,7 @@ pub struct PlaybackEvidenceCollector {
     observed_duration: Duration,
     last_state: Option<TransportState>,
     last_master: Option<Option<ClockMaster>>,
+    last_rate: Option<PlaybackRate>,
     last_scale: Option<PreviewResolutionScale>,
     last_position: Option<(PlaybackEpoch, i64)>,
     snapshot_count: u64,
@@ -462,6 +468,7 @@ impl PlaybackEvidenceCollector {
             observed_duration: Duration::ZERO,
             last_state: None,
             last_master: None,
+            last_rate: None,
             last_scale: None,
             last_position: None,
             snapshot_count: 0,
@@ -526,6 +533,13 @@ impl PlaybackEvidenceCollector {
                 PlaybackEvidenceEventKind::ClockMasterChanged { from, to: snapshot.clock_master },
             );
         }
+        if let Some(from) = self.last_rate.filter(|from| *from != snapshot.rate) {
+            self.push_event(
+                observed_at,
+                epoch,
+                PlaybackEvidenceEventKind::PlaybackRateChanged { from, to: snapshot.rate },
+            );
+        }
         if let Some(from) = self.last_scale.filter(|from| *from != snapshot.preview_scale) {
             self.push_event(
                 observed_at,
@@ -539,6 +553,7 @@ impl PlaybackEvidenceCollector {
         self.last_observed_at = Some(observed_at);
         self.last_state = Some(snapshot.state);
         self.last_master = Some(snapshot.clock_master);
+        self.last_rate = Some(snapshot.rate);
         self.last_scale = Some(snapshot.preview_scale);
         self.last_position = Some((snapshot.epoch, snapshot.position.frame));
         Ok(())
@@ -794,13 +809,11 @@ impl PlaybackEvidenceCollector {
                 snapshot.state,
                 TransportState::Stopped | TransportState::Blocked
             )
-            || snapshot.position.frame <= previous_frame
+            || snapshot.position.frame == previous_frame
         {
             return;
         }
-        let advanced_frames = (snapshot.position.frame as i128)
-            .saturating_sub(previous_frame as i128)
-            .min(u64::MAX as i128) as u64;
+        let advanced_frames = snapshot.position.frame.abs_diff(previous_frame);
         let skipped_intermediate_frames = advanced_frames.saturating_sub(1);
         if skipped_intermediate_frames == 0 {
             self.clock_frame_advances.single_frame_advances =
@@ -993,7 +1006,7 @@ mod tests {
     use super::*;
     use crate::{
         AudioDeviceClockObservation, FrameDeliveryCandidate, FrameDemandKind, FrameDemandSequence,
-        PlaybackClockPhaseObservation, PlaybackSnapshot,
+        PlaybackClockPhaseObservation, PlaybackRate, PlaybackSnapshot,
     };
     use mondrian_core::{FramePosition, Rational};
     use std::time::Duration;
@@ -1016,6 +1029,7 @@ mod tests {
             epoch,
             state,
             position: FramePosition::new(frame, Rational::new(1, 25)),
+            rate: PlaybackRate::FORWARD_1X,
             clock_master: master,
             preview_scale: PreviewResolutionScale::Full,
             quality_revision: 1,
@@ -1079,6 +1093,7 @@ mod tests {
                 epoch,
                 state,
                 position: target,
+                rate: PlaybackRate::FORWARD_1X,
                 clock_master: master,
                 preview_scale: PreviewResolutionScale::Full,
                 quality_revision: 1,
@@ -1146,6 +1161,31 @@ mod tests {
         assert_eq!(report.delivery_phase_error.unproven_presentable, 0);
         assert_eq!(report.audio_underrun_frames, 960);
         assert_eq!(report.audio_underrun_recoveries, 1);
+    }
+
+    #[test]
+    fn records_exact_playback_rate_transitions() {
+        let epoch = PlaybackEpoch(17);
+        let mut collector = PlaybackEvidenceCollector::default();
+        let forward = snapshot(
+            epoch,
+            10,
+            TransportState::Playing,
+            Some(ClockMaster::Synthetic),
+        );
+        collector.observe_snapshot(at(0), forward, None).expect("forward snapshot");
+
+        let mut reverse = forward;
+        reverse.rate = PlaybackRate::new(-2, 1).expect("reverse rate");
+        collector.observe_snapshot(at(1), reverse, None).expect("reverse snapshot");
+
+        assert!(collector.report().events.iter().any(|event| {
+            event.kind
+                == PlaybackEvidenceEventKind::PlaybackRateChanged {
+                    from: PlaybackRate::FORWARD_1X,
+                    to: reverse.rate,
+                }
+        }));
     }
 
     #[test]
@@ -1248,6 +1288,40 @@ mod tests {
                 == PlaybackEvidenceEventKind::ClockFramesAdvanced {
                     from_frame: 1,
                     to_frame: 4,
+                    skipped_intermediate_frames: 2,
+                }
+        }));
+    }
+
+    #[test]
+    fn reverse_clock_advancement_uses_absolute_directional_distance() {
+        let epoch = PlaybackEpoch(19);
+        let mut collector = PlaybackEvidenceCollector::default();
+        let reverse = |frame| {
+            let mut snapshot = snapshot(
+                epoch,
+                frame,
+                TransportState::Playing,
+                Some(ClockMaster::Synthetic),
+            );
+            snapshot.rate = PlaybackRate::REVERSE_1X;
+            snapshot
+        };
+
+        collector.observe_snapshot(at(0), reverse(10), None).expect("anchor");
+        collector.observe_snapshot(at(40), reverse(9), None).expect("single reverse");
+        collector.observe_snapshot(at(160), reverse(6), None).expect("reverse skip");
+
+        let report = collector.report();
+        assert_eq!(report.clock_frame_advances.single_frame_advances, 1);
+        assert_eq!(report.clock_frame_advances.multi_frame_advances, 1);
+        assert_eq!(report.clock_frame_advances.advanced_frames, 4);
+        assert_eq!(report.clock_frame_advances.skipped_intermediate_frames, 2);
+        assert!(report.events.iter().any(|event| {
+            event.kind
+                == PlaybackEvidenceEventKind::ClockFramesAdvanced {
+                    from_frame: 9,
+                    to_frame: 6,
                     skipped_intermediate_frames: 2,
                 }
         }));

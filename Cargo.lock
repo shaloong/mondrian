@@ -1224,6 +1224,7 @@ dependencies = [
  "miniz_oxide",
  "num-complex",
  "pulp",
+ "rayon-core",
  "smallvec",
  "zune-inflate",
 ]
@@ -2306,14 +2307,18 @@ dependencies = [
  "libc",
  "mondrian-assets",
  "mondrian-audio",
+ "mondrian-broadcast",
  "mondrian-core",
  "mondrian-editor-state",
  "mondrian-effects",
  "mondrian-export",
+ "mondrian-interchange",
  "mondrian-media",
  "mondrian-platform",
  "mondrian-playback",
  "mondrian-project",
+ "mondrian-reference-output",
+ "mondrian-render-cache",
  "mondrian-renderer",
  "mondrian-storage",
  "mondrian-timeline",
@@ -2325,6 +2330,7 @@ dependencies = [
  "mondrian-ui-theme",
  "mondrian-ui-tooltip",
  "mondrian-ui-widgets",
+ "mondrian-validation-launcher",
  "parking_lot",
  "pollster",
  "raw-window-handle",
@@ -2333,7 +2339,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
+ "tiff",
  "tiny-skia",
  "tokio",
  "tracing",
@@ -2369,9 +2377,27 @@ dependencies = [
 name = "mondrian-audio"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
+ "memmap2",
  "mondrian-core",
  "mondrian-timeline",
  "pulp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "mondrian-broadcast"
+version = "0.2.0"
+dependencies = [
+ "mondrian-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
@@ -2380,6 +2406,7 @@ name = "mondrian-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "crossbeam-channel",
  "dashmap",
@@ -2435,9 +2462,16 @@ dependencies = [
 name = "mondrian-export"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "base64",
+ "bytemuck",
  "chrono",
+ "exr",
+ "half",
+ "image",
  "mondrian-audio",
+ "mondrian-broadcast",
  "mondrian-core",
  "mondrian-effects",
  "mondrian-media",
@@ -2445,15 +2479,34 @@ dependencies = [
  "mondrian-storage",
  "mondrian-timeline",
  "parking_lot",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tiff",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wgpu",
+]
+
+[[package]]
+name = "mondrian-interchange"
+version = "0.2.0"
+dependencies = [
+ "glam",
+ "mondrian-core",
+ "mondrian-effects",
+ "mondrian-timeline",
+ "roxmltree",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
- "wgpu",
 ]
 
 [[package]]
@@ -2472,30 +2525,42 @@ dependencies = [
  "libc",
  "lru",
  "mondrian-core",
+ "mondrian-platform-core",
  "mondrian-storage",
+ "mondrian-validation-launcher",
  "parking_lot",
  "rubato",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "walkdir",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "mondrian-platform"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "arboard",
  "libc",
+ "libloading",
  "mondrian-platform-core",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "rfd",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
  "wayland-client",
  "wayland-protocols",
  "windows-sys 0.61.2",
@@ -2506,6 +2571,13 @@ dependencies = [
 [[package]]
 name = "mondrian-platform-core"
 version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "mondrian-playback"
@@ -2521,6 +2593,7 @@ name = "mondrian-project"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "image",
  "mondrian-core",
  "mondrian-storage",
  "mondrian-timeline",
@@ -2531,10 +2604,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "mondrian-reference-output"
+version = "0.2.0"
+dependencies = [
+ "mondrian-broadcast",
+ "mondrian-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mondrian-render-cache"
+version = "0.2.0"
+dependencies = [
+ "mondrian-core",
+ "mondrian-storage",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "mondrian-renderer"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "ash",
  "async-trait",
  "bytemuck",
  "cosmic-text",
@@ -2543,10 +2644,13 @@ dependencies = [
  "glam",
  "half",
  "image",
+ "libc",
+ "libloading",
  "lru",
  "mondrian-core",
  "mondrian-effects",
  "mondrian-media",
+ "mondrian-reference-output",
  "mondrian-timeline",
  "naga",
  "objc2-core-foundation",
@@ -2554,9 +2658,12 @@ dependencies = [
  "objc2-metal 0.3.2",
  "parking_lot",
  "pollster",
+ "pulp",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -2697,6 +2804,20 @@ dependencies = [
  "unicode-segmentation",
  "usvg",
  "wgpu",
+]
+
+[[package]]
+name = "mondrian-validation-launcher"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

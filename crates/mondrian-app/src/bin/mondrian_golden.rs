@@ -8,6 +8,7 @@ use anyhow::{bail, Context};
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
+    mondrian_platform::prepare_graphics_process()?;
     let mut arguments = std::env::args_os();
     let _executable = arguments.next();
     let Some(command) = arguments.next() else {

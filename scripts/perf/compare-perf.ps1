@@ -7,6 +7,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
+Import-Module (Join-Path $repositoryRoot "scripts/perf/perf-owner-closure.psm1") -Force
 
 function Read-JsonLines {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -79,7 +81,7 @@ function Assert-Passed {
         [Parameter(Mandatory = $true)][string]$Context
     )
 
-    if (!($Row.PSObject.Properties.Name -contains "passed") -or !$Row.passed) {
+    if (!($Row.PSObject.Properties.Name -contains "passed") -or $Row.passed -isnot [bool] -or !$Row.passed) {
         throw "$Context is missing a passing verdict"
     }
 }
@@ -163,6 +165,14 @@ if ($beforeProject.Count -ne $expectedProjectCases.Count -or
     throw "Project baseline/current must each contain exactly three cases"
 }
 Assert-SameKeySet -Before $beforeProject -After $afterProject -Context "Project report"
+Assert-MondrianPerfCases -Cases @($beforeProject.Values) -Scenario "project"
+Assert-MondrianPerfCases -Cases @($afterProject.Values) -Scenario "project"
+Assert-MondrianIdenticalOwnerClosures `
+    -Containers @($beforeProject.Values) `
+    -Context "Project baseline cases"
+Assert-MondrianIdenticalOwnerClosures `
+    -Containers @($afterProject.Values) `
+    -Context "Project current cases"
 if (Compare-Object `
         -ReferenceObject ($expectedProjectCases | Sort-Object) `
         -DifferenceObject @($afterProject.Keys | Sort-Object)) {
@@ -174,6 +184,8 @@ foreach ($key in $afterProject.Keys) {
     $after = $afterProject[$key]
     Assert-Passed -Row $before -Context "Project baseline '$key'"
     Assert-Passed -Row $after -Context "Project current '$key'"
+    Assert-MondrianCleanOwnerClosure -Container $before -Context "Project baseline '$key'" -ExpectedPreviewOwners 0 -GpuRequired $false
+    Assert-MondrianCleanOwnerClosure -Container $after -Context "Project current '$key'" -ExpectedPreviewOwners 0 -GpuRequired $false
     if ([uint64]$before.iterations -ne [uint64]$after.iterations -or
         [uint64]$before.threshold_ms -ne [uint64]$after.threshold_ms) {
         throw "Project workload or threshold changed for '$key'"

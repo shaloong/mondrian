@@ -17,7 +17,7 @@ use spacing::SpacingTokens;
 use typography::TypographyTokens;
 
 /// 主题 — 所有视觉属性的集合
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub name: String,
     pub colors: ColorTokens,

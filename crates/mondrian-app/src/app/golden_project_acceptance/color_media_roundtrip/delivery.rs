@@ -77,7 +77,7 @@ pub(super) fn execute_export_roundtrip(
         EXPORT_TIMEOUT,
     )?;
     let output_sha256 = sha256_file(&execution.output_path)?;
-    let probe = probe_export_output(&execution.output_path).map_err(anyhow::Error::msg)?;
+    let probe = probe_export_output(&execution.output_path)?;
     let video = probe.video.as_ref().context("color-media export has no video stream")?;
     ensure!(
         video.codec_name.as_deref() == Some("h264")
@@ -94,12 +94,13 @@ pub(super) fn execute_export_roundtrip(
         .active_sequence()
         .context("active Sequence is absent")?
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: PREVIEW_RESOLUTION,
         input_color,

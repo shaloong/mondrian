@@ -9,14 +9,78 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use mondrian_core::{Resolution, SourceSampleTarget, SourceSamplingBoundary, TimelineTime};
+use mondrian_core::{
+    CameraRawAdapter, CameraRawInterpretation, ColorSpace, Resolution, SourceSampleTarget,
+    SourceSamplingBoundary, TimelineTime,
+};
+use serde::{Deserialize, Serialize};
 
 use super::{MediaFileFingerprint, PreviewHardwareDecodeRequest, PreviewSourceColorContract};
-use crate::info::{PixelFormat, VideoStreamInfo};
+use crate::info::{PixelFormat, VideoCodec, VideoCodecProfile, VideoStreamInfo};
 use crate::proxy::{
     ProxyArtifactManifest, ProxyEncodingProfile, PROXY_MANIFEST_VERSION,
     PROXY_PRIMARY_VIDEO_STREAM_INDEX,
 };
+
+/// Versioned Camera RAW development identity shared by Preview and Export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CameraRawDecodeIntent {
+    /// Source Adapter proven by the media probe.
+    adapter: CameraRawAdapter,
+    /// Persistent author controls.
+    interpretation: CameraRawInterpretation,
+    /// Exact algorithm revision included in every decode/cache identity.
+    algorithm_version: u16,
+}
+
+impl CameraRawDecodeIntent {
+    /// Current deterministic DNG development algorithm revision.
+    pub const ALGORITHM_VERSION: u16 = 1;
+
+    /// Build and validate an executable RAW development identity.
+    pub fn new(
+        adapter: CameraRawAdapter,
+        interpretation: CameraRawInterpretation,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        interpretation.validate().map_err(|error| {
+            PreviewDecodeContractError::InvalidCameraRawInterpretation { reason: error.to_string() }
+        })?;
+        Ok(Self {
+            adapter,
+            interpretation,
+            algorithm_version: Self::ALGORITHM_VERSION,
+        })
+    }
+
+    /// Source Adapter proven by the media probe.
+    pub const fn adapter(self) -> CameraRawAdapter {
+        self.adapter
+    }
+
+    /// Persistent author controls carried by this exact execution identity.
+    pub const fn interpretation(self) -> CameraRawInterpretation {
+        self.interpretation
+    }
+
+    /// Exact development algorithm revision.
+    pub const fn algorithm_version(self) -> u16 {
+        self.algorithm_version
+    }
+
+    fn validate_current(self) -> Result<(), PreviewDecodeContractError> {
+        self.interpretation.validate().map_err(|error| {
+            PreviewDecodeContractError::InvalidCameraRawInterpretation { reason: error.to_string() }
+        })?;
+        if self.algorithm_version != Self::ALGORITHM_VERSION {
+            return Err(
+                PreviewDecodeContractError::UnsupportedCameraRawAlgorithmVersion {
+                    algorithm_version: self.algorithm_version,
+                },
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Decoder-native surface family conservatively inferred from physical source evidence.
 ///
@@ -29,6 +93,130 @@ pub enum PreviewNativeSurfaceHint {
     Nv12,
     /// An opaque 10-bit 4:2:0 source may decode to a P010 hardware surface.
     P010,
+    /// A 12-bit 4:2:0 source may decode to a P012-family hardware surface.
+    Yuv420p12,
+    /// A 16-bit 4:2:0 source may decode to a P016-family hardware surface.
+    Yuv420p16,
+    /// A 10-bit 4:2:2 source may decode to a planar or packed platform surface.
+    Yuv422p10,
+    /// A 12-bit 4:2:2 source may decode to a planar or packed platform surface.
+    Yuv422p12,
+    /// A 16-bit 4:2:2 source may decode to a platform-native surface.
+    Yuv422p16,
+    /// A 10-bit 4:4:4 source may decode to a planar or packed platform surface.
+    Yuv444p10,
+    /// A 12-bit 4:4:4 source may decode to a planar or packed platform surface.
+    Yuv444p12,
+    /// A 16-bit 4:4:4 source may decode to a platform-native surface.
+    Yuv444p16,
+}
+
+/// Compact CPU YUV representation conservatively inferred from a probed source.
+///
+/// This is planning evidence only. The decoded frame remains authoritative and
+/// may still fall back to another CPU representation when FFmpeg produces a
+/// different surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreviewCompactCpuYuvHint {
+    /// Eight-bit 4:2:0 with interleaved CbCr samples.
+    Nv12,
+    /// Ten-bit 4:2:0 with interleaved CbCr and left-aligned component words.
+    P010,
+    /// Planar eight-bit 4:2:0 retained as immutable Y, Cb, and Cr planes.
+    Yuv420p,
+    /// Planar little-endian ten-bit 4:2:0 with right-aligned component samples.
+    Yuv420p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
+    Yuv420p12le,
+    /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
+    Yuv422p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
+    Yuv422p12le,
+    /// Planar eight-bit 4:2:2 with full-height chroma planes.
+    Yuv422p,
+    /// Planar eight-bit 4:4:4 with full-resolution chroma planes.
+    Yuv444p,
+    /// Planar little-endian ten-bit 4:4:4 with right-aligned samples.
+    Yuv444p10le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
+    Yuv444p12le,
+}
+
+impl PreviewCompactCpuYuvHint {
+    /// Upper bound on tightly packed bytes per luma pixel for even extents.
+    ///
+    /// Fractional ratios round up. Use `retained_bytes_for_extent` for physical
+    /// admission, including odd chroma extents and aligned row strides.
+    pub const fn retained_bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Yuv420p | Self::Nv12 | Self::Yuv422p => 2,
+            Self::Yuv420p10le | Self::Yuv420p12le | Self::P010 | Self::Yuv444p => 3,
+            Self::Yuv422p10le | Self::Yuv422p12le => 4,
+            Self::Yuv444p10le | Self::Yuv444p12le => 6,
+        }
+    }
+
+    /// Conservative retained FFmpeg plane bytes for one materialized extent.
+    ///
+    /// Software decoders may align each plane row beyond the visible raster.
+    /// Reserving 256-byte row alignment keeps admission valid across SIMD and
+    /// codec-specific allocation policies while avoiding a full-frame copy
+    /// merely to make the allocation tightly packed.
+    pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
+        match self {
+            Self::Yuv420p | Self::Yuv420p10le | Self::Yuv420p12le | Self::Nv12 | Self::P010 => {
+                let component_bytes = match self {
+                    Self::Yuv420p | Self::Nv12 => 1,
+                    _ => 2,
+                };
+                let luma_row = align_up_saturating(
+                    (extent.width as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                let chroma_row = align_up_saturating(
+                    (extent.width.div_ceil(2) as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                luma_row.saturating_mul(extent.height as usize).saturating_add(
+                    chroma_row.saturating_mul(2).saturating_mul(extent.height.div_ceil(2) as usize),
+                )
+            }
+            Self::Yuv422p
+            | Self::Yuv422p10le
+            | Self::Yuv422p12le
+            | Self::Yuv444p
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le => {
+                let component_bytes = match self {
+                    Self::Yuv422p | Self::Yuv444p => 1,
+                    _ => 2,
+                };
+                let chroma_width = match self {
+                    Self::Yuv444p | Self::Yuv444p10le | Self::Yuv444p12le => extent.width,
+                    _ => extent.width.div_ceil(2),
+                };
+                let luma_row = align_up_saturating(
+                    (extent.width as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                let chroma_row = align_up_saturating(
+                    (chroma_width as usize).saturating_mul(component_bytes),
+                    256,
+                );
+                luma_row
+                    .saturating_add(chroma_row.saturating_mul(2))
+                    .saturating_mul(extent.height as usize)
+            }
+        }
+    }
+}
+
+const fn align_up_saturating(value: usize, alignment: usize) -> usize {
+    if alignment == 0 {
+        return value;
+    }
+    let units = value.saturating_add(alignment.saturating_sub(1)) / alignment;
+    units.saturating_mul(alignment)
 }
 
 /// Strength of physical Alpha evidence attached to one decode source.
@@ -54,6 +242,9 @@ pub struct PreviewDecodeSource {
     video_stream_index: u32,
     alpha_presence: PreviewDecodeAlphaPresence,
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
+    compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
+    cpu_component_bit_depth: Option<u8>,
+    still_image: bool,
     source_extent: Resolution,
 }
 
@@ -92,14 +283,17 @@ impl PreviewDecodeSource {
         } else {
             PreviewDecodeAlphaPresence::Opaque
         };
-        Self::new(
+        let mut source = Self::new(
             path.into(),
             fingerprint,
             stream.index,
             alpha_presence,
-            native_surface_hint_from_pixel_format(sampling.pixel_format),
+            native_surface_hint_from_stream(stream, sampling.pixel_format),
+            compact_cpu_yuv_hint_from_pixel_format(sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
-        )
+        )?;
+        source.cpu_component_bit_depth = Some(sampling.bit_depth);
+        Ok(source)
     }
 
     /// Capture and validate one generated proxy artifact under its exact manifest contract.
@@ -137,14 +331,25 @@ impl PreviewDecodeSource {
             ProxyEncodingProfile::H265Main10 => Some(PreviewNativeSurfaceHint::P010),
             ProxyEncodingProfile::DnxHrSq8 | ProxyEncodingProfile::DnxHrHqx10 => None,
         };
-        Self::new(
+        let mut source = Self::new(
             path.into(),
             fingerprint,
             PROXY_PRIMARY_VIDEO_STREAM_INDEX,
             PreviewDecodeAlphaPresence::Opaque,
             native_surface_hint,
+            match manifest.encoding {
+                ProxyEncodingProfile::DnxHrHqx10 => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+                ProxyEncodingProfile::H264High8 => Some(PreviewCompactCpuYuvHint::Yuv420p),
+                ProxyEncodingProfile::H265Main10 => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+                ProxyEncodingProfile::DnxHrSq8 => None,
+            },
             source_extent,
-        )
+        )?;
+        source.cpu_component_bit_depth = Some(match manifest.encoding {
+            ProxyEncodingProfile::H264High8 | ProxyEncodingProfile::DnxHrSq8 => 8,
+            ProxyEncodingProfile::H265Main10 | ProxyEncodingProfile::DnxHrHqx10 => 10,
+        });
+        Ok(source)
     }
 
     /// Build an exact CPU-only source when no complete sampling evidence was frozen.
@@ -165,6 +370,7 @@ impl PreviewDecodeSource {
             video_stream_index,
             PreviewDecodeAlphaPresence::Unknown,
             None,
+            None,
             source_extent,
         )
     }
@@ -175,6 +381,7 @@ impl PreviewDecodeSource {
         video_stream_index: u32,
         alpha_presence: PreviewDecodeAlphaPresence,
         native_surface_hint: Option<PreviewNativeSurfaceHint>,
+        compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
         source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         if path.as_os_str().is_empty() {
@@ -197,6 +404,9 @@ impl PreviewDecodeSource {
             video_stream_index,
             alpha_presence,
             native_surface_hint,
+            compact_cpu_yuv_hint,
+            cpu_component_bit_depth: None,
+            still_image: false,
             source_extent,
         })
     }
@@ -226,6 +436,45 @@ impl PreviewDecodeSource {
         self.native_surface_hint
     }
 
+    /// Compact CPU YUV layout expected from the selected physical stream.
+    pub const fn compact_cpu_yuv_hint(&self) -> Option<PreviewCompactCpuYuvHint> {
+        self.compact_cpu_yuv_hint
+    }
+
+    /// Freeze an admitted single-image Asset's physical source family.
+    ///
+    /// Callers must supply domain evidence; extensions and unknown CPU sources
+    /// do not establish this fact. It selects the existing bounded CPU-still
+    /// Session slot without changing request timing or presentation authority.
+    pub fn with_still_image_source(mut self) -> Self {
+        self.still_image = true;
+        self.native_surface_hint = None;
+        self.compact_cpu_yuv_hint = None;
+        self
+    }
+
+    /// Whether an admitted Asset established the single-image source family.
+    pub const fn is_still_image(&self) -> bool {
+        self.still_image
+    }
+
+    /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
+    ///
+    /// Encoded sources above eight bits retain float RGBA just like the actual
+    /// decoder materializer. Unproven sampling reserves float capacity; proven
+    /// eight-bit sources retain their smaller RGBA8 allocation. Compact YUV and
+    /// native surfaces have separate representation-specific accounting.
+    pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
+        if color.is_scene_linear()
+            || color.is_data_texture()
+            || self.cpu_component_bit_depth.is_none_or(cpu_preview_uses_float)
+        {
+            4 * std::mem::size_of::<f32>()
+        } else {
+            4
+        }
+    }
+
     /// The source's own raster extent (never a consumer/output extent).
     pub const fn source_extent(&self) -> Resolution {
         self.source_extent
@@ -236,6 +485,10 @@ impl PreviewDecodeSource {
         matches!(self.alpha_presence, PreviewDecodeAlphaPresence::Opaque)
             && self.native_surface_hint.is_some()
     }
+}
+
+pub(super) const fn cpu_preview_uses_float(bit_depth: u8) -> bool {
+    bit_depth > 8
 }
 
 /// Working representation quality requested by one Preview decode consumer.
@@ -271,6 +524,20 @@ pub enum PreviewDecodeRepresentation {
     /// Media's own representation at its source raster extent, materialized as
     /// CPU-addressable pixels. Decode never swscales to an output extent.
     NativeCpu,
+    /// Media's source raster retained as compact CPU YUV planes for direct
+    /// Renderer upload and GPU color materialization.
+    ///
+    /// This identity is admitted only from an exact probed layout and a
+    /// GPU-capable downstream payload contract. A decoder format mismatch is
+    /// an execution error; it cannot silently expand into an RGBA payload
+    /// under the same cache and residency identity.
+    CompactCpuYuv,
+    /// Reduced-raster compact CPU YUV planes for realtime recovery.
+    ///
+    /// The divisor is physical cache/materialization identity, while the
+    /// underlying compressed-stream decoder remains reusable across Full,
+    /// Half, and Quarter representation changes.
+    ReducedCompactCpuYuv { divisor: NonZeroU32 },
     /// Media's own representation as a decoder-native surface at source
     /// extent; the renderer materializes the composition target from it.
     NativeSurface,
@@ -301,6 +568,7 @@ impl PreviewDecodeRepresentation {
         payload_requirement: PreviewDecodePayloadRequirement,
         hardware_request: PreviewHardwareDecodeRequest,
         representation_quality: PreviewRepresentationQuality,
+        source_color: PreviewSourceColorContract,
     ) -> Result<Self, PreviewDecodeContractError> {
         let native_requested = matches!(
             hardware_request,
@@ -310,6 +578,7 @@ impl PreviewDecodeRepresentation {
         if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
             && native_requested
             && source.permits_native_output()
+            && !source_color.is_data_texture()
         {
             return Ok(Self::NativeSurface);
         }
@@ -323,9 +592,25 @@ impl PreviewDecodeRepresentation {
             );
         }
         match representation_quality {
+            PreviewRepresentationQuality::Full
+                if payload_requirement != PreviewDecodePayloadRequirement::CpuAddressable
+                    && source.compact_cpu_yuv_hint().is_some()
+                    && !source_color.is_scene_linear()
+                    && !source_color.is_data_texture() =>
+            {
+                Ok(Self::CompactCpuYuv)
+            }
             PreviewRepresentationQuality::Full => Ok(Self::NativeCpu),
             PreviewRepresentationQuality::Reduced { divisor } if divisor.get() == 1 => {
                 Err(PreviewDecodeContractError::IdentityReducedRepresentation)
+            }
+            PreviewRepresentationQuality::Reduced { divisor }
+                if payload_requirement != PreviewDecodePayloadRequirement::CpuAddressable
+                    && source.compact_cpu_yuv_hint().is_some()
+                    && !source_color.is_scene_linear()
+                    && !source_color.is_data_texture() =>
+            {
+                Ok(Self::ReducedCompactCpuYuv { divisor })
             }
             PreviewRepresentationQuality::Reduced { divisor } => Ok(Self::Reduced { divisor }),
         }
@@ -348,6 +633,14 @@ impl PreviewDecodeRepresentation {
         !self.is_native_surface()
     }
 
+    /// Whether this representation preserves exact compact CPU YUV planes.
+    pub const fn is_compact_cpu_yuv(self) -> bool {
+        matches!(
+            self,
+            Self::CompactCpuYuv | Self::ReducedCompactCpuYuv { .. }
+        )
+    }
+
     /// The representation's own raster extent given a concrete source extent.
     ///
     /// Native representations keep the source extent; a reduced representation
@@ -356,8 +649,8 @@ impl PreviewDecodeRepresentation {
     /// output/composition extent.
     pub const fn extent_for_source(self, source: Resolution) -> Resolution {
         match self {
-            Self::NativeCpu | Self::NativeSurface => source,
-            Self::Reduced { divisor } => {
+            Self::NativeCpu | Self::CompactCpuYuv | Self::NativeSurface => source,
+            Self::Reduced { divisor } | Self::ReducedCompactCpuYuv { divisor } => {
                 let divisor = divisor.get();
                 Resolution {
                     width: source.width.div_ceil(divisor),
@@ -386,8 +679,12 @@ impl PreviewDecodeRepresentation {
 /// Addressability required by the downstream Preview execution path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreviewDecodePayloadRequirement {
-    /// The downstream processor must be able to address CPU pixels.
+    /// The downstream processor requires CPU RGB pixels rather than YUV planes.
     CpuAddressable,
+    /// CPU decoding is required, but the downstream Renderer can consume compact
+    /// YUV planes. Native GPU surfaces remain forbidden; unsupported plane
+    /// layouts retain the ordinary CPU RGB representation.
+    CpuYuvAllowed,
     /// A renderer-admitted native surface may be returned.
     NativeAllowed,
 }
@@ -404,6 +701,8 @@ pub struct PreviewDecodeKey {
     source_sample: SourceSampleTarget,
     representation: PreviewDecodeRepresentation,
     source_color: PreviewSourceColorContract,
+    field_processing: super::PreviewSourceFieldProcessing,
+    camera_raw: Option<CameraRawDecodeIntent>,
 }
 
 impl PreviewDecodeKey {
@@ -427,13 +726,37 @@ impl PreviewDecodeKey {
                 boundary: source_sample.boundary(),
             });
         }
-        validate_representation_for_source(representation, &source)?;
+        validate_representation_for_source(representation, &source, source_color)?;
         Ok(Self {
             source,
             source_sample,
             representation,
             source_color,
+            field_processing: super::PreviewSourceFieldProcessing::Automatic,
+            camera_raw: None,
         })
+    }
+
+    /// Build a validated exact decode key for a probe-admitted camera RAW source.
+    pub fn new_camera_raw(
+        source: PreviewDecodeSource,
+        source_sample: SourceSampleTarget,
+        representation: PreviewDecodeRepresentation,
+        source_color: PreviewSourceColorContract,
+        camera_raw: CameraRawDecodeIntent,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        camera_raw.validate_current()?;
+        if representation.is_native_surface() || representation.is_compact_cpu_yuv() {
+            return Err(PreviewDecodeContractError::CameraRawRequiresCpuFloat);
+        }
+        if source_color.color_space() != Some(ColorSpace::LinearRec709) {
+            return Err(PreviewDecodeContractError::CameraRawRequiresLinearRec709 {
+                actual: source_color.color_space(),
+            });
+        }
+        let mut key = Self::new(source, source_sample, representation, source_color)?;
+        key.camera_raw = Some(camera_raw);
+        Ok(key)
     }
 
     /// Selected physical file and stream revision.
@@ -455,15 +778,44 @@ impl PreviewDecodeKey {
     pub const fn source_color(&self) -> PreviewSourceColorContract {
         self.source_color
     }
+
+    /// Exact source scan/deinterlace identity.
+    pub const fn field_processing(&self) -> super::PreviewSourceFieldProcessing {
+        self.field_processing
+    }
+
+    /// Bind a resolved source scan/deinterlace identity into this key.
+    ///
+    /// A native-surface representation cannot currently satisfy software BWDIF;
+    /// callers must choose a CPU-addressable representation or receive a stable
+    /// contract error.
+    pub fn with_field_processing(
+        mut self,
+        field_processing: super::PreviewSourceFieldProcessing,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        if field_processing.requires_cpu_decode() && self.representation.is_native_surface() {
+            return Err(PreviewDecodeContractError::DeinterlaceRequiresCpuAddressablePayload);
+        }
+        self.field_processing = field_processing;
+        Ok(self)
+    }
+
+    /// Camera RAW development identity, when the probe admitted one.
+    pub const fn camera_raw(&self) -> Option<CameraRawDecodeIntent> {
+        self.camera_raw
+    }
 }
 
 fn validate_representation_for_source(
     representation: PreviewDecodeRepresentation,
     source: &PreviewDecodeSource,
+    source_color: PreviewSourceColorContract,
 ) -> Result<(), PreviewDecodeContractError> {
     match representation {
         PreviewDecodeRepresentation::NativeSurface => {
-            if source.permits_native_output() {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else if source.permits_native_output() {
                 Ok(())
             } else {
                 Err(PreviewDecodeContractError::NativeSourceUnavailable {
@@ -472,9 +824,31 @@ fn validate_representation_for_source(
                 })
             }
         }
-        PreviewDecodeRepresentation::Proxy(extent) => validate_extent(extent),
-        PreviewDecodeRepresentation::Reduced { divisor } if divisor.get() == 1 => {
+        PreviewDecodeRepresentation::Reduced { divisor }
+        | PreviewDecodeRepresentation::ReducedCompactCpuYuv { divisor }
+            if divisor.get() == 1 =>
+        {
             Err(PreviewDecodeContractError::IdentityReducedRepresentation)
+        }
+        PreviewDecodeRepresentation::CompactCpuYuv
+        | PreviewDecodeRepresentation::ReducedCompactCpuYuv { .. } => {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else if source.compact_cpu_yuv_hint().is_some() && !source_color.is_scene_linear() {
+                Ok(())
+            } else {
+                Err(PreviewDecodeContractError::CompactCpuYuvUnavailable {
+                    compact_hint: source.compact_cpu_yuv_hint(),
+                    source_color_space: source_color.color_space(),
+                })
+            }
+        }
+        PreviewDecodeRepresentation::Proxy(extent) => {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else {
+                validate_extent(extent)
+            }
         }
         PreviewDecodeRepresentation::NativeCpu | PreviewDecodeRepresentation::Reduced { .. } => {
             Ok(())
@@ -485,6 +859,30 @@ fn validate_representation_for_source(
 /// Invalid or incomplete physical Preview decode contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewDecodeContractError {
+    /// RAW author controls failed their closed bounds.
+    #[error("invalid camera RAW interpretation: {reason}")]
+    InvalidCameraRawInterpretation {
+        /// Stable validation reason.
+        reason: String,
+    },
+    /// Serialized or external state selected a development revision this build cannot execute.
+    #[error("unsupported camera RAW algorithm version {algorithm_version}")]
+    UnsupportedCameraRawAlgorithmVersion {
+        /// Unrecognized development revision.
+        algorithm_version: u16,
+    },
+    /// Camera RAW output is always CPU-addressable scene-linear float in this slice.
+    #[error("camera RAW Preview decode requires CPU float output")]
+    CameraRawRequiresCpuFloat,
+    /// The only qualified deinterlacer is currently the CPU BWDIF Adapter.
+    #[error("motion-adaptive deinterlace requires a CPU-addressable Preview payload")]
+    DeinterlaceRequiresCpuAddressablePayload,
+    /// Camera RAW Adapter output has one explicit source identity.
+    #[error("camera RAW Preview decode requires LinearRec709 source identity, got {actual:?}")]
+    CameraRawRequiresLinearRec709 {
+        /// Contradictory input identity.
+        actual: Option<ColorSpace>,
+    },
     /// Empty paths cannot identify a physical source.
     #[error("Preview decode source path is empty")]
     EmptySourcePath,
@@ -545,6 +943,20 @@ pub enum PreviewDecodeContractError {
         /// Physical native-surface hint.
         native_surface_hint: Option<PreviewNativeSurfaceHint>,
     },
+    /// Compact CPU YUV requires an exact physical layout and nonlinear source encoding.
+    #[error(
+        "compact CPU YUV Preview output is unavailable for hint={compact_hint:?}, color={source_color_space:?}"
+    )]
+    CompactCpuYuvUnavailable {
+        /// Exact physical compact-layout evidence, when present.
+        compact_hint: Option<PreviewCompactCpuYuvHint>,
+        /// Resolved source color identity.
+        source_color_space: Option<mondrian_core::ColorSpace>,
+    },
+    /// Data textures require CPU-addressable RGB samples so no YCbCr or native
+    /// color conversion can silently alter their numeric channels.
+    #[error("data-texture Preview decode requires CPU-addressable RGB output")]
+    DataTextureRequiresCpuRgb,
     /// A required native request cannot be reconciled with source/output facts.
     #[error(
         "required native Preview output is unavailable for requirement={payload_requirement:?}, alpha={alpha_presence:?}, surface={native_surface_hint:?}"
@@ -589,12 +1001,114 @@ const fn native_surface_hint_from_pixel_format(
     match pixel_format {
         PixelFormat::Yuv420p | PixelFormat::Nv12 => Some(PreviewNativeSurfaceHint::Nv12),
         PixelFormat::Yuv420p10le | PixelFormat::P010 => Some(PreviewNativeSurfaceHint::P010),
+        PixelFormat::Yuv420p12le | PixelFormat::P012 => Some(PreviewNativeSurfaceHint::Yuv420p12),
+        PixelFormat::Yuv420p16le | PixelFormat::P016 => Some(PreviewNativeSurfaceHint::Yuv420p16),
+        PixelFormat::Yuv422p10le => Some(PreviewNativeSurfaceHint::Yuv422p10),
+        PixelFormat::Yuv422p12le => Some(PreviewNativeSurfaceHint::Yuv422p12),
+        PixelFormat::Yuv422p16le => Some(PreviewNativeSurfaceHint::Yuv422p16),
+        PixelFormat::Yuv444p10le => Some(PreviewNativeSurfaceHint::Yuv444p10),
+        PixelFormat::Yuv444p12le => Some(PreviewNativeSurfaceHint::Yuv444p12),
+        PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
         PixelFormat::Yuv422p
         | PixelFormat::Yuv444p
-        | PixelFormat::Yuv422p10le
-        | PixelFormat::Yuv444p10le
+        | PixelFormat::Gbrp10le
+        | PixelFormat::Gbrp12le
+        | PixelFormat::Gbrp16le
+        | PixelFormat::Gbrap10le
+        | PixelFormat::Gbrap12le
+        | PixelFormat::Gbrap16le
+        | PixelFormat::Gbrpf32le
+        | PixelFormat::Gbrpf32be
+        | PixelFormat::Gbrapf32le
+        | PixelFormat::Gbrapf32be
         | PixelFormat::Rgb24
-        | PixelFormat::Rgba => None,
+        | PixelFormat::Rgba
+        | PixelFormat::Rgba64le
+        | PixelFormat::BayerRggb8
+        | PixelFormat::BayerBggr8
+        | PixelFormat::BayerGbrg8
+        | PixelFormat::BayerGrbg8
+        | PixelFormat::BayerRggb16le
+        | PixelFormat::BayerBggr16le
+        | PixelFormat::BayerGbrg16le
+        | PixelFormat::BayerGrbg16le => None,
+    }
+}
+
+const fn compact_cpu_yuv_hint_from_pixel_format(
+    pixel_format: PixelFormat,
+) -> Option<PreviewCompactCpuYuvHint> {
+    match pixel_format {
+        PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
+        PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
+        PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
+        PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+        PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
+        PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
+        PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
+        PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
+        PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
+        PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+        PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
+        _ => None,
+    }
+}
+
+fn native_surface_hint_from_stream(
+    stream: &VideoStreamInfo,
+    pixel_format: PixelFormat,
+) -> Option<PreviewNativeSurfaceHint> {
+    let surface = native_surface_hint_from_pixel_format(pixel_format)?;
+    match surface {
+        PreviewNativeSurfaceHint::Nv12 => match &stream.codec {
+            VideoCodec::H264 => (!matches!(
+                stream.codec_profile,
+                VideoCodecProfile::H264High10
+                    | VideoCodecProfile::H264High10Intra
+                    | VideoCodecProfile::H264High422
+                    | VideoCodecProfile::H264High422Intra
+                    | VideoCodecProfile::H264High444
+                    | VideoCodecProfile::H264High444Predictive
+                    | VideoCodecProfile::H264High444Intra
+                    | VideoCodecProfile::H264Cavlc444
+            ))
+            .then_some(surface),
+            VideoCodec::H265 | VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
+        PreviewNativeSurfaceHint::P010 => match &stream.codec {
+            VideoCodec::H265
+                if matches!(
+                    stream.codec_profile,
+                    VideoCodecProfile::HevcMain10
+                        | VideoCodecProfile::HevcRangeExtensions
+                        | VideoCodecProfile::Unknown
+                ) =>
+            {
+                Some(surface)
+            }
+            VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
+        PreviewNativeSurfaceHint::Yuv420p12
+        | PreviewNativeSurfaceHint::Yuv420p16
+        | PreviewNativeSurfaceHint::Yuv422p10
+        | PreviewNativeSurfaceHint::Yuv422p12
+        | PreviewNativeSurfaceHint::Yuv422p16
+        | PreviewNativeSurfaceHint::Yuv444p10
+        | PreviewNativeSurfaceHint::Yuv444p12
+        | PreviewNativeSurfaceHint::Yuv444p16 => match &stream.codec {
+            VideoCodec::H265
+                if matches!(
+                    stream.codec_profile,
+                    VideoCodecProfile::HevcRangeExtensions | VideoCodecProfile::Unknown
+                ) =>
+            {
+                Some(surface)
+            }
+            VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
     }
 }
 
@@ -646,6 +1160,7 @@ mod tests {
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture: mondrian_core::PictureStreamMetadata::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format,
@@ -655,6 +1170,7 @@ mod tests {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth: pixel_format.bit_depth(),
             has_alpha: pixel_format.has_alpha(),
             avg_bitrate: 1,
@@ -702,6 +1218,302 @@ mod tests {
     }
 
     #[test]
+    fn native_surface_hint_rejects_codec_profile_false_positives() {
+        let mut h264_high10 = video_stream(3, PixelFormat::Yuv420p10le, true);
+        h264_high10.codec = VideoCodec::H264;
+        h264_high10.codec_profile = VideoCodecProfile::H264High10;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/h264-high10.mp4"),
+            exact_fingerprint(14),
+            &h264_high10,
+        )
+        .expect("H.264 High10 remains a valid CPU-decodable source");
+        assert_eq!(source.native_surface_hint(), None);
+
+        let mut hevc_main10 = video_stream(4, PixelFormat::Yuv420p10le, true);
+        hevc_main10.codec = VideoCodec::H265;
+        hevc_main10.codec_profile = VideoCodecProfile::HevcMain10;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/hevc-main10.mp4"),
+            exact_fingerprint(15),
+            &hevc_main10,
+        )
+        .expect("HEVC Main10 remains eligible for P010 admission");
+        assert_eq!(
+            source.native_surface_hint(),
+            Some(PreviewNativeSurfaceHint::P010)
+        );
+
+        let mut prores = video_stream(5, PixelFormat::Yuv420p, true);
+        prores.codec = VideoCodec::ProRes(mondrian_core::ProResVariant::Proxy);
+        prores.codec_profile = VideoCodecProfile::Unknown;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/prores-proxy.mov"),
+            exact_fingerprint(16),
+            &prores,
+        )
+        .expect("ProRes remains a valid CPU-decodable source");
+        assert_eq!(source.native_surface_hint(), None);
+    }
+
+    #[test]
+    fn compact_420_admission_uses_aligned_chroma_extent_and_preserves_cpu_requirement() {
+        for pixel in [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv420p10le,
+            PixelFormat::Nv12,
+            PixelFormat::P010,
+        ] {
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/420.mp4"),
+                exact_fingerprint(19),
+                &video_stream(0, pixel, true),
+            )
+            .expect("proven 420 source");
+            let hint = source.compact_cpu_yuv_hint().expect("compact 420 admission");
+            assert_eq!(
+                hint.retained_bytes_for_extent(Resolution { width: 5, height: 3 }),
+                1792
+            );
+            for requirement in [
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+            ] {
+                let actual = PreviewDecodeRepresentation::canonical(
+                    &source,
+                    requirement,
+                    PreviewHardwareDecodeRequest::Auto,
+                    PreviewRepresentationQuality::Full,
+                    PreviewSourceColorContract::automatic(
+                        ColorSpace::Rec709,
+                        DecodedVideoRange::Limited,
+                    ),
+                )
+                .expect("valid representation");
+                assert_eq!(
+                    actual,
+                    if requirement == PreviewDecodePayloadRequirement::NativeAllowed {
+                        PreviewDecodeRepresentation::CompactCpuYuv
+                    } else {
+                        PreviewDecodeRepresentation::NativeCpu
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_field_payload_keeps_planes_without_admitting_native_surfaces() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/field-422.mov"),
+            exact_fingerprint(19),
+            &video_stream(0, PixelFormat::Yuv422p10le, true),
+        )
+        .expect("opaque 422 source");
+        for hardware in [
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+        ] {
+            for (quality, expected) in [
+                (
+                    PreviewRepresentationQuality::Full,
+                    PreviewDecodeRepresentation::CompactCpuYuv,
+                ),
+                (
+                    PreviewRepresentationQuality::Reduced {
+                        divisor: NonZeroU32::new(2).expect("two"),
+                    },
+                    PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                        divisor: NonZeroU32::new(2).expect("two"),
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    PreviewDecodeRepresentation::canonical(
+                        &source,
+                        PreviewDecodePayloadRequirement::CpuYuvAllowed,
+                        hardware,
+                        quality,
+                        source_color(),
+                    )
+                    .expect("CPU planes"),
+                    expected,
+                );
+            }
+        }
+        assert!(matches!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuYuvAllowed,
+                PreviewHardwareDecodeRequest::RequireGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            ),
+            Err(PreviewDecodeContractError::RequiredNativeOutputUnavailable { .. })
+        ));
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("CPU RGB consumer"),
+            PreviewDecodeRepresentation::NativeCpu,
+        );
+    }
+
+    #[test]
+    fn compact_cpu_yuv_extended_aligned_budget_preserves_full_chroma_rows() {
+        for (hint, expected) in [
+            (PreviewCompactCpuYuvHint::Yuv422p, 3072),
+            (PreviewCompactCpuYuvHint::Yuv444p, 4608),
+            (PreviewCompactCpuYuvHint::Yuv444p10le, 6912),
+            (PreviewCompactCpuYuvHint::Yuv444p12le, 6912),
+            (PreviewCompactCpuYuvHint::Yuv422p12le, 5376),
+            (PreviewCompactCpuYuvHint::Yuv420p12le, 4352),
+        ] {
+            assert_eq!(
+                hint.retained_bytes_for_extent(Resolution { width: 257, height: 3 }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn compact_cpu_yuv_extended_planar_layouts_are_admitted_without_rgb_expansion() {
+        let mut rejected = Vec::new();
+        for pixel in [
+            PixelFormat::Yuv422p,
+            PixelFormat::Yuv444p,
+            PixelFormat::Yuv444p10le,
+            PixelFormat::Yuv420p12le,
+            PixelFormat::Yuv422p12le,
+            PixelFormat::Yuv444p12le,
+        ] {
+            let mut stream = video_stream(9, pixel, true);
+            stream.codec = VideoCodec::H264;
+            stream.codec_profile = VideoCodecProfile::H264High444Predictive;
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/planar.mp4"),
+                exact_fingerprint(19),
+                &stream,
+            )
+            .expect("explicit planar source");
+            let representation = PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("valid representation");
+            if representation != PreviewDecodeRepresentation::CompactCpuYuv {
+                rejected.push((pixel, representation));
+            }
+        }
+        assert!(
+            rejected.is_empty(),
+            "planar software sources expanded to RGB: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn compact_cpu_yuv_hint_requires_exact_probed_layout() {
+        let mut sony_422 = video_stream(8, PixelFormat::Yuv422p10le, true);
+        sony_422.codec = VideoCodec::H264;
+        sony_422.codec_profile = VideoCodecProfile::H264High422;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/h264-high422.mp4"),
+            exact_fingerprint(17),
+            &sony_422,
+        )
+        .expect("H.264 High 4:2:2 source");
+        assert_eq!(source.native_surface_hint(), None);
+        assert_eq!(
+            source.compact_cpu_yuv_hint(),
+            Some(PreviewCompactCpuYuvHint::Yuv422p10le)
+        );
+        assert_eq!(
+            source
+                .compact_cpu_yuv_hint()
+                .map(PreviewCompactCpuYuvHint::retained_bytes_per_pixel),
+            Some(4)
+        );
+        assert_eq!(
+            PreviewCompactCpuYuvHint::Yuv422p10le
+                .retained_bytes_for_extent(Resolution { width: 3840, height: 2160 }),
+            3840usize * 2160usize * 4
+        );
+        assert_eq!(
+            PreviewCompactCpuYuvHint::Yuv422p10le
+                .retained_bytes_for_extent(Resolution { width: 1921, height: 1080 }),
+            8192usize * 1080usize
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("GPU-capable Preview may retain compact software-decoded YUV"),
+            PreviewDecodeRepresentation::CompactCpuYuv
+        );
+        let half_divisor = NonZeroU32::new(2).expect("divisor");
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Reduced { divisor: half_divisor },
+                source_color(),
+            )
+            .expect("adaptive Preview must retain the compact YUV contract"),
+            PreviewDecodeRepresentation::ReducedCompactCpuYuv { divisor: half_divisor }
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("CPU consumers require RGB-addressable pixels"),
+            PreviewDecodeRepresentation::NativeCpu
+        );
+        let linear_source_color = PreviewSourceColorContract::automatic(
+            ColorSpace::LinearRec709,
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                linear_source_color,
+            )
+            .expect("scene-linear sources keep their float CPU representation"),
+            PreviewDecodeRepresentation::NativeCpu
+        );
+
+        let yuv444 = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/yuv444p10.mov"),
+            exact_fingerprint(18),
+            &video_stream(9, PixelFormat::Yuv444p10le, true),
+        )
+        .expect("10-bit 4:4:4 source");
+        assert_eq!(
+            yuv444.compact_cpu_yuv_hint(),
+            Some(PreviewCompactCpuYuvHint::Yuv444p10le)
+        );
+    }
+
+    #[test]
     fn unproven_sampling_incomplete_revision_and_relative_path_are_rejected() {
         let unproven = video_stream(2, PixelFormat::P010, false);
         assert!(matches!(
@@ -735,6 +1547,51 @@ mod tests {
     }
 
     #[test]
+    fn still_source_identity_requires_explicit_frozen_kind_and_survives_request_projection() {
+        let unknown = PreviewDecodeSource::from_frozen_cpu_stream(
+            absolute_test_path("media/image.png"),
+            exact_fingerprint(41),
+            0,
+            Resolution { width: 16, height: 16 },
+        )
+        .expect("frozen source without asset kind");
+        assert!(
+            !unknown.is_still_image(),
+            "extensions are not source-kind authority"
+        );
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/image.png"),
+            exact_fingerprint(42),
+            &video_stream(0, PixelFormat::P010, true),
+        )
+        .expect("probed sampling does not imply static time");
+        assert!(!source.is_still_image());
+        let still = source.with_still_image_source();
+        assert!(still.is_still_image());
+        assert!(still.native_surface_hint().is_none());
+        assert!(still.compact_cpu_yuv_hint().is_none());
+        let key = PreviewDecodeKey::new(
+            still,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeCpu,
+            super::super::PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                crate::DecodedVideoRange::Limited,
+            ),
+        )
+        .expect("static CPU key");
+        let request = super::super::PreviewDecodeRequest::from_key(
+            &key,
+            super::super::PreviewDecodeAccessMode::PlaybackCursor,
+        );
+        assert!(request.still_image);
+        assert_eq!(
+            request.access_mode,
+            super::super::PreviewDecodeAccessMode::PlaybackCursor
+        );
+    }
+
+    #[test]
     fn proxy_uses_output_stream_zero_and_profile_surface_instead_of_source_facts() {
         let original = PreviewDecodeSource::from_probed_stream(
             absolute_test_path("media/source.mov"),
@@ -756,6 +1613,10 @@ mod tests {
             Some(PreviewNativeSurfaceHint::P010)
         );
         assert_eq!(proxy.video_stream_index(), 0);
+        assert!(
+            !proxy.is_still_image(),
+            "generated video proxy retains video session identity"
+        );
         assert_eq!(
             proxy.native_surface_hint(),
             Some(PreviewNativeSurfaceHint::Nv12)
@@ -805,6 +1666,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("native representation"),
             PreviewDecodeRepresentation::NativeSurface
@@ -815,6 +1677,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::CpuAddressable,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("CPU representation"),
             PreviewDecodeRepresentation::NativeCpu
@@ -832,6 +1695,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("preferred native may safely downgrade"),
             PreviewDecodeRepresentation::NativeCpu
@@ -842,6 +1706,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::RequireGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             ),
             Err(PreviewDecodeContractError::RequiredNativeOutputUnavailable { .. })
         ));
@@ -881,6 +1746,14 @@ mod tests {
             "reduced CPU representations remain CPU-addressable"
         );
         assert!(!half.is_native_surface());
+        let compact_half = PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+            divisor: NonZeroU32::new(2).expect("divisor"),
+        };
+        assert_eq!(
+            compact_half.extent_for_source(source_extent),
+            half.extent_for_source(source_extent)
+        );
+        assert!(compact_half.is_compact_cpu_yuv());
     }
 
     #[test]
@@ -888,7 +1761,7 @@ mod tests {
         let source = PreviewDecodeSource::from_probed_stream(
             absolute_test_path("media/reduced.mov"),
             exact_fingerprint(33),
-            &video_stream(0, PixelFormat::Yuv420p, true),
+            &video_stream(0, PixelFormat::Nv12, true),
         )
         .expect("valid source");
         assert_eq!(
@@ -899,9 +1772,12 @@ mod tests {
                 PreviewRepresentationQuality::Reduced {
                     divisor: NonZeroU32::new(2).expect("divisor"),
                 },
+                source_color(),
             )
-            .expect("reduced CPU representation"),
-            PreviewDecodeRepresentation::Reduced { divisor: NonZeroU32::new(2).expect("divisor") }
+            .expect("reduced compact CPU representation"),
+            PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+                divisor: NonZeroU32::new(2).expect("divisor")
+            }
         );
         assert_eq!(
             PreviewDecodeRepresentation::canonical(
@@ -909,6 +1785,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::CpuAddressable,
                 PreviewHardwareDecodeRequest::Auto,
                 PreviewRepresentationQuality::Reduced { divisor: NonZeroU32::MIN },
+                source_color(),
             ),
             Err(PreviewDecodeContractError::IdentityReducedRepresentation)
         );
@@ -928,6 +1805,7 @@ mod tests {
                 PreviewRepresentationQuality::Reduced {
                     divisor: NonZeroU32::new(4).expect("divisor"),
                 },
+                source_color(),
             )
             .expect("native surface preference wins over reduced quality"),
             PreviewDecodeRepresentation::NativeSurface
@@ -978,6 +1856,57 @@ mod tests {
         assert_eq!(
             half_key.representation().extent_for_source(source_extent).width,
             1920
+        );
+    }
+
+    #[test]
+    fn field_processing_is_part_of_decode_identity_and_blocks_native_surfaces() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/interlaced.mov"),
+            exact_fingerprint(135),
+            &video_stream(0, PixelFormat::Nv12, true),
+        )
+        .expect("valid source");
+        let base = PreviewDecodeKey::new(
+            source.clone(),
+            SourceSampleTarget::covering(TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeCpu,
+            source_color(),
+        )
+        .expect("base key");
+        let tff = base
+            .clone()
+            .with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::TopFirst,
+                },
+            )
+            .expect("CPU field processing");
+        let bff = base
+            .clone()
+            .with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::BottomFirst,
+                },
+            )
+            .expect("CPU field processing");
+        assert_ne!(base, tff);
+        assert_ne!(tff, bff);
+
+        let native = PreviewDecodeKey::new(
+            source,
+            SourceSampleTarget::covering(TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeSurface,
+            source_color(),
+        )
+        .expect("native key");
+        assert_eq!(
+            native.with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::TopFirst,
+                }
+            ),
+            Err(PreviewDecodeContractError::DeinterlaceRequiresCpuAddressablePayload)
         );
     }
 
@@ -1093,5 +2022,101 @@ mod tests {
             ),
             Err(PreviewDecodeContractError::SourceSampleBeforeOrigin { .. })
         ));
+    }
+
+    #[test]
+    fn data_texture_decode_key_accepts_only_cpu_rgb_representations() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/data-texture.mov"),
+            exact_fingerprint(42),
+            &video_stream(0, PixelFormat::Yuv422p10le, true),
+        )
+        .expect("valid source with compact-YUV evidence");
+        let sample = SourceSampleTarget::covering(TimelineTime::ZERO);
+        let data = PreviewSourceColorContract::data_texture(
+            super::super::DecodedVideoRangeContract::OverrideFull,
+        );
+
+        PreviewDecodeKey::new(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            data,
+        )
+        .expect("CPU-addressable RGB is the exact DataTexture route");
+        for representation in [
+            PreviewDecodeRepresentation::NativeSurface,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            PreviewDecodeRepresentation::Proxy(Resolution { width: 960, height: 540 }),
+        ] {
+            assert_eq!(
+                PreviewDecodeKey::new(source.clone(), sample, representation, data),
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb),
+                "{representation:?} must not reinterpret technical channels"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_raw_author_controls_rotate_decode_identity_and_request_projection() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/frame.dng"),
+            exact_fingerprint(43),
+            &video_stream(0, PixelFormat::BayerRggb16le, true),
+        )
+        .expect("valid RAW source");
+        let sample = SourceSampleTarget::covering(TimelineTime::ZERO);
+        let color = PreviewSourceColorContract::automatic(
+            ColorSpace::LinearRec709,
+            super::super::DecodedVideoRange::Full,
+        );
+        let base_intent =
+            CameraRawDecodeIntent::new(CameraRawAdapter::Dng, CameraRawInterpretation::default())
+                .expect("base RAW intent");
+        let raised_intent = CameraRawDecodeIntent::new(
+            CameraRawAdapter::Dng,
+            CameraRawInterpretation {
+                exposure_millistops: 1_000,
+                ..CameraRawInterpretation::default()
+            },
+        )
+        .expect("raised RAW intent");
+        let base = PreviewDecodeKey::new_camera_raw(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            color,
+            base_intent,
+        )
+        .expect("base RAW key");
+        let raised = PreviewDecodeKey::new_camera_raw(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            color,
+            raised_intent,
+        )
+        .expect("raised RAW key");
+
+        assert_ne!(base, raised);
+        assert_eq!(base.camera_raw(), Some(base_intent));
+        assert_eq!(
+            super::super::PreviewDecodeRequest::from_key(
+                &base,
+                super::super::PreviewDecodeAccessMode::RandomAccessStillFrame,
+            )
+            .camera_raw,
+            Some(base_intent)
+        );
+        assert_eq!(
+            PreviewDecodeKey::new_camera_raw(
+                source,
+                sample,
+                PreviewDecodeRepresentation::NativeSurface,
+                color,
+                base_intent,
+            ),
+            Err(PreviewDecodeContractError::CameraRawRequiresCpuFloat)
+        );
     }
 }

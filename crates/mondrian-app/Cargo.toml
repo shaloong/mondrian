@@ -11,7 +11,9 @@ default-run = "mondrian"
 validation = [
     "mondrian-export/validation",
     "mondrian-media/validation",
+    "dep:mondrian-validation-launcher",
     "mondrian-renderer/validation",
+    "dep:tiff",
 ]
 
 # Product app UI editor shell.
@@ -22,6 +24,20 @@ path = "src/main.rs"
 [[bin]]
 name = "mondrian-golden"
 path = "src/bin/mondrian_golden.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[bin]]
+name = "mondrian-surface-reopen"
+path = "src/bin/mondrian_surface_reopen.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[bin]]
+name = "mondrian-endurance"
+path = "src/bin/mondrian_endurance.rs"
 required-features = ["validation"]
 test = false
 bench = false
@@ -47,13 +63,80 @@ path = "src/bin/ui_pipeline_test.rs"
 name = "viewer_gpu_output_budget"
 path = "src/bin/viewer_gpu_output_budget.rs"
 
+# Production-linked owner protocol without integration-test companion binaries.
+[[example]]
+name = "performance_owner_protocol"
+path = "examples/performance_owner_protocol.rs"
+required-features = ["validation"]
+test = true
+bench = false
+
+# Actual-source protocol tests without integration-test companion binaries.
+[[example]]
+name = "preview_visual_protocol"
+path = "examples/preview_visual_protocol.rs"
+required-features = ["validation"]
+test = true
+harness = true
+bench = false
+
+[[example]]
+name = "window_service_protocol"
+path = "examples/window_service_protocol.rs"
+required-features = ["validation"]
+test = true
+harness = true
+bench = false
+
+[[example]]
+name = "host_startup_qualification"
+path = "examples/host_startup_qualification.rs"
+required-features = ["validation"]
+test = true
+harness = true
+bench = false
+
+[[example]]
+name = "cross_application_capture"
+path = "examples/cross_application_capture.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_smoke"
+path = "examples/local_media_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_export_smoke"
+path = "examples/local_media_export_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+[[example]]
+name = "local_media_proxy_smoke"
+path = "examples/local_media_proxy_smoke.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
 [dependencies]
+tiff = { version = "0.11.3", optional = true }
+mondrian-validation-launcher = { workspace = true, optional = true }
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
+mondrian-broadcast = { workspace = true }
 mondrian-playback = { workspace = true }
+mondrian-render-cache = { workspace = true }
+mondrian-reference-output = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
+mondrian-interchange = { workspace = true }
 mondrian-renderer = { workspace = true }
 mondrian-assets   = { workspace = true }
 mondrian-effects  = { workspace = true }
@@ -116,3 +199,4 @@ winres = "0.1"
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
 mondrian-export = { workspace = true, features = ["validation"] }
 mondrian-renderer = { workspace = true, features = ["validation"] }
+tempfile = { workspace = true }

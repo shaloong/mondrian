@@ -91,9 +91,13 @@ pub use timeline_view::{
     WaveformDisplay,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
-pub use video_scopes_surface::{VideoScopesSurface, VideoScopesTextureSet};
+pub use video_scopes_surface::{
+    VideoScopesLayout, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
+};
 pub use viewer_surface::{
-    ViewerCanvasBackground, ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
-    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
-    ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
+    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
+    ViewerControlAction, ViewerExternalTextureFrame, ViewerExternalTexturePresentation,
+    ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow, ViewerPowerWindowAction,
+    ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerPresentationGeometry,
+    ViewerStatusTone, ViewerSurface,
 };

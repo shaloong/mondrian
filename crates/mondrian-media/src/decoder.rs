@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ffmpeg;
 pub use mondrian_core::DecodedVideoRange;
 
+#[cfg(target_os = "windows")]
+use windows::core::Interface;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+
 /// GPU hardware acceleration backend family.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
@@ -44,6 +49,14 @@ pub enum HwAccelBackend {
 /// resulting native frame's physical adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelDeviceSelector {
+    /// DRM render-node minor number bound to the active Linux Vulkan device.
+    ///
+    /// The renderer verifies the node's character-device identity before admission.
+    VaapiDrmRenderNode(u32),
+    /// CUDA device ordinal passed only to FFmpeg's CUDA device creator.
+    ///
+    /// This selects decoding but does not prove Vulkan interoperability.
+    CudaDeviceOrdinal(u16),
     /// DXGI adapter index passed only to FFmpeg's D3D12VA device creator.
     D3D12VaAdapterIndex(u32),
     /// DXGI adapter index passed only to FFmpeg's D3D11VA device creator.
@@ -53,6 +66,12 @@ pub enum HwAccelDeviceSelector {
 impl HwAccelDeviceSelector {
     fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
         match (self, backend) {
+            (Self::VaapiDrmRenderNode(minor), HwAccelBackend::Vaapi) => {
+                CString::new(format!("/dev/dri/renderD{minor}")).ok()
+            }
+            (Self::CudaDeviceOrdinal(index), HwAccelBackend::Cuda) => {
+                CString::new(index.to_string()).ok()
+            }
             (Self::D3D12VaAdapterIndex(index), HwAccelBackend::D3D12VA)
             | (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
                 CString::new(index.to_string()).ok()
@@ -64,7 +83,9 @@ impl HwAccelDeviceSelector {
     pub(crate) fn selects_backend(self, backend: HwAccelBackend) -> bool {
         matches!(
             (self, backend),
-            (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
+            (Self::VaapiDrmRenderNode(_), HwAccelBackend::Vaapi)
+                | (Self::CudaDeviceOrdinal(_), HwAccelBackend::Cuda)
+                | (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
                 | (Self::D3D11VaAdapterIndex(_), HwAccelBackend::D3D11VA)
         )
     }
@@ -73,6 +94,194 @@ impl HwAccelDeviceSelector {
 type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
 const HW_DEVICE_FAILURE_BACKOFF_BASE: Duration = Duration::from_millis(250);
 const HW_DEVICE_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Immutable renderer-qualified FFmpeg hardware-device root.
+///
+/// Platform Adapters construct this value from the exact native device owned
+/// by the active renderer. Decoder worker families install it into their
+/// existing device-context pool; codec Sessions receive ordinary FFmpeg
+/// `AVBufferRef` leases and never acquire a renderer or OS graphics handle.
+#[derive(Clone)]
+pub struct RendererHwAccelDeviceContext {
+    owner: Arc<SharedHwAccelDeviceContext>,
+}
+
+impl std::fmt::Debug for RendererHwAccelDeviceContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RendererHwAccelDeviceContext")
+            .field("backend", &self.owner.backend)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RendererHwAccelDeviceContext {
+    /// Hardware backend represented by this exact renderer device root.
+    pub fn backend(&self) -> HwAccelBackend {
+        self.owner.backend
+    }
+
+    /// Retain the exact FFmpeg device root for another media-owned hardware Session.
+    ///
+    /// The returned reference is independently owned and must be released with
+    /// `av_buffer_unref`. It remains crate-private so platform clients cannot
+    /// manufacture an unqualified FFmpeg device interpretation.
+    #[cfg(any(target_os = "linux", all(target_os = "windows", mondrian_ffmpeg_7_1)))]
+    pub(crate) fn retain_ffmpeg_device_ref(
+        &self,
+    ) -> Result<NonNull<ffmpeg::ffi::AVBufferRef>, RendererHwAccelDeviceContextCreateError> {
+        let retained = unsafe { ffmpeg::ffi::av_buffer_ref(self.owner.ptr.as_ptr()) };
+        NonNull::new(retained).ok_or(RendererHwAccelDeviceContextCreateError::AllocationFailed)
+    }
+
+    /// Create an FFmpeg CUDA device root for a renderer-qualified device ordinal.
+    ///
+    /// The renderer must first match its Vulkan physical-device UUID to this
+    /// CUDA ordinal. Media deliberately accepts no implicit default device, so
+    /// multi-GPU systems cannot silently encode on a different adapter.
+    #[cfg(target_os = "linux")]
+    pub fn from_cuda_device_ordinal(
+        ordinal: u16,
+    ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
+        ffmpeg::init().map_err(|error| {
+            RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                backend: HwAccelBackend::Cuda,
+                reason: error.to_string(),
+            }
+        })?;
+        let device_name = CString::new(ordinal.to_string())
+            .map_err(|_| RendererHwAccelDeviceContextCreateError::InvalidDeviceSelector)?;
+        let mut device_context = ptr::null_mut();
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                device_name.as_ptr(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(
+                RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                    backend: HwAccelBackend::Cuda,
+                    reason: ffmpeg::Error::from(result).to_string(),
+                },
+            );
+        }
+        let device_context = NonNull::new(device_context)
+            .ok_or(RendererHwAccelDeviceContextCreateError::AllocationFailed)?;
+        Ok(Self {
+            owner: Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::Cuda,
+                ptr: device_context,
+            }),
+        })
+    }
+
+    /// Create an FFmpeg D3D12VA device root over the exact renderer device.
+    ///
+    /// FFmpeg takes ownership of one COM reference during initialization. The
+    /// returned value is therefore safe to move to decoder workers after the
+    /// temporary renderer HAL borrow has ended.
+    #[cfg(target_os = "windows")]
+    pub fn from_d3d12_device(
+        device: ID3D12Device,
+    ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
+        let _ = ffmpeg::init();
+        let device_context = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_alloc(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
+            )
+        };
+        let Some(device_context) = NonNull::new(device_context) else {
+            return Err(RendererHwAccelDeviceContextCreateError::AllocationFailed);
+        };
+        let result = initialize_ffmpeg_d3d12_device_context(device_context, device);
+        if let Err(error) = result {
+            let mut raw = device_context.as_ptr();
+            unsafe { ffmpeg::ffi::av_buffer_unref(&mut raw) };
+            return Err(error);
+        }
+        Ok(Self {
+            owner: Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::D3D12VA,
+                ptr: device_context,
+            }),
+        })
+    }
+}
+
+/// Failure to bind an FFmpeg hardware-device root to the renderer device.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RendererHwAccelDeviceContextCreateError {
+    /// FFmpeg could not allocate the requested device context.
+    #[error("FFmpeg could not allocate a renderer-qualified hardware device context")]
+    AllocationFailed,
+    /// A renderer-selected native device identifier could not be represented.
+    #[error("renderer-qualified hardware device selector is invalid")]
+    InvalidDeviceSelector,
+    /// FFmpeg returned an incomplete generic device-context allocation.
+    #[error("FFmpeg returned an incomplete D3D12VA device-context allocation")]
+    InvalidAllocation,
+    /// FFmpeg rejected the supplied renderer device.
+    #[error("FFmpeg could not initialize the renderer-owned {backend:?} device context: {reason}")]
+    InitializationFailed {
+        /// Hardware backend whose exact device could not be initialized.
+        backend: HwAccelBackend,
+        /// Stable FFmpeg error text.
+        reason: String,
+    },
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct AvD3D12VaDeviceContext {
+    device: *mut std::ffi::c_void,
+    video_device: *mut std::ffi::c_void,
+    lock: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    unlock: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    lock_context: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "windows")]
+fn initialize_ffmpeg_d3d12_device_context(
+    device_context: NonNull<ffmpeg::ffi::AVBufferRef>,
+    device: ID3D12Device,
+) -> Result<(), RendererHwAccelDeviceContextCreateError> {
+    // SAFETY: av_hwdevice_ctx_alloc returned an owned AVBufferRef whose data
+    // points to a writable AVHWDeviceContext until av_hwdevice_ctx_init.
+    let generic = unsafe {
+        NonNull::new((*device_context.as_ptr()).data.cast::<ffmpeg::ffi::AVHWDeviceContext>())
+    }
+    .ok_or(RendererHwAccelDeviceContextCreateError::InvalidAllocation)?;
+    // SAFETY: FFmpeg allocated the D3D12VA-specific payload for this exact
+    // device type. The local layout mirrors libavutil/hwcontext_d3d12va.h.
+    let native =
+        unsafe { NonNull::new((*generic.as_ptr()).hwctx.cast::<AvD3D12VaDeviceContext>()) }
+            .ok_or(RendererHwAccelDeviceContextCreateError::InvalidAllocation)?;
+
+    // Transfer one owned COM reference into FFmpeg. The D3D12VA context
+    // releases it unconditionally when the final AVBufferRef is destroyed.
+    let raw_device = device.into_raw();
+    unsafe {
+        (*native.as_ptr()).device = raw_device;
+        (*native.as_ptr()).video_device = std::ptr::null_mut();
+        (*native.as_ptr()).lock = None;
+        (*native.as_ptr()).unlock = None;
+        (*native.as_ptr()).lock_context = std::ptr::null_mut();
+    }
+    let result = unsafe { ffmpeg::ffi::av_hwdevice_ctx_init(device_context.as_ptr()) };
+    if result < 0 {
+        return Err(
+            RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                backend: HwAccelBackend::D3D12VA,
+                reason: ffmpeg::Error::from(result).to_string(),
+            },
+        );
+    }
+    Ok(())
+}
 
 /// Idle-residency policy for one explicit hardware-device context pool.
 ///
@@ -110,6 +319,12 @@ pub struct HwDeviceContextPoolDiagnostics {
     pub active_contexts: usize,
     /// Entries retained only as idle acceleration resources.
     pub idle_contexts: usize,
+    /// External device initialization still owned by an acquiring worker,
+    /// including a revoked generation waiting for its provider to return.
+    pub initializing_contexts: usize,
+    /// Detached pool references whose release has not returned. Independent
+    /// Session leases can retain retired roots beyond this pool-owned work.
+    pub retiring_contexts: usize,
     /// Most recently allocated device generation.
     pub latest_generation: u64,
     /// Acquisitions that reused one current generation.
@@ -149,6 +364,8 @@ struct HwDeviceContextPoolState {
     recency_clock: u64,
     entries: HashMap<HwAccelDeviceProbeKey, HwDeviceContextPoolEntry>,
     failures: HashMap<HwAccelDeviceProbeKey, HwDeviceContextFailureBackoff>,
+    initializing: Option<HwDeviceContextInitialization>,
+    retiring_contexts: usize,
     hits: u64,
     misses: u64,
     retirements: u64,
@@ -167,6 +384,8 @@ impl HwDeviceContextPoolState {
             recency_clock: 0,
             entries: HashMap::new(),
             failures: HashMap::new(),
+            initializing: None,
+            retiring_contexts: 0,
             hits: 0,
             misses: 0,
             retirements: 0,
@@ -195,7 +414,8 @@ impl HwDeviceContextPoolState {
             .count()
     }
 
-    fn trim_idle_to(&mut self, max_idle_contexts: usize) {
+    fn trim_idle_to(&mut self, max_idle_contexts: usize) -> Vec<HwDeviceContextPoolEntry> {
+        let mut retired = Vec::new();
         while self.idle_count() > max_idle_contexts {
             let Some(key) = self
                 .entries
@@ -206,9 +426,12 @@ impl HwDeviceContextPoolState {
             else {
                 break;
             };
-            self.entries.remove(&key);
+            if let Some(entry) = self.entries.remove(&key) {
+                retired.push(entry);
+            }
             self.evictions = self.evictions.saturating_add(1);
         }
+        retired
     }
 
     fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
@@ -219,6 +442,8 @@ impl HwDeviceContextPoolState {
             entries: self.entries.len(),
             active_contexts: self.entries.len().saturating_sub(idle_contexts),
             idle_contexts,
+            initializing_contexts: usize::from(self.initializing.is_some()),
+            retiring_contexts: self.retiring_contexts,
             latest_generation: self.next_generation.saturating_sub(1),
             hits: self.hits,
             misses: self.misses,
@@ -266,6 +491,51 @@ impl HwDeviceContextPoolState {
 
 struct HwDeviceContextPoolInner {
     state: Mutex<HwDeviceContextPoolState>,
+    // Serialize foreign creation without excluding state observation or
+    // acquisition of an already-published root. This gate owns no pool state.
+    creation: Mutex<()>,
+}
+
+struct HwDeviceContextInitialization {
+    key: HwAccelDeviceProbeKey,
+    generation: u64,
+    publishable: bool,
+}
+
+struct HwDeviceContextInitializationGuard {
+    pool: HwDeviceContextPool,
+    generation: u64,
+}
+
+impl Drop for HwDeviceContextInitializationGuard {
+    fn drop(&mut self) {
+        let mut state = self.pool.lock_state();
+        if state
+            .initializing
+            .as_ref()
+            .is_some_and(|value| value.generation == self.generation)
+        {
+            state.initializing = None;
+        }
+    }
+}
+
+struct HwDeviceContextRetirement {
+    pool: HwDeviceContextPool,
+    entries: Vec<HwDeviceContextPoolEntry>,
+}
+
+impl Drop for HwDeviceContextRetirement {
+    fn drop(&mut self) {
+        let count = self.entries.len();
+        if count == 0 {
+            return;
+        }
+        // Keep the accounting and this pool alive until every foreign final
+        // release has returned. No shared state lock spans those releases.
+        drop(std::mem::take(&mut self.entries));
+        self.pool.lock_state().retiring_contexts -= count;
+    }
 }
 
 /// Explicit worker-family owner of shared FFmpeg hardware device contexts.
@@ -294,6 +564,7 @@ impl HwDeviceContextPool {
         Self {
             inner: Arc::new(HwDeviceContextPoolInner {
                 state: Mutex::new(HwDeviceContextPoolState::new(policy)),
+                creation: Mutex::new(()),
             }),
         }
     }
@@ -306,18 +577,122 @@ impl HwDeviceContextPool {
         }
         state.policy = policy;
         state.policy_revision = state.policy_revision.saturating_add(1);
-        state.trim_idle_to(policy.max_idle_contexts);
+        let entries = state.trim_idle_to(policy.max_idle_contexts);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
     }
 
     /// Release every idle context while preserving all active Session leases.
     pub fn release_idle(&self) {
-        self.lock_state().trim_idle_to(0);
+        let mut state = self.lock_state();
+        let entries = state.trim_idle_to(0);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
+    }
+
+    fn own_retirement(
+        &self,
+        state: &mut HwDeviceContextPoolState,
+        entries: Vec<HwDeviceContextPoolEntry>,
+    ) -> HwDeviceContextRetirement {
+        state.retiring_contexts += entries.len();
+        HwDeviceContextRetirement { pool: self.clone(), entries }
     }
 
     /// Clear transient setup-failure delays, for example after an explicit
     /// adapter/device-generation change notification.
     pub fn invalidate_failure_backoff(&self) {
         self.lock_state().failures.clear();
+    }
+
+    /// Install the exact renderer-qualified device root for future decoder Sessions.
+    ///
+    /// Replacing a generation never revokes active Sessions: their independent
+    /// `Arc` leases retain the previous FFmpeg root until the last Session and
+    /// native output release it. Installing the same root is idempotent.
+    pub fn install_renderer_device_context(
+        &self,
+        selector: HwAccelDeviceSelector,
+        context: RendererHwAccelDeviceContext,
+    ) -> Result<bool, RendererHwAccelDeviceContextInstallError> {
+        let backend = context.backend();
+        if !selector.selects_backend(backend) {
+            return Err(RendererHwAccelDeviceContextInstallError::SelectorMismatch {
+                selector,
+                backend,
+            });
+        }
+        let key = (backend, Some(selector));
+        let mut state = self.lock_state();
+        if state
+            .entries
+            .get(&key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.owner, &context.owner))
+        {
+            state.failures.remove(&key);
+            return Ok(false);
+        }
+        let generation = state
+            .allocate_generation()
+            .ok_or(RendererHwAccelDeviceContextInstallError::GenerationExhausted)?;
+        if let Some(initializing) = state.initializing.as_mut().filter(|value| value.key == key) {
+            initializing.publishable = false;
+        }
+        let recency = state.next_recency();
+        let previous = state.entries.insert(
+            key,
+            HwDeviceContextPoolEntry {
+                generation,
+                last_used: recency,
+                owner: context.owner,
+            },
+        );
+        if previous.is_some() {
+            state.retirements = state.retirements.saturating_add(1);
+        }
+        state.failures.remove(&key);
+        state.misses = state.misses.saturating_add(1);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
+        Ok(true)
+    }
+
+    /// Retire the renderer-qualified root currently offered for one selector.
+    ///
+    /// Active codec Sessions and native outputs retain independent `Arc`
+    /// leases; this removes only future acquisition authority. An in-progress
+    /// initialization for this selector is also revoked, but remains accounted
+    /// for until its provider returns and the acquiring worker consumes it.
+    pub fn retire_renderer_device_context(&self, selector: HwAccelDeviceSelector) -> bool {
+        let backend = match selector {
+            HwAccelDeviceSelector::VaapiDrmRenderNode(_) => HwAccelBackend::Vaapi,
+            HwAccelDeviceSelector::CudaDeviceOrdinal(_) => HwAccelBackend::Cuda,
+            HwAccelDeviceSelector::D3D12VaAdapterIndex(_) => HwAccelBackend::D3D12VA,
+            HwAccelDeviceSelector::D3D11VaAdapterIndex(_) => HwAccelBackend::D3D11VA,
+        };
+        let key = (backend, Some(selector));
+        let mut state = self.lock_state();
+        state.failures.remove(&key);
+        let initializing_revoked = state.initializing.as_mut().is_some_and(|value| {
+            if value.key == key && value.publishable {
+                value.publishable = false;
+                true
+            } else {
+                false
+            }
+        });
+        let previous = state.entries.remove(&key);
+        if previous.is_none() && !initializing_revoked {
+            return false;
+        }
+        state.retirements = state.retirements.saturating_add(1);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
+        true
     }
 
     /// Return current generation and residency evidence.
@@ -341,10 +716,15 @@ impl HwDeviceContextPool {
     fn retire(&self, key: HwAccelDeviceProbeKey, generation: u64) {
         let mut state = self.lock_state();
         let current_generation = state.entries.get(&key).map(|entry| entry.generation);
-        if current_generation == Some(generation) {
-            state.entries.remove(&key);
+        let previous = if current_generation == Some(generation) {
             state.retirements = state.retirements.saturating_add(1);
-        }
+            state.entries.remove(&key)
+        } else {
+            None
+        };
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
     }
 
     fn retire_after_setup_failure(
@@ -355,11 +735,17 @@ impl HwDeviceContextPool {
     ) {
         let mut state = self.lock_state();
         let current_generation = state.entries.get(&key).map(|entry| entry.generation);
-        if current_generation == Some(generation) {
-            state.entries.remove(&key);
-            state.retirements = state.retirements.saturating_add(1);
+        if current_generation != Some(generation) {
+            // The failing Session still owns its diagnostic and old root, but
+            // cannot revoke or defer acquisition of a replacement generation.
+            return;
         }
+        state.retirements = state.retirements.saturating_add(1);
+        let previous = state.entries.remove(&key);
         let _ = state.record_failure(key, probe, true);
+        let retirement = self.own_retirement(&mut state, previous.into_iter().collect());
+        drop(state);
+        drop(retirement);
     }
 
     fn release(
@@ -379,17 +765,50 @@ impl HwDeviceContextPool {
         }
 
         let max_idle_contexts = state.policy.max_idle_contexts;
+        let mut entries = Vec::new();
         if state.idle_count() >= max_idle_contexts {
-            state.entries.remove(&key);
+            if let Some(entry) = state.entries.remove(&key) {
+                entries.push(entry);
+            }
             state.evictions = state.evictions.saturating_add(1);
         }
-        state.trim_idle_to(max_idle_contexts);
+        entries.extend(state.trim_idle_to(max_idle_contexts));
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
     }
 
     pub(crate) fn acquire(
         &self,
         backend: HwAccelBackend,
         selector: Option<HwAccelDeviceSelector>,
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        self.acquire_with_device_creation(backend, selector, |device_type, device_name| {
+            let mut device_context = ptr::null_mut();
+            // SAFETY: The out pointer is exclusive to this call; the returned
+            // AVBufferRef is transferred to the pool's creation owner or
+            // released on the partial-open path before publication.
+            let result = unsafe {
+                ffmpeg::ffi::av_hwdevice_ctx_create(
+                    &mut device_context,
+                    device_type,
+                    device_name.map_or(ptr::null(), |name| name.as_ptr()),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            (result, device_context)
+        })
+    }
+
+    fn acquire_with_device_creation(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+        create: impl FnOnce(
+            ffmpeg::ffi::AVHWDeviceType,
+            Option<&std::ffi::CStr>,
+        ) -> (i32, *mut ffmpeg::ffi::AVBufferRef),
     ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
         if let Some(selector) = selector.filter(|selector| !selector.selects_backend(backend)) {
             return Err(HwAccelDeviceContextProbe::unavailable(
@@ -426,8 +845,14 @@ impl HwDeviceContextPool {
             });
         }
 
-        let key = (backend, selector);
-        let mut state = self.lock_state();
+        self.acquire_available_device(backend, selector, device_type, create)
+    }
+
+    fn acquire_current_device(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        state: &mut HwDeviceContextPoolState,
+    ) -> std::result::Result<Option<HwAccelDeviceContext>, HwAccelDeviceContextProbe> {
         let now = Instant::now();
         if let Some(failure) = state.failures.get(&key) {
             if now < failure.retry_after {
@@ -453,15 +878,43 @@ impl HwDeviceContextPool {
             let owner = Arc::clone(&entry.owner);
             state.hits = state.hits.saturating_add(1);
             state.failures.remove(&key);
-            return Ok(HwAccelDeviceContext {
+            return Ok(Some(HwAccelDeviceContext {
                 owner,
                 pool: self.clone(),
                 key,
                 generation,
                 newly_created: false,
-            });
+            }));
         }
 
+        Ok(None)
+    }
+
+    fn acquire_available_device(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+        device_type: ffmpeg::ffi::AVHWDeviceType,
+        create: impl FnOnce(
+            ffmpeg::ffi::AVHWDeviceType,
+            Option<&std::ffi::CStr>,
+        ) -> (i32, *mut ffmpeg::ffi::AVBufferRef),
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        let ffmpeg_device_type_available = true;
+        let key = (backend, selector);
+        let mut state = self.lock_state();
+        if let Some(current) = self.acquire_current_device(key, &mut state)? {
+            return Ok(current);
+        }
+        drop(state);
+        let _creation = match self.inner.creation.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut state = self.lock_state();
+        if let Some(current) = self.acquire_current_device(key, &mut state)? {
+            return Ok(current);
+        }
         let Some(generation) = state.allocate_generation() else {
             return Err(HwAccelDeviceContextProbe {
                 backend,
@@ -473,18 +926,13 @@ impl HwDeviceContextPool {
                 reason: "hardware device generation space is exhausted".to_owned(),
             });
         };
-        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        state.initializing =
+            Some(HwDeviceContextInitialization { key, generation, publishable: true });
+        drop(state);
+        let _initialization = HwDeviceContextInitializationGuard { pool: self.clone(), generation };
         let device_name = selector.and_then(|selector| selector.device_name_for(backend));
-        let result = unsafe {
-            ffmpeg::ffi::av_hwdevice_ctx_create(
-                &mut device_context,
-                device_type,
-                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if result < 0 {
+        let (result, mut device_context) = create(device_type, device_name.as_deref());
+        let created = if result < 0 {
             if !device_context.is_null() {
                 // SAFETY: FFmpeg returned this partial AVBufferRef through the
                 // exclusive out pointer; no owner was published.
@@ -505,9 +953,13 @@ impl HwDeviceContextPool {
                     ffmpeg::Error::from(result)
                 ),
             };
-            return Err(state.record_failure(key, probe, false));
-        }
-        let Some(device_context) = NonNull::new(device_context) else {
+            Err(probe)
+        } else if let Some(device_context) = NonNull::new(device_context) {
+            Ok(Arc::new(SharedHwAccelDeviceContext {
+                backend,
+                ptr: device_context,
+            }))
+        } else {
             let probe = HwAccelDeviceContextProbe {
                 backend,
                 backend_maps_to_ffmpeg_device: true,
@@ -520,10 +972,37 @@ impl HwDeviceContextPool {
                     backend.as_str()
                 ),
             };
-            return Err(state.record_failure(key, probe, false));
+            Err(probe)
         };
-
-        let owner = Arc::new(SharedHwAccelDeviceContext { backend, ptr: device_context });
+        // A renderer generation may be installed or retired while the foreign
+        // call runs. Its later state change wins; a late result cannot reopen it.
+        // `created` precedes this guard so discarded foreign roots drop only
+        // after the state mutex is released, including all early-return paths.
+        let mut state = self.lock_state();
+        if !state
+            .initializing
+            .as_ref()
+            .is_some_and(|value| value.generation == generation && value.publishable)
+        {
+            if let Some(current) = self.acquire_current_device(key, &mut state)? {
+                return Ok(current);
+            }
+            let reason = "hardware device initialization was retired before publication";
+            let probe = match &created {
+                Ok(_) => HwAccelDeviceContextProbe::acquired(backend, true, reason),
+                Err(failure) => {
+                    let mut probe = failure.clone();
+                    probe.reason = format!("{reason}; {}", probe.reason);
+                    probe
+                }
+            };
+            return Err(probe);
+        }
+        let owner = match created {
+            Ok(owner) => owner,
+            Err(probe) => return Err(state.record_failure(key, probe, false)),
+        };
+        let recency = state.next_recency();
         state.entries.insert(
             key,
             HwDeviceContextPoolEntry {
@@ -535,7 +1014,10 @@ impl HwDeviceContextPool {
         state.failures.remove(&key);
         state.misses = state.misses.saturating_add(1);
         let max_idle_contexts = state.policy.max_idle_contexts;
-        state.trim_idle_to(max_idle_contexts);
+        let entries = state.trim_idle_to(max_idle_contexts);
+        let retirement = self.own_retirement(&mut state, entries);
+        drop(state);
+        drop(retirement);
         Ok(HwAccelDeviceContext {
             owner,
             pool: self.clone(),
@@ -544,6 +1026,22 @@ impl HwDeviceContextPool {
             newly_created: true,
         })
     }
+}
+
+/// Failure to install a renderer-qualified root into a decoder worker family.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RendererHwAccelDeviceContextInstallError {
+    /// The selector names a different hardware backend.
+    #[error("hardware selector {selector:?} does not select renderer device backend {backend:?}")]
+    SelectorMismatch {
+        /// Supplied decoder device selector.
+        selector: HwAccelDeviceSelector,
+        /// Backend owned by the renderer-qualified context.
+        backend: HwAccelBackend,
+    },
+    /// Pool generation identity cannot advance safely.
+    #[error("hardware device-context generation space is exhausted")]
+    GenerationExhausted,
 }
 
 impl Default for HwDeviceContextPool {
@@ -562,6 +1060,8 @@ pub enum DecodedFrameResidency {
     CpuRgba,
     /// Decoder output is CPU RGBA f32 memory.
     CpuFloat,
+    /// Decoder output is compact CPU YUV planes awaiting GPU materialization.
+    CpuYuv,
     /// Decoder output is a GPU texture or hardware frame.
     GpuTexture,
 }
@@ -581,16 +1081,132 @@ pub enum DecodedVideoSurfaceFormat {
     Nv12,
     /// 10-bit P010 two-plane YUV 4:2:0 surface.
     P010,
+    /// 12-bit P012 two-plane YUV 4:2:0 surface.
+    P012,
+    /// 16-bit P016 two-plane YUV 4:2:0 surface.
+    P016,
+    /// 10-bit P210 two-plane YUV 4:2:2 surface.
+    P210,
+    /// 12-bit P212 two-plane YUV 4:2:2 surface.
+    P212,
+    /// 16-bit P216 two-plane YUV 4:2:2 surface.
+    P216,
+    /// 10-bit P410 two-plane YUV 4:4:4 surface.
+    P410,
+    /// 12-bit P412 two-plane YUV 4:4:4 surface.
+    P412,
+    /// 16-bit P416 two-plane YUV 4:4:4 surface.
+    P416,
+    /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
+    Y210,
+    /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
+    Y212,
+    /// Packed 10-bit XV30-in-Y410 YCbCr 4:4:4 surface.
+    Xv30,
+    /// Packed 12-bit XV36-in-Y416 YCbCr 4:4:4 surface.
+    Xv36,
     /// Planar 8-bit YUV 4:2:0.
     Yuv420p,
     /// Planar 10-bit YUV 4:2:0.
     Yuv420p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
+    Yuv420p12le,
+    /// Planar 8-bit YUV 4:2:2.
+    Yuv422p,
+    /// Planar 10-bit YUV 4:2:2.
+    Yuv422p10le,
+    /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
+    Yuv422p12le,
+    /// Planar eight-bit CPU YUV 4:4:4.
+    Yuv444p,
+    /// Planar little-endian ten-bit CPU YUV 4:4:4 with right-aligned samples.
+    Yuv444p10le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
+    Yuv444p12le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
     Bgra8,
+    /// Packed scene- or display-referred RGBA half-float.
+    Rgba16Float,
+    /// Packed scene- or display-referred RGBA single-precision float.
+    Rgba32Float,
     /// A known but currently non-native preview surface format.
     Other,
+}
+
+/// Color-family fact carried by a decoded surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceColorModel {
+    /// Luma plus blue- and red-difference chroma components.
+    Ycbcr,
+    /// Red, green, and blue components.
+    Rgb,
+}
+
+/// Chroma sampling grid carried by a decoded YCbCr surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceChromaSubsampling {
+    /// One chroma sample covers two horizontal by two vertical luma samples.
+    Cs420,
+    /// One chroma sample covers two horizontal by one vertical luma sample.
+    Cs422,
+    /// Chroma has the same sampling grid as luma.
+    Cs444,
+}
+
+/// Shader-visible plane organization of a decoded surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfacePlaneLayout {
+    /// Luma and an interleaved CbCr plane.
+    SemiPlanar,
+    /// Independent luma, Cb, and Cr planes.
+    Planar,
+    /// Packed YCbCr 4:2:2 words requiring an explicit GPU unpack Adapter.
+    PackedYuv422,
+    /// Packed YCbCr 4:4:4 words requiring an explicit GPU unpack Adapter.
+    PackedYuv444,
+    /// One packed RGBA plane.
+    PackedRgba,
+    /// One packed BGRA plane.
+    PackedBgra,
+}
+
+/// Numeric representation stored by each decoded-surface component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceNumericEncoding {
+    /// Eight-bit unsigned normalized components.
+    Unorm8,
+    /// High-bit unsigned normalized components stored in sixteen-bit words.
+    Unorm16 {
+        /// Whether the effective code bits occupy the most-significant side.
+        most_significant_bits: bool,
+    },
+    /// Integer code components packed into layout-specific bit fields.
+    PackedUnsigned,
+    /// IEEE 754 binary16 components.
+    Float16,
+    /// IEEE 754 binary32 components.
+    Float32,
+}
+
+/// Complete physical interpretation of one known decoded surface format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecodedVideoSurfaceDescriptor {
+    /// Color component family.
+    pub color_model: DecodedVideoSurfaceColorModel,
+    /// Chroma grid for YCbCr, absent for RGB.
+    pub chroma_subsampling: Option<DecodedVideoSurfaceChromaSubsampling>,
+    /// Physical plane organization.
+    pub plane_layout: DecodedVideoSurfacePlaneLayout,
+    /// Numeric component storage.
+    pub numeric_encoding: DecodedVideoSurfaceNumericEncoding,
+    /// Effective component precision in bits.
+    pub component_bit_depth: u8,
+    /// Whether the physical surface carries an alpha component.
+    pub has_alpha: bool,
+    /// Whether the media layer may retain this physical format as a native GPU payload.
+    pub native_gpu_payload: bool,
 }
 
 /// Authority-aware quantization-range contract carried into frame decode.
@@ -997,6 +1613,13 @@ impl HwAccelDeviceContext {
         self.newly_created
     }
 
+    /// Whether this lease still names the pool generation offered to new Sessions.
+    pub(crate) fn is_current_generation(&self) -> bool {
+        self.pool.lock_state().entries.get(&self.key).is_some_and(|entry| {
+            entry.generation == self.generation && Arc::ptr_eq(&entry.owner, &self.owner)
+        })
+    }
+
     /// Retire this exact generation from future pool acquisitions.
     ///
     /// Other active Sessions remain safe because they retain independent Arc
@@ -1341,7 +1964,7 @@ impl HwAccelBackend {
         }
         #[cfg(target_os = "linux")]
         {
-            vec![Self::Vaapi, Self::Vdpau]
+            vec![Self::Vaapi, Self::Cuda, Self::Vdpau]
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
@@ -1384,12 +2007,46 @@ impl HwAccelBackend {
         match self {
             Self::None => Vec::new(),
             Self::Dxva2 | Self::Vdpau => Vec::new(),
-            Self::Cuda | Self::D3D12VA | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
-                vec![
-                    DecodedVideoSurfaceFormat::P010,
-                    DecodedVideoSurfaceFormat::Nv12,
-                ]
-            }
+            Self::D3D12VA => vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::D3D11VA => vec![
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::VideoToolbox => vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::P416,
+                DecodedVideoSurfaceFormat::P410,
+                DecodedVideoSurfaceFormat::P216,
+                DecodedVideoSurfaceFormat::P210,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::Cuda => vec![
+                DecodedVideoSurfaceFormat::P016,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::Vaapi => vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Rgba8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
         }
     }
 
@@ -1414,6 +2071,7 @@ impl DecodedFrameResidency {
         match self {
             Self::CpuRgba => "CpuRgba",
             Self::CpuFloat => "CpuFloat",
+            Self::CpuYuv => "CpuYuv",
             Self::GpuTexture => "GpuTexture",
         }
     }
@@ -1426,26 +2084,183 @@ impl DecodedVideoSurfaceFormat {
             Self::Unknown => "Unknown",
             Self::Nv12 => "Nv12",
             Self::P010 => "P010",
+            Self::P012 => "P012",
+            Self::P016 => "P016",
+            Self::P210 => "P210",
+            Self::P212 => "P212",
+            Self::P216 => "P216",
+            Self::P410 => "P410",
+            Self::P412 => "P412",
+            Self::P416 => "P416",
+            Self::Y210 => "Y210",
+            Self::Y212 => "Y212",
+            Self::Xv30 => "Xv30",
+            Self::Xv36 => "Xv36",
             Self::Yuv420p => "Yuv420p",
             Self::Yuv420p10le => "Yuv420p10le",
+            Self::Yuv420p12le => "Yuv420p12le",
+            Self::Yuv422p => "Yuv422p",
+            Self::Yuv422p10le => "Yuv422p10le",
+            Self::Yuv422p12le => "Yuv422p12le",
+            Self::Yuv444p => "Yuv444p",
+            Self::Yuv444p10le => "Yuv444p10le",
+            Self::Yuv444p12le => "Yuv444p12le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
+            Self::Rgba16Float => "Rgba16Float",
+            Self::Rgba32Float => "Rgba32Float",
             Self::Other => "Other",
         }
     }
 
+    /// Return the complete physical descriptor for a modeled surface format.
+    pub const fn descriptor(self) -> Option<DecodedVideoSurfaceDescriptor> {
+        use DecodedVideoSurfaceChromaSubsampling::{Cs420, Cs422, Cs444};
+        use DecodedVideoSurfaceColorModel::{Rgb, Ycbcr};
+        use DecodedVideoSurfaceNumericEncoding::{
+            Float16, Float32, PackedUnsigned, Unorm16, Unorm8,
+        };
+        use DecodedVideoSurfacePlaneLayout::{
+            PackedBgra, PackedRgba, PackedYuv422, PackedYuv444, Planar, SemiPlanar,
+        };
+
+        let descriptor = match self {
+            Self::Unknown | Self::Other => return None,
+            Self::Nv12 => DecodedVideoSurfaceDescriptor {
+                color_model: Ycbcr,
+                chroma_subsampling: Some(Cs420),
+                plane_layout: SemiPlanar,
+                numeric_encoding: Unorm8,
+                component_bit_depth: 8,
+                has_alpha: false,
+                native_gpu_payload: true,
+            },
+            Self::P010
+            | Self::P012
+            | Self::P016
+            | Self::P210
+            | Self::P212
+            | Self::P216
+            | Self::P410
+            | Self::P412
+            | Self::P416 => {
+                let (chroma_subsampling, component_bit_depth) = match self {
+                    Self::P010 => (Cs420, 10),
+                    Self::P012 => (Cs420, 12),
+                    Self::P016 => (Cs420, 16),
+                    Self::P210 => (Cs422, 10),
+                    Self::P212 => (Cs422, 12),
+                    Self::P216 => (Cs422, 16),
+                    Self::P410 => (Cs444, 10),
+                    Self::P412 => (Cs444, 12),
+                    Self::P416 => (Cs444, 16),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout: SemiPlanar,
+                    numeric_encoding: Unorm16 { most_significant_bits: component_bit_depth < 16 },
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: true,
+                }
+            }
+            Self::Y210 | Self::Y212 | Self::Xv30 | Self::Xv36 => {
+                let (chroma_subsampling, plane_layout, component_bit_depth) = match self {
+                    Self::Y210 => (Cs422, PackedYuv422, 10),
+                    Self::Y212 => (Cs422, PackedYuv422, 12),
+                    Self::Xv30 => (Cs444, PackedYuv444, 10),
+                    Self::Xv36 => (Cs444, PackedYuv444, 12),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout,
+                    numeric_encoding: if matches!(self, Self::Xv30) {
+                        PackedUnsigned
+                    } else {
+                        Unorm16 { most_significant_bits: true }
+                    },
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: true,
+                }
+            }
+            Self::Yuv420p
+            | Self::Yuv420p10le
+            | Self::Yuv420p12le
+            | Self::Yuv422p
+            | Self::Yuv422p10le
+            | Self::Yuv422p12le
+            | Self::Yuv444p
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le => {
+                let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
+                    Self::Yuv420p => (Cs420, 8, Unorm8),
+                    Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv420p12le => (Cs420, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p => (Cs422, 8, Unorm8),
+                    Self::Yuv444p => (Cs444, 8, Unorm8),
+                    Self::Yuv444p10le => (Cs444, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv444p12le => (Cs444, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p12le => (Cs422, 12, Unorm16 { most_significant_bits: false }),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout: Planar,
+                    numeric_encoding,
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: false,
+                }
+            }
+            Self::Rgba8 | Self::Bgra8 => DecodedVideoSurfaceDescriptor {
+                color_model: Rgb,
+                chroma_subsampling: None,
+                plane_layout: if matches!(self, Self::Rgba8) {
+                    PackedRgba
+                } else {
+                    PackedBgra
+                },
+                numeric_encoding: Unorm8,
+                component_bit_depth: 8,
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
+            Self::Rgba16Float | Self::Rgba32Float => DecodedVideoSurfaceDescriptor {
+                color_model: Rgb,
+                chroma_subsampling: None,
+                plane_layout: PackedRgba,
+                numeric_encoding: if matches!(self, Self::Rgba16Float) {
+                    Float16
+                } else {
+                    Float32
+                },
+                component_bit_depth: if matches!(self, Self::Rgba16Float) {
+                    16
+                } else {
+                    32
+                },
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
+        };
+        Some(descriptor)
+    }
+
     /// Whether this decoded surface format can be carried as a native GPU payload.
     pub fn supports_native_gpu_payload(self) -> bool {
-        matches!(self, Self::Nv12 | Self::P010 | Self::Rgba8 | Self::Bgra8)
+        self.descriptor().is_some_and(|descriptor| descriptor.native_gpu_payload)
     }
 
     /// Effective bit depth for formats with a fixed Mondrian contract.
     pub fn fixed_bit_depth(self) -> Option<u8> {
-        match self {
-            Self::Nv12 | Self::Yuv420p | Self::Rgba8 | Self::Bgra8 => Some(8),
-            Self::P010 | Self::Yuv420p10le => Some(10),
-            Self::Unknown | Self::Other => None,
-        }
+        self.descriptor().map(|descriptor| descriptor.component_bit_depth)
     }
 }
 
@@ -1597,8 +2412,41 @@ mod tests {
         assert_eq!(
             HwAccelBackend::D3D11VA.preferred_surface_formats(),
             vec![
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
                 DecodedVideoSurfaceFormat::P010,
                 DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::P416,
+                DecodedVideoSurfaceFormat::P410,
+                DecodedVideoSurfaceFormat::P216,
+                DecodedVideoSurfaceFormat::P210,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Rgba8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
             ]
         );
         assert_eq!(
@@ -1725,6 +2573,310 @@ mod tests {
         } else if probe.device_create_attempted {
             assert!(probe.device_create_error_code.is_some());
         }
+    }
+
+    #[test]
+    fn hardware_device_creation_does_not_hold_pool_state_lock() {
+        let pool = HwDeviceContextPool::default();
+        let mut invoked = false;
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            None,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| {
+                invoked = true;
+                assert!(
+                pool.inner.state.try_lock().is_ok(),
+                "foreign device initialization must not block pool diagnostics or resource policy"
+            );
+                assert_eq!(pool.diagnostics().initializing_contexts, 1);
+                pool.reconfigure(HwDeviceContextPoolPolicy::new(0));
+                (-1, ptr::null_mut())
+            },
+        );
+        assert!(
+            invoked,
+            "admitted device creation must reach the injected provider"
+        );
+        assert!(result.is_err());
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        assert_eq!(pool.diagnostics().policy.max_idle_contexts, 0);
+    }
+
+    // These are AVBuffer ownership tests, not fake physical device admission.
+    // The bytes are never attached to a codec or interpreted as AVHWDeviceContext.
+    fn ownership_test_device_root() -> Arc<SharedHwAccelDeviceContext> {
+        let ptr = unsafe { ffmpeg::ffi::av_buffer_alloc(1) };
+        Arc::new(SharedHwAccelDeviceContext {
+            backend: HwAccelBackend::Cuda,
+            ptr: NonNull::new(ptr).expect("ownership fixture allocation"),
+        })
+    }
+
+    #[test]
+    fn retiring_preview_family_preserves_budgeted_device_root_until_full_clear() {
+        let pool = HwDeviceContextPool::new(HwDeviceContextPoolPolicy::new(1));
+        let root = ownership_test_device_root();
+        let retained = Arc::downgrade(&root);
+        pool.install_renderer_device_context(
+            HwAccelDeviceSelector::CudaDeviceOrdinal(0),
+            RendererHwAccelDeviceContext { owner: root },
+        )
+        .expect("install ownership fixture");
+        let resources = crate::PreviewDecodeWorkerResources::new(
+            crate::PreviewSeekIndexCache::default(),
+            pool.clone(),
+        );
+        let mut context = crate::PreviewDecodeSessionContext::with_worker_resources(resources);
+        for family in [
+            crate::PreviewDecodeSessionFamily::Interactive,
+            crate::PreviewDecodeSessionFamily::Playback,
+        ] {
+            context.clear_family(family);
+            assert!(
+                retained.upgrade().is_some(),
+                "family retirement must honor the existing idle device-root budget"
+            );
+        }
+        context.clear();
+        assert!(
+            retained.upgrade().is_none(),
+            "full clear releases idle roots"
+        );
+    }
+
+    fn observed_ownership_test_device_root(
+        pool: &HwDeviceContextPool,
+    ) -> (
+        Arc<SharedHwAccelDeviceContext>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        struct Observation {
+            pool: std::sync::Weak<HwDeviceContextPoolInner>,
+            result: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        unsafe extern "C" fn release(opaque: *mut std::ffi::c_void, data: *mut u8) {
+            // SAFETY: This test allocated both pointers and gives FFmpeg the
+            // unique final-release callback. No panic crosses the C boundary.
+            let observation = unsafe { Box::from_raw(opaque.cast::<Observation>()) };
+            let (unlocked, accounted) = observation.pool.upgrade().map_or((false, false), |pool| {
+                pool.state
+                    .try_lock()
+                    .map_or((false, false), |state| (true, state.retiring_contexts > 0))
+            });
+            observation.result.store(
+                1 | (usize::from(unlocked) << 1) | (usize::from(accounted) << 2),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            unsafe { ffmpeg::ffi::av_free(data.cast()) };
+        }
+        let result = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observation = Box::new(Observation {
+            pool: Arc::downgrade(&pool.inner),
+            result: Arc::clone(&result),
+        });
+        let data = unsafe { ffmpeg::ffi::av_malloc(1) }.cast::<u8>();
+        assert!(!data.is_null(), "test payload allocation");
+        let opaque = Box::into_raw(observation).cast();
+        let buffer = unsafe { ffmpeg::ffi::av_buffer_create(data, 1, Some(release), opaque, 0) };
+        if buffer.is_null() {
+            unsafe { release(opaque, data) };
+            panic!("test AVBuffer allocation");
+        }
+        (
+            Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::Cuda,
+                ptr: NonNull::new(buffer).expect("checked AVBuffer allocation"),
+            }),
+            result,
+        )
+    }
+
+    #[test]
+    fn hardware_device_retirement_does_not_hold_pool_state_lock() {
+        for operation in ["release_idle", "reconfigure", "retire", "replace", "create"] {
+            let pool = HwDeviceContextPool::new(HwDeviceContextPoolPolicy::new(
+                if operation == "create" { 0 } else { 2 },
+            ));
+            let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+            let (root, observed) = observed_ownership_test_device_root(&pool);
+            pool.install_renderer_device_context(
+                selector,
+                RendererHwAccelDeviceContext { owner: root },
+            )
+            .expect("install idle root");
+            match operation {
+                "release_idle" => pool.release_idle(),
+                "reconfigure" => pool.reconfigure(HwDeviceContextPoolPolicy::new(0)),
+                "retire" => {
+                    assert!(pool.retire_renderer_device_context(selector));
+                }
+                "replace" => {
+                    pool.install_renderer_device_context(
+                        selector,
+                        RendererHwAccelDeviceContext { owner: ownership_test_device_root() },
+                    )
+                    .expect("replace root");
+                }
+                "create" => {
+                    let root = ownership_test_device_root();
+                    let lease = pool
+                        .acquire_available_device(
+                            HwAccelBackend::Cuda,
+                            Some(HwAccelDeviceSelector::CudaDeviceOrdinal(1)),
+                            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                            |_, _| (0, unsafe { ffmpeg::ffi::av_buffer_ref(root.ptr.as_ptr()) }),
+                        )
+                        .expect("create another root and trim idle roots");
+                    drop(lease);
+                }
+                _ => unreachable!("fixed operation table"),
+            }
+            assert_eq!(
+                observed.load(std::sync::atomic::Ordering::SeqCst),
+                7,
+                "foreign root destruction during {operation} must be unlocked and still accounted"
+            );
+            assert_eq!(pool.diagnostics().retiring_contexts, 0);
+        }
+    }
+
+    #[test]
+    fn hardware_device_creation_cannot_replace_a_later_renderer_generation() {
+        for creation_succeeds in [false, true] {
+            let pool = HwDeviceContextPool::default();
+            let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+            let renderer = ownership_test_device_root();
+            let late = ownership_test_device_root();
+            let acquired = pool
+                .acquire_available_device(
+                    HwAccelBackend::Cuda,
+                    Some(selector),
+                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                    |_, _| {
+                        pool.install_renderer_device_context(
+                            selector,
+                            RendererHwAccelDeviceContext { owner: Arc::clone(&renderer) },
+                        )
+                        .expect("install superseding renderer generation");
+                        assert_eq!(pool.diagnostics().initializing_contexts, 1);
+                        if creation_succeeds {
+                            (0, unsafe { ffmpeg::ffi::av_buffer_ref(late.ptr.as_ptr()) })
+                        } else {
+                            (-1, ptr::null_mut())
+                        }
+                    },
+                )
+                .expect("acquire the newer installed renderer generation");
+            assert!(Arc::ptr_eq(&acquired.owner, &renderer));
+            assert_eq!(acquired.generation(), 2);
+            assert!(!acquired.newly_created);
+            assert_eq!(
+                unsafe { ffmpeg::ffi::av_buffer_get_ref_count(late.ptr.as_ptr()) },
+                1
+            );
+            let diagnostics = pool.diagnostics();
+            assert_eq!(diagnostics.initializing_contexts, 0);
+            assert_eq!(diagnostics.entries, 1);
+            assert_eq!(diagnostics.creation_failures, 0);
+            assert_eq!(diagnostics.failure_backoffs, 0);
+        }
+    }
+
+    #[test]
+    fn hardware_device_stale_failure_cannot_poison_renderer_replacement() {
+        let pool = HwDeviceContextPool::default();
+        let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+        pool.install_renderer_device_context(
+            selector,
+            RendererHwAccelDeviceContext { owner: ownership_test_device_root() },
+        )
+        .expect("install original root");
+        let old = pool
+            .acquire_available_device(
+                HwAccelBackend::Cuda,
+                Some(selector),
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("installed root must be reused"),
+            )
+            .expect("original lease");
+        let replacement = ownership_test_device_root();
+        pool.install_renderer_device_context(
+            selector,
+            RendererHwAccelDeviceContext { owner: Arc::clone(&replacement) },
+        )
+        .expect("install replacement root");
+        old.retire_after_runtime_failure("late failure from an old Session");
+        let current = pool
+            .acquire_available_device(
+                HwAccelBackend::Cuda,
+                Some(selector),
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("replacement root must be reused"),
+            )
+            .expect("old failure must not reject replacement");
+        assert!(Arc::ptr_eq(&current.owner, &replacement));
+        assert_eq!(pool.diagnostics().failure_backoffs, 0);
+    }
+
+    #[test]
+    fn hardware_device_creation_retirement_rejects_late_publication() {
+        let pool = HwDeviceContextPool::default();
+        let selector = HwAccelDeviceSelector::CudaDeviceOrdinal(0);
+        let late = ownership_test_device_root();
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            Some(selector),
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| {
+                assert!(pool.retire_renderer_device_context(selector));
+                assert_eq!(
+                    pool.diagnostics().initializing_contexts,
+                    1,
+                    "revocation must not pretend the foreign owner has already returned"
+                );
+                (0, unsafe { ffmpeg::ffi::av_buffer_ref(late.ptr.as_ptr()) })
+            },
+        );
+        let rejected = result.err().expect("revoked generation must fail");
+        assert!(rejected.reason.contains("retired before publication"));
+        assert!(rejected.device_create_attempted);
+        assert!(
+            rejected.device_context_created,
+            "retirement must not erase the fact that the provider created a root"
+        );
+        assert!(rejected.ffmpeg_device_type_available);
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(late.ptr.as_ptr()) },
+            1
+        );
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        assert_eq!(pool.diagnostics().entries, 0);
+    }
+
+    #[test]
+    fn hardware_device_creation_panic_releases_initialization_reservation() {
+        let pool = HwDeviceContextPool::default();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.acquire_available_device(
+                HwAccelBackend::Cuda,
+                None,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                |_, _| panic!("injected provider unwind"),
+            )
+        }));
+        assert!(panic.is_err());
+        assert!(!pool.inner.state.is_poisoned());
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
+        let result = pool.acquire_available_device(
+            HwAccelBackend::Cuda,
+            None,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            |_, _| (-1, ptr::null_mut()),
+        );
+        assert!(result.is_err());
+        assert_eq!(pool.diagnostics().latest_generation, 2);
+        assert_eq!(pool.diagnostics().initializing_contexts, 0);
     }
 
     #[test]
@@ -1870,6 +3022,136 @@ mod tests {
     }
 
     #[test]
+    fn native_high_bit_surface_matrix_has_exact_physical_descriptors() {
+        use DecodedVideoSurfaceChromaSubsampling::{Cs420, Cs422, Cs444};
+        use DecodedVideoSurfaceColorModel::{Rgb, Ycbcr};
+        use DecodedVideoSurfacePlaneLayout::{PackedRgba, PackedYuv422, PackedYuv444, SemiPlanar};
+
+        for (format, model, chroma, layout, bits, alpha) in [
+            (
+                DecodedVideoSurfaceFormat::P012,
+                Ycbcr,
+                Some(Cs420),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P016,
+                Ycbcr,
+                Some(Cs420),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P210,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P212,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P216,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P410,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P412,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P416,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Y210,
+                Ycbcr,
+                Some(Cs422),
+                PackedYuv422,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Y212,
+                Ycbcr,
+                Some(Cs422),
+                PackedYuv422,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Xv30,
+                Ycbcr,
+                Some(Cs444),
+                PackedYuv444,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Xv36,
+                Ycbcr,
+                Some(Cs444),
+                PackedYuv444,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                Rgb,
+                None,
+                PackedRgba,
+                16,
+                true,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Rgba32Float,
+                Rgb,
+                None,
+                PackedRgba,
+                32,
+                true,
+            ),
+        ] {
+            let descriptor = format.descriptor().expect("modeled native format");
+            assert_eq!(descriptor.color_model, model, "{format:?}");
+            assert_eq!(descriptor.chroma_subsampling, chroma, "{format:?}");
+            assert_eq!(descriptor.plane_layout, layout, "{format:?}");
+            assert_eq!(descriptor.component_bit_depth, bits, "{format:?}");
+            assert_eq!(descriptor.has_alpha, alpha, "{format:?}");
+            assert!(descriptor.native_gpu_payload, "{format:?}");
+        }
+    }
+
+    #[test]
     fn hw_accel_backend_has_stable_names() {
         assert_eq!(HwAccelBackend::None.as_str(), "None");
         assert_eq!(HwAccelBackend::Cuda.as_str(), "Cuda");
@@ -1879,6 +3161,41 @@ mod tests {
         assert_eq!(HwAccelBackend::VideoToolbox.as_str(), "VideoToolbox");
         assert_eq!(HwAccelBackend::Vaapi.as_str(), "Vaapi");
         assert_eq!(HwAccelBackend::Vdpau.as_str(), "VDPAU");
+    }
+
+    #[test]
+    fn linux_device_selectors_never_cross_backend_families() {
+        let vaapi = HwAccelDeviceSelector::VaapiDrmRenderNode(129);
+        let cuda = HwAccelDeviceSelector::CudaDeviceOrdinal(1);
+        assert_eq!(
+            vaapi.device_name_for(HwAccelBackend::Vaapi).as_deref(),
+            Some(c"/dev/dri/renderD129")
+        );
+        assert_eq!(
+            cuda.device_name_for(HwAccelBackend::Cuda).as_deref(),
+            Some(c"1")
+        );
+        for backend in [
+            HwAccelBackend::Vaapi,
+            HwAccelBackend::Cuda,
+            HwAccelBackend::Vdpau,
+            HwAccelBackend::D3D12VA,
+        ] {
+            assert_eq!(
+                vaapi.selects_backend(backend),
+                backend == HwAccelBackend::Vaapi
+            );
+            assert_eq!(
+                cuda.selects_backend(backend),
+                backend == HwAccelBackend::Cuda
+            );
+            if backend != HwAccelBackend::Vaapi {
+                assert!(vaapi.device_name_for(backend).is_none());
+            }
+            if backend != HwAccelBackend::Cuda {
+                assert!(cuda.device_name_for(backend).is_none());
+            }
+        }
     }
 
     #[test]
@@ -1898,7 +3215,11 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(
             candidates,
-            vec![HwAccelBackend::Vaapi, HwAccelBackend::Vdpau]
+            vec![
+                HwAccelBackend::Vaapi,
+                HwAccelBackend::Cuda,
+                HwAccelBackend::Vdpau
+            ]
         );
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         assert!(candidates.is_empty());

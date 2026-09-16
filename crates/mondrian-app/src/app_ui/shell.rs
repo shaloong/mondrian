@@ -22,16 +22,16 @@ use mondrian_ui_widgets::{
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
-    export_edit_draft_action, project_create_with_settings_action,
-    project_recover_from_autosave_action, project_update_color_environment_action,
-    sequence_update_settings_action, AppShellCopySystemInfoPayload,
-    AppShellInterpretAssetDialogPayload, AppShellOpenRecentProjectPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-    ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
+    app_shell_preferences_display_management_changed_action, assets_import_files_action,
+    assets_relink_asset_action, assets_set_interpretation_action, export_edit_draft_action,
+    project_create_with_settings_action, project_recover_from_autosave_action,
+    project_update_color_environment_action, sequence_update_settings_action,
+    AppShellCopySystemInfoPayload, AppShellInterpretAssetDialogPayload,
+    AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
+    AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload,
+    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
     ProjectUpdateColorEnvironmentPayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -41,13 +41,13 @@ use crate::app::ui_actions::{
     APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
-    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PROJECT_SETTINGS,
-    APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED, APP_SHELL_RECOVER_PROJECT,
-    APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
-    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
-    APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
-    VIEWER_SET_ZOOM_SCALE,
+    APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE, APP_SHELL_PREFERENCES_TAB_CHANGED,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
+    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG, APP_SHELL_SEQUENCE_SETTINGS,
+    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
+    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::AppState;
@@ -112,8 +112,17 @@ pub fn project_file_filters() -> Vec<FileFilter> {
 pub fn media_import_filters() -> Vec<FileFilter> {
     vec![
         FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
+        FileFilter::new(
+            "图片 / Camera RAW",
+            vec!["dng", "dpx", "exr", "png", "jpg", "jpeg", "tif", "tiff"],
+        ),
         FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+/// File dialog filter for monitor calibration profiles.
+pub fn display_icc_profile_filters() -> Vec<FileFilter> {
+    vec![FileFilter::new("ICC 显示配置文件", vec!["icc", "icm"])]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +131,17 @@ struct StatusBarModel {
     is_error: bool,
     is_busy: bool,
     context: String,
+}
+
+impl Default for StatusBarModel {
+    fn default() -> Self {
+        Self {
+            message: "就绪".to_owned(),
+            is_error: false,
+            is_busy: false,
+            context: String::new(),
+        }
+    }
 }
 
 struct StatusBar {
@@ -297,6 +317,7 @@ fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
         ExportProgressPhase::Preparing => "正在准备导出",
         ExportProgressPhase::Rendering => "正在渲染",
         ExportProgressPhase::Encoding => "正在编码",
+        ExportProgressPhase::Packaging => "正在封装交付包",
         ExportProgressPhase::Validating => "正在验证成品",
         ExportProgressPhase::Publishing => "正在发布成品",
     }
@@ -481,6 +502,47 @@ pub fn try_resolve_app_shell_action(
                     ))
                 }))
         }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == crate::app::ui_actions::APP_SHELL_IMPORT_EXPORT_ANCILLARY_DIALOG =>
+        {
+            let Some(paths) = platform
+                .open_file_dialog(
+                    "导入 ANC / 广播字幕",
+                    &[FileFilter::new(
+                        "ANC JSON / SCC V1.0 / 原始 CDP",
+                        vec!["json", "mdanc", "scc", "cdp"],
+                    )],
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+            else {
+                return Ok(None);
+            };
+            Ok(paths
+                .into_iter()
+                .next()
+                .map(|path| export_edit_draft_action(ExportDraftEdit::ImportAncillary(path))))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == crate::app::ui_actions::APP_SHELL_IMPORT_EXPORT_PSE_DIALOG =>
+        {
+            let Some(paths) = platform
+                .open_file_dialog(
+                    "导入监管 PSE 配置",
+                    &[FileFilter::new("Regulatory PSE JSON", vec!["json"])],
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+            else {
+                return Ok(None);
+            };
+            Ok(paths
+                .into_iter()
+                .next()
+                .map(|path| export_edit_draft_action(ExportDraftEdit::ImportRegulatoryPse(path))))
+        }
         Action::Custom { namespace, name, .. } if namespace == APP_SHELL_NAMESPACE => {
             Err(unknown_app_shell_action_error(&name))
         }
@@ -588,6 +650,26 @@ fn apply_viewer_canvas_background(
     models.viewer.canvas_background = background;
 }
 
+fn apply_video_scopes_preferences(
+    models: &mut AppUiPanelModels,
+    state: &AppState,
+    preferences: &AppUiPreferences,
+) {
+    let program_output = state
+        .active_sequence()
+        .map(|sequence| sequence.settings.color.program_output.color_space)
+        .unwrap_or(state.new_sequence_defaults().color.program_output.color_space);
+    let signal_color_space = match preferences.video_scopes.tap {
+        mondrian_core::ProgramScopesTap::ProgramOutput => program_output,
+        mondrian_core::ProgramScopesTap::MonitorOutput => preferences
+            .display_management
+            .resolve_output_color_space(state.project_color_environment().engine(), program_output)
+            .unwrap_or(program_output),
+    };
+    models.scopes.settings = preferences.video_scopes;
+    models.scopes.signal_color_space = signal_color_space;
+}
+
 fn project_sequence_color_contracts(state: &AppState) -> Vec<(WorkingColorSpace, ColorSpace)> {
     let defaults = state.new_sequence_defaults();
     let mut contracts = vec![(
@@ -678,6 +760,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
@@ -742,7 +825,7 @@ impl AppUiAppRoot {
             AppUiPreferencesModel::default(),
             workspace_preset,
             None,
-            status_bar_model(&AppState::new()),
+            StatusBarModel::default(),
         )
     }
 
@@ -945,7 +1028,10 @@ impl AppUiAppRoot {
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: self.models.viewer.canvas_background,
+            video_scopes: self.models.scopes.settings,
             audio_output_device: Default::default(),
+            reference_output: Default::default(),
+            display_management: self.preferences_model.display_management.clone(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -964,7 +1050,11 @@ impl AppUiAppRoot {
         }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
-        self.models.scopes = ScopesPanelModel::from_viewer(&viewer);
+        self.models.scopes = ScopesPanelModel::from_viewer_with_settings(
+            &viewer,
+            self.models.scopes.settings,
+            self.models.scopes.signal_color_space,
+        );
         self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
@@ -1043,6 +1133,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
@@ -1058,6 +1149,9 @@ impl AppUiAppRoot {
                 preferences.audio_output_device.clone(),
                 self.audio_output_device_catalog.clone(),
             );
+        let mut preferences_model = preferences_model;
+        preferences_model
+            .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
@@ -1072,6 +1166,20 @@ impl AppUiAppRoot {
         }
         self.audio_output_device_catalog = catalog.clone();
         self.preferences_model.set_audio_output_device_catalog(catalog);
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
+            dialog.set_model(self.preferences_model.clone());
+        }
+    }
+
+    /// Publish the latest structured display diagnosis into Preferences.
+    pub fn set_display_output_snapshot(
+        &mut self,
+        snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    ) {
+        if self.preferences_model.display_output_snapshot == snapshot {
+            return;
+        }
+        self.preferences_model.set_display_output_snapshot(snapshot);
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(self.preferences_model.clone());
         }
@@ -1421,6 +1529,32 @@ impl AppUiAppRoot {
                 }
                 Ok(None)
             }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE =>
+            {
+                let Some(path) = platform
+                    .open_file_dialog("选择显示器 ICC 配置文件", &display_icc_profile_filters())
+                    .map_err(|error| native_shell_error(&name, error))?
+                    .into_selection()
+                    .and_then(|paths| paths.into_iter().next())
+                else {
+                    return Ok(None);
+                };
+                let policy = self
+                    .preferences_model
+                    .display_management
+                    .with_calibration(mondrian_core::DisplayCalibrationPolicy::IccProfilePath(
+                        path.display().to_string(),
+                    ))
+                    .map_err(|error| MondrianError::WorkflowStepFailed {
+                        step_id: "display_management.select_icc_profile".to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                Ok(Some(
+                    app_shell_preferences_display_management_changed_action(policy),
+                ))
+            }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INTERPRET_ASSET_DIALOG =>
             {
@@ -1710,6 +1844,7 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
         widget.as_any_mut().and_then(|any| any.downcast_mut::<VideoScopesSurface>())
     {
         scopes.set_textures(model.textures.clone());
+        scopes.set_settings(model.settings, model.signal_color_space);
         return true;
     }
     (0..widget.child_count()).fold(false, |updated, index| {
@@ -1717,7 +1852,7 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
     })
 }
 
-pub(super) fn viewer_presentation_geometry(
+pub(crate) fn viewer_presentation_geometry(
     widget: &dyn Widget,
 ) -> Option<ViewerPresentationGeometry> {
     if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
@@ -2837,6 +2972,14 @@ mod tests {
     }
 
     #[test]
+    fn packaging_phase_has_a_product_status_message() {
+        assert_eq!(
+            export_phase_status_message(ExportProgressPhase::Packaging),
+            "正在封装交付包"
+        );
+    }
+
+    #[test]
     fn new_project_draft_uses_path_stem_and_preserves_settings_payload() {
         let path = PathBuf::from("E:/projects/Trailer Cut.mdp");
         let mut draft = AppUiNewProjectDraft::from_project_path(&path);
@@ -2967,15 +3110,17 @@ mod tests {
             payload.sequence_settings.color.program_output.workflow,
             ColorWorkflow::SceneReferred
         );
-        let context =
-            payload.sequence_settings.root_program_color_context(&payload.color_environment);
+        let context = payload
+            .sequence_settings
+            .root_program_color_context(&payload.color_environment)
+            .expect("valid context");
         assert_eq!(
-            context.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            context.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 
@@ -3171,7 +3316,7 @@ mod tests {
         assert_eq!(output.view(), "ACES 2.0 - SDR 100 nits (Rec.709)");
         assert!(!output.display_color_space().is_empty());
         assert!(!identity.config_sha256().is_empty());
-        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(!identity.dependency_manifest_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
     }
 
@@ -3267,7 +3412,7 @@ mod tests {
             .expect("pinned Custom OCIO identity");
         assert_eq!(identity.working_space(), "Linear Rec.2020");
         assert!(!identity.config_sha256().is_empty());
-        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(!identity.dependency_manifest_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
     }
 
@@ -3429,7 +3574,7 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::FieldOrder(FieldOrder::UpperFirst),
+                SequenceSettingsDraftUpdatePayload::FieldOrder(FieldOrder::Progressive),
             ),
             &platform,
             None,
@@ -3587,7 +3732,7 @@ mod tests {
             payload.settings.pixel_aspect_ratio,
             PixelAspectRatio::Anamorphic2x
         );
-        assert_eq!(payload.settings.field_order, FieldOrder::UpperFirst);
+        assert_eq!(payload.settings.field_order, FieldOrder::Progressive);
         assert_eq!(
             payload.settings.timeline_display.format,
             TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame)
@@ -3731,6 +3876,17 @@ mod tests {
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
         assert_eq!(dialog.model().proxy_mode, "已启用");
+    }
+
+    #[test]
+    fn model_only_shell_does_not_construct_an_app_owner() {
+        let state = AppState::new();
+        let models = AppUiPanelModels::from_app_state(&state);
+        let before = crate::app::test_app_state_construction_count();
+        let root = AppUiAppRoot::from_models(models);
+        assert_eq!(crate::app::test_app_state_construction_count(), before);
+        assert!(!root.status_bar.model.is_busy);
+        assert!(!root.status_bar.model.is_error);
     }
 
     #[test]
@@ -4206,6 +4362,60 @@ mod tests {
             resolve_app_shell_action(app_shell_open_project_dialog_action(), &platform, None);
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn ancillary_dialog_yields_typed_import_and_cancellation_keeps_the_draft() {
+        let path = PathBuf::from("E:/broadcast/canonical.json");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone()]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action(),
+            &platform,
+            None,
+        )
+        .expect("selection");
+        assert_eq!(
+            action,
+            export_edit_draft_action(ExportDraftEdit::ImportAncillary(path))
+        );
+        assert_eq!(
+            resolve_app_shell_action(
+                crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action(),
+                &FakePlatform::default(),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn regulatory_pse_dialog_yields_typed_import_and_retains_cancellation() {
+        let path = PathBuf::from("E:/broadcast/pse.json");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone()]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_import_export_pse_dialog_action(),
+            &platform,
+            None,
+        )
+        .expect("selection");
+        assert_eq!(
+            action,
+            export_edit_draft_action(ExportDraftEdit::ImportRegulatoryPse(path))
+        );
+        assert_eq!(
+            resolve_app_shell_action(
+                crate::app::ui_actions::app_shell_import_export_pse_dialog_action(),
+                &FakePlatform::default(),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

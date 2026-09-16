@@ -118,6 +118,13 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 }
                 let color = color_to_gpu_linear(*color);
 
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    None,
+                );
+
                 let vertices = generate_rect_vertices(
                     screen_rect,
                     color[0],
@@ -162,6 +169,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     *offset,
                     |rect| pixel_to_ndc_rect(rect, sx, sy, tx, ty),
                 ) {
+                    ensure_texture_key(
+                        &mut batches,
+                        &mut current_batch,
+                        clip_stack.last().copied(),
+                        None,
+                    );
                     current_batch.vertices.extend(vertices);
                 }
             }
@@ -185,6 +198,13 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                     continue;
                 }
                 let colors = colors.map(|color| color_from_gpu_linear(color_to_gpu_linear(color)));
+
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    None,
+                );
 
                 let vertices = generate_gradient_rect_vertices(
                     screen_rect,
@@ -276,10 +296,22 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 let n_start = apply_transform_point(start, &transform_stack);
                 let n_end = apply_transform_point(end, &transform_stack);
                 if let Some(verts) = line_vertices(n_start, n_end, *width, color, sx, sy, tx, ty) {
+                    ensure_texture_key(
+                        &mut batches,
+                        &mut current_batch,
+                        clip_stack.last().copied(),
+                        None,
+                    );
                     current_batch.vertices.extend(verts);
                 }
             }
             DrawCommand::Triangles { vertices, color } => {
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    None,
+                );
                 for triangle in vertices.chunks_exact(3) {
                     let points = [
                         point_to_ndc(
@@ -310,6 +342,12 @@ pub fn build_batches(commands: &[DrawCommand], screen_size: (u32, u32)) -> Vec<D
                 }
             }
             DrawCommand::ColoredTriangles { vertices, mask } => {
+                ensure_texture_key(
+                    &mut batches,
+                    &mut current_batch,
+                    clip_stack.last().copied(),
+                    None,
+                );
                 let mask_rect = mask.map(|mask| apply_transform(&mask.bounds, &transform_stack));
                 for triangle in vertices.chunks_exact(3) {
                     let point = |index: usize| {

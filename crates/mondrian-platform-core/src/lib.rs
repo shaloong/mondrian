@@ -7,7 +7,9 @@
 
 mod desktop;
 mod display;
+mod endurance_qualification;
 mod memory;
+mod qualification_matrix;
 mod user_state_directory;
 
 pub use desktop::{
@@ -18,11 +20,37 @@ pub use display::{
     DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
     DisplayProbeBackend, DisplayProfileProbe, DisplayProfileProbeTarget,
 };
+pub use endurance_qualification::{
+    EnduranceAncillaryExportArtifact, EnduranceAncillaryPhaseEvidence,
+    EnduranceAncillaryWireJournal, EnduranceCounterRequirement, EnduranceCounters, EnduranceGauges,
+    EnduranceMemoryRequirement, EndurancePhaseChunkReceipt, EndurancePhaseKind,
+    EndurancePhaseManifest, EndurancePhaseMeasurementTiming, EndurancePhaseOwnerReceipt,
+    EndurancePhaseProducerEvidence, EndurancePhaseReport, EndurancePhaseRequirement,
+    EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
+    EnduranceQualificationError, EnduranceQualificationProfile, EnduranceQualificationReport,
+    EnduranceQualificationStatus, EnduranceRunManifest, EnduranceRunOwnerClosureEvidence,
+    EnduranceSample, EnduranceSampleChunk, PreparedEnduranceQualification,
+    ProcessEventLoopOwnerClosureEvidence,
+};
 pub use memory::{
     ExecutionMemoryProbe, PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
     PhysicalMemoryCapacityProbeResult, ProcessMemoryProbe, ProcessMemoryProbeBackend,
     ProcessMemoryProbeResult, ProcessMemoryScope, ProcessPrivateMemoryMetric, SystemMemoryProbe,
     SystemMemoryProbeBackend, SystemMemoryProbeResult,
+};
+pub use qualification_matrix::{
+    PlatformDriverDisplayQualificationProfile, PlatformQualificationCampaign,
+    PlatformQualificationCellObservation, PlatformQualificationCellReport,
+    PlatformQualificationCellRequirement, PlatformQualificationDriverIdentity,
+    PlatformQualificationEnvironment, PlatformQualificationError,
+    PlatformQualificationEvidenceKind, PlatformQualificationEvidenceReport,
+    PlatformQualificationEvidenceRequirement, PlatformQualificationLimits,
+    PlatformQualificationProductArtifact, PlatformQualificationReport,
+    PlatformQualificationScenarioEvidence, PlatformQualificationScenarioRequirement,
+    PlatformQualificationStatus, PreparedPlatformDriverDisplayQualification,
+    QualificationAdapterKind, QualificationDisplayScenario, QualificationGraphicsBackend,
+    QualificationHdrPresentation, QualificationHdrTransferFunction, QualificationPlatform,
+    QualificationPresentationTransfer, QualificationSurfaceColorSpace,
 };
 pub use user_state_directory::{UserStateDirectory, UserStateDirectoryError};
 
@@ -32,3 +60,8 @@ pub use user_state_directory::{UserStateDirectory, UserStateDirectoryError};
 /// cancelled/no-op shell outcome. It never manufactures native evidence.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopPlatformService;
+
+mod runtime_capsule;
+pub use runtime_capsule::{
+    QualifiedRuntimeCapsuleChildCleanupEvidence, QualifiedRuntimeCapsuleClosureEvidence,
+};

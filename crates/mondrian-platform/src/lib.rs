@@ -9,6 +9,7 @@ use std::process::Command;
 mod display;
 mod eyedropper;
 mod global_pointer;
+mod graphics_process;
 mod memory;
 mod playback_scheduling;
 mod process_memory;
@@ -16,12 +17,21 @@ mod user_state_directory;
 pub use mondrian_platform_core::{
     ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
     DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
-    DisplayProfileProbeTarget, ExecutionMemoryProbe, FileDialogError, FileDialogOutcome,
-    FileFilter, FileRevealError, NoopPlatformService, PhysicalMemoryCapacityProbe,
-    PhysicalMemoryCapacityProbeBackend, PhysicalMemoryCapacityProbeResult, PlatformService,
-    ProcessMemoryProbe, ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
-    ProcessPrivateMemoryMetric, SystemMemoryProbe, SystemMemoryProbeBackend,
-    SystemMemoryProbeResult, UserStateDirectory, UserStateDirectoryError,
+    DisplayProfileProbeTarget, EnduranceAncillaryExportArtifact, EnduranceAncillaryPhaseEvidence,
+    EnduranceAncillaryWireJournal, EnduranceCounterRequirement, EnduranceCounters, EnduranceGauges,
+    EnduranceMemoryRequirement, EndurancePhaseChunkReceipt, EndurancePhaseKind,
+    EndurancePhaseManifest, EndurancePhaseMeasurementTiming, EndurancePhaseOwnerReceipt,
+    EndurancePhaseProducerEvidence, EndurancePhaseReport, EndurancePhaseRequirement,
+    EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
+    EnduranceQualificationError, EnduranceQualificationProfile, EnduranceQualificationReport,
+    EnduranceQualificationStatus, EnduranceRunManifest, EnduranceRunOwnerClosureEvidence,
+    EnduranceSample, EnduranceSampleChunk, ExecutionMemoryProbe, FileDialogError,
+    FileDialogOutcome, FileFilter, FileRevealError, NoopPlatformService,
+    PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
+    PhysicalMemoryCapacityProbeResult, PlatformService, PreparedEnduranceQualification,
+    ProcessEventLoopOwnerClosureEvidence, ProcessMemoryProbe, ProcessMemoryProbeBackend,
+    ProcessMemoryProbeResult, ProcessMemoryScope, ProcessPrivateMemoryMetric, SystemMemoryProbe,
+    SystemMemoryProbeBackend, SystemMemoryProbeResult, UserStateDirectory, UserStateDirectoryError,
 };
 
 /// Default desktop platform implementation.
@@ -33,6 +43,7 @@ pub use mondrian_platform_core::{
 pub struct SystemPlatformService;
 
 pub use eyedropper::{DesktopEyedropper, DesktopPoint, DesktopRgba8};
+pub use graphics_process::{prepare_graphics_process, GraphicsProcessBootstrapError};
 pub use playback_scheduling::{
     PlaybackThreadScheduling, PlaybackThreadSchedulingError, PlaybackThreadSchedulingStatus,
 };

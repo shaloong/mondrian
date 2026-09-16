@@ -1,5 +1,16 @@
 # Execution Resource Coordination
 
+Preview source reservations use Media's frozen sampling precision rather than
+inferring storage precision from transfer function. Initial playback, seek,
+cache recovery and predictive admission use that same key-derived footprint;
+encoded ten-bit HEVC therefore reserves its actual float source plus working
+float frame. No deadline or memory limit changes accompany this accounting.
+The completion pump preserves the physical lease's admission class. A purely
+speculative capacity rejection caused by later Current work retires without
+remembering a source failure for the generation. Missing leases, Current grants
+and completions adopted by the pending current demand retain strict failure
+evidence, including the actual payload bytes and admission class in diagnostics.
+
 `mondrian-app` owns one lightweight product policy Module that coordinates
 resource demand without becoming an execution scheduler. It converts three
 inputs into a versioned immutable decision:
@@ -11,7 +22,7 @@ inputs into a versioned immutable decision:
   whole-system pressure (`Nominal`, `Elevated`, or `Critical`).
 
 The default profile Adapter reads physically installed memory through Windows
-`GetPhysicallyInstalledSystemMemory`, Linux `/proc/meminfo`, or macOS
+`GetPhysicallyInstalledSystemMemory`, Linux's system udev DMI inventory, or macOS
 `hw.memsize`. A platform or failed probe without reliable evidence is classified
 as `UnknownConservative`, not falsely reported as an 8 GiB machine. Measured machines below 8 GiB are explicitly
 `BelowMinimum`; the half-open range [8 GiB, 16 GiB) is `MinimumSupported`,
@@ -19,6 +30,17 @@ as `UnknownConservative`, not falsely reported as an 8 GiB machine. Measured mac
 Unknown capacity uses the same conservative budgets as the 8 GiB policy while
 remaining distinguishable evidence; below-minimum capacity gets
 smaller derived-media budgets and a coarser realtime Preview floor.
+
+Linux dynamically loads `libudev.so.1` and reads the system-populated DMI
+device properties through its native API. Every declared memory slot must
+contain a positive byte size or explicit absence; incomplete, contradictory,
+non-volatile, or overflowing inventories fail closed. The library, context,
+and device are owned for the bounded query and released in dependency order.
+An unavailable provider or inventory produces `UnknownConservative` without
+requiring elevated application privileges. Linux `MemTotal` remains part of
+live pressure evidence only: it excludes reserved memory and cannot be labeled
+installed capacity or rounded up to a policy tier. The existing tier boundaries
+and per-tier budgets do not change.
 
 ## Interface and ownership
 
@@ -28,7 +50,16 @@ Proxy receives global/automatic dispatch plus requested parallelism. Thumbnail
 and Waveform receive automatic admission, dispatch, and their own cache grant.
 Media Import receives dispatch plus requested parallelism. Existing-Asset
 mutation receives only dispatch. Export receives dispatch plus one complete
-resource grant that its queue freezes for each dispatched attempt. Preview
+resource grant that its queue freezes for each dispatched attempt. That grant
+includes the maximum FFmpeg filter, filter-complex, and per-codec worker counts
+derived from the same observed logical CPU capacity and capped at eight. The
+external encoder command consumes the filter count before opening its rawvideo input, so
+FFmpeg cannot expand pools from the host topology beyond a container or
+qualification task grant. This bounds process resources without changing codec
+quality, GOP structure, color conversion, hardware selection, or fallback
+classification. The independent full-decode verifier consumes the same frozen
+codec count for both its input decoder and hash/rawvideo output encoder; it does
+not rediscover host topology after admission. Preview
 receives its runtime scale, Frame Store limits, trim request, Basic Title cache
 grant, and instance-owned Effect pixel-cache/GPU-plan-cache grants, plus an
 independent Viewer GPU idle-retention/active-working-set grant and one atomic
@@ -104,11 +135,13 @@ generation facts. It never receives a job payload and cannot execute, cancel,
 reorder, retry, or terminalize domain work.
 
 The below-minimum/unknown/8 GiB, 16 GiB, and 32 GiB classes admit at most one,
-two, and four domain dispatch seams respectively. Elevated pressure admits one;
-Critical pressure and realtime Preview/Audio admit none. This is deliberately
-a coarse cross-domain concurrency grant, not a claim that every admitted
-domain has the same internal cost. Each domain still applies its own bounded
-parallelism and byte/resource grants.
+two, and four domain dispatch seams respectively. Elevated pressure admits one
+and Critical pressure admits none. Realtime Preview/Audio closes automatic
+heavy work but retains one slot for an explicitly admitted user Export; that
+attempt freezes a CPU-capable execution policy unless its authored closure
+requires GPU execution. This is deliberately a coarse cross-domain concurrency
+grant, not a claim that every admitted domain has the same internal cost. Each
+domain still applies its own bounded parallelism and byte/resource grants.
 
 Allocation follows five invariants:
 
@@ -124,6 +157,15 @@ Allocation follows five invariants:
    close epoch and that same domain has subsequently supplied a fresh
    `running == 0` observation. Domains may complete this proof independently;
    capacity reopens only after the draining set is empty.
+
+Export's cooperative execution gate reports a yielded running attempt
+separately from a physically executing attempt. The App demand projection moves
+that bounded yielded population from `running` to `queued`: the immutable job
+still requests its user slot, while the allocator receives the required fresh
+`running == 0` proof. Keeping a yielded attempt in `running` would make Nominal
+recovery wait for job completion while the same job waits for dispatch to
+reopen after Critical pressure. Queue identity, cancellation, snapshot, and
+publication authority remain unchanged across this slot reacquisition.
 
 Handoff is a close/acknowledge/resample transition. `domains_to_close` repeats
 every draining domain idempotently under the current `close_epoch`. The
@@ -182,6 +224,20 @@ increment that count. This statement is deliberately scoped to Headless
 Preview: it does not claim that a Headless presentation call owns or dispatches
 every other background execution domain.
 
+The lazy native process-memory observer remains an App-owned worker, including
+the never-started case. Qualification first closes its request admission and
+then consumes a terminal receipt against the same absolute deadline used by the
+other `AppState` owners. The receipt distinguishes no startup attempt, failed or
+partial startup, normal join, panic, timeout/detach, queued/running work,
+retained resources, and cumulative failures; only exact lifecycle closure may
+support terminal quiescence. Ordinary `Drop` may request shutdown as bounded
+best-effort cleanup, but it is not worker-return evidence. Runtime endurance
+facts use one atomic mutually exclusive queued/running inventory, preserve
+started-versus-unexpected-exit identity, and monotonically count supported
+native-probe failures. The terminal receipt reuses that same failure ledger, so
+a failure discovered before or during shutdown cannot regress during merge;
+unsupported probes remain explicit capability evidence and do not increment it.
+
 Every bounded Headless candidate turn advances that complete resource cycle
 before it polls an in-flight GPU submission, promotes a Prepared Viewer
 Successor, reuses an exact-current alias, or requests new Preview work. Those
@@ -237,12 +293,25 @@ until the owning Preview boundary can safely release it. A stronger trim may
 separately release decoder-backed media without conflating that lifecycle
 action with Store budget configuration.
 
+The same current-media resource-unit limit governs physical Interactive decoder
+Session residency. The App partitions the family grant across the decode
+workers that actually started and publishes that per-worker capacity through
+shared worker-family resources. Workers reuse released Sessions before opening
+another; a lower decision retires only slots whose native-output leases have
+already reached zero. This keeps multilayer native decode proportional to the
+same authority that admits its Frame Store surfaces instead of hiding a fixed
+two-layer bottleneck or creating an uncharged decoder pool.
+
 Viewer GPU output residency is a separate typed grant because renderer-owned
 working/output textures are not Frame Store entries. Nominal
 below-minimum/8/16/32 GiB profiles retain at most 1/2/3/3 idle textures per
 exact extent/format/usage contract and 48/128/256/384 MiB across contracts.
-Speculative trim retains at most one per contract and halves the byte grant;
-Aggressive trim grants zero idle residency and requests idle release. This
+Speculative trim retains at most one per contract while preserving the
+machine-class byte grant. That bound is the frame-to-frame hot-set envelope,
+not a duplicate-cache target: halving it can evict one UHD float working
+texture as later display textures return and reintroduce synchronous GPU
+allocation into realtime successor preparation. Aggressive trim grants zero
+idle residency and requests idle release. This
 narrow `PreviewViewerGpuExecutionDecision` contains only the renderer grant and
 that release instruction; the Headless Adapter does not receive the unrelated
 Frame Store, decode, title, or Effect policy fields. The single
@@ -253,7 +322,8 @@ grant. Window and Headless therefore share one renderer Interface and one
 policy projection without moving GPU resource ownership into UI or App state.
 
 The same renderer grant independently admits one complete active Viewer
-request. Below-minimum/8/16/32 GiB classes permit respectively
+request. Before an active GPU generation is bound, below-minimum/8/16/32 GiB
+system-memory classes permit respectively
 384 MiB/48, 768 MiB/64, 2 GiB/96, and 4 GiB/160 active logical texture
 bytes/resources; unknown capacity uses the conservative 8 GiB values while
 remaining distinguishable evidence. These active limits derive only from
@@ -261,6 +331,24 @@ machine class and remain identical across Nominal, Elevated, Critical,
 transport-active, Speculative, and Aggressive decisions. Pressure can reduce
 resolution only by causing Preview to issue a new explicit quality request; it
 cannot shrink the grant beneath a frozen candidate or change its precision.
+
+Linux Vulkan startup also queries the exact selected physical device's primary
+device-local heap. A separately mapped host-visible device-local aperture is
+not added to that heap because it does not increase the physical allocation
+budget; unified-memory adapters fall back to their largest device-local heap.
+The existing `ExecutionResourceCoordinator` records that
+immutable generation fact and bounds its class grant to five sixteenths of the
+device-local bytes for one active Viewer closure plus one sixteenth for idle
+reuse. The remaining five eighths is reserved for decoder surfaces, the display
+compositor, driver and pipeline state, allocator fragmentation, and other GPU
+owners outside the Viewer texture table. A measured device below 3 GiB requests
+Half runtime Preview resolution; below 2 GiB requests Quarter. If an active
+generation cannot expose capacity, the observation remains explicitly absent
+and receives the Half/384 MiB conservative policy. Device reopen replaces this
+fact before the successor generation can allocate Viewer work. This is one
+projection of the product resource authority, not a renderer-local quality
+policy, and it never changes working precision or color semantics.
+
 The renderer estimates and admits the complete request before texture
 creation. Idle pool limits, active Viewer limits, and the inner heterogeneous
 continuation grant are three different authorities and may not substitute for
@@ -349,6 +437,14 @@ cannot accumulate unbounded host outputs outside the compositor grant.
 Decoded media, Effect-session residency, and OCIO processor residency remain
 separately governed.
 
+The renderer's Prepared Visual Execution Module consumes that admitted closure
+with one iterative child-before-parent schedule. It retains at most the one
+Adapter output already counted for each prepared instance and calls each node
+exactly once; Preview and Export no longer own recursive stacks or hidden
+nested-output pools. The schedule is request-local metadata proportional to the
+already bounded closure node/binding count. It does not create another worker,
+cache, GPU grant, or decoder residency owner.
+
 Preview heterogeneous execution freezes two correlated grants before any CPU
 prefix starts. The CPU grant bounds one atomic addressed batch, Effect Session,
 graph steps/materializations, and retained input-plus-all-frontier pixels. The
@@ -381,19 +477,40 @@ collection of live knobs. It grants the attempt-local Prepared Visual Program
 cache including its LUT Preparation Cache, Effect pixel/topology/GPU-plan
 residency and temporal/ROI working limit, heterogeneous route-contract ledger,
 CPU color-processor Session, GPU output idle-texture pool, and Basic Title
-cache. The route ledger is correctness/admission state, not GPU-plan cache
+cache. The policy separately freezes `gpu_visual_active` for the complete
+GPU-resident visual closure and `gpu_output_active` for the final output plus
+readback. The route ledger is correctness/admission state, not GPU-plan cache
 residency: its entry and conservative logical-byte grants remain stable across
 Nominal and Elevated pressure, while retained GPU-plan entries/bytes may
 shrink. The below-minimum/8/16/32 GiB profiles grant 8/16/32/64 immutable route
-contracts at 128 conservative logical bytes each. The same profiles grant
+contracts at 128 conservative logical bytes each. Their GPU visual grants are
+384 MiB/768 MiB/2 GiB/4 GiB across 48/64/96/160 active textures. Every node
+includes already-retained nested outputs plus conservative upload,
+Effect-domain, Transition, and working-composite demand; rejection happens
+before that node records and becomes terminal only if an earlier GPU node has
+already started. The same profiles grant
 384 MiB/512 MiB/1 GiB/2 GiB and four resources to one final GPU output
 boundary. That pressure-stable grant covers the exact working input texture,
 encoded output texture, and padded readback buffer; the separate idle pool may
-still be trimmed. A plan that exceeds either active limit is rejected before
-GPU allocation and records an explicit `ActiveWorkingSetRejected` CPU-fallback
+still be trimmed. The policy additionally freezes eight resident-encoder
+surfaces and 512 MiB of conservative logical surface bytes for the qualified
+Windows HEVC route. Export rejects admission before execution unless the exact
+NV12/P010 pool fits both limits. Renderer detached input leases remain charged
+to their originating GPU output pool until the cross-queue completion wait has
+been enqueued; poisoned leases and destination surfaces remain owned by the
+resident Adapter until retirement rather than being returned under unknown
+native state. A plan that exceeds either active limit is rejected before GPU
+allocation and records an explicit `ActiveWorkingSetRejected` CPU-fallback
 reason rather than silently reducing delivery precision. The queue copies the current
 policy when a pending job becomes one `Running/Preparing` attempt, and that
 immutable value constructs the attempt's single `ExportVisualRenderSession`.
+A realtime decision also freezes whether equivalent CPU-capable visual work
+may use opportunistic GPU acceleration. While Preview or Audio owns realtime
+execution, the one admitted explicit Export uses its exact Float32 CPU route
+for closures that support it, including the final color/output boundary, and
+does not qualify a resident hardware-encode route. A closure whose Effect
+contract has no exact CPU Float32 route retains its required GPU execution;
+the scheduling policy cannot reinterpret authored processing semantics.
 A later resource decision may close dispatch or request a safe-boundary yield,
 but it cannot resize or reinterpret the running attempt. Only a later
 dispatched attempt freezes the later grant.
@@ -407,9 +524,14 @@ finite product-artwork set.
 ## Priority and degradation order
 
 Realtime Preview and Audio are always admitted. When transport is active,
-background Modules stop dispatching new work. Explicit Export, Import, and user
-Proxy requests remain admitted into their bounded domain queues and resume
-after transport becomes idle. The coordinator itself owns no cancellation
+automatic background Modules and explicit Import/Proxy mutation stop dispatching
+new work. One concrete user Export may receive a single bounded offline slot at
+Nominal or Elevated pressure; this is the execution path used by Concurrent
+Recovery qualification. Its CPU-equivalent work yields the GPU to realtime
+Preview and Reference Output; GPU-required Effect work remains explicit and
+bounded by the frozen Export policy. Critical pressure closes that slot as well. Additional
+Export attempts, Import, and user Proxy requests remain admitted into their
+bounded domain queues and resume when policy grants a slot. The coordinator itself owns no cancellation
 token, but each deep Module may implement a cooperative safe-boundary yield
 without terminalizing or recreating the user's intent. Proxy cancel/requeues
 the same running attempt when its backend acknowledges the resource yield;
@@ -432,8 +554,8 @@ allocation to one domain. At Nominal pressure with no explicit heavy demand,
 bounded automatic queues may admit and dispatch normally. This gives the
 product one simple priority order:
 
-1. realtime Preview and Audio;
-2. explicit user Import, existing-Asset mutation, Export, and Proxy work;
+1. realtime Preview and Audio, plus at most one bounded explicit Export;
+2. explicit user Import, existing-Asset mutation, remaining Export, and Proxy work;
 3. automatic derived-media and recovery work.
 
 Whole-process pressure then applies monotonic degradation: Elevated pressure
@@ -481,6 +603,13 @@ editor model or recursively request another resource decision merely because
 Import dispatch or parallelism changed. Explicit diagnostics observe that
 policy immediately. Admission rejection advances both revisions because its
 bounded rejection counter and terminal record are real product evidence.
+
+Host integration validation exercises the packaged Isolated Media Probe Helper
+rather than replacing it with an in-process probe. Its orchestration wait remains
+bounded, but admits normal debug-build process cold-start and scheduling jitter;
+the wait is a correctness deadline, not a three-second media-probe performance
+service-level objective. The Helper retains its independent 120-second product
+deadline and process-reaping contract.
 
 Closing or replacing the Project:
 
@@ -594,3 +723,65 @@ guidance only: `cancel` remains the sole authority and returns the exact
 returns the exact removal count from the same lock. “Terminal” includes
 Completed, Failed, and Cancelled evidence; the product must not label this as
 completed-only cleanup or report success when no evidence was removed.
+# Professional realtime Viewer grant
+
+The App maps the `Professional` machine class to
+`ViewerGpuExecutionResourceGrant::professional_realtime()`, the same
+Renderer-owned grant used by sealed 4K/8K qualification. The pool remains
+demand-driven: selecting the class allocates nothing. Speculative pressure
+reduces duplicate retention to one resource per exact contract, while
+aggressive pressure releases all idle textures. Neither pressure state lowers
+the 4 GiB active byte ceiling, 160-texture ceiling, working precision, or
+frame semantics.
+
+Lower machine classes retain their smaller product grants and are not implied
+to satisfy the 8K qualification profile. Machine classification from system
+RAM also does not prove GPU capacity; runtime admission consumes the active
+generation's device-local capacity independently, while the coordinated matrix
+still records and checks the reference-machine GPU inventory and real Renderer
+workload.
+
+### CUDA import storage within SourcePreparation
+
+The Viewer estimate charges the CUDA bridge's checked padded buffer capacity to
+SourcePreparation in addition to encoded and working textures. It calls the same
+layout policy used by allocation; physical Vulkan memory requirements must fit
+that admitted capacity. Texture count remains two, and the existing byte grant
+is unchanged. CUDA storage cannot be hidden in Media's decoder-surface charge or
+in an unbounded transfer cache.
+
+Native-source encoded-RGB and working textures use the requested materialization
+extent, exactly as Viewer recording does. The CUDA storage bridge continues to
+charge the full decoded extent; downscaling cannot reduce its charge. A 4K-to-1080p
+admission regression checks both surface formats, the exact grant boundary and
+one-byte-under rejection without increasing any grant.
+
+Linux task names are opaque kernel bytes. Process identity parsing reads the
+numeric/state suffix after the final `)` in stat; memory parsing reads only the
+required ASCII counter lines in status. A non-UTF8 task name cannot hide a live
+child or make its counters unreadable. Inventory may omit only a procfs record
+that vanished (`ENOENT` or post-open `ESRCH`); permission, malformed-record and
+other I/O failures invalidate the observation instead of silently reducing the
+membership set. A native child with a non-UTF8 comm verifies both ancestry
+inclusion and memory sampling through the production probe.
+
+An owned descendant group leader also anchors that group's live members. Linux
+reparents children when a launcher exits, before it is reaped; PPID-only walking
+would omit those live address spaces even though the native process owner still
+retains the group. Group membership is derived from the same stat inventory and
+included in the before/after identity comparison. The root's own terminal/job
+group does not establish descendant ownership and cannot pull unrelated peers
+into the sample. Native tests cover both an exited/unreaped helper launcher with
+a live group member and an unrelated peer sharing the sampled root's group.
+
+Linux process-memory inventories retain zombie/dead tasks for ancestry discovery
+but exclude their exited user address spaces from RSS aggregation. Such tasks
+legitimately omit RssAnon/VmRSS/VmHWM; missing counters on a live process remain
+an error. PID/start-time and before/after membership validation still reject
+races. This memory observation never claims child reap or shutdown completion;
+the process owner must still consume wait status independently. A real exited,
+unreaped child regression checks this distinction and then reaps its fixture.
+
+A terminal group leader is excluded only when its task count is one. A zombie
+leader with surviving sibling threads cannot prove an exited address space;
+missing counters remain unavailable rather than becoming an invented zero sample.

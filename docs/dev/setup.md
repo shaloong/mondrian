@@ -26,6 +26,13 @@ On Windows, install a toolchain capable of building native Rust crates and use
 --recurse --overlay-ports=vcpkg-overlay`. This is the product profile: `zlib`
 closes PNG/OpenEXR decode, `ffmpeg`/`ffprobe` provide supervised CLI adapters,
 and the explicit encoder features match Export's current software backends.
+Release verification also requires the resulting CLI runtime to expose DNxHR
+LB/SQ/HQ/HQX/444 with `yuv422p10le`/`gbrp10le`, libx264's
+`avcintra-class` with `yuv422p10le`, and the `rawvideo`, `v210`, and `r210`
+encoders. Encoder-name presence is not enough: the runtime gate inspects the
+encoder help contracts, while Export tests complete real professional
+encode/re-probe rows. A build that lacks x264 10-bit 4:2:2 must fail release
+verification rather than silently dropping AVC-Intra support.
 The repository's `vcpkg-overlay` port builds `x265` with `HIGH_BIT_DEPTH=ON`;
 without it the stock port ships an 8-bit-only encoder and HEVC Main10 exports
 silently downgrade to 8-bit. A default `ffmpeg:x64-windows` install is not a

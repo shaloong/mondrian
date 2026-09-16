@@ -45,8 +45,8 @@ use mondrian_media::{
 };
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    execute_cpu_output_boundary, CpuColorFrame, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole},
+    CpuColorFrame, TimelineCompositeScratch,
 };
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::sequence::InputColorResolutionSource;
@@ -523,8 +523,9 @@ fn render_program_reference(
             "delivery work area contains no generated title",
         ),
     };
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let resolved = match resolve_preview_timeline(
         sequence,
         state.sequences(),
@@ -578,20 +579,22 @@ fn render_program_reference(
     let program_output_color = resolved
         .plan
         .color_context
-        .output_color_space
+        .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
-    let output_boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Export,
+    let output_boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Export,
         program_output_color,
-        &resolved.plan.color_context.output_transform,
-        resolved.plan.color_context.output_tone_map,
-        resolved.plan.color_context.engine.clone(),
+        resolved.plan.color_context.output_transform(),
+        resolved.plan.color_context.output_tone_map(),
+        resolved.plan.color_context.engine().clone(),
     )?;
-    let rgba = execute_cpu_output_boundary(&flattened, &output_boundary)?
-        .result
-        .frame
-        .into_rgba();
+    let rgba = ProgramOutputModule::execute_cpu_rgba8(
+        &flattened,
+        &output_boundary,
+        scratch.color_execution_mut(),
+    )?
+    .rgba;
 
     let center = rgba8_at(
         &rgba,
@@ -801,7 +804,7 @@ pub(super) fn export_and_probe(
         "export reported a precision or output-transform correctness failure"
     );
     let output_path = completed.output_path;
-    let probe = probe_export_output(&output_path).map_err(anyhow::Error::msg)?;
+    let probe = probe_export_output(&output_path)?;
     assert_probe_matches_contract(
         &probe,
         export,
@@ -1091,12 +1094,13 @@ fn reimport_export(
         .active_sequence()
         .context("active Sequence is absent")?
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: reference.resolution,
         input_color,

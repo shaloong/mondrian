@@ -31,8 +31,8 @@ use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryCandidate, FrameDeliveryKind, FrameDemandIdentity,
     FramePresentationQuality, FramePresentationTicket, MonotonicTimestamp, PlaybackEngine,
-    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, PreviewResolutionScale,
-    TransportState, VideoPrerollObservation,
+    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackRate, PlaybackSeekKind,
+    PlaybackShuttleDirection, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{
@@ -45,6 +45,9 @@ use project_persistence::{
 };
 pub(crate) use project_recovery::discover_crash_recovery_candidates;
 pub use project_recovery::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
+pub use reference_output::{
+    AppReferenceOutputError, AppReferenceOutputTeardownStatus, ReferenceOutputBinding,
+};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;
@@ -97,6 +100,8 @@ mod audio_authoring;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+#[cfg(test)]
+mod test_fixture;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 #[cfg(test)]
 mod audio_playback_acceptance;
@@ -104,26 +109,75 @@ mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
 mod clip_retime;
+mod dynamic_hdr_authoring;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_ancillary;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_campaign;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_export;
+#[cfg(feature = "validation")]
+pub mod endurance_ffmpeg_toolchain;
+#[cfg(feature = "validation")]
+pub mod endurance_machine_factory;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_machine_plan;
+#[cfg(feature = "validation")]
+pub mod endurance_physical_machine;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_playback;
+#[cfg(feature = "validation")]
+pub mod endurance_product_runtime;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_qualification;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_recovery;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_reference_output;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_run_request;
+pub(crate) mod endurance_shutdown;
+pub use endurance_shutdown::AppEnduranceShutdownEvidence;
+#[cfg(feature = "validation")]
+pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_source_inventory;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_workload;
+pub(crate) mod execution_panic_diagnostic;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
+mod gallery_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
+mod grade_authoring;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_av_evidence;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_execution_startup;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_realtime_playback;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_viewer_gpu;
+mod interchange;
 pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;
 mod packaged_worker;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod perf_process_memory;
 mod playback;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
+pub(crate) mod viewer_gpu_startup;
 pub(crate) mod viewer_gpu_submission;
 pub(crate) use playback::{
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
 };
+pub(crate) mod owned_worker_lifecycle;
 #[cfg(test)]
 mod playback_acceptance;
 pub(crate) mod playback_preview;
@@ -138,12 +192,16 @@ pub(crate) mod preview_frame_store;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_hardware_admission;
 pub(crate) mod preview_media_frame;
+mod preview_media_residency;
 pub(crate) mod preview_media_source;
 pub(crate) mod preview_media_task;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
+pub(crate) mod preview_render_cache;
+mod preview_render_cache_identity;
 pub mod preview_runtime;
 pub(crate) mod preview_scheduler_policy;
+pub(crate) mod preview_shutdown_evidence;
 pub(crate) mod preview_timeline_execution;
 pub(crate) mod preview_title_task;
 pub mod preview_unavailability;
@@ -151,14 +209,18 @@ pub(crate) mod preview_viewer_plan;
 pub(crate) mod preview_visual_dependencies;
 pub(crate) mod preview_visual_execution_task;
 pub(crate) mod preview_work_notification;
+mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+#[cfg(any(test, feature = "validation"))]
+pub use project_lifecycle::PreparedEnduranceProjectFixture;
 pub(crate) use project_lifecycle::ProjectClosePoll;
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
 pub mod proxy_generation;
+mod reference_output;
 mod selection;
 mod single_worker_activity;
 pub mod thumbnail_service;
@@ -176,6 +238,7 @@ mod video_transitions;
 pub mod viewer_gpu_output_health;
 pub(crate) mod viewer_gpu_output_residency;
 mod visual_mask_authoring;
+pub mod visual_tracking;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;
@@ -374,6 +437,10 @@ pub struct AppState {
     /// Machine-local Viewer policy. It is runtime state, never Project or
     /// Sequence author data.
     viewer_display_management: DisplayManagementPolicy,
+    /// Viewer-only frozen-still comparison; never Project author data.
+    gallery_comparison: Option<gallery_authoring::GalleryComparisonState>,
+    /// Machine-local professional clean-feed output; never Project author data.
+    reference_output: reference_output::AppReferenceOutputService,
 
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
@@ -432,6 +499,9 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     audio_playback: playback::AppAudioPlayback,
+    /// Cumulative Audio failure facts retained when a terminal owner is replaced.
+    #[cfg(any(test, feature = "validation"))]
+    audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger,
     /// Open-Session audition intent and observations from the exact prepared Runtime.
     audio_monitoring: audio_monitoring::AudioMonitoringState,
     pub audio_source_cache: Arc<AudioSourceCache>,
@@ -442,10 +512,25 @@ pub struct AppState {
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
     /// Ordered two-phase execution for relink and audio Component mutations.
     media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
+    /// Instance-owned, bounded Mask tracking execution and result cache.
+    visual_tracking: visual_tracking::VisualTrackingService,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static APP_STATE_CONSTRUCTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Observe real constructor calls on this test thread without creating an owner.
+#[cfg(test)]
+pub(crate) fn test_app_state_construction_count() -> u64 {
+    APP_STATE_CONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
 impl AppState {
     pub fn new() -> Self {
+        #[cfg(test)]
+        APP_STATE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         let audio_sample_rate = 48_000;
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate));
         let playback_observation_instant_anchor = Instant::now();
@@ -463,6 +548,8 @@ impl AppState {
             autosave_last_requested_at: Instant::now(),
             autosave_in_flight_request: None,
             viewer_display_management: DisplayManagementPolicy::default(),
+            gallery_comparison: None,
+            reference_output: reference_output::AppReferenceOutputService::default(),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,
@@ -489,6 +576,8 @@ impl AppState {
             proxy_terminal_observed_sequence: 0,
             audio_sample_rate,
             audio_playback: playback::AppAudioPlayback::product_default(audio_sample_rate),
+            #[cfg(any(test, feature = "validation"))]
+            audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger::default(),
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new(),
@@ -496,6 +585,7 @@ impl AppState {
             media_import: MediaImportExecution::new(),
             media_import_batches: HashMap::new(),
             media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
+            visual_tracking: visual_tracking::VisualTrackingService::new(),
         }
     }
 
@@ -534,6 +624,11 @@ impl AppState {
     /// Canonical active Sequence. Execution and UI callers receive no mutable clone.
     pub fn active_sequence(&self) -> Option<&Sequence> {
         self.authoring.as_ref().and_then(AuthoringSession::active_sequence)
+    }
+
+    /// Canonical Project Gallery, if a Project is open.
+    pub fn project_gallery(&self) -> Option<&mondrian_core::ProjectGallery> {
+        self.authoring.as_ref().map(|session| &session.document().gallery)
     }
 
     /// Direct fixture access for tests that need to construct otherwise
@@ -607,30 +702,31 @@ impl AppState {
     /// Thumbnails use the future-Sequence template for source interpretation,
     /// but always publish an sRGB display raster. Window Adapters consume this
     /// value and never interpret the Project color engine themselves.
-    pub(crate) fn thumbnail_color_context(&self) -> ProgramColorContext {
+    pub(crate) fn thumbnail_color_context(
+        &self,
+    ) -> Result<ProgramColorContext, mondrian_timeline::sequence::ProgramColorContextError> {
         let environment = self.project_color_environment();
-        let mut context = self.new_sequence_defaults().root_program_color_context(environment);
-        context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
-        context.output_tone_map = true;
-        context.output_transform = match environment.engine() {
-            mondrian_core::ColorEngine::MondrianStandard { package } => {
-                mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
-            }
-            mondrian_core::ColorEngine::Aces { preset } => {
-                mondrian_core::OutputTransformIntent::aces_preset(*preset)
-            }
-            mondrian_core::ColorEngine::CustomOcio { .. } => {
-                mondrian_core::OutputTransformIntent::CustomOcio {
-                    output_color_space: mondrian_core::types::ColorSpace::Srgb,
-                }
-            }
-        };
-        context
+        self.new_sequence_defaults()
+            .root_program_color_context(environment)?
+            .for_rendering_view_output(mondrian_core::types::ColorSpace::Srgb)
     }
 
     /// Machine-local Viewer display policy used by Window and Headless Adapters.
     pub fn viewer_display_management(&self) -> &DisplayManagementPolicy {
         &self.viewer_display_management
+    }
+
+    /// Install the validated machine-local Viewer display policy.
+    ///
+    /// This is runtime/user preference state. It never mutates Project or
+    /// Sequence authoring data; Window observes the changed value and rebuilds
+    /// the display-dependent output contract before publishing more pixels.
+    pub fn set_viewer_display_management(&mut self, policy: DisplayManagementPolicy) -> bool {
+        if self.viewer_display_management == policy {
+            return false;
+        }
+        self.viewer_display_management = policy;
+        true
     }
 
     /// Current author generation used by execution snapshots and cache identity.
@@ -702,13 +798,12 @@ impl AppState {
     fn test_fixture_root() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
-        let root = std::env::temp_dir().join(format!(
+        let name = format!(
             "mondrian-app-test-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).expect("create test fixture root");
-        root
+        );
+        test_fixture::create_root(&std::env::temp_dir(), &name).expect("create test fixture root")
     }
 
     #[cfg(test)]
@@ -778,6 +873,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_sequence(&mut self, sequence: Option<Sequence>) {
         let Some(sequence) = sequence else {
+            self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.media_asset_mutations.bind_project(None);
@@ -889,6 +985,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_asset_library(&mut self, library: Option<Arc<AssetLibrary>>) {
         let Some(library) = library else {
+            self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.media_asset_mutations.bind_project(None);
@@ -913,6 +1010,7 @@ impl AppState {
             AuthoringSession::open_saved(document, project_file, runtime_root, library)
                 .expect("replace test asset library"),
         );
+        self.visual_tracking.cancel_all();
         self.manual_project_file_destination = None;
         self.manual_project_file_applied_request = None;
         self.synchronize_audio_idle_warmup_binding();
@@ -1131,16 +1229,16 @@ mod color_policy_tests {
     fn thumbnail_color_policy_is_resolved_by_app_state_for_srgb_publication() {
         let state = AppState::new();
 
-        let context = state.thumbnail_color_context();
+        let context = state.thumbnail_color_context().expect("valid thumbnail context");
 
         assert_eq!(
-            context.output_color_space.color(),
+            context.output_color_space().color(),
             Some(mondrian_core::types::ColorSpace::Srgb)
         );
-        assert!(context.output_tone_map);
+        assert!(context.output_tone_map());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 }
@@ -1194,5 +1292,11 @@ fn unix_now_ms() -> u64 {
 mod animation_selection_tests;
 #[cfg(test)]
 mod perf_tests;
+/// Bounded validation of the actual App/Preview performance owner protocol.
+#[cfg(any(test, feature = "validation"))]
+pub mod performance_owner_closure;
+/// Qualification admission for production-selected Viewer execution scale.
+#[cfg(any(test, feature = "validation"))]
+pub mod preview_validation_extent;
 #[cfg(test)]
 mod timeline_edit_tests;

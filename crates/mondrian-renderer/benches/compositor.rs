@@ -7,8 +7,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, execute_cpu_input_stage, execute_cpu_output_stage,
-    CpuColorFrame, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
+    color::{ProgramOutputBoundary, ProgramOutputModule, SourceColorModule},
+    composite_timeline_elements_color_frame, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, RenderCpuColorExecutionSession, RenderInputTransform,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineEffectColorRuntime, TimelineMediaLayer,
 };
@@ -31,17 +32,18 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
 
 fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
-    execute_cpu_input_stage(
-        &source,
+    let mut session = RenderCpuColorExecutionSession::default();
+    SourceColorModule::execute_cpu_with_intent(
+        &CpuSourceColorFrame::from(source),
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
+        &mut session,
     )
     .expect("benchmark input transform")
-    .result
-    .frame
+    .into_frame()
 }
 
 fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
@@ -84,18 +86,17 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 &mut scratch,
             )
             .expect("benchmark timeline composite");
-            execute_cpu_output_stage(
+            ProgramOutputModule::execute_cpu_rgba8(
                 &frame,
-                &RenderColorTransform::display(
+                &ProgramOutputBoundary::display(
                     ColorSpace::Rec709,
                     false,
                     ColorEngine::mondrian_standard(),
                 ),
+                scratch.color_execution_mut(),
             )
             .expect("benchmark color transform")
-            .result
-            .frame
-            .into_rgba()
+            .rgba
         })
     });
 }

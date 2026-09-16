@@ -17,7 +17,7 @@
 //! read-only mode, double-click word selection, and drag auto-scroll.
 
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::time::Instant;
 
 use mondrian_editor_state::Action;
@@ -27,7 +27,6 @@ use mondrian_ui_core::widget::{
     EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
-use mondrian_ui_text::TextRenderer;
 use mondrian_ui_theme::{current_theme, Theme};
 
 mod commands;
@@ -92,15 +91,8 @@ impl Default for TextInputMetrics {
     }
 }
 
-thread_local! {
-    static TEXT_METRICS: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
-}
-
 fn measure_text_width(text: &str, font_size: f32) -> f32 {
-    if text.is_empty() {
-        return 0.0;
-    }
-    TEXT_METRICS.with_borrow_mut(|renderer| renderer.measure_text(text, font_size).0)
+    crate::text_metrics::measure_single_line_at_size(text, font_size).0
 }
 
 fn normalize_single_line_input(input: &str) -> Cow<'_, str> {

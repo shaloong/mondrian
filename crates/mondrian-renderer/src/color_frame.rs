@@ -1,9 +1,11 @@
 use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
+use crate::working_float_policy::product_gpu_working_texture_format;
 use mondrian_core::{
     display_calibration::DisplayCalibrationKey, timeline_data::AlphaInterpretation,
     types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
     WorkingRgbaF32Frame,
 };
+use mondrian_effects::straight_rgba_from_premultiplied;
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
 };
@@ -24,6 +26,11 @@ pub enum ColorFrameDomain {
     Effect,
     /// Non-color scalar alpha/mask values stored in the alpha channel.
     AlphaMask,
+    /// Non-color RGBA numeric channels before their explicit compositor bypass.
+    ///
+    /// This domain is intentionally distinct from `Working`: the samples have
+    /// no color identity and must never be admitted to an OCIO processor.
+    DataTexture,
     /// Presentation pixels after a display/view transform.
     Display,
     /// Delivery pixels after export/output transforms.
@@ -164,9 +171,15 @@ impl ColorFrameDescriptor {
     pub const fn has_coherent_space_domain(self) -> bool {
         matches!(
             (self.color_space, self.domain),
-            (ColorFrameSpace::NonColorData, ColorFrameDomain::AlphaMask)
+            (
+                ColorFrameSpace::NonColorData,
+                ColorFrameDomain::AlphaMask | ColorFrameDomain::DataTexture
+            )
         ) || (!matches!(self.color_space, ColorFrameSpace::NonColorData)
-            && !matches!(self.domain, ColorFrameDomain::AlphaMask))
+            && !matches!(
+                self.domain,
+                ColorFrameDomain::AlphaMask | ColorFrameDomain::DataTexture
+            ))
     }
 }
 
@@ -533,6 +546,23 @@ impl<R> GpuColorFrameResourceTable<R> {
         self.entries.len()
     }
 
+    /// Return checked logical texture bytes for every active table entry.
+    ///
+    /// Driver allocation padding is backend-specific and excluded. `None` is
+    /// a fail-closed overflow signal for owner admission; it must never be
+    /// interpreted as zero residency.
+    pub fn logical_texture_bytes(&self) -> Option<u64> {
+        self.entries.values().try_fold(0_u64, |total, entry| {
+            let descriptor = entry.handle.descriptor();
+            u64::from(descriptor.width)
+                .checked_mul(u64::from(descriptor.height))
+                .and_then(|pixels| {
+                    pixels.checked_mul(u64::from(entry.handle.texture_format().bytes_per_pixel()))
+                })
+                .and_then(|bytes| total.checked_add(bytes))
+        })
+    }
+
     /// Return whether the table has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -665,7 +695,7 @@ impl GpuColorFrameWgpuResourcePoolKey {
 }
 
 /// Bounded reuse policy for renderer-owned color-frame textures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GpuColorFrameWgpuResourcePoolOptions {
     /// Maximum idle textures retained for one exact extent/format/usage contract.
     pub max_per_contract: usize,
@@ -709,6 +739,18 @@ pub struct GpuColorFrameWgpuResourcePoolDiagnostics {
     pub detached_presentation_accounting_overflows: u64,
     /// Whether the current detached-presentation demand exceeds the public budget model.
     pub detached_presentation_accounting_overflowed: bool,
+    /// Current textures detached into move-only resident-encoder leases.
+    pub detached_encoder_resources: u64,
+    /// Current logical bytes owned by resident-encoder leases.
+    pub detached_encoder_bytes: u64,
+    /// Highest simultaneous resident-encoder texture count.
+    pub detached_encoder_high_water_resources: u64,
+    /// Highest simultaneous resident-encoder logical byte ownership.
+    pub detached_encoder_high_water_bytes: u64,
+    /// Transitions into encoder demand that cannot be represented by the public `u64` model.
+    pub detached_encoder_accounting_overflows: u64,
+    /// Whether current detached-encoder demand exceeds the public budget model.
+    pub detached_encoder_accounting_overflowed: bool,
     /// Current number of idle retained resources.
     pub retained_resources: usize,
     /// Approximate bytes occupied by idle retained resources.
@@ -723,6 +765,8 @@ struct PooledGpuColorFrameWgpuResource {
 struct GpuColorFrameWgpuResourcePoolState {
     options: GpuColorFrameWgpuResourcePoolOptions,
     idle: VecDeque<PooledGpuColorFrameWgpuResource>,
+    ordered_turnover: VecDeque<PooledGpuColorFrameWgpuResource>,
+    ordered_turnover_active: bool,
     retained_bytes: u64,
     hits: u64,
     misses: u64,
@@ -738,6 +782,12 @@ struct GpuColorFrameWgpuResourcePoolState {
     detached_presentation_high_water_bytes: u128,
     detached_presentation_accounting_overflows: u64,
     detached_presentation_accounting_irrecoverable: bool,
+    detached_encoder_resources: u128,
+    detached_encoder_bytes: u128,
+    detached_encoder_high_water_resources: u128,
+    detached_encoder_high_water_bytes: u128,
+    detached_encoder_accounting_overflows: u64,
+    detached_encoder_accounting_irrecoverable: bool,
 }
 
 impl Default for GpuColorFrameWgpuResourcePoolState {
@@ -745,6 +795,8 @@ impl Default for GpuColorFrameWgpuResourcePoolState {
         Self {
             options: GpuColorFrameWgpuResourcePoolOptions::default(),
             idle: VecDeque::new(),
+            ordered_turnover: VecDeque::new(),
+            ordered_turnover_active: false,
             retained_bytes: 0,
             hits: 0,
             misses: 0,
@@ -760,6 +812,12 @@ impl Default for GpuColorFrameWgpuResourcePoolState {
             detached_presentation_high_water_bytes: 0,
             detached_presentation_accounting_overflows: 0,
             detached_presentation_accounting_irrecoverable: false,
+            detached_encoder_resources: 0,
+            detached_encoder_bytes: 0,
+            detached_encoder_high_water_resources: 0,
+            detached_encoder_high_water_bytes: 0,
+            detached_encoder_accounting_overflows: 0,
+            detached_encoder_accounting_irrecoverable: false,
         }
     }
 }
@@ -819,6 +877,22 @@ impl GpuColorFrameWgpuResourcePool {
         let key = GpuColorFrameWgpuResourcePoolKey::from_plan(plan);
         let reused = {
             let mut state = self.state.lock();
+            let turnover_position =
+                state.ordered_turnover.iter().position(|entry| entry.key == key);
+            if let Some(position) = turnover_position
+                && let Some(entry) = state.ordered_turnover.remove(position)
+            {
+                state.hits = state.hits.saturating_add(1);
+                return GpuColorFrameResource::new(plan.handle.clone(), entry.payload);
+            }
+            // A contract miss proves that the incoming frame is not an exact
+            // physical successor of the staged set. Drop every unmatched
+            // predecessor before allocating the new contract. Sending them
+            // through the optional idle grant would still keep part of the old
+            // working set alive while the new one is created, which can exhaust
+            // device-local memory during quality or extent changes even though
+            // each request independently fits its active grant.
+            evict_gpu_color_frame_ordered_turnover(&mut state);
             let position = state.idle.iter().position(|entry| entry.key == key);
             if let Some(position) = position {
                 if let Some(entry) = state.idle.remove(position) {
@@ -846,6 +920,33 @@ impl GpuColorFrameWgpuResourcePool {
         release_gpu_color_frame_resource(&mut state, resource);
     }
 
+    /// Begin one synchronous reuse scope for resources from an exactly submitted frame.
+    pub(crate) fn begin_ordered_turnover(
+        self: &Arc<Self>,
+    ) -> GpuColorFrameWgpuOrderedTurnoverGuard {
+        let mut state = self.state.lock();
+        debug_assert!(!state.ordered_turnover_active);
+        debug_assert!(state.ordered_turnover.is_empty());
+        state.ordered_turnover_active = true;
+        drop(state);
+        GpuColorFrameWgpuOrderedTurnoverGuard { pool: Arc::clone(self) }
+    }
+
+    /// Stage one resource whose preceding queue use has exact submission proof.
+    pub(crate) fn release_for_ordered_turnover(
+        &self,
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) {
+        let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
+        let (_, payload) = resource.into_parts();
+        let mut state = self.state.lock();
+        debug_assert!(state.ordered_turnover_active);
+        state.releases = state.releases.saturating_add(1);
+        state
+            .ordered_turnover
+            .push_back(PooledGpuColorFrameWgpuResource { key, payload });
+    }
+
     /// Register one presentation allocation and atomically capture its return generation.
     fn register_detached_presentation(
         &self,
@@ -870,6 +971,32 @@ impl GpuColorFrameWgpuResourcePool {
     ) -> bool {
         let mut state = self.state.lock();
         unregister_detached_presentation_demand(&mut state, byte_len);
+        if !state.accepts_generation_returns || generation.0 != state.generation {
+            state.stale_generation_releases = state.stale_generation_releases.saturating_add(1);
+            drop(state);
+            drop(resource);
+            return false;
+        }
+        release_gpu_color_frame_resource(&mut state, resource);
+        true
+    }
+
+    /// Register one resident-encoder input and capture its pool return generation.
+    fn register_detached_encoder(&self, byte_len: u128) -> GpuColorFrameWgpuResourcePoolGeneration {
+        let mut state = self.state.lock();
+        register_detached_encoder_demand(&mut state, byte_len);
+        GpuColorFrameWgpuResourcePoolGeneration(state.generation)
+    }
+
+    /// Retire resident-encoder demand and return the resource to its producing pool epoch.
+    fn release_detached_encoder(
+        &self,
+        generation: GpuColorFrameWgpuResourcePoolGeneration,
+        byte_len: u128,
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) -> bool {
+        let mut state = self.state.lock();
+        unregister_detached_encoder_demand(&mut state, byte_len);
         if !state.accepts_generation_returns || generation.0 != state.generation {
             state.stale_generation_releases = state.stale_generation_releases.saturating_add(1);
             drop(state);
@@ -908,7 +1035,10 @@ impl GpuColorFrameWgpuResourcePool {
             None => state.accepts_generation_returns = false,
         }
         state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.evictions = state.evictions.saturating_add(state.ordered_turnover.len() as u64);
         state.idle.clear();
+        state.ordered_turnover.clear();
+        state.ordered_turnover_active = false;
         state.retained_bytes = 0;
     }
 
@@ -937,6 +1067,16 @@ impl GpuColorFrameWgpuResourcePool {
             detached_presentation_accounting_overflowed: detached_presentation_demand_overflowed(
                 &state,
             ),
+            detached_encoder_resources: saturating_u128_to_u64(state.detached_encoder_resources),
+            detached_encoder_bytes: saturating_u128_to_u64(state.detached_encoder_bytes),
+            detached_encoder_high_water_resources: saturating_u128_to_u64(
+                state.detached_encoder_high_water_resources,
+            ),
+            detached_encoder_high_water_bytes: saturating_u128_to_u64(
+                state.detached_encoder_high_water_bytes,
+            ),
+            detached_encoder_accounting_overflows: state.detached_encoder_accounting_overflows,
+            detached_encoder_accounting_overflowed: detached_encoder_demand_overflowed(&state),
             retained_resources: state.idle.len(),
             retained_bytes: state.retained_bytes,
         }
@@ -946,9 +1086,37 @@ impl GpuColorFrameWgpuResourcePool {
     pub fn clear(&self) {
         let mut state = self.state.lock();
         state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.evictions = state.evictions.saturating_add(state.ordered_turnover.len() as u64);
         state.idle.clear();
+        state.ordered_turnover.clear();
+        state.ordered_turnover_active = false;
         state.retained_bytes = 0;
     }
+}
+
+pub(crate) struct GpuColorFrameWgpuOrderedTurnoverGuard {
+    pool: Arc<GpuColorFrameWgpuResourcePool>,
+}
+
+impl Drop for GpuColorFrameWgpuOrderedTurnoverGuard {
+    fn drop(&mut self) {
+        let mut state = self.pool.state.lock();
+        state.ordered_turnover_active = false;
+        settle_gpu_color_frame_ordered_turnover(&mut state);
+    }
+}
+
+fn settle_gpu_color_frame_ordered_turnover(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    while let Some(entry) = state.ordered_turnover.pop_front() {
+        retain_gpu_color_frame_pool_entry(state, entry);
+    }
+}
+
+fn evict_gpu_color_frame_ordered_turnover(state: &mut GpuColorFrameWgpuResourcePoolState) {
+    state.evictions = state
+        .evictions
+        .saturating_add(state.ordered_turnover.len().min(u64::MAX as usize) as u64);
+    state.ordered_turnover.clear();
 }
 
 fn register_detached_presentation_demand(
@@ -1007,6 +1175,60 @@ fn detached_presentation_demand_overflowed(state: &GpuColorFrameWgpuResourcePool
         || state.detached_presentation_bytes > u128::from(u64::MAX)
 }
 
+fn register_detached_encoder_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    let was_overflowed = detached_encoder_demand_overflowed(state);
+    match (
+        state.detached_encoder_resources.checked_add(1),
+        state.detached_encoder_bytes.checked_add(byte_len),
+    ) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_encoder_resources = resources;
+            state.detached_encoder_bytes = bytes;
+            state.detached_encoder_high_water_resources =
+                state.detached_encoder_high_water_resources.max(resources);
+            state.detached_encoder_high_water_bytes =
+                state.detached_encoder_high_water_bytes.max(bytes);
+        }
+        _ => state.detached_encoder_accounting_irrecoverable = true,
+    }
+    if !was_overflowed && detached_encoder_demand_overflowed(state) {
+        state.detached_encoder_accounting_overflows =
+            state.detached_encoder_accounting_overflows.saturating_add(1);
+    }
+}
+
+fn unregister_detached_encoder_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    if state.detached_encoder_accounting_irrecoverable {
+        return;
+    }
+    match (
+        state.detached_encoder_resources.checked_sub(1),
+        state.detached_encoder_bytes.checked_sub(byte_len),
+    ) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_encoder_resources = resources;
+            state.detached_encoder_bytes = bytes;
+        }
+        _ => {
+            state.detached_encoder_accounting_irrecoverable = true;
+            state.detached_encoder_accounting_overflows =
+                state.detached_encoder_accounting_overflows.saturating_add(1);
+        }
+    }
+}
+
+fn detached_encoder_demand_overflowed(state: &GpuColorFrameWgpuResourcePoolState) -> bool {
+    state.detached_encoder_accounting_irrecoverable
+        || state.detached_encoder_resources > u128::from(u64::MAX)
+        || state.detached_encoder_bytes > u128::from(u64::MAX)
+}
+
 fn saturating_u128_to_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -1016,9 +1238,17 @@ fn release_gpu_color_frame_resource(
     resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
 ) {
     let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
-    let byte_len = key.byte_len();
     let (_, payload) = resource.into_parts();
     state.releases = state.releases.saturating_add(1);
+    retain_gpu_color_frame_pool_entry(state, PooledGpuColorFrameWgpuResource { key, payload });
+}
+
+fn retain_gpu_color_frame_pool_entry(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    entry: PooledGpuColorFrameWgpuResource,
+) {
+    let key = entry.key;
+    let byte_len = key.byte_len();
     if state.options.max_per_contract == 0 || byte_len > state.options.max_retained_bytes {
         state.evictions = state.evictions.saturating_add(1);
         return;
@@ -1034,7 +1264,7 @@ fn release_gpu_color_frame_resource(
             state.evictions = state.evictions.saturating_add(1);
         }
     }
-    state.idle.push_back(PooledGpuColorFrameWgpuResource { key, payload });
+    state.idle.push_back(entry);
     state.retained_bytes = state.retained_bytes.saturating_add(byte_len);
     enforce_gpu_color_frame_pool_byte_limit(state);
 }
@@ -1152,6 +1382,74 @@ impl Drop for ViewerGpuPresentationOutputLease {
     }
 }
 
+/// Move-only renderer output retained until a resident encoder Adapter orders its GPU read.
+///
+/// This lease never exposes a CPU pixel boundary. The Adapter must order all
+/// external-queue reads before dropping it; dropping then returns the texture
+/// only to the exact device generation that produced it.
+pub struct GpuResidentEncoderInputLease {
+    resource: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    pool: Arc<GpuColorFrameWgpuResourcePool>,
+    pool_generation: GpuColorFrameWgpuResourcePoolGeneration,
+    byte_len: u128,
+}
+
+impl GpuResidentEncoderInputLease {
+    /// Bind one detached renderer output to its producing pool generation.
+    pub(crate) fn new(
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+        pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Self {
+        let byte_len =
+            GpuColorFrameWgpuResourcePoolKey::from_resource(&resource).logical_byte_len();
+        let pool_generation = pool.register_detached_encoder(byte_len);
+        Self {
+            resource: Some(resource),
+            pool,
+            pool_generation,
+            byte_len,
+        }
+    }
+
+    /// Exact typed renderer contract carried by this resident input.
+    pub fn contract(&self) -> GpuColorFrameContract {
+        self.resource().handle().contract()
+    }
+
+    /// Borrow the source texture inside the renderer-owned platform Adapter.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        &self.resource().resource().texture
+    }
+
+    fn resource(&self) -> &GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        self.resource
+            .as_ref()
+            .expect("resident encoder input resource is present before Drop")
+    }
+}
+
+impl std::fmt::Debug for GpuResidentEncoderInputLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GpuResidentEncoderInputLease")
+            .field("handle", self.resource().handle())
+            .field("pool_generation", &self.pool_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for GpuResidentEncoderInputLease {
+    fn drop(&mut self) {
+        let Some(resource) = self.resource.take() else {
+            return;
+        };
+        let _ = self
+            .pool
+            .release_detached_encoder(self.pool_generation, self.byte_len, resource);
+    }
+}
+
 /// GPU texture allocation plan for a color frame resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuColorFrameAllocationPlan {
@@ -1202,7 +1500,9 @@ pub struct GpuColorFrameUploadPlan {
 enum GpuColorFrameUploadPayload {
     Bytes(Arc<Vec<u8>>),
     Float32(Arc<Vec<f32>>),
+    EncodedRgba32(Arc<EncodedRgbaF32Frame>),
     WorkingRgba32(Arc<WorkingRgbaF32Frame>),
+    DataTextureRgba32(Arc<WorkingRgbaF32Frame>),
     AlphaMaskRgba32(Arc<Vec<[f32; 4]>>),
 }
 
@@ -1211,7 +1511,9 @@ impl GpuColorFrameUploadPayload {
         match self {
             Self::Bytes(bytes) => bytes.as_slice(),
             Self::Float32(samples) => bytemuck::cast_slice(samples.as_slice()),
+            Self::EncodedRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::WorkingRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
+            Self::DataTextureRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::AlphaMaskRgba32(samples) => bytemuck::cast_slice(samples.as_slice()),
         }
     }
@@ -1225,7 +1527,7 @@ impl GpuColorFrameUploadPlan {
         texture_format: GpuColorFrameTextureFormat,
         label: impl Into<String>,
     ) -> Result<Self, GpuColorFrameUploadError> {
-        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+        if texture_format != product_gpu_working_texture_format() {
             return Err(GpuColorFrameUploadError::UnsupportedCpuFloatTextureFormat {
                 texture_format,
             });
@@ -1237,6 +1539,43 @@ impl GpuColorFrameUploadPlan {
         Self::new(
             handle,
             GpuColorFrameUploadPayload::WorkingRgba32(frame.rgba_f32_shared()),
+        )
+    }
+
+    /// Build a typed non-color upload plan for normalized RGBA numeric data.
+    ///
+    /// The CPU storage happens to use [`CpuColorFrame`] for its validated
+    /// Float32 extent and straight-alpha payload. The GPU handle deliberately
+    /// carries `NonColorData + DataTexture`, so the upload cannot be passed to
+    /// a color transform or mistaken for an already color-managed working
+    /// frame. Only the compositor's explicit numeric-bypass source may consume
+    /// it and write a working-domain result.
+    pub fn from_cpu_data_texture(
+        id: GpuColorFrameId,
+        frame: &CpuColorFrame,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        let source = frame.descriptor();
+        let descriptor = ColorFrameDescriptor {
+            width: source.width,
+            height: source.height,
+            color_space: ColorFrameSpace::NonColorData,
+            domain: ColorFrameDomain::DataTexture,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: source.alpha,
+        };
+        validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            label,
+        )
+        .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::DataTextureRgba32(frame.rgba_f32_shared()),
         )
     }
 
@@ -1280,6 +1619,27 @@ impl GpuColorFrameUploadPlan {
         Self::new(
             handle,
             GpuColorFrameUploadPayload::Bytes(frame.rgba_shared()),
+        )
+    }
+
+    /// Build an upload plan for a CPU encoded floating-point source frame.
+    pub fn from_cpu_encoded_float_frame(
+        id: GpuColorFrameId,
+        frame: &CpuEncodedFloatColorFrame,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        let descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            label,
+        )
+        .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::EncodedRgba32(frame.rgba_f32_shared()),
         )
     }
 
@@ -1494,10 +1854,38 @@ pub enum GpuNativeDecodedFrameTextureFormat {
     Nv12,
     /// 10-bit P010 two-plane YCbCr surface.
     P010,
+    /// 12-bit P012 two-plane YCbCr 4:2:0 surface.
+    P012,
+    /// 16-bit P016 two-plane YCbCr 4:2:0 surface.
+    P016,
+    /// 10-bit P210 two-plane YCbCr 4:2:2 surface.
+    P210,
+    /// 12-bit P212 two-plane YCbCr 4:2:2 surface.
+    P212,
+    /// 16-bit P216 two-plane YCbCr 4:2:2 surface.
+    P216,
+    /// 10-bit P410 two-plane YCbCr 4:4:4 surface.
+    P410,
+    /// 12-bit P412 two-plane YCbCr 4:4:4 surface.
+    P412,
+    /// 16-bit P416 two-plane YCbCr 4:4:4 surface.
+    P416,
+    /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
+    Y210,
+    /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
+    Y212,
+    /// Packed 10-bit XV30-in-Y410 YCbCr 4:4:4 surface.
+    Xv30,
+    /// Packed 12-bit XV36-in-Y416 YCbCr 4:4:4 surface.
+    Xv36,
     /// Single-plane 8-bit normalized RGBA surface.
     Rgba8Unorm,
     /// Single-plane 8-bit normalized BGRA surface.
     Bgra8Unorm,
+    /// Single-plane RGBA half-float surface.
+    Rgba16Float,
+    /// Single-plane RGBA single-precision float surface.
+    Rgba32Float,
 }
 
 impl GpuNativeDecodedFrameTextureFormat {
@@ -1506,8 +1894,53 @@ impl GpuNativeDecodedFrameTextureFormat {
         match self {
             Self::Nv12 => "Nv12",
             Self::P010 => "P010",
+            Self::P012 => "P012",
+            Self::P016 => "P016",
+            Self::P210 => "P210",
+            Self::P212 => "P212",
+            Self::P216 => "P216",
+            Self::P410 => "P410",
+            Self::P412 => "P412",
+            Self::P416 => "P416",
+            Self::Y210 => "Y210",
+            Self::Y212 => "Y212",
+            Self::Xv30 => "Xv30",
+            Self::Xv36 => "Xv36",
             Self::Rgba8Unorm => "Rgba8Unorm",
             Self::Bgra8Unorm => "Bgra8Unorm",
+            Self::Rgba16Float => "Rgba16Float",
+            Self::Rgba32Float => "Rgba32Float",
+        }
+    }
+
+    /// Return the media-owned physical descriptor for this renderer format.
+    pub const fn physical_descriptor(
+        self,
+    ) -> Option<mondrian_media::DecodedVideoSurfaceDescriptor> {
+        self.media_surface_format().descriptor()
+    }
+
+    /// Return the canonical media-layer surface format represented by this format.
+    pub const fn media_surface_format(self) -> DecodedVideoSurfaceFormat {
+        match self {
+            Self::Nv12 => DecodedVideoSurfaceFormat::Nv12,
+            Self::P010 => DecodedVideoSurfaceFormat::P010,
+            Self::P012 => DecodedVideoSurfaceFormat::P012,
+            Self::P016 => DecodedVideoSurfaceFormat::P016,
+            Self::P210 => DecodedVideoSurfaceFormat::P210,
+            Self::P212 => DecodedVideoSurfaceFormat::P212,
+            Self::P216 => DecodedVideoSurfaceFormat::P216,
+            Self::P410 => DecodedVideoSurfaceFormat::P410,
+            Self::P412 => DecodedVideoSurfaceFormat::P412,
+            Self::P416 => DecodedVideoSurfaceFormat::P416,
+            Self::Y210 => DecodedVideoSurfaceFormat::Y210,
+            Self::Y212 => DecodedVideoSurfaceFormat::Y212,
+            Self::Xv30 => DecodedVideoSurfaceFormat::Xv30,
+            Self::Xv36 => DecodedVideoSurfaceFormat::Xv36,
+            Self::Rgba8Unorm => DecodedVideoSurfaceFormat::Rgba8,
+            Self::Bgra8Unorm => DecodedVideoSurfaceFormat::Bgra8,
+            Self::Rgba16Float => DecodedVideoSurfaceFormat::Rgba16Float,
+            Self::Rgba32Float => DecodedVideoSurfaceFormat::Rgba32Float,
         }
     }
 }
@@ -1519,11 +1952,32 @@ impl TryFrom<DecodedVideoSurfaceFormat> for GpuNativeDecodedFrameTextureFormat {
         match format {
             DecodedVideoSurfaceFormat::Nv12 => Ok(Self::Nv12),
             DecodedVideoSurfaceFormat::P010 => Ok(Self::P010),
+            DecodedVideoSurfaceFormat::P012 => Ok(Self::P012),
+            DecodedVideoSurfaceFormat::P016 => Ok(Self::P016),
+            DecodedVideoSurfaceFormat::P210 => Ok(Self::P210),
+            DecodedVideoSurfaceFormat::P212 => Ok(Self::P212),
+            DecodedVideoSurfaceFormat::P216 => Ok(Self::P216),
+            DecodedVideoSurfaceFormat::P410 => Ok(Self::P410),
+            DecodedVideoSurfaceFormat::P412 => Ok(Self::P412),
+            DecodedVideoSurfaceFormat::P416 => Ok(Self::P416),
+            DecodedVideoSurfaceFormat::Y210 => Ok(Self::Y210),
+            DecodedVideoSurfaceFormat::Y212 => Ok(Self::Y212),
+            DecodedVideoSurfaceFormat::Xv30 => Ok(Self::Xv30),
+            DecodedVideoSurfaceFormat::Xv36 => Ok(Self::Xv36),
             DecodedVideoSurfaceFormat::Rgba8 => Ok(Self::Rgba8Unorm),
             DecodedVideoSurfaceFormat::Bgra8 => Ok(Self::Bgra8Unorm),
+            DecodedVideoSurfaceFormat::Rgba16Float => Ok(Self::Rgba16Float),
+            DecodedVideoSurfaceFormat::Rgba32Float => Ok(Self::Rgba32Float),
             DecodedVideoSurfaceFormat::Unknown
             | DecodedVideoSurfaceFormat::Yuv420p
             | DecodedVideoSurfaceFormat::Yuv420p10le
+            | DecodedVideoSurfaceFormat::Yuv420p12le
+            | DecodedVideoSurfaceFormat::Yuv422p
+            | DecodedVideoSurfaceFormat::Yuv422p10le
+            | DecodedVideoSurfaceFormat::Yuv422p12le
+            | DecodedVideoSurfaceFormat::Yuv444p
+            | DecodedVideoSurfaceFormat::Yuv444p10le
+            | DecodedVideoSurfaceFormat::Yuv444p12le
             | DecodedVideoSurfaceFormat::Other => {
                 Err(GpuNativeDecodedFrameSourceFormatError::Unsupported { format })
             }
@@ -1621,21 +2075,24 @@ impl GpuNativeDecodedFrameVideoSampling {
             });
         }
 
-        match source_texture_format {
-            GpuNativeDecodedFrameTextureFormat::Nv12 => {
-                self.validate_ycbcr(source_texture_format, 8)
+        let descriptor = source_texture_format.physical_descriptor().ok_or_else(|| {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: "native surface has no physical descriptor".to_owned(),
             }
-            GpuNativeDecodedFrameTextureFormat::P010 => {
-                self.validate_ycbcr(source_texture_format, 10)
+        })?;
+        match descriptor.color_model {
+            mondrian_media::DecodedVideoSurfaceColorModel::Ycbcr => {
+                self.validate_ycbcr(source_texture_format, descriptor.component_bit_depth)
             }
-            GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-            | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
-                if self.bit_depth != 8 {
+            mondrian_media::DecodedVideoSurfaceColorModel::Rgb => {
+                if self.bit_depth != descriptor.component_bit_depth {
                     return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
                         source_texture_format,
                         reason: format!(
-                            "{} requires 8-bit sampling metadata, got {}",
+                            "{} requires {}-bit component metadata, got {}",
                             source_texture_format.as_str(),
+                            descriptor.component_bit_depth,
                             self.bit_depth
                         ),
                     });
@@ -1684,7 +2141,11 @@ impl GpuNativeDecodedFrameVideoSampling {
                 ),
             });
         }
-        if self.chroma_location == GpuVideoChromaLocation::Unspecified {
+        let chroma_is_subsampled = source_texture_format
+            .physical_descriptor()
+            .and_then(|descriptor| descriptor.chroma_subsampling)
+            != Some(mondrian_media::DecodedVideoSurfaceChromaSubsampling::Cs444);
+        if chroma_is_subsampled && self.chroma_location == GpuVideoChromaLocation::Unspecified {
             return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
                 source_texture_format,
                 reason: format!(
@@ -1706,6 +2167,17 @@ pub enum GpuNativeDecodedFrameImportMode {
     GpuBridgeCopy,
 }
 
+/// One exact native decoded-surface import route implemented by a renderer Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuNativeDecodedFrameImportRoute {
+    /// Decoder resource family accepted by this route.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Physical source format accepted by this route.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Transfer implementation used by this exact handle/format pair.
+    pub import_mode: GpuNativeDecodedFrameImportMode,
+}
+
 /// Renderer backend capability contract for importing native decoded frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuNativeDecodedFrameImportSupport {
@@ -1719,6 +2191,9 @@ pub struct GpuNativeDecodedFrameImportSupport {
     pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
     /// Decoder source texture formats accepted by the backend.
     pub supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    /// Exact handle/format/mode routes. This is the admission authority; the two
+    /// lists above are aggregate diagnostics and never imply a Cartesian product.
+    pub routes: Vec<GpuNativeDecodedFrameImportRoute>,
     /// Physical transfer mode implemented by this exact backend/device binding.
     pub import_mode: Option<GpuNativeDecodedFrameImportMode>,
     /// Decoder device that produces resources on the renderer's physical adapter.
@@ -1736,6 +2211,7 @@ impl GpuNativeDecodedFrameImportSupport {
             ),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            routes: Vec::new(),
             import_mode: None,
             hardware_decode_device_selector: None,
         }
@@ -1752,6 +2228,7 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: Some(reason.into()),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            routes: Vec::new(),
             import_mode: None,
             hardware_decode_device_selector: None,
         }
@@ -1786,15 +2263,81 @@ impl GpuNativeDecodedFrameImportSupport {
         supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
         import_mode: GpuNativeDecodedFrameImportMode,
     ) -> Self {
+        let routes = supported_handle_kinds
+            .iter()
+            .flat_map(|handle_kind| {
+                supported_source_texture_formats.iter().map(|source_texture_format| {
+                    GpuNativeDecodedFrameImportRoute {
+                        handle_kind: *handle_kind,
+                        source_texture_format: *source_texture_format,
+                        import_mode,
+                    }
+                })
+            })
+            .collect();
         Self {
             renderer_backend_ready: true,
             renderer_backend_label: None,
             unavailable_reason: None,
             supported_handle_kinds,
             supported_source_texture_formats,
+            routes,
             import_mode: Some(import_mode),
             hardware_decode_device_selector: None,
         }
+    }
+
+    /// Build support from exact routes, preserving per-format transfer modes.
+    pub fn try_ready_routes(
+        routes: Vec<GpuNativeDecodedFrameImportRoute>,
+    ) -> Result<Self, GpuNativeDecodedFrameImportSupportError> {
+        let mut canonical_routes = Vec::new();
+        for route in routes {
+            if let Some(existing) =
+                canonical_routes.iter().find(|existing: &&GpuNativeDecodedFrameImportRoute| {
+                    existing.handle_kind == route.handle_kind
+                        && existing.source_texture_format == route.source_texture_format
+                })
+            {
+                if existing.import_mode != route.import_mode {
+                    return Err(GpuNativeDecodedFrameImportSupportError::ConflictingRoute {
+                        handle_kind: route.handle_kind,
+                        source_texture_format: route.source_texture_format,
+                        first_mode: existing.import_mode,
+                        second_mode: route.import_mode,
+                    });
+                }
+                continue;
+            }
+            canonical_routes.push(route);
+        }
+        let routes = canonical_routes;
+        let mut supported_handle_kinds = Vec::new();
+        let mut supported_source_texture_formats = Vec::new();
+        for route in &routes {
+            if !supported_handle_kinds.contains(&route.handle_kind) {
+                supported_handle_kinds.push(route.handle_kind);
+            }
+            if !supported_source_texture_formats.contains(&route.source_texture_format) {
+                supported_source_texture_formats.push(route.source_texture_format);
+            }
+        }
+        let import_mode = routes
+            .first()
+            .map(|route| route.import_mode)
+            .filter(|mode| routes.iter().all(|route| route.import_mode == *mode));
+        Ok(Self {
+            renderer_backend_ready: !routes.is_empty(),
+            renderer_backend_label: None,
+            unavailable_reason: routes
+                .is_empty()
+                .then(|| "renderer backend exposes no native decoded-frame routes".to_owned()),
+            supported_handle_kinds,
+            supported_source_texture_formats,
+            routes,
+            import_mode,
+            hardware_decode_device_selector: None,
+        })
     }
 
     /// Attach a renderer backend label to this support contract.
@@ -1827,6 +2370,38 @@ impl GpuNativeDecodedFrameImportSupport {
     ) -> bool {
         self.supported_source_texture_formats.contains(&texture_format)
     }
+
+    /// Return the transfer mode for one exact decoder handle and physical format.
+    pub fn import_mode_for(
+        &self,
+        handle_kind: DecodedGpuFrameHandleKind,
+        texture_format: GpuNativeDecodedFrameTextureFormat,
+    ) -> Option<GpuNativeDecodedFrameImportMode> {
+        let mut matches = self.routes.iter().filter(|route| {
+            route.handle_kind == handle_kind && route.source_texture_format == texture_format
+        });
+        let first = matches.next()?.import_mode;
+        matches.all(|route| route.import_mode == first).then_some(first)
+    }
+}
+
+/// Error returned when native import route evidence is internally contradictory.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeDecodedFrameImportSupportError {
+    /// One handle/format pair cannot have two physical transfer modes.
+    #[error(
+        "native import route {handle_kind:?} + {source_texture_format:?} conflicts: {first_mode:?} versus {second_mode:?}"
+    )]
+    ConflictingRoute {
+        /// Decoder handle family.
+        handle_kind: DecodedGpuFrameHandleKind,
+        /// Physical source format.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        /// First declared transfer mode.
+        first_mode: GpuNativeDecodedFrameImportMode,
+        /// Conflicting transfer mode.
+        second_mode: GpuNativeDecodedFrameImportMode,
+    },
 }
 
 impl Default for GpuNativeDecodedFrameImportSupport {
@@ -1927,6 +2502,17 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
+        if support
+            .import_mode_for(contract.handle_kind, contract.source_texture_format)
+            .is_none()
+        {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedImportRoute {
+                    handle_kind: contract.handle_kind,
+                    source_texture_format: contract.source_texture_format,
+                },
+            );
+        }
         contract
             .video_sampling
             .validate_for(contract.source_texture_format, contract.source_color_space)?;
@@ -1937,6 +2523,11 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
+        let source_descriptor = contract.source_texture_format.physical_descriptor().ok_or(
+            GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
+                source_texture_format: contract.source_texture_format,
+            },
+        )?;
         let encoded_source_descriptor = ColorFrameDescriptor {
             width: contract.output_width,
             height: contract.output_height,
@@ -1944,12 +2535,16 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::Opaque,
+            alpha: if source_descriptor.has_alpha {
+                ColorFrameAlpha::StraightCoverage
+            } else {
+                ColorFrameAlpha::Opaque
+            },
         };
         let encoded_source_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             encoded_source_descriptor,
-            GpuColorFrameTextureFormat::Rgba16Float,
+            product_gpu_working_texture_format(),
             format!("{}.encoded-source", contract.label),
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::EncodedSourceFrameHandle)?;
@@ -1960,12 +2555,12 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::StraightCoverage,
+            alpha: encoded_source_descriptor.alpha,
         };
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             working_descriptor,
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             contract.label,
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::WorkingFrameHandle)?;
@@ -1982,6 +2577,86 @@ impl GpuNativeDecodedFrameImportPlan {
             working_frame,
         })
     }
+}
+
+/// Validated direct RGB native-surface path into the shared OCIO input stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuNativeRgbDecodePlan {
+    /// Physical decoded RGB format admitted by the exact renderer route.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Visible physical source extent sampled by the RGB materialization pass.
+    pub source_width: u32,
+    /// Visible physical source height sampled by the RGB materialization pass.
+    pub source_height: u32,
+    /// Imported encoded RGB texture consumed by OCIO without a YCbCr pass.
+    pub encoded_source_frame: GpuColorFrameHandle,
+    /// Product working-frame destination.
+    pub working_frame: GpuColorFrameHandle,
+    /// Shared source-to-working OCIO transform.
+    pub input_transform: RenderInputTransform,
+}
+
+impl GpuNativeRgbDecodePlan {
+    /// Lower one native import plan into the direct RGB execution Seam.
+    pub fn from_import_plan(
+        import: &GpuNativeDecodedFrameImportPlan,
+    ) -> Result<Self, GpuNativeRgbDecodePlanError> {
+        let physical = import.source_texture_format.physical_descriptor().ok_or(
+            GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                format: import.source_texture_format,
+            },
+        )?;
+        if physical.color_model != mondrian_media::DecodedVideoSurfaceColorModel::Rgb {
+            return Err(GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                format: import.source_texture_format,
+            });
+        }
+        match physical.numeric_encoding {
+            mondrian_media::DecodedVideoSurfaceNumericEncoding::Unorm8
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::Float16
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::Float32 => {}
+            mondrian_media::DecodedVideoSurfaceNumericEncoding::Unorm16 { .. }
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::PackedUnsigned => {
+                return Err(GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                    format: import.source_texture_format,
+                })
+            }
+        }
+        let expected = product_gpu_working_texture_format();
+        if import.encoded_source_frame.texture_format() != expected {
+            return Err(GpuNativeRgbDecodePlanError::EncodedSourceFormatMismatch {
+                expected,
+                actual: import.encoded_source_frame.texture_format(),
+            });
+        }
+        Ok(Self {
+            source_texture_format: import.source_texture_format,
+            source_width: import.source_width,
+            source_height: import.source_height,
+            encoded_source_frame: import.encoded_source_frame.clone(),
+            working_frame: import.working_frame.clone(),
+            input_transform: import.input_transform.clone(),
+        })
+    }
+}
+
+/// Error returned when a native surface cannot use the direct RGB Seam.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeRgbDecodePlanError {
+    /// YCbCr or unsupported packed inputs require another materialization path.
+    #[error("native decoded surface {format:?} is not a direct RGB texture")]
+    UnsupportedSourceFormat {
+        /// Rejected physical format.
+        format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The encoded-source handle would reinterpret the imported texture.
+    #[error("native RGB encoded source format {actual:?} does not match {expected:?}")]
+    EncodedSourceFormatMismatch {
+        /// Format required by the physical surface.
+        expected: GpuColorFrameTextureFormat,
+        /// Planned renderer format.
+        actual: GpuColorFrameTextureFormat,
+    },
 }
 
 /// Error returned when native decoded-frame import cannot be planned.
@@ -2016,6 +2691,14 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     #[error("unsupported native decoded frame source texture format {source_texture_format:?}")]
     UnsupportedSourceTextureFormat {
         /// Unsupported decoder source texture format.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The backend lists the handle and format but not their exact combination.
+    #[error("unsupported native decoded frame route {handle_kind:?} + {source_texture_format:?}")]
+    UnsupportedImportRoute {
+        /// Decoder handle family.
+        handle_kind: DecodedGpuFrameHandleKind,
+        /// Physical source texture format.
         source_texture_format: GpuNativeDecodedFrameTextureFormat,
     },
     /// Native decoded frames must use the renderer OCIO GPU input path.
@@ -2192,6 +2875,13 @@ pub enum GpuNativeDecodedFrameImportError {
     NativeDeviceRemoved {
         /// Stable native-device diagnostic.
         reason: String,
+    },
+    /// GPU completion was observed, but the platform release worker did not
+    /// consume every corresponding native owner before the caller deadline.
+    #[error("native decoded frame release retained {remaining} owner(s) at the caller deadline")]
+    NativeReleaseDeadlineExceeded {
+        /// Exact native owner count still live at the deadline.
+        remaining: usize,
     },
     /// The native payload does not match the import contract.
     #[error("native decoded frame payload does not match the import contract")]
@@ -2474,6 +3164,19 @@ impl GpuColorFrameReadbackPlan {
 pub struct GpuColorFrameReadback;
 
 impl GpuColorFrameReadback {
+    /// Record a readback of the exact output held by a presentation lease.
+    ///
+    /// Uses the same handle and format validation as ordinary frame readback.
+    /// The caller must keep the lease alive until the submitted copy completes.
+    pub fn record_presentation_copy(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &GpuColorFrameReadbackPlan,
+        output: &ViewerGpuPresentationOutputLease,
+    ) -> Result<wgpu::Buffer, GpuColorFrameReadbackError> {
+        Self::record_copy(device, encoder, plan, output.resource())
+    }
+
     /// Create a MAP_READ buffer and record a texture-to-buffer copy into the encoder.
     pub fn record_copy(
         device: &wgpu::Device,
@@ -2656,6 +3359,10 @@ impl CpuColorFrame {
         self.descriptor
     }
 
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
+    }
+
     /// Borrow the underlying linear-light frame.
     pub fn rgba_f32(&self) -> &WorkingRgbaF32Frame {
         self.frame.as_ref()
@@ -2723,14 +3430,49 @@ impl CpuEncodedFloatColorFrame {
         Self { descriptor, frame: Arc::new(frame) }
     }
 
+    /// Create a source/import encoded-float frame from interleaved RGBA samples.
+    pub fn source_flat_rgba_f32(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        data: Vec<f32>,
+    ) -> Self {
+        assert_eq!(
+            data.len(),
+            width as usize * height as usize * 4,
+            "encoded source data length must be width * height * 4"
+        );
+        // `[f32; 4]` has the same alignment as `f32`; the validated component
+        // count makes this an allocation-preserving ownership cast rather than
+        // a second full-frame copy at the 4K software-decode boundary.
+        let data = bytemuck::allocation::cast_vec(data);
+        Self::new(
+            EncodedRgbaF32Frame { width, height, data, color_space },
+            ColorFrameDomain::Source,
+        )
+    }
+
     /// Return the frame metadata contract.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         self.descriptor
     }
 
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
+    }
+
     /// Borrow the underlying encoded floating-point samples.
     pub fn rgba_f32(&self) -> &EncodedRgbaF32Frame {
         self.frame.as_ref()
+    }
+
+    pub(crate) fn rgba_f32_mut(&mut self) -> &mut EncodedRgbaF32Frame {
+        Arc::make_mut(&mut self.frame)
+    }
+
+    /// Clone the shared immutable encoded floating-point frame backing this wrapper.
+    pub fn rgba_f32_shared(&self) -> Arc<EncodedRgbaF32Frame> {
+        Arc::clone(&self.frame)
     }
 
     /// Consume this wrapper and return the encoded floating-point samples.
@@ -2806,6 +3548,10 @@ impl CpuEncodedColorFrame {
     /// Return the frame metadata contract.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         self.descriptor
+    }
+
+    pub(crate) fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        self.descriptor.alpha = alpha;
     }
 
     /// Borrow RGBA8 pixels.
@@ -2934,6 +3680,8 @@ impl LinearFloatSource {
 pub enum CpuSourceColorFrame {
     /// Transfer-encoded 8-bit RGBA samples.
     EncodedRgba8(CpuEncodedColorFrame),
+    /// Transfer-encoded floating-point RGBA samples.
+    EncodedFloat(CpuEncodedFloatColorFrame),
     /// Scene-linear floating-point RGBA samples.
     LinearFloat(LinearFloatSource),
 }
@@ -2958,7 +3706,19 @@ impl CpuSourceColorFrame {
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         match self {
             Self::EncodedRgba8(frame) => frame.descriptor(),
+            Self::EncodedFloat(frame) => frame.descriptor(),
             Self::LinearFloat(frame) => frame.descriptor(),
+        }
+    }
+
+    /// Exact GPU texture format used by the current source-upload Implementation.
+    ///
+    /// This is intentionally distinct from the post-transform working format:
+    /// encoded and linear Float32 CPU payloads are uploaded without repacking.
+    pub const fn gpu_upload_texture_format(&self) -> GpuColorFrameTextureFormat {
+        match self {
+            Self::EncodedRgba8(_) => GpuColorFrameTextureFormat::Rgba8Unorm,
+            Self::EncodedFloat(_) | Self::LinearFloat(_) => GpuColorFrameTextureFormat::Rgba32Float,
         }
     }
 
@@ -2966,6 +3726,9 @@ impl CpuSourceColorFrame {
     pub fn retained_bytes(&self) -> usize {
         match self {
             Self::EncodedRgba8(frame) => frame.rgba().len(),
+            Self::EncodedFloat(frame) => {
+                frame.rgba_f32().data.len().saturating_mul(std::mem::size_of::<[f32; 4]>())
+            }
             Self::LinearFloat(frame) => {
                 frame.data().len().saturating_mul(std::mem::size_of::<f32>())
             }
@@ -3000,6 +3763,19 @@ impl CpuSourceColorFrame {
                 let frame = CpuEncodedColorFrame { descriptor, rgba: Arc::new(rgba) };
                 Ok(Self::EncodedRgba8(frame))
             }
+            (Self::EncodedFloat(frame), interpretation) => {
+                let mut descriptor = frame.descriptor;
+                descriptor.alpha = match interpretation {
+                    AlphaInterpretation::Ignore => ColorFrameAlpha::Opaque,
+                    AlphaInterpretation::Straight | AlphaInterpretation::Premultiplied => {
+                        ColorFrameAlpha::StraightCoverage
+                    }
+                };
+                let mut rgba = frame.into_rgba_f32();
+                normalize_rgba_f32_alpha(rgba.data.as_flattened_mut(), interpretation)?;
+                let frame = CpuEncodedFloatColorFrame { descriptor, frame: Arc::new(rgba) };
+                Ok(Self::EncodedFloat(frame))
+            }
             (Self::LinearFloat(frame), interpretation) => {
                 let mut descriptor = frame.descriptor;
                 descriptor.alpha = match interpretation {
@@ -3019,12 +3795,13 @@ impl CpuSourceColorFrame {
     fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
         match self {
             Self::EncodedRgba8(frame) => frame.descriptor.alpha = alpha,
+            Self::EncodedFloat(frame) => frame.descriptor.alpha = alpha,
             Self::LinearFloat(frame) => frame.descriptor.alpha = alpha,
         }
     }
 }
 
-fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
+pub(crate) fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
     for pixel in rgba.chunks_exact_mut(4) {
         match interpretation {
             AlphaInterpretation::Straight => {}
@@ -3045,7 +3822,7 @@ fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
     }
 }
 
-fn normalize_rgba_f32_alpha(
+pub(crate) fn normalize_rgba_f32_alpha(
     rgba: &mut [f32],
     interpretation: AlphaInterpretation,
 ) -> Result<(), SourceAlphaInterpretationError> {
@@ -3061,12 +3838,10 @@ fn normalize_rgba_f32_alpha(
                         value: alpha,
                     });
                 }
-                if alpha <= f32::EPSILON {
-                    pixel[..3].fill(0.0);
-                } else if alpha < 1.0 {
-                    for channel in &mut pixel[..3] {
-                        *channel /= alpha;
-                    }
+                if alpha < 1.0 {
+                    let straight =
+                        straight_rgba_from_premultiplied([pixel[0], pixel[1], pixel[2], alpha]);
+                    pixel.copy_from_slice(&straight);
                 }
             }
         }
@@ -3077,6 +3852,12 @@ fn normalize_rgba_f32_alpha(
 impl From<CpuEncodedColorFrame> for CpuSourceColorFrame {
     fn from(frame: CpuEncodedColorFrame) -> Self {
         Self::EncodedRgba8(frame)
+    }
+}
+
+impl From<CpuEncodedFloatColorFrame> for CpuSourceColorFrame {
+    fn from(frame: CpuEncodedFloatColorFrame) -> Self {
+        Self::EncodedFloat(frame)
     }
 }
 
@@ -3249,6 +4030,37 @@ mod tests {
             normalized.descriptor().alpha,
             ColorFrameAlpha::StraightCoverage
         );
+    }
+
+    #[test]
+    fn source_alpha_normalization_preserves_the_smallest_sixteen_bit_edge() {
+        let alpha = 1.0 / 65_535.0;
+        let expected = [1.25, -0.125, 0.5, alpha];
+        let source = CpuSourceColorFrame::from(LinearFloatSource::new(
+            1,
+            1,
+            ColorSpace::LinearRec2020,
+            vec![
+                expected[0] * alpha,
+                expected[1] * alpha,
+                expected[2] * alpha,
+                alpha,
+            ],
+        ));
+
+        let normalized = source
+            .normalize_alpha(AlphaInterpretation::Premultiplied)
+            .expect("valid low-coverage premultiplied source");
+        let CpuSourceColorFrame::LinearFloat(normalized) = normalized else {
+            panic!("float source must stay float");
+        };
+
+        for (channel, (actual, expected)) in normalized.data().iter().zip(expected).enumerate() {
+            assert!(
+                (*actual - expected).abs() <= 2.0 * f32::EPSILON,
+                "channel {channel}: expected {expected}, got {actual}"
+            );
+        }
     }
 
     #[test]
@@ -3607,7 +4419,7 @@ mod tests {
         );
         assert_eq!(
             plan.encoded_source_frame.texture_format(),
-            GpuColorFrameTextureFormat::Rgba16Float
+            GpuColorFrameTextureFormat::Rgba32Float
         );
         assert_eq!(plan.working_frame.id().raw(), 501);
         assert_eq!(
@@ -3619,7 +4431,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
-                alpha: ColorFrameAlpha::StraightCoverage,
+                alpha: ColorFrameAlpha::Opaque,
             }
         );
         assert_eq!(
@@ -3740,6 +4552,121 @@ mod tests {
             }
             other => panic!("expected invalid video sampling, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_import_routes_do_not_form_a_cartesian_capability_product() {
+        let support = GpuNativeDecodedFrameImportSupport::try_ready_routes(vec![
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D12Resource,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::P010,
+                import_mode: GpuNativeDecodedFrameImportMode::ZeroCopy,
+            },
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+                import_mode: GpuNativeDecodedFrameImportMode::GpuBridgeCopy,
+            },
+        ])
+        .expect("non-conflicting exact routes");
+
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D12Resource,
+                GpuNativeDecodedFrameTextureFormat::P010,
+            ),
+            Some(GpuNativeDecodedFrameImportMode::ZeroCopy)
+        );
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D11Texture2D,
+                GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            ),
+            Some(GpuNativeDecodedFrameImportMode::GpuBridgeCopy)
+        );
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D12Resource,
+                GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            ),
+            None
+        );
+        assert_eq!(
+            support.import_mode, None,
+            "mixed routes have no false global mode"
+        );
+    }
+
+    #[test]
+    fn native_import_routes_reject_conflicting_transfer_evidence() {
+        let route = GpuNativeDecodedFrameImportRoute {
+            handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+            source_texture_format: GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            import_mode: GpuNativeDecodedFrameImportMode::ZeroCopy,
+        };
+        let mut conflict = route;
+        conflict.import_mode = GpuNativeDecodedFrameImportMode::GpuBridgeCopy;
+        assert!(matches!(
+            GpuNativeDecodedFrameImportSupport::try_ready_routes(vec![route, conflict]),
+            Err(GpuNativeDecodedFrameImportSupportError::ConflictingRoute { .. })
+        ));
+    }
+
+    #[test]
+    fn native_rgb_half_and_float_keep_their_source_precision_until_ocio() {
+        for (source_texture_format, bits) in [
+            (GpuNativeDecodedFrameTextureFormat::Rgba16Float, 16),
+            (GpuNativeDecodedFrameTextureFormat::Rgba32Float, 32),
+        ] {
+            let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+                vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+                vec![source_texture_format],
+            );
+            let mut contract = native_import_contract();
+            contract.source_texture_format = source_texture_format;
+            contract.source_color_space = ColorSpace::Srgb;
+            contract.video_sampling = GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+                ColorSpace::Srgb,
+                GpuVideoRange::Full,
+                bits,
+                GpuVideoChromaLocation::Unspecified,
+            );
+            let mut ids = GpuColorFrameIdAllocator::new(700).expect("frame ids");
+            let import =
+                GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+                    .expect("qualified RGB native import");
+            let rgb = GpuNativeRgbDecodePlan::from_import_plan(&import)
+                .expect("direct RGB execution plan");
+            assert_eq!(
+                rgb.encoded_source_frame.texture_format(),
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "native RGB materialization must never stage through half"
+            );
+            assert_eq!(
+                rgb.working_frame.texture_format(),
+                GpuColorFrameTextureFormat::Rgba32Float
+            );
+            assert_eq!(
+                rgb.encoded_source_frame.descriptor().alpha,
+                ColorFrameAlpha::StraightCoverage
+            );
+        }
+    }
+
+    #[test]
+    fn native_444_allows_unspecified_chroma_siting() {
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+            vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
+            vec![GpuNativeDecodedFrameTextureFormat::P412],
+        );
+        let mut contract = native_import_contract();
+        contract.handle_kind = DecodedGpuFrameHandleKind::CVPixelBuffer;
+        contract.source_texture_format = GpuNativeDecodedFrameTextureFormat::P412;
+        contract.video_sampling.bit_depth = 12;
+        contract.video_sampling.chroma_location = GpuVideoChromaLocation::Unspecified;
+        let mut ids = GpuColorFrameIdAllocator::new(800).expect("frame ids");
+        GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect("4:4:4 has no chroma siting ambiguity");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4443,6 +5370,38 @@ mod tests {
             panic!("linear source upload must retain f32 payload");
         };
         assert!(Arc::ptr_eq(payload, &samples));
+    }
+
+    #[test]
+    fn encoded_float_source_upload_preserves_source_encoding_and_precision() {
+        let frame = CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+            1,
+            1,
+            ColorSpace::Rec709,
+            vec![1.0 / 65_535.0, 0.5, 1.0, 1.0],
+        );
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_encoded_float_frame(
+            GpuColorFrameId::from_raw(203),
+            &frame,
+            "encoded-float-source-upload",
+        )
+        .expect("encoded float upload plan");
+
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba32Float);
+        assert_eq!(
+            plan.handle.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(plan.handle.descriptor().domain, ColorFrameDomain::Source);
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(plan.bytes())[0],
+            1.0 / 65_535.0
+        );
+        let GpuColorFrameUploadPayload::EncodedRgba32(payload) = &plan.payload else {
+            panic!("encoded float upload must retain the shared typed payload");
+        };
+        assert!(Arc::ptr_eq(payload, &frame.frame));
     }
 
     #[test]

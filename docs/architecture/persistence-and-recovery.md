@@ -15,13 +15,21 @@ requests a save but never serializes a live document or SQLite connection.
 
 Rebuildable proxies, thumbnails, waveforms, decoded frames, prepared render
 plans, plugin runtime state, UI navigation, and device handles never enter the
-archive.
+archive. Project Gallery stills are the explicit exception for pixels: they are
+user-authored portable references, stored as bounded base64 PNG payloads inside
+canonical `project.json`, not incidental Viewer/cache residency. Archive read
+decodes them under a 256 MiB per-still allocation cap and validates canonical
+RGBA8 structure and declared dimensions before admitting the Project.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v25, and library v5.
-Library v5 canonicalizes persisted native audio layout evidence as exact,
-unspecified, or unsupported; its v4 migration is a field-scoped transactional
-JSON rewrite and never interprets asset names or stream labels. An archive is
+version axes. The current values are archive v1, document v25, and library v6.
+Library v5 canonicalized persisted native audio layout evidence as exact,
+unspecified, or unsupported; its v4 migration was a field-scoped transactional
+JSON rewrite and never interpreted asset names or stream labels. Library v6
+normalizes every `AssetMediaInterpretation` JSON record with the default Camera
+RAW controls and validates their closed fixed-point bounds transactionally.
+The `.mdp` Manifest carries library schema v6; Project JSON does not duplicate
+RAW settings. An archive is
 accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
@@ -95,6 +103,14 @@ to create a self-consistent database snapshot, then writes the archive from the
 immutable document and that database. It never copies a live WAL database as a
 set of ordinary files. UI, playback, and rendering remain independent of ZIP
 compression and filesystem latency.
+
+Commercial endurance observes the same service rather than a parallel save
+counter. One shared saturating ledger increments once for each real failed
+worker completion, including archive or recovery-publication failures. Runtime
+facts partition queued and physically running requests, retain total owned
+payloads, and keep startup/unexpected worker exits in a separate health bucket.
+Consuming shutdown reuses the identical failure ledger and one absolute App
+deadline, so terminal merge cannot erase a failure completed during shutdown.
 
 Before allocating the SQLite snapshot, the same worker validates the archive's
 direct parent. If a Save As or Headless target contains a missing directory
@@ -669,6 +685,28 @@ machine can admit the configured limit under concurrent workload. The candidate
 Project ID and schema are verified before SQLite is opened. Once opened, that
 directory is immutable for the complete
 `Arc<AssetLibrary>` lifetime: it is never renamed, replaced, or unlinked.
+Commercial-endurance fixture installation strengthens this same open path
+without creating a second Project parser. The public seam derives Project path,
+digest, and Sequence only from a prepared machine plan, and pauses the previous
+Persistence Generation before it touches the filesystem. One canonical direct file object is
+retained across bounded whole-file SHA-256, rewind, `PreparedProjectArchive`
+preparation, and extraction. Its active Sequence ID must match the machine plan
+and must already own at least one video and one audio Track. The loader retains
+the Project document schema observed before registered migration; Exact policy
+requires that source schema and the declared Library schema to be current.
+Unlike canonical UI
+Open and Recovery, this policy never invokes `ensure_minimum_tracks`; the
+installed Session begins saved at Author Generation 1 with empty Undo/Redo, or
+the complete candidate is rejected before the previous Session retires. Windows
+opens the source with read sharing only for the retained lifetime. macOS/Linux
+currently fail closed; their later native Adapter must prove that no pathname
+replacement or in-place writer can invalidate the hash-to-consumption object
+guarantee before their endurance run.
+Successful Exact installation returns private-construction evidence over the
+machine-plan digest, archive path/hash, installed Project/document and root
+Sequence/revision, process-local Session/Author Generation, and extracted live
+Library revision. External-source admission revalidates that evidence; an
+ordinary Open or any later author/Library mutation cannot reuse it.
 Building a candidate therefore leaves the previous Session and its library
 untouched; a failed extraction, SQLite open, or Session construction removes
 only the uninstalled candidate. Candidate rollback also retains weak lifetime
@@ -693,9 +731,23 @@ Recovery selection uses the manifest's actual runtime root and requires both
 authorities to agree on `ProjectId`. SQLite migrations operate on the extracted
 runtime copy only; saving is the sole path back into `.mdp`.
 
+### App test fixture namespace
+
+App's test-only fixture allocator uses the PID/counter label only for diagnostics.
+It atomically claims a randomized directory under the selected temporary parent;
+it never adopts an existing directory through `create_dir_all`. Reused process
+IDs must not cause a new test to attach to an old unmarked runtime parent.
+The existing durable runtime-parent marker checks remain unchanged.
+
+Allocation returns a persistent path because asynchronous App/domain owners may
+outlive the allocating call. It does not drop a temporary-directory guard while
+those owners are live, delete prior fixture directories, or establish a new
+automatic cleanup policy. Regression tests exercise the same allocator source
+for stale PID slots, concurrent same-label claims, and missing-parent rejection.
+
 ## Document Schema Contract
 
-Document schema v25 is the current Alpha author contract. It persists the
+Document schema v26 is the current Alpha author contract. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 author time, canonical audio layout/routing/processor schemas, canonical proxy
 membership, closed Clip content, multi-member link groups, strong visual
@@ -703,7 +755,9 @@ Transitions, complete Mask and Basic Title properties, Clip-local visual author
 time, closed Sequence color/delivery structures, and one exact
 `ClipSourceTimeMap` whose constant mapping persists origin, signed scale, and
 covering/strict-predecessor sampling boundary while its terminal boundary is
-derived from duration.
+derived from duration. Media Clip interpretation may also retain a bounded reel
+name, exact SMPTE source reference, and foreign item identity for interchange;
+these facts never replace Asset or placement identity.
 
 Every old or future document schema and every unknown author field fails closed
 during Alpha. Reopen must never synthesize missing defaults, infer a legacy

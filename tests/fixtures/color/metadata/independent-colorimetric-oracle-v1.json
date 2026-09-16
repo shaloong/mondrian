@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "corpus_id": "mondrian-independent-colorimetric-oracle-v1",
+  "origin": "public_specification",
+  "numeric_precision": "IEEE-754 binary64 reference evaluation; decimal targets rounded only as printed by the cited source",
+  "sources": [
+    {
+      "id": "iec-61966-2-1",
+      "revision": "1999 + AMD1:2003",
+      "scope": "sRGB opto-electronic transfer function"
+    },
+    {
+      "id": "itu-r-bt-709",
+      "revision": "BT.709-6 (2015)",
+      "scope": "Rec.709 opto-electronic transfer function and 8/10-bit studio range"
+    },
+    {
+      "id": "smpte-st-2084",
+      "revision": "ST 2084:2014",
+      "scope": "PQ absolute-luminance electro-optical transfer function"
+    },
+    {
+      "id": "itu-r-bt-2100",
+      "revision": "BT.2100-3 (2025)",
+      "scope": "HLG reference OETF/OOTF, HDR signal range, and chroma location"
+    },
+    {
+      "id": "itu-r-bt-2124",
+      "revision": "BT.2124-0 (2019)",
+      "scope": "ICtCp and Delta E ITP Annex 4 reference"
+    },
+    {
+      "id": "sharma-wu-dalal-ciede2000",
+      "revision": "Color Research and Application 30(1), 2005 supplemental data",
+      "scope": "CIEDE2000 reference pairs"
+    }
+  ],
+  "sdr_transfer_vectors": [
+    { "transfer": "srgb", "linear": 0.0, "encoded": 0.0 },
+    { "transfer": "srgb", "linear": 0.0001, "encoded": 0.001292 },
+    { "transfer": "srgb", "linear": 0.0031308, "encoded": 0.040449936 },
+    { "transfer": "srgb", "linear": 0.018, "encoded": 0.1428256813030392 },
+    { "transfer": "srgb", "linear": 0.18, "encoded": 0.46135612950044164 },
+    { "transfer": "srgb", "linear": 0.5, "encoded": 0.7353569830524495 },
+    { "transfer": "srgb", "linear": 1.0, "encoded": 1.0 },
+    { "transfer": "bt709", "linear": 0.0, "encoded": 0.0 },
+    { "transfer": "bt709", "linear": 0.001, "encoded": 0.0045 },
+    { "transfer": "bt709", "linear": 0.018, "encoded": 0.08124794403514046 },
+    { "transfer": "bt709", "linear": 0.18, "encoded": 0.4090077288641504 },
+    { "transfer": "bt709", "linear": 0.5, "encoded": 0.7055150899221212 },
+    { "transfer": "bt709", "linear": 1.0, "encoded": 1.0 }
+  ],
+  "hdr_transfer_vectors": [
+    { "transfer": "pq", "input": 0.0, "target": 0.0, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "pq", "input": 0.0001, "target": 0.14994573210018022, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "pq", "input": 0.001, "target": 0.29969909242098597, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "pq", "input": 0.01, "target": 0.508078421517399, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "pq", "input": 0.1, "target": 0.751827096247041, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "pq", "input": 1.0, "target": 1.0, "units": "encoded_from_normalized_10000_nits" },
+    { "transfer": "hlg_1000_nit", "input": 0.0, "target": 0.0, "units": "display_nits_from_encoded_signal" },
+    { "transfer": "hlg_1000_nit", "input": 0.5, "target": 50.6970284911005, "units": "display_nits_from_encoded_signal" },
+    { "transfer": "hlg_1000_nit", "input": 0.75, "target": 203.152145353666, "units": "display_nits_from_encoded_signal" },
+    { "transfer": "hlg_1000_nit", "input": 1.0, "target": 1000.0000292395617, "units": "display_nits_from_encoded_signal" }
+  ],
+  "range_vectors": [
+    { "bit_depth": 8, "range": "limited", "luma_black": 16, "luma_white": 235, "chroma_neutral": 128 },
+    { "bit_depth": 8, "range": "full", "luma_black": 0, "luma_white": 255, "chroma_neutral": 128 },
+    { "bit_depth": 10, "range": "limited", "luma_black": 64, "luma_white": 940, "chroma_neutral": 512 },
+    { "bit_depth": 10, "range": "full", "luma_black": 0, "luma_white": 1023, "chroma_neutral": 512 },
+    { "bit_depth": 12, "range": "limited", "luma_black": 256, "luma_white": 3760, "chroma_neutral": 2048 },
+    { "bit_depth": 12, "range": "full", "luma_black": 0, "luma_white": 4095, "chroma_neutral": 2048 }
+  ],
+  "alpha_vectors": [
+    { "bit_depth": 8, "codes": [0, 1, 127, 128, 254, 255] },
+    { "bit_depth": 10, "codes": [0, 1, 511, 512, 1022, 1023] },
+    { "bit_depth": 16, "codes": [0, 1, 32767, 32768, 65534, 65535] }
+  ],
+  "chroma_siting_vectors": [
+    { "subsampling": "420", "location": "left", "origin": [0.5, 1.0], "source_center": [2.5, 2.5], "sample_coordinate": [1.0, 0.75] },
+    { "subsampling": "420", "location": "center", "origin": [1.0, 1.0], "source_center": [2.5, 2.5], "sample_coordinate": [0.75, 0.75] },
+    { "subsampling": "420", "location": "top_left", "origin": [0.5, 0.5], "source_center": [2.5, 2.5], "sample_coordinate": [1.0, 1.0] },
+    { "subsampling": "422", "location": "left", "origin": [0.5, 0.5], "source_center": [2.5, 2.5], "sample_coordinate": [1.0, 2.0] },
+    { "subsampling": "422", "location": "center", "origin": [1.0, 0.5], "source_center": [2.5, 2.5], "sample_coordinate": [0.75, 2.0] },
+    { "subsampling": "422", "location": "top_left", "origin": [0.5, 0.5], "source_center": [2.5, 2.5], "sample_coordinate": [1.0, 2.0] }
+  ],
+  "delta_e_2000_vectors": [
+    { "reference_lab": [50.0, 2.6772, -79.7751], "sample_lab": [50.0, 0.0, -82.7485], "target": 2.0425 },
+    { "reference_lab": [50.0, 3.1571, -77.2803], "sample_lab": [50.0, 0.0, -82.7485], "target": 2.8615 },
+    { "reference_lab": [50.0, 2.8361, -74.02], "sample_lab": [50.0, 0.0, -82.7485], "target": 3.4412 }
+  ],
+  "delta_e_itp_vectors": [
+    { "reference_itp": [0.3554, 0.1346, -0.1613], "sample_itp": [0.3568, 0.1321, -0.1629], "target": 2.363 }
+  ]
+}

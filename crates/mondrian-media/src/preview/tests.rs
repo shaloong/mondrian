@@ -9,28 +9,29 @@ use super::{
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
     resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
-    select_decoded_temporal_candidate, temporal_selection_is_approximate, DecodedRgbaFrameContract,
-    DecodedTemporalCandidate, DecodedTemporalExtent, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp, MediaFileFingerprint,
-    MediaFileObjectIdentity, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-    PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeCancellation,
-    PreviewDecodeCancellationCheckpoint, PreviewDecodeCancellationSource, PreviewDecodeDiagnostics,
-    PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath, PreviewDecodeExecutionStage,
-    PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    select_decoded_temporal_candidate, temporal_selection_is_approximate, CpuYuvChromaPlaneLayout,
+    CpuYuvChromaPlanes, DecodedRgbaFrameContract, DecodedTemporalCandidate, DecodedTemporalExtent,
+    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp,
+    MediaFileFingerprint, MediaFileObjectIdentity, PreviewDecodeAccessMode,
+    PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints, PreviewDecodeBackend,
+    PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
+    PreviewDecodeCancellationSource, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
+    PreviewDecodeExecutionPath, PreviewDecodeExecutionStage, PreviewDecodeInterruptState,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeRequest,
     PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeSessionDisposition,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
-    PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+    PreviewDecodeSource, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
+    PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
-    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-    PreviewSeekIndex, PreviewSeekIndexCache, PreviewSeekIndexCachePolicy,
-    PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
-    PreviewSourceColorContract, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-    PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-    PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewIsolatedDemuxExecutionEvidence,
+    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
+    PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexCache,
+    PreviewSeekIndexCachePolicy, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+    PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+    PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
+    PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+    PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+    PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
 #[cfg(mondrian_ffmpeg_7_1)]
@@ -40,6 +41,7 @@ use crate::decoder::{
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     HwAccelBackend,
 };
+use crate::{DecodedRgbaEncoding, DecodedVideoRangeContract};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
 use mondrian_core::{
@@ -78,21 +80,45 @@ fn synthetic_file_fingerprint(
 #[test]
 fn gpu_resident_decode_reserves_external_hardware_frame_leases() {
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferGpuResident),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            HwAccelBackend::Vaapi
+        ),
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::RequireGpuResident),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::RequireGpuResident,
+            HwAccelBackend::Vaapi
+        ),
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferHardwareDecode),
+        preview_hardware_extra_frames(
+            PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            HwAccelBackend::Vaapi
+        ),
         0
     );
     assert_eq!(
-        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto),
+        preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto, HwAccelBackend::Vaapi),
         0
     );
+}
+
+#[test]
+fn safe_cuda_outputs_do_not_reserve_decoder_surface_leases() {
+    for request in [
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewHardwareDecodeRequest::RequireGpuResident,
+    ] {
+        assert_eq!(
+            preview_hardware_extra_frames(request, HwAccelBackend::Cuda),
+            0
+        );
+    }
 }
 
 #[test]
@@ -166,7 +192,13 @@ fn real_concat_duration_selects_covering_before_even_when_successor_is_nearer() 
                 Some(after),
             )
             .expect("covering temporal candidate");
-            assert_eq!(selected, (DecodedTemporalCandidate::Before, before));
+            assert_eq!(
+                selected,
+                (
+                    DecodedTemporalCandidate::Before,
+                    before.with_successor(after.start_pts),
+                )
+            );
             assert!(!temporal_selection_is_approximate(
                 requested_pts,
                 Some(selected.1)
@@ -227,6 +259,27 @@ fn successor_boundary_overrides_an_overlapping_declared_duration() {
 }
 
 #[test]
+fn successor_boundary_extends_a_short_declared_duration_across_a_vfr_hold() {
+    let before = DecodedTemporalExtent::from_duration(80, 10);
+    let after = DecodedTemporalExtent::from_duration(100, 10);
+
+    let selected = select_decoded_temporal_candidate(
+        90,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        Some(before),
+        Some(after),
+    )
+    .expect("the predecessor remains presented until the next decoded frame");
+
+    assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+    assert_eq!(selected.1.end_pts(), Some(100));
+    assert_eq!(
+        selected.1.source,
+        super::PreviewTemporalExtentSource::SuccessorBoundary
+    );
+}
+
+#[test]
 fn long_successor_proven_vfr_extent_is_not_rejected_by_nominal_distance() {
     let before = DecodedTemporalExtent::point(100);
     let after = DecodedTemporalExtent::point(1_000);
@@ -266,13 +319,14 @@ fn positive_frame_duration_is_mode_independent_without_a_successor() {
 }
 
 #[test]
-fn exact_access_rejects_a_true_gap_while_scrub_may_choose_nearest_degraded() {
+fn successor_boundary_closes_a_short_declared_vfr_gap_for_every_access_mode() {
     let before = DecodedTemporalExtent::from_duration(100, 5);
     let after = DecodedTemporalExtent::from_duration(120, 5);
     let requested_pts = 118;
 
     for access_mode in [
         PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::ScrubCursor,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
     ] {
         let selected = select_decoded_temporal_candidate(
@@ -280,25 +334,45 @@ fn exact_access_rejects_a_true_gap_while_scrub_may_choose_nearest_degraded() {
             access_mode,
             Some(before),
             Some(after),
-        );
-        assert!(
-            selected.is_none(),
-            "exact access cannot publish an uncovered frame"
-        );
+        )
+        .expect("the predecessor remains presented until the decoded successor");
+        assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+        assert_eq!(selected.1.end_pts(), Some(120));
+        assert!(!temporal_selection_is_approximate(
+            requested_pts,
+            Some(selected.1)
+        ));
     }
+}
+
+#[test]
+fn exact_access_rejects_an_expired_declared_extent_without_successor_evidence() {
+    let before = DecodedTemporalExtent::from_duration(100, 5);
+    let requested_pts = 118;
 
     let scrub = select_decoded_temporal_candidate(
         requested_pts,
         PreviewDecodeAccessMode::ScrubCursor,
         Some(before),
-        Some(after),
+        None,
     )
     .expect("nearest scrub candidate");
-    assert_eq!(scrub.0, DecodedTemporalCandidate::After);
+    assert_eq!(scrub.0, DecodedTemporalCandidate::Before);
     assert!(temporal_selection_is_approximate(
         requested_pts,
         Some(scrub.1)
     ));
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        assert!(
+            select_decoded_temporal_candidate(requested_pts, access_mode, Some(before), None)
+                .is_none(),
+            "exact access still requires a successor or another covering extent"
+        );
+    }
 }
 
 fn test_source_color() -> PreviewSourceColorContract {
@@ -321,6 +395,30 @@ fn covering_decode_request<'a>(
 
 fn test_linear_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
+}
+
+#[test]
+fn data_texture_source_contract_round_trips_and_is_a_distinct_cache_identity() {
+    let data = PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull)
+        .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
+    let color = PreviewSourceColorContract::new(
+        ColorSpace::LinearRec2020,
+        DecodedVideoRangeContract::OverrideFull,
+    );
+    let encoded = serde_json::to_string(&data).expect("serialize DataTexture contract");
+    let decoded: PreviewSourceColorContract =
+        serde_json::from_str(&encoded).expect("deserialize DataTexture contract");
+
+    assert_eq!(decoded, data);
+    assert!(decoded.is_data_texture());
+    assert_eq!(decoded.color_space(), None);
+    assert!(!decoded.is_scene_linear());
+    assert_eq!(
+        decoded.yuv_matrix_fallback, None,
+        "numeric RGB never accepts a YUV color-matrix fallback"
+    );
+    let identities = std::collections::HashSet::from([data, color]);
+    assert_eq!(identities.len(), 2);
 }
 
 fn test_rgba_contract() -> DecodedRgbaFrameContract {
@@ -541,6 +639,34 @@ fn source_sample_boundary_controls_half_open_grid_lowering() {
 }
 
 #[test]
+fn field_rate_selection_keeps_half_picture_times_distinct_on_coarse_stream_grid() {
+    let second_field =
+        SourceSampleTarget::covering(TimelineTime::new(1, 50).expect("exact second-field time"));
+    assert_eq!(
+        super::source_sample_to_stream_pts(second_field, ffmpeg::Rational(1, 25), 0)
+            .expect("coarse demux target"),
+        0
+    );
+    assert_eq!(
+        super::source_sample_to_selection_pts(second_field, ffmpeg::Rational(1, 25), 0, 2)
+            .expect("exact field-rate target"),
+        1
+    );
+    assert_eq!(
+        super::source_sample_to_selection_pts(
+            SourceSampleTarget::covering(
+                TimelineTime::new(1, 25).expect("exact next-picture time")
+            ),
+            ffmpeg::Rational(1, 25),
+            0,
+            2,
+        )
+        .expect("exact next-picture target"),
+        2
+    );
+}
+
+#[test]
 fn exact_source_time_preserves_long_duration_without_float_drift() {
     assert_eq!(
         super::source_sample_to_stream_pts(
@@ -611,7 +737,9 @@ fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
             cfg!(target_os = "windows")
         }
         Some(crate::decoder::HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
-        Some(crate::decoder::HwAccelPixelFormat::Vaapi) => cfg!(target_os = "linux"),
+        Some(
+            crate::decoder::HwAccelPixelFormat::Vaapi | crate::decoder::HwAccelPixelFormat::Cuda,
+        ) => cfg!(target_os = "linux"),
         _ => false,
     };
     assert_eq!(
@@ -662,6 +790,26 @@ fn hardware_decode_plan_can_prefer_cpu_transfer_without_requiring_native_residen
         assert!(!plan.ffmpeg_device_context.device_context_created);
         assert!(plan.ffmpeg_device_context.reason.contains("owning decode Session"));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hardware_decode_plan_reason_tracks_the_renderer_selected_cuda_backend() {
+    let plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        Some(crate::HwAccelDeviceSelector::CudaDeviceOrdinal(0)),
+    );
+
+    assert_eq!(plan.probe.candidate_backend, Some(HwAccelBackend::Cuda));
+    assert!(
+        plan.probe.reason.contains(HwAccelBackend::Cuda.as_str()),
+        "selected CUDA plan reported an unrelated backend: {}",
+        plan.probe.reason
+    );
+    assert!(!plan.probe.reason.contains("VA-API"));
 }
 
 #[test]
@@ -860,19 +1008,31 @@ fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
 }
 
 #[test]
-fn software_decode_threading_defaults_prefer_slice_for_uhd_playback() {
+fn long_gop_decode_threading_defaults_to_frame_pipelining_for_every_access_mode() {
     let playback = super::PreviewDecodeAccessMode::PlaybackCursor;
     let scrub = super::PreviewDecodeAccessMode::ScrubCursor;
     assert_eq!(
-        super::default_threading_kind_for_software_decode(playback, 3_840 * 2_160),
-        super::PreviewDecodeThreadingKind::Slice
-    );
-    assert_eq!(
-        super::default_threading_kind_for_software_decode(playback, 1_920 * 1_080),
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            playback,
+            3_840 * 2_160
+        ),
         super::PreviewDecodeThreadingKind::Frame
     );
     assert_eq!(
-        super::default_threading_kind_for_software_decode(scrub, 3_840 * 2_160),
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            playback,
+            1_920 * 1_080
+        ),
+        super::PreviewDecodeThreadingKind::Frame
+    );
+    assert_eq!(
+        super::default_threading_kind_for_software_decode(
+            ffmpeg::codec::Id::H264,
+            scrub,
+            3_840 * 2_160
+        ),
         super::PreviewDecodeThreadingKind::Frame
     );
 }
@@ -918,6 +1078,24 @@ fn preview_decode_cpu_budget_coordinates_workers_and_decoder_threads() {
 }
 
 #[test]
+fn worker_thread_limit_caps_playback_failover_without_changing_threading_kind() {
+    let requested =
+        PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::Slice, count: 10 };
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, Some(3)),
+        PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::Slice, count: 3 }
+    );
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, None),
+        requested
+    );
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, Some(0)).count,
+        1
+    );
+}
+
+#[test]
 fn preview_decode_access_mode_names_and_defaults_are_stable() {
     assert_eq!(
         PreviewDecodeAccessMode::PlaybackCursor.as_str(),
@@ -952,6 +1130,7 @@ fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
     .with_fingerprint(fingerprint)
     .with_adaptive_hints(PreviewDecodeAdaptiveHints {
         scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+        ..PreviewDecodeAdaptiveHints::default()
     });
 
     assert_eq!(request.path, path.as_path());
@@ -1127,6 +1306,7 @@ fn scrub_policy_applies_adaptive_latency_hints() {
         frame_duration_pts,
         PreviewDecodeAdaptiveHints {
             scrub_class: PreviewScrubAdaptiveClass::SlowLatency,
+            ..PreviewDecodeAdaptiveHints::default()
         },
     );
     assert_eq!(
@@ -1144,7 +1324,10 @@ fn scrub_policy_applies_adaptive_latency_hints() {
         &probe_index,
         120,
         frame_duration_pts,
-        PreviewDecodeAdaptiveHints { scrub_class: PreviewScrubAdaptiveClass::HotRegion },
+        PreviewDecodeAdaptiveHints {
+            scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+            ..PreviewDecodeAdaptiveHints::default()
+        },
     );
     assert_eq!(
         hot.scrub_adaptive_class,
@@ -1222,9 +1405,6 @@ fn preview_seek_index_records_distinct_keyframe_packets() {
     assert_eq!(index.keyframe_at_or_before(199), Some(100));
     assert_eq!(index.keyframe_at_or_before(200), Some(200));
     assert_eq!(index.keyframe_at_or_before(1_000), Some(200));
-    assert_eq!(index.nearest_keyframe(60), Some(50));
-    assert_eq!(index.nearest_keyframe(90), Some(100));
-    assert_eq!(index.nearest_keyframe(150), Some(100));
     assert_eq!(index.adjacent_keyframe_radius(50), Some(50));
     assert_eq!(index.adjacent_keyframe_radius(100), Some(100));
     assert_eq!(index.adjacent_keyframe_radius(150), Some(50));
@@ -1238,6 +1418,17 @@ fn preview_seek_index_records_distinct_keyframe_packets() {
             source: PreviewSeekIndexSource::SessionObserved,
         }
     );
+}
+
+#[test]
+fn preview_seek_index_uses_decode_timestamp_for_reordered_keyframe_anchor() {
+    let mut index = PreviewSeekIndex::from_probe_keyframes(vec![-41]);
+
+    index.observe_packet(&test_packet(Some(10), Some(-41), true));
+
+    assert_eq!(index.keyframe_at_or_before(10), Some(-41));
+    assert_eq!(index.keyframe_after(-41), None);
+    assert_eq!(index.diagnostics().keyframes, 1);
 }
 
 #[test]
@@ -1495,7 +1686,26 @@ fn cpu_rgba_contract_uses_explicit_bt2020_matrix_and_limited_range() {
         DecodedVideoMatrix::Bt2020NonConstant
     );
     assert_eq!(contract.applied_range, DecodedVideoRange::Limited);
-    assert_eq!(contract.source.color_space, ColorSpace::Rec2100Pq);
+    assert_eq!(contract.source.color_space(), Some(ColorSpace::Rec2100Pq));
+}
+
+#[test]
+fn data_texture_cpu_contract_accepts_rgb_and_rejects_yuv_before_swscale() {
+    let data = PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull);
+    let rgb =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGB24, 16, 16);
+    let contract = resolve_cpu_rgba_contract(&rgb, data, Path::new("technical-rgb.exr"))
+        .expect("RGB technical channels require no color matrix");
+    assert_eq!(contract.encoding, DecodedRgbaEncoding::DataTexture);
+    assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Rgb);
+
+    let mut yuv =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUV420P, 16, 16);
+    yuv.set_color_space(ffmpeg::util::color::Space::BT709);
+    yuv.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let error = resolve_cpu_rgba_contract(&yuv, data, Path::new("technical-yuv.mov"))
+        .expect_err("a YCbCr matrix would change technical channels");
+    assert!(error.to_string().contains("data-texture materialization requires RGB/GBR"));
 }
 
 #[test]
@@ -1624,6 +1834,7 @@ fn swscale_expands_bt709_limited_range_to_full_rgba() {
     let path = Path::new("limited-rec709.mov");
     let mut scaler = preview_create_rgba_scaler(
         ffmpeg::util::format::pixel::Pixel::YUV420P,
+        ffmpeg::util::format::pixel::Pixel::RGBA,
         4,
         4,
         4,
@@ -2183,6 +2394,7 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
     let mut scaler_color_contract = None;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut scaler,
         &mut scaler_source_format,
@@ -2199,6 +2411,583 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
         plan.native_decode_fallback,
         Some(PreviewNativeDecodeFallback::SoftwareFrame)
     );
+}
+
+#[test]
+fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA64LE, 2, 1);
+    decoded.set_color_space(ffmpeg::util::color::Space::RGB);
+    decoded.set_color_range(ffmpeg::util::color::Range::JPEG);
+    let samples = [1_u16, 2, 3, u16::MAX, 257, 513, 1025, u16::MAX];
+    for (target, sample) in decoded.data_mut(0).chunks_exact_mut(2).zip(samples) {
+        target.copy_from_slice(&sample.to_le_bytes());
+    }
+
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("synthetic-rgba64"),
+        test_source_color(),
+    )
+    .expect("high-bit software frame materializes as encoded float");
+
+    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+        panic!("high-bit software frames must not quantize through RGBA8");
+    };
+    assert_eq!(
+        frame.color_contract.encoding,
+        DecodedRgbaEncoding::SourceEncodedRgb
+    );
+    assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 16);
+    assert!((frame.rgba()[0] - 1.0 / 65_535.0).abs() < 1.0e-7);
+    assert!((frame.rgba()[4] - 257.0 / 65_535.0).abs() < 1.0e-7);
+    assert_eq!(frame.rgba()[3], 1.0);
+    assert_eq!(frame.rgba()[7], 1.0);
+    let mut stream = reduced_test_stream();
+    stream.width = 2;
+    stream.height = 1;
+    stream.pixel_format = crate::info::PixelFormat::Rgba64le;
+    stream.bit_depth = 16;
+    stream.has_alpha = true;
+    let directory = tempfile::tempdir().expect("source revision directory");
+    let path = directory.path().join("rgba64.raw");
+    std::fs::write(&path, [1, 2, 3, 4]).expect("source revision bytes");
+    let source = PreviewDecodeSource::capture_probed_stream(&path, &stream)
+        .expect("proven high-depth source");
+    assert_eq!(
+        source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 2,
+        std::mem::size_of_val(frame.rgba()),
+        "source metadata reserves the materializer's actual float payload"
+    );
+}
+
+#[test]
+fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
+    for (format, pixel_format, bit_depth, expected_bytes) in [
+        (
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            crate::info::PixelFormat::Yuv420p,
+            8,
+            4,
+        ),
+        (
+            ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
+            crate::info::PixelFormat::Yuv420p10le,
+            10,
+            16,
+        ),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(format, 4, 2);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..decoded.planes() {
+            decoded.data_mut(plane).fill(0);
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeCpu,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            4,
+            2,
+            Path::new("sampling-reservation"),
+            test_source_color(),
+        )
+        .expect("actual CPU materializer");
+        let retained = match payload {
+            PreviewDecodedFramePayload::CpuRgba(frame) => std::mem::size_of_val(frame.rgba()),
+            PreviewDecodedFramePayload::CpuFloat(frame) => std::mem::size_of_val(frame.rgba()),
+            _ => panic!("CPU RGBA representation required"),
+        };
+        let mut stream = reduced_test_stream();
+        stream.width = 4;
+        stream.height = 2;
+        stream.pixel_format = pixel_format;
+        stream.bit_depth = bit_depth;
+        let directory = tempfile::tempdir().expect("source revision directory");
+        let path = directory.path().join("source.raw");
+        std::fs::write(&path, [1, 2, 3, 4]).expect("source revision bytes");
+        let source = PreviewDecodeSource::capture_probed_stream(&path, &stream)
+            .expect("proven source sampling");
+        assert_eq!(
+            source.cpu_rgba_retained_bytes_per_pixel(test_source_color()),
+            expected_bytes
+        );
+        assert_eq!(
+            source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 8,
+            retained
+        );
+    }
+}
+
+#[test]
+fn compact_cpu_yuv_420_retains_samples_and_owner_at_odd_extents() {
+    use crate::CpuYuvSampleFormat;
+    use ffmpeg::util::format::pixel::Pixel;
+    for (pixel, sample_format) in [
+        (Pixel::YUV420P, CpuYuvSampleFormat::Unorm8),
+        (Pixel::YUV420P10LE, CpuYuvSampleFormat::Unorm16Lsb10),
+        (Pixel::YUV420P12LE, CpuYuvSampleFormat::Unorm16Lsb12),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..3 {
+            decoded.data_mut(plane).fill(16 + plane as u8);
+        }
+        let luma_address = decoded.data(0).as_ptr();
+        // AVFrame owns aligned allocations beyond the visible plane slices.
+        // SAFETY: decoded owns this live AVFrame and its populated buffer refs.
+        let allocation_bytes = unsafe {
+            (*decoded.as_ptr())
+                .buf
+                .iter()
+                .filter(|buffer| !buffer.is_null())
+                .map(|buffer| (**buffer).size)
+                .sum::<usize>()
+        };
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            5,
+            3,
+            Path::new("synthetic-compact-420"),
+            test_source_color(),
+        )
+        .expect("supported 420 must not expand to RGBA");
+        let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+            panic!("expected compact planes");
+        };
+        assert_eq!(frame.luma_plane().data().as_ptr(), luma_address);
+        assert_eq!(frame.retained_bytes(), allocation_bytes);
+        let mut ring = PreviewPlaybackRing::new(2, allocation_bytes - 1);
+        assert!(!ring.put(DecodedTemporalExtent::from_duration(0, 1), frame.clone()));
+        assert_eq!(ring.reserved_bytes(), 0);
+        drop(decoded);
+        assert_eq!((frame.chroma_width, frame.chroma_height), (3, 2));
+        assert_eq!(frame.sample_format, sample_format);
+        assert_eq!(frame.luma_plane().data()[0], 16);
+        let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+            panic!("expected separate chroma planes");
+        };
+        assert_eq!(cb.data()[0], 17);
+        assert_eq!(cr.data()[0], 18);
+        assert!(cb.data().len() >= cb.bytes_per_row() as usize * 2);
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+        assert_eq!(frame.diagnostics.stage_durations.swscale_us, 0);
+    }
+}
+
+#[test]
+fn compact_cpu_yuv_semiplanar_retains_interleaved_chroma() {
+    use ffmpeg::util::format::pixel::Pixel;
+    for pixel in [Pixel::NV12, Pixel::P010LE] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 6, 4);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        decoded.data_mut(0).fill(64);
+        decoded.data_mut(1).fill(128);
+        let chroma_address = decoded.data(1).as_ptr();
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            6,
+            4,
+            Path::new("synthetic-compact-semiplanar"),
+            test_source_color(),
+        )
+        .expect("hardware download layouts must retain compact planes");
+        let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+            panic!("expected compact planes");
+        };
+        drop(decoded);
+        let CpuYuvChromaPlanes::Interleaved(chroma) = frame.chroma_planes() else {
+            panic!("NV12/P010 must retain interleaved chroma");
+        };
+        assert_eq!(chroma.data().as_ptr(), chroma_address);
+        assert_eq!(chroma.data()[0], 128);
+        assert_eq!((frame.chroma_width, frame.chroma_height), (3, 2));
+        assert_eq!(
+            frame.chroma_plane_layout(),
+            CpuYuvChromaPlaneLayout::Interleaved
+        );
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+    }
+}
+
+#[test]
+fn compact_cpu_yuv_extended_planar_layouts_retain_original_planes() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut rejected = Vec::new();
+    for (pixel, chroma_width, bytes) in [
+        (Pixel::YUV422P, 3, 1),
+        (Pixel::YUV444P, 5, 1),
+        (Pixel::YUV444P10LE, 5, 2),
+        (Pixel::YUV444P12LE, 5, 2),
+        (Pixel::YUV422P12LE, 3, 2),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel, 5, 3);
+        decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+        decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+        for plane in 0..3 {
+            for sample in decoded.data_mut(plane).chunks_exact_mut(bytes) {
+                sample.fill(0);
+                sample[0] = 0x5a;
+            }
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::H264,
+            None,
+        );
+        let result = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            5,
+            3,
+            Path::new("synthetic-planar-retention"),
+            test_source_color(),
+        );
+        let mut frame = match result {
+            Ok(PreviewDecodedFramePayload::CpuYuv(frame)) => frame,
+            other => {
+                rejected.push(format!("{pixel:?}: {other:?}"));
+                continue;
+            }
+        };
+        let physical_format = frame.surface_format();
+        if matches!(pixel, Pixel::YUV422P12LE | Pixel::YUV444P12LE) {
+            assert_eq!(frame.sample_format.bit_depth(), 12);
+            assert_eq!(
+                physical_format.descriptor().expect("planar descriptor").component_bit_depth,
+                12
+            );
+        }
+        frame.diagnostics.decoded_surface_format = DecodedVideoSurfaceFormat::Unknown;
+        assert_eq!(
+            frame.surface_format(),
+            physical_format,
+            "diagnostics cannot alter the input contract"
+        );
+        assert_eq!((frame.chroma_width, frame.chroma_height), (chroma_width, 3));
+        assert_eq!(frame.sample_format.bytes_per_component(), bytes);
+        assert_eq!(frame.luma_plane().data().as_ptr(), decoded.data(0).as_ptr());
+        let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+            panic!("planar storage must not be interleaved or expanded");
+        };
+        assert_eq!(cb.data().as_ptr(), decoded.data(1).as_ptr());
+        assert_eq!(cr.data().as_ptr(), decoded.data(2).as_ptr());
+        drop(decoded);
+        assert_eq!(
+            frame.luma_plane().data()[0],
+            0x5a,
+            "retained allocation remains live"
+        );
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+    }
+    assert!(
+        rejected.is_empty(),
+        "compact planar layouts were rejected: {rejected:?}"
+    );
+}
+
+#[test]
+fn compact_cpu_yuv_representation_is_exact_and_fail_closed() {
+    let mut decoded = ffmpeg::util::frame::video::Video::new(
+        ffmpeg::util::format::pixel::Pixel::YUV422P10LE,
+        4,
+        2,
+    );
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-yuv422p10le"),
+        test_source_color(),
+    )
+    .expect("exact YUV422P10LE representation must remain compact");
+    let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+        panic!("compact representation must not expand into an RGBA payload");
+    };
+    assert_eq!(frame.chroma_plane_layout(), CpuYuvChromaPlaneLayout::Planar);
+    let luma = frame.luma_plane();
+    assert!(luma.bytes_per_row() >= 4 * 2);
+    assert!(luma.data().len() >= luma.bytes_per_row() as usize * 2);
+    let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+        panic!("FFmpeg YUV422P10LE must retain separate Cb and Cr planes");
+    };
+    assert!(cb.bytes_per_row() >= 2 * 2);
+    assert_eq!(cb.bytes_per_row(), cr.bytes_per_row());
+    assert!(frame.retained_bytes() >= 4 * 2 * 4);
+    assert_eq!(frame.chroma_width, 2);
+    assert_eq!(frame.chroma_height, 2);
+    assert_eq!(
+        frame.diagnostics.path,
+        PreviewDecodePath::InProcessFfmpegCpuYuv
+    );
+
+    let scaled = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("synthetic-scaled-yuv422p10le"),
+        test_source_color(),
+    )
+    .expect("adaptive compact representation must materialize its requested extent");
+    let PreviewDecodedFramePayload::CpuYuv(scaled) = scaled else {
+        panic!("scaled compact representation must remain a YUV payload");
+    };
+    assert_eq!((scaled.width, scaled.height), (2, 1));
+    assert_eq!((scaled.chroma_width, scaled.chroma_height), (1, 1));
+    assert_eq!(
+        scaled.chroma_plane_layout(),
+        CpuYuvChromaPlaneLayout::Planar
+    );
+    assert!(scaled.retained_bytes() >= 2 * 4);
+    assert_eq!(scaled.diagnostics.stage_durations.rgba_copy_us, 0);
+
+    let mismatched =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 4, 2);
+    let error = materialize_decoded_frame(
+        &mismatched,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-yuv-mismatch"),
+        test_source_color(),
+    )
+    .expect_err("compact representation must reject a decoder layout mismatch");
+    assert!(error.to_string().contains("expected supported compact YUV"));
+}
+
+#[test]
+fn interlaced_decoded_frame_fails_before_native_or_cpu_materialization() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
+    // SAFETY: the test owns this AVFrame exclusively and only sets FFmpeg's public scan flag.
+    unsafe {
+        (*decoded.as_mut_ptr()).flags |= ffmpeg::ffi::AV_FRAME_FLAG_INTERLACED;
+        (*decoded.as_mut_ptr()).interlaced_frame = 1;
+    }
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let error = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        2,
+        Path::new("synthetic-interlaced"),
+        test_source_color(),
+    )
+    .expect_err("interlaced pixels must not bypass progressive-only admission");
+
+    assert!(error.to_string().contains("interlaced"));
+}
+
+#[test]
+fn planar_float_materialization_preserves_bits_and_interpretation_for_every_layout() {
+    use ffmpeg::util::format::pixel::Pixel;
+
+    for (pixel_format, little_endian, has_alpha) in [
+        (Pixel::GBRPF32LE, true, false),
+        (Pixel::GBRPF32BE, false, false),
+        (Pixel::GBRAPF32LE, true, true),
+        (Pixel::GBRAPF32BE, false, true),
+    ] {
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel_format, 2, 2);
+        let mut pixels = [
+            [-0.25_f32, 0.000_000_1, 4.0, 0.123_456_7],
+            [0.123_456_7, -0.0, 65_536.5, 0.75],
+            [1.000_001, 0.3, -2.0, 0.0],
+            [0.4, 0.5, 0.6, 1.0],
+        ];
+        if !has_alpha {
+            for pixel in &mut pixels {
+                pixel[3] = 1.0;
+            }
+        }
+        for (plane, channel) in [(0, 1), (1, 2), (2, 0), (3, 3)] {
+            if plane == 3 && !has_alpha {
+                continue;
+            }
+            let stride = decoded.stride(plane);
+            for (index, pixel) in pixels.iter().enumerate() {
+                let start = (index / 2) * stride + (index % 2) * 4;
+                let bytes = if little_endian {
+                    pixel[channel].to_le_bytes()
+                } else {
+                    pixel[channel].to_be_bytes()
+                };
+                decoded.data_mut(plane)[start..start + 4].copy_from_slice(&bytes);
+            }
+        }
+        for (source_color, encoding) in [
+            (
+                test_linear_source_color(),
+                DecodedRgbaEncoding::SourceLinearRgb,
+            ),
+            (test_source_color(), DecodedRgbaEncoding::SourceEncodedRgb),
+            (
+                PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull),
+                DecodedRgbaEncoding::DataTexture,
+            ),
+        ] {
+            let mut plan = PreviewHardwareDecodePlan::resolve(
+                PreviewHardwareDecodeRequest::Auto,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                PreviewDecodeBackend::Software,
+                ffmpeg::codec::Id::EXR,
+                None,
+            );
+            let mut scaler = None;
+            let payload = materialize_decoded_frame(
+                &decoded,
+                PreviewDecodeRepresentation::NativeCpu,
+                &mut plan,
+                &mut scaler,
+                &mut None,
+                &mut None,
+                2,
+                2,
+                Path::new("synthetic-float.exr"),
+                source_color,
+            )
+            .expect("every planar-f32 interpretation must avoid integer conversion");
+            let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+                panic!("planar-f32 materialization must retain float storage");
+            };
+            assert!(
+                scaler.is_none(),
+                "float samples must bypass integer swscale"
+            );
+            assert_eq!(frame.color_contract.source, source_color);
+            assert_eq!(frame.color_contract.encoding, encoding);
+            assert_eq!(frame.color_contract.applied_matrix, DecodedVideoMatrix::Rgb);
+            assert_eq!(frame.color_contract.applied_range, DecodedVideoRange::Full);
+            assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 32);
+            assert_eq!(
+                frame.diagnostics.decoded_surface_format,
+                DecodedVideoSurfaceFormat::Other,
+                "planar source must not claim a packed RGBA surface"
+            );
+            let actual: Vec<_> = frame.rgba().iter().map(|value| value.to_bits()).collect();
+            let expected: Vec<_> =
+                pixels.as_flattened().iter().map(|value| value.to_bits()).collect();
+            assert_eq!(actual, expected, "{pixel_format:?} {encoding:?}");
+        }
+    }
+}
+
+#[test]
+fn scene_linear_integer_decode_still_refuses_implicit_quantization() {
+    let decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA64LE, 2, 1);
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::EXR,
+        None,
+    );
+    let mut scaler = None;
+    let error = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut scaler,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("unexpected-integer-linear.exr"),
+        test_linear_source_color(),
+    )
+    .expect_err("scene-linear source still requires an explicitly supported float layout");
+    assert!(error.to_string().contains("unsupported non-planar-f32"));
+    assert!(scaler.is_none());
 }
 
 #[test]
@@ -2229,6 +3018,7 @@ fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
     );
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut None,
         &mut None,
@@ -2260,6 +3050,61 @@ fn float_preview_resize_preserves_extended_range() {
 }
 
 #[test]
+fn preferred_native_software_fallback_keeps_supported_yuv_compact() {
+    let mut decoded = ffmpeg::util::frame::video::Video::new(
+        ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
+        4,
+        2,
+    );
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::HEVC,
+        None,
+    );
+    plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-native-fallback"),
+        test_source_color(),
+    )
+    .expect("preferred native permits a CPU fallback");
+    assert!(
+        matches!(payload, PreviewDecodedFramePayload::CpuYuv(_)),
+        "GPU consumers must not pay for an unnecessary CPU float expansion"
+    );
+    assert!(!plan.probe.hardware_decode_active);
+    assert!(!plan.probe.zero_copy_active);
+    plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
+    assert!(
+        materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::NativeSurface,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            4,
+            2,
+            Path::new("synthetic-native-required"),
+            test_source_color(),
+        )
+        .is_err(),
+        "required native must never pass with compact CPU planes"
+    );
+}
+
+#[test]
 fn gpu_required_software_frame_fails_closed() {
     let decoded =
         ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
@@ -2273,6 +3118,7 @@ fn gpu_required_software_frame_fails_closed() {
     plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
     let error = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -2300,6 +3146,7 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
     plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -2313,7 +3160,9 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
 
     let frame = match &payload {
         PreviewDecodedFramePayload::NativeGpu(frame) => frame,
-        PreviewDecodedFramePayload::CpuRgba(_) | PreviewDecodedFramePayload::CpuFloat(_) => {
+        PreviewDecodedFramePayload::CpuRgba(_)
+        | PreviewDecodedFramePayload::CpuFloat(_)
+        | PreviewDecodedFramePayload::CpuYuv(_) => {
             panic!("explicit D3D11 NV12 frame must not transfer to CPU")
         }
     };
@@ -2345,6 +3194,7 @@ fn explicit_d3d12_p010_frame_materializes_native_with_decode_fence() {
     plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -2542,12 +3392,12 @@ fn format_interrupt_callback_uses_only_the_active_request_probe() {
 }
 
 #[test]
-fn external_decode_process_is_reaped_when_cancellation_is_observed() {
-    let mut command = Command::new("rustc");
+fn external_decode_precancel_rejects_before_process_creation() {
+    let mut command = Command::new("mondrian-external-decode-must-not-spawn-missing-program");
     command.arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let outcome = run_external_decode_command_cancellable(&mut command, 4 * 1024, &|| true)
-        .expect("cancellation should reap the external process");
+        .expect("pre-cancellation must finish without starting a process");
 
     assert!(outcome.is_none());
 }
@@ -2593,6 +3443,138 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
 }
 
 #[test]
+fn playback_sessions_preserve_source_locality_across_composited_sources() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("base.mp4");
+    let overlay = root.path().join("overlay.mp4");
+    std::fs::write(&base, FIXTURE).expect("write base H.264 fixture");
+    std::fs::write(&overlay, FIXTURE).expect("write overlay H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+
+    for (index, (path, frame_index)) in
+        [(&base, 5_i64), (&overlay, 5_i64), (&base, 6_i64)].into_iter().enumerate()
+    {
+        let request = covering_decode_request(
+            path,
+            TimelineTime::new(frame_index, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
+        )
+        .with_max_size(Some(64), Some(64))
+        .with_fingerprint(MediaFileFingerprint::capture(path));
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("source-local playback frame must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("software playback fixture must return an RGBA frame");
+        };
+        let expected = if index < 2 {
+            PreviewDecodeSessionDisposition::Opened
+        } else if frame.diagnostics.path == PreviewDecodePath::PlaybackSessionRingHit {
+            PreviewDecodeSessionDisposition::BypassedCache
+        } else {
+            PreviewDecodeSessionDisposition::Reused
+        };
+        assert_eq!(frame.diagnostics.session_disposition, expected);
+    }
+
+    assert_eq!(context.resident_session_count(), 2);
+    context.clear();
+    assert_eq!(context.resident_session_count(), 0);
+}
+
+#[test]
+#[ignore = "requires real HEVC and still-image fixtures in MONDRIAN_SESSION_VIDEO_FIXTURE and MONDRIAN_SESSION_STILL_FIXTURE"]
+fn playback_video_still_video_retains_separate_sessions_and_clears_both() {
+    let video = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_SESSION_VIDEO_FIXTURE").expect("explicit real video fixture"),
+    );
+    let still = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_SESSION_STILL_FIXTURE")
+            .expect("explicit real still-image fixture"),
+    );
+    assert!(
+        video.is_file() && still.is_file(),
+        "both fixtures must exist before decoding"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut context = PreviewDecodeSessionContext::new();
+    for (index, path, is_still) in [(0, &video, false), (1, &still, true), (2, &video, false)] {
+        let source = PreviewDecodeSource::from_frozen_cpu_stream(
+            path.as_path(),
+            MediaFileFingerprint::capture(path),
+            0,
+            mondrian_core::Resolution {
+                width: 3840,
+                height: if is_still { 3000 } else { 2160 },
+            },
+        )
+        .expect("admit fixture identity");
+        let source = if is_still {
+            source.with_still_image_source()
+        } else {
+            source
+        };
+        let key = super::PreviewDecodeKey::new(
+            source,
+            SourceSampleTarget::covering(if index == 2 {
+                TimelineTime::new(1, 24).expect("next 24 fps source frame")
+            } else {
+                TimelineTime::ZERO
+            }),
+            PreviewDecodeRepresentation::NativeCpu,
+            PreviewSourceColorContract::automatic(
+                if is_still {
+                    ColorSpace::Srgb
+                } else {
+                    ColorSpace::Rec2100Pq
+                },
+                if is_still {
+                    DecodedVideoRange::Full
+                } else {
+                    DecodedVideoRange::Limited
+                },
+            ),
+        )
+        .expect("fixture decode key");
+        let request = PreviewDecodeRequest::from_key(&key, PreviewDecodeAccessMode::PlaybackCursor)
+            .with_max_size(Some(64), Some(64));
+        let outcome = context
+            .decode_cancellable(request, move || std::time::Instant::now() >= deadline)
+            .expect("decode within the single original deadline");
+        let diagnostics = match &outcome {
+            PreviewDecodeOutcome::Frame(frame) => &frame.diagnostics,
+            PreviewDecodeOutcome::FloatFrame(frame) => &frame.diagnostics,
+            other => panic!("CPU fixture must produce actual pixels: {other:?}"),
+        };
+        assert_eq!(
+            diagnostics.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+        assert_eq!(
+            diagnostics.session_disposition,
+            if index < 2 {
+                PreviewDecodeSessionDisposition::Opened
+            } else if diagnostics.path == PreviewDecodePath::PlaybackSessionRingHit {
+                PreviewDecodeSessionDisposition::BypassedCache
+            } else {
+                PreviewDecodeSessionDisposition::Reused
+            }
+        );
+        assert_eq!(
+            context.resident_session_count(),
+            if index == 0 { 1 } else { 2 }
+        );
+        assert!(std::time::Instant::now() < deadline);
+        drop(outcome);
+    }
+    context.clear();
+    assert_eq!(context.resident_session_count(), 0);
+    assert!(context.native_outputs_released());
+}
+
+#[test]
 fn playback_session_reuses_decoder_across_adaptive_output_geometry() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
     let root = tempfile::tempdir().expect("tempdir");
@@ -2632,6 +3614,50 @@ fn playback_session_reuses_decoder_across_adaptive_output_geometry() {
 }
 
 #[test]
+fn reverse_playback_replays_the_bounded_decoded_gop_tail_without_reseeking() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-reverse-window.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+
+    for (request_index, frame_index) in [12, 11, 10].into_iter().enumerate() {
+        let request = covering_decode_request(
+            path.as_path(),
+            TimelineTime::new(frame_index, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
+        )
+        .with_max_size(Some(64), Some(64))
+        .with_fingerprint(fingerprint)
+        .with_adaptive_hints(PreviewDecodeAdaptiveHints {
+            playback_direction: crate::preview::PreviewPlaybackDirection::Reverse,
+            ..PreviewDecodeAdaptiveHints::default()
+        });
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("reverse frame {frame_index} must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("software reverse fixture must return an RGBA frame");
+        };
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
+        if request_index > 0 {
+            assert!(!frame.diagnostics.seek_performed);
+            assert_eq!(
+                frame.diagnostics.decoded_frame_count, 0,
+                "adjacent reverse frames must replay the retained GOP tail"
+            );
+            assert_eq!(
+                frame.diagnostics.session_disposition,
+                PreviewDecodeSessionDisposition::Reused
+            );
+        }
+    }
+}
+
+#[test]
 fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
     let root = tempfile::tempdir().expect("tempdir");
@@ -2656,8 +3682,8 @@ fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU exact fixture must return an RGBA frame");
         };
-        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 512));
-        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 1_024));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
         assert!(!frame.diagnostics.temporal_approximation);
         assert_eq!(
             frame.diagnostics.session_disposition,
@@ -2764,6 +3790,238 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     assert_eq!(evidence.active_sessions, 0);
     assert_eq!(evidence.failure_terminations, 0);
     assert_eq!(evidence.forced_close_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("family-retirement-h264.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic fixture");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for (mode, frame_index) in [
+        (PreviewDecodeAccessMode::RandomAccessStillFrame, 8),
+        (PreviewDecodeAccessMode::PlaybackCursor, 2),
+    ] {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(frame_index, 25).expect("exact time"),
+            mode,
+            test_source_color(),
+        )
+        .with_fingerprint(fingerprint)
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return an RGBA frame");
+        };
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        drop(frame);
+        if mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
+            context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+            assert_eq!(context.resident_session_count(), 0, "old codec must retire");
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(
+        evidence.active_sessions, 0,
+        "full clear consumes every child"
+    );
+    assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
+    assert_eq!(evidence.failure_terminations, 0);
+    assert_eq!(
+        evidence.session_launches, 1,
+        "family transition must reuse the healthy source without retaining its old codec"
+    );
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("retired-revision.mp4");
+    std::fs::write(&path, FIXTURE).expect("write fixture");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    let original = MediaFileFingerprint::capture(&path);
+    for revision in 0..2 {
+        if revision == 1 {
+            // Replace the inode as well as length: the retired child still owns
+            // the original open file, so reuse would serve a stale revision.
+            let replacement = root.path().join("replacement.mp4");
+            let mut bytes = FIXTURE.to_vec();
+            bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
+            std::fs::write(&replacement, bytes).expect("write replacement");
+            std::fs::rename(&replacement, &path).expect("replace source");
+            assert_ne!(MediaFileFingerprint::capture(&path), original);
+        }
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode revision");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return a frame");
+        };
+        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+        drop(frame);
+        context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        assert_eq!(context.resident_session_count(), 0);
+        let evidence = observer.snapshot().isolated_demux;
+        assert_eq!(evidence.session_launches, revision + 1);
+        assert_eq!(evidence.active_sessions, 1);
+        assert_eq!(evidence.reaped_sessions(), revision);
+    }
+    // No live codecs remain here; clear must still consume the idle child.
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(evidence.clean_closes, 2);
+    assert_eq!(evidence.failure_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_cancellation_reaps_before_retry() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("retired-cancel.mp4");
+    std::fs::write(&path, FIXTURE).expect("write fixture");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for (attempt, mode) in [
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::PlaybackCursor,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            mode,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_video_stream_index(0)
+        .with_max_size(Some(64), Some(64));
+        let cancellation_observer = observer.clone();
+        let outcome = context
+            .decode_cancellable(request, move || {
+                attempt == 1
+                    && cancellation_observer.snapshot().stage == PreviewDecodeExecutionStage::Seek
+            })
+            .expect("decode or cooperative cancellation");
+        if attempt == 1 {
+            let PreviewDecodeOutcome::Canceled(cancellation) = outcome else {
+                panic!("reused source seek must cancel");
+            };
+            assert_eq!(
+                cancellation.source,
+                PreviewDecodeCancellationSource::IsolatedDemuxTermination
+            );
+            let evidence = observer.snapshot().isolated_demux;
+            assert_eq!(evidence.session_launches, 1, "cancel the retained process");
+            assert_eq!(evidence.active_sessions, 0);
+            assert_eq!(evidence.reaped_sessions(), 1);
+        } else {
+            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+                panic!("initial decode and retry must return exact frames");
+            };
+            assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+            drop(frame);
+        }
+        if attempt == 0 {
+            context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(
+        evidence.session_launches, 2,
+        "retry requires a fresh process"
+    );
+    assert_eq!(evidence.cancellation_terminations, 1);
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(evidence.failure_terminations, 0);
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_retired_demux_sources_obey_reduced_worker_residency() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    for index in 0..7 {
+        if index == 4 {
+            context.worker_resources().reconfigure_session_residency(
+                crate::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(1, 1),
+            );
+        }
+        let path = root.path().join(format!("source-{index}.mp4"));
+        std::fs::write(&path, FIXTURE).expect("write distinct source");
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(8, 25).expect("exact time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        )
+        .with_fingerprint(MediaFileFingerprint::capture(&path))
+        .with_max_size(Some(64), Some(64));
+        let outcome = context.decode_cancellable(request, || false).expect("decode");
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("CPU fixture must return a frame");
+        };
+        drop(frame);
+        if index >= 4 {
+            // One Playback slot, one Interactive slot, and one CPU-Still slot.
+            // Count active plus retired children before retiring this codec.
+            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+        }
+        context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
+        assert_eq!(context.resident_session_count(), 0);
+        if index >= 4 {
+            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+        }
+    }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.session_launches, 7);
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.reaped_sessions(), 7);
+    assert_eq!(evidence.clean_closes, 7);
+    assert_eq!(evidence.failure_terminations, 0);
 }
 
 #[test]
@@ -3125,6 +4383,7 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
     let diagnostics = match recovered {
         PreviewDecodeOutcome::Frame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::FloatFrame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::CpuYuvFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::NativeGpuFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::Canceled(cancellation) => {
             panic!("recovery decode unexpectedly canceled: {cancellation:?}")
@@ -3211,6 +4470,9 @@ fn preview_decode_fixture_perf_smoke() {
         PreviewDecodeOutcome::FloatFrame(_) => {
             panic!("Rec.709 still-frame perf fixture unexpectedly decoded as float")
         }
+        PreviewDecodeOutcome::CpuYuvFrame(_) => {
+            panic!("still-frame perf decode requires CPU RGBA output")
+        }
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let report = PreviewDecodePerfReport {
@@ -3238,6 +4500,96 @@ fn preview_decode_fixture_perf_smoke() {
 }
 
 #[test]
+#[ignore = "requires a three-second 25 fps HEVC Main10 fixture with reordered open GOPs; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
+fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE")
+            .expect("explicit synthetic HEVC fixture is required"),
+    );
+    clear_thread_local_preview_decode_session();
+    // Both sides of the 24-frame GOP boundaries, sampled by a 24 fps program.
+    // Descending requests also prove that the reused owner really seeks back.
+    for frame_index in (0..70).chain((0..70).rev()) {
+        let request = covering_decode_request(
+            &path,
+            TimelineTime::new(frame_index, 24).expect("exact program sample"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        );
+        let outcome = decode_preview_frame_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("program frame {frame_index}: {error}"));
+        let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
+            panic!("Main10 software decode must retain the production float representation");
+        };
+        let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
+        let requested = frame.diagnostics.requested_pts.expect("requested stream coordinate");
+        assert!(
+            selection.selected_pts <= requested,
+            "program frame {frame_index}"
+        );
+        assert!(
+            requested < selection.selected_pts + selection.selected_duration_pts,
+            "program frame {frame_index}"
+        );
+    }
+    clear_thread_local_preview_decode_session();
+}
+
+#[test]
+#[ignore = "requires a tagged 25i interlaced fixture and packaged demux worker"]
+fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_INTERLACED_DECODE_FIXTURE")
+            .expect("explicit interlaced fixture is required"),
+    );
+    let demux_worker = PathBuf::from(
+        std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+            .expect("explicit packaged demux worker is required"),
+    );
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    for field_processing in [
+        super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+            dominance: mondrian_core::PictureFieldDominance::TopFirst,
+        },
+        super::PreviewSourceFieldProcessing::Automatic,
+    ] {
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(demux_worker.clone());
+        let mut decoder = bootstrap.build();
+        for field_index in 0..16 {
+            let source_time = TimelineTime::new(field_index, 50).expect("exact 25i field time");
+            let mut request = covering_decode_request(
+                &path,
+                source_time,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            )
+            .with_fingerprint(fingerprint)
+            .with_field_processing(field_processing);
+            request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+            let outcome = decoder.decode_cancellable(request, || false).unwrap_or_else(|error| {
+                panic!("{field_processing:?} field {field_index}: {error}")
+            });
+            let PreviewDecodeOutcome::CpuYuvFrame(frame) = outcome else {
+                panic!("interlaced software decode must retain compact YUV");
+            };
+            let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
+            assert_eq!(selection.requested_pts, field_index);
+            assert_eq!(selection.selected_pts, field_index);
+            assert_eq!(selection.selected_duration_pts, 1);
+            assert!(!selection.temporal_approximation);
+        }
+
+        decoder.clear();
+        let demux = observer.snapshot().isolated_demux;
+        assert!(
+            demux.completed_reads > 0 && demux.clean_closes > 0 && demux.active_sessions == 0,
+            "{field_processing:?} did not close the isolated demux owner: {demux:?}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "manual sequential decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
 fn preview_decode_fixture_sequence_perf_smoke() {
     let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from) else {
@@ -3250,9 +4602,16 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let frame_rate = std::env::var("MONDRIAN_PREVIEW_DECODE_FRAME_RATE")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
+    let frame_rate_spec =
+        std::env::var("MONDRIAN_PREVIEW_DECODE_FRAME_RATE").unwrap_or_else(|_| "25/1".to_owned());
+    let exact_frame_rate = frame_rate_spec.split_once('/').and_then(|(numerator, denominator)| {
+        let numerator = numerator.parse::<i64>().ok()?;
+        let denominator = denominator.parse::<i64>().ok()?;
+        (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+    });
+    let frame_rate = exact_frame_rate
+        .map(|(numerator, denominator)| numerator as f64 / denominator as f64)
+        .or_else(|| frame_rate_spec.parse::<f64>().ok())
         .unwrap_or(25.0)
         .max(1.0);
     let frame_count = std::env::var("MONDRIAN_PREVIEW_DECODE_SEQUENCE_FRAMES")
@@ -3269,8 +4628,29 @@ fn preview_decode_fixture_sequence_perf_smoke() {
     let p95_budget_us = std::env::var("MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
+    let compact_yuv = std::env::var("MONDRIAN_PREVIEW_DECODE_COMPACT_YUV")
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let demux_worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH").map(PathBuf::from);
 
     clear_thread_local_preview_decode_session();
+    let (mut context, demux_mode, demux_observer) = if let Some(worker) = demux_worker {
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+        (bootstrap.build(), "isolated_process", Some(observer))
+    } else {
+        (PreviewDecodeSessionContext::new(), "in_process", None)
+    };
+    let representation = if compact_yuv {
+        PreviewDecodeRepresentation::CompactCpuYuv
+    } else {
+        PreviewDecodeRepresentation::NativeCpu
+    };
+    let representation_name = if compact_yuv {
+        "compact_cpu_yuv"
+    } else {
+        "native_cpu"
+    };
     let access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     let fingerprint = MediaFileFingerprint::capture(&path);
     let mut frames = Vec::with_capacity(frame_count);
@@ -3281,56 +4661,80 @@ fn preview_decode_fixture_sequence_perf_smoke() {
     let mut uncached_max_us = 0u64;
     let mut total_stage_durations = PreviewDecodeStageDurations::default();
     let mut max_frame_stage_durations = PreviewDecodeStageDurations::default();
+    let start_time = TimelineTime::from_f64_quantized(start_secs, 1_000_000)
+        .expect("quantized diagnostic start time");
     let started = Instant::now();
     for index in 0..frame_count {
-        let timestamp_secs = start_secs + index as f64 / frame_rate;
+        let source_time = if let Some((numerator, denominator)) = exact_frame_rate {
+            let frame_numerator = i64::try_from(index)
+                .expect("bounded diagnostic frame index")
+                .checked_mul(denominator)
+                .expect("bounded diagnostic frame offset");
+            start_time
+                .checked_add(
+                    TimelineTime::new(frame_numerator, numerator)
+                        .expect("exact diagnostic frame offset"),
+                )
+                .expect("bounded diagnostic source time")
+        } else {
+            TimelineTime::from_f64_quantized(start_secs + index as f64 / frame_rate, 1_000_000)
+                .expect("quantized diagnostic source time")
+        };
+        let timestamp_secs = source_time.to_f64();
         let frame_started = Instant::now();
-        let request = covering_decode_request(
+        let mut request = covering_decode_request(
             path.as_path(),
-            TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
-                .expect("quantized diagnostic source time"),
+            source_time,
             PreviewDecodeAccessMode::PlaybackCursor,
             test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
         )
         .with_max_size(max_width, max_height)
         .with_fingerprint(fingerprint);
-        let frame = match decode_preview_frame_cancellable(request, || false)
+        request.representation = representation;
+        let (decoded_width, decoded_height, diagnostics) = match context
+            .decode_cancellable(request, || false)
             .expect("decode preview fixture frame")
         {
-            PreviewDecodeOutcome::Frame(frame) => frame,
+            PreviewDecodeOutcome::Frame(frame) => (frame.width, frame.height, frame.diagnostics),
+            PreviewDecodeOutcome::FloatFrame(frame) => {
+                (frame.width, frame.height, frame.diagnostics)
+            }
             PreviewDecodeOutcome::Canceled(_) => {
                 panic!("playback sequence perf decode canceled")
             }
             PreviewDecodeOutcome::NativeGpuFrame(_) => {
                 panic!("playback sequence perf decode requires CPU RGBA output")
             }
-            PreviewDecodeOutcome::FloatFrame(_) => {
-                panic!("Rec.709 playback perf fixture unexpectedly decoded as float")
+            PreviewDecodeOutcome::CpuYuvFrame(frame) if compact_yuv => {
+                (frame.width, frame.height, frame.diagnostics)
+            }
+            PreviewDecodeOutcome::CpuYuvFrame(_) => {
+                panic!("native CPU playback perf decode returned compact GPU input")
             }
         };
         let elapsed_us = duration_us(frame_started.elapsed());
         total_us = total_us.saturating_add(elapsed_us);
         max_us = max_us.max(elapsed_us);
-        if !frame.diagnostics.cache_hit {
+        if !diagnostics.cache_hit {
             uncached_total_us = uncached_total_us.saturating_add(elapsed_us);
             uncached_frame_count = uncached_frame_count.saturating_add(1);
             uncached_max_us = uncached_max_us.max(elapsed_us);
         }
-        total_stage_durations.accumulate(frame.diagnostics.stage_durations);
+        total_stage_durations.accumulate(diagnostics.stage_durations);
         max_frame_stage_durations =
-            max_stage_durations(max_frame_stage_durations, frame.diagnostics.stage_durations);
+            max_stage_durations(max_frame_stage_durations, diagnostics.stage_durations);
         frames.push(PreviewDecodeSequenceFrameReport {
             index,
             timestamp_secs,
             elapsed_us,
-            decoded_width: frame.width,
-            decoded_height: frame.height,
-            cache_hit: frame.diagnostics.cache_hit,
-            seek_performed: frame.diagnostics.seek_performed,
-            decoded_frame_count: frame.diagnostics.decoded_frame_count,
-            threading_kind: frame.diagnostics.threading_kind.as_str(),
-            threading_count: frame.diagnostics.threading_count,
-            stage_durations: frame.diagnostics.stage_durations,
+            decoded_width,
+            decoded_height,
+            cache_hit: diagnostics.cache_hit,
+            seek_performed: diagnostics.seek_performed,
+            decoded_frame_count: diagnostics.decoded_frame_count,
+            threading_kind: diagnostics.threading_kind.as_str(),
+            threading_count: diagnostics.threading_count,
+            stage_durations: diagnostics.stage_durations,
         });
     }
     let wall_us = duration_us(started.elapsed());
@@ -3339,11 +4743,17 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         frames.iter().filter(|frame| !frame.cache_hit).map(|frame| frame.elapsed_us),
         95,
     );
+    context.clear();
+    let isolated_demux = demux_observer.map(|observer| observer.snapshot().isolated_demux);
     let report = PreviewDecodeSequencePerfReport {
         path: path.display().to_string(),
+        demux_mode,
+        representation: representation_name,
         access_mode: access_mode.as_str(),
         start_secs,
         frame_rate,
+        frame_rate_numerator: exact_frame_rate.map(|(numerator, _)| numerator),
+        frame_rate_denominator: exact_frame_rate.map(|(_, denominator)| denominator),
         frame_count,
         max_width,
         max_height,
@@ -3359,12 +4769,15 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         p95_budget_us,
         total_stage_durations,
         max_frame_stage_durations,
+        isolated_demux,
         frames,
     };
     let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
     eprintln!(
-        "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={}",
+        "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" demux_mode={} representation={} access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={}",
         report.path,
+        report.demux_mode,
+        report.representation,
         report.access_mode,
         report.frame_count,
         report.avg_us,
@@ -3451,9 +4864,13 @@ struct PreviewDecodePerfReport {
 #[derive(Debug, Serialize)]
 struct PreviewDecodeSequencePerfReport {
     path: String,
+    demux_mode: &'static str,
+    representation: &'static str,
     access_mode: &'static str,
     start_secs: f64,
     frame_rate: f64,
+    frame_rate_numerator: Option<i64>,
+    frame_rate_denominator: Option<i64>,
     frame_count: usize,
     max_width: Option<u32>,
     max_height: Option<u32>,
@@ -3469,6 +4886,7 @@ struct PreviewDecodeSequencePerfReport {
     p95_budget_us: Option<u64>,
     total_stage_durations: PreviewDecodeStageDurations,
     max_frame_stage_durations: PreviewDecodeStageDurations,
+    isolated_demux: Option<PreviewIsolatedDemuxExecutionEvidence>,
     frames: Vec<PreviewDecodeSequenceFrameReport>,
 }
 
@@ -3496,6 +4914,7 @@ fn reduced_test_stream() -> crate::info::VideoStreamInfo {
         codec_profile: VideoCodecProfile::H264Main,
         width: 64,
         height: 64,
+        picture: mondrian_core::PictureStreamMetadata::default(),
         frame_rate: Rational::new(25, 1),
         frame_rate_proven: true,
         pixel_format: PixelFormat::Yuv420p,
@@ -3505,6 +4924,7 @@ fn reduced_test_stream() -> crate::info::VideoStreamInfo {
         color_metadata: None,
         color_metadata_hints: Vec::new(),
         hdr_metadata: Vec::new(),
+        camera_raw: None,
         bit_depth: 8,
         has_alpha: false,
         avg_bitrate: 1,
@@ -3617,6 +5037,15 @@ fn full_and_reduced_representations_decode_independently_from_the_same_source() 
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("representation {index} must return an RGBA frame");
         };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            if index == 0 {
+                PreviewDecodeSessionDisposition::Opened
+            } else {
+                PreviewDecodeSessionDisposition::Reused
+            },
+            "materialization representation changes must not reopen the compressed-stream decoder"
+        );
         assert_eq!(
             (frame.width, frame.height),
             expected,

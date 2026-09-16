@@ -163,9 +163,9 @@ impl DeclaredViewerLayerCounts {
 
     fn record_source(&mut self, source: &ViewerGpuSourceLayer) {
         match source {
-            ViewerGpuSourceLayer::Media { gpu_source, native_source, .. } => {
+            ViewerGpuSourceLayer::Media { gpu_source, native_source, cpu_yuv_source, .. } => {
                 self.media_layers = self.media_layers.saturating_add(1);
-                if gpu_source.is_some() {
+                if gpu_source.is_some() || cpu_yuv_source.is_some() {
                     self.gpu_input_eligible_layers =
                         self.gpu_input_eligible_layers.saturating_add(1);
                 }

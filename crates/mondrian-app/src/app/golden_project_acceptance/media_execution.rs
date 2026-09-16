@@ -52,6 +52,7 @@ pub(super) fn decode_media_with_preference(
         asset,
         color_space_override: request.color_space_override,
         alpha_interpretation: request.alpha_interpretation,
+        picture_overrides: request.picture_overrides,
         source_sample: request.source_sample,
         input_color: &request.input_color,
         prefer_proxy,
@@ -114,6 +115,9 @@ pub(super) fn source_rgba(
     let source = frame.gpu_source().context("decoded media did not retain a CPU source frame")?;
     match source.source.as_ref() {
         CpuSourceColorFrame::EncodedRgba8(frame) => Ok(frame.rgba().to_vec()),
+        CpuSourceColorFrame::EncodedFloat(_) => {
+            bail!("8-bit color fixture unexpectedly decoded as encoded float")
+        }
         CpuSourceColorFrame::LinearFloat(_) => bail!("color fixture unexpectedly decoded as float"),
     }
 }

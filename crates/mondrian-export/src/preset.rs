@@ -3,14 +3,18 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::{
-    AudioSourceComponentId, FramePosition, FrameRounding, Rational, TimelineTime,
+    AudioSourceComponentId, FramePosition, FrameRounding, Rational, SignalLegalizer, TimelineTime,
     TimelineTimeError, TimelineTimeRange,
 };
-use mondrian_media::{AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic};
+use mondrian_media::{
+    AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic, VideoStreamInfo,
+};
 use mondrian_timeline::sequence::{DeliveryBitDepth, Sequence, VideoRange};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use crate::video_encoding::VideoCodingStructure;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
@@ -65,6 +69,15 @@ pub enum ExportChromaSampling {
     Yuv444,
     /// Packed RGB representation, currently used by GIF delivery.
     Rgb,
+}
+
+/// Temporal sampling used when delivery cadence differs from the Sequence grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFrameSampling {
+    /// Hold the covering Sequence frame for each output-frame start time.
+    #[default]
+    FrameHold,
 }
 
 /// Concrete encoded video signal choices independent from creative color intent.
@@ -153,6 +166,50 @@ impl ProResProfile {
     }
 }
 
+/// Avid DNxHR profile variants qualified against the product FFmpeg Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnxHrProfile {
+    /// Low-bandwidth 8-bit 4:2:2 editorial proxy.
+    Lb,
+    /// Standard-quality 8-bit 4:2:2 intermediate.
+    Sq,
+    /// High-quality 8-bit 4:2:2 intermediate.
+    Hq,
+    /// High-quality 10-bit 4:2:2 intermediate.
+    Hqx,
+    /// High-quality 10-bit 4:4:4 RGB intermediate.
+    FourFourFour,
+}
+
+/// Panasonic AVC-Intra classes with an exact progressive HD contract.
+///
+/// Class 50 is intentionally absent: its 1440x1080 anamorphic representation
+/// requires a preset-owned sample-aspect-ratio override that the current
+/// Program Output model does not expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvcIntraClass {
+    /// AVC-Intra Class 100, High 4:2:2 Intra, 10-bit.
+    Class100,
+    /// AVC-Intra Class 200, High 4:2:2 Intra, 10-bit.
+    Class200,
+}
+
+/// Exact uncompressed video representations qualified in a MOV container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UncompressedVideoFormat {
+    /// Packed UYVY 8-bit 4:2:2 (`2vuy`).
+    Yuv422Eight,
+    /// Packed v210 10-bit 4:2:2.
+    Yuv422Ten,
+    /// Packed 8-bit RGB (`raw `).
+    RgbEight,
+    /// Packed r210 10-bit RGB.
+    RgbTen,
+}
+
 /// Single-pass quality control with an optional, properly bounded VBV ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoRateControl {
@@ -216,6 +273,21 @@ pub enum VideoCodecConfig {
         /// Exact encoder profile.
         profile: ProResProfile,
     },
+    /// Avid DNxHR encoding with an exact profile-owned signal contract.
+    DnxHr {
+        /// Exact DNxHR profile.
+        profile: DnxHrProfile,
+    },
+    /// AVC-Intra encoding through libx264's explicit class mode.
+    AvcIntra {
+        /// Exact AVC-Intra class.
+        class: AvcIntraClass,
+    },
+    /// Uncompressed RGB or YUV essence with an exact packed representation.
+    Uncompressed {
+        /// Exact uncompressed representation.
+        format: UncompressedVideoFormat,
+    },
     /// Palette GIF encoding.
     Gif {
         /// Maximum palette entries.
@@ -235,6 +307,126 @@ pub enum AudioCodecConfig {
     Pcm { bit_depth: u8 },
     /// MP3 encoding at the requested bitrate in kilobits per second.
     Mp3 { bitrate_kbps: u32 },
+}
+
+/// One encoded media-file output contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncodedMediaOutput {
+    /// Mux/container family.
+    pub container: Container,
+    /// Encoded video essence.
+    pub video: VideoCodecConfig,
+    /// Encoded audio essence.
+    pub audio: AudioCodecConfig,
+    /// Codec-family picture structure.
+    pub video_coding: VideoCodingStructure,
+}
+
+/// Still-image representation shared by every frame in an image sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSequenceFormat {
+    /// Lossless 8-bit RGBA PNG.
+    Png8,
+    /// Lossless 16-bit RGB/RGBA PNG.
+    Png16,
+    /// OpenEXR with IEEE-754 binary16 RGB/RGBA channels.
+    OpenExrHalf,
+    /// OpenEXR with IEEE-754 binary32 RGB/RGBA channels.
+    OpenExrFloat,
+    /// 16-bit integer RGB DPX.
+    Dpx16,
+    /// Lossless 16-bit integer RGB/RGBA TIFF.
+    Tiff16,
+    /// Lossless IEEE-754 binary32 RGB/RGBA TIFF.
+    TiffFloat,
+}
+
+/// Sample representation used by every file in an audio-stem package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioStemFormat {
+    /// Broadcast-wave-compatible 24-bit integer PCM WAV.
+    WavePcm24,
+}
+
+/// Exact professional delivery profile owned by one package or constrained MXF file.
+///
+/// These are deliberately narrow product rows rather than aliases for the broad
+/// IMF, AS-11, or DCP standard families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfessionalDeliveryProfile {
+    /// SMPTE RDD 45 IMF Application ProRes, single composition/segment, 1080p25.
+    ImfAppProResRdd45_1080p25,
+    /// AMWA AS-11 X9 NABA HD, progressive 720p59.94 AVC High 4:2:2.
+    As11X9NabaHd720p5994,
+    /// SMPTE DCP, 2D 2K Flat 24 fps, unencrypted and unsigned.
+    SmpteDcp2kFlat24,
+}
+
+/// Human-authored package metadata frozen with one export request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfessionalDeliveryMetadata {
+    /// Display title carried by the package composition or AS-11 clip.
+    pub title: String,
+    /// Organization issuing the deliverable.
+    pub issuer: String,
+    /// Application or operator creating the deliverable.
+    pub creator: String,
+    /// RFC 5646 primary spoken-language tag used for explicit audio labeling.
+    pub language: String,
+}
+
+impl Default for ProfessionalDeliveryMetadata {
+    fn default() -> Self {
+        Self {
+            title: "Mondrian Composition".to_owned(),
+            issuer: "Mondrian".to_owned(),
+            creator: "Mondrian".to_owned(),
+            language: "en".to_owned(),
+        }
+    }
+}
+
+/// One professional package or constrained-file output contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfessionalDeliveryOutput {
+    /// Exact qualified profile row.
+    pub profile: ProfessionalDeliveryProfile,
+    /// Metadata validated and frozen before any essence is rendered.
+    pub metadata: ProfessionalDeliveryMetadata,
+}
+
+/// Public Program Output selection implied by one physical artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportAudioProgramSelection {
+    /// Do not capture or execute audio.
+    Disabled,
+    /// Capture only the Sequence default/primary Program Output.
+    Primary,
+    /// Capture every public Program Output in stable authored order.
+    All,
+}
+
+/// Physical artifact family produced by one preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ExportArtifactEncoding {
+    /// One validated encoded media file.
+    MediaFile(EncodedMediaOutput),
+    /// One validated directory containing numbered frames and a manifest.
+    ImageSequence {
+        /// Exact still-image representation for every frame.
+        format: ImageSequenceFormat,
+    },
+    /// One validated WAV per public Program Output plus a content manifest.
+    AudioStems {
+        /// Exact sample representation shared by every stem.
+        format: AudioStemFormat,
+    },
+    /// One profile-qualified IMF/DCP package directory or AS-11 MXF file.
+    ProfessionalDelivery(ProfessionalDeliveryOutput),
 }
 
 /// How timeline coverage is delivered by an export preset.
@@ -269,10 +461,15 @@ pub enum ExportColorTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportPreset {
     pub name: String,
-    pub container: Container,
-    pub video: VideoCodecConfig,
-    pub audio: AudioCodecConfig,
+    /// Physical encoded artifact and its family-specific settings.
+    pub artifact: ExportArtifactEncoding,
     pub resolution: Option<Resolution>,
+    /// Encoded constant frame rate, inherited from the Sequence or explicitly overridden.
+    #[serde(default)]
+    pub frame_rate: ExportParameter<Rational>,
+    /// Explicit temporal sampling policy for cadence conversion.
+    #[serde(default)]
+    pub frame_sampling: ExportFrameSampling,
     /// Encoded signal representation. Creative output color remains Sequence-owned.
     #[serde(default)]
     pub video_signal: ExportVideoSignal,
@@ -282,20 +479,94 @@ pub struct ExportPreset {
     /// Explicit creative color target, independent from encoded signal layout.
     #[serde(default)]
     pub color_target: ExportColorTarget,
+    /// Explicit delivery legalization after the output transform and before quantization.
+    #[serde(default)]
+    pub legalizer: SignalLegalizer,
 }
 
 impl ExportPreset {
+    /// Return the encoded-media contract when this preset publishes one file.
+    pub const fn media_file(&self) -> Option<&EncodedMediaOutput> {
+        match &self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => Some(media),
+            ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. }
+            | ExportArtifactEncoding::ProfessionalDelivery(_) => None,
+        }
+    }
+
+    /// Mutably borrow the encoded-media contract when this preset publishes one file.
+    pub fn media_file_mut(&mut self) -> Option<&mut EncodedMediaOutput> {
+        match &mut self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => Some(media),
+            ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. }
+            | ExportArtifactEncoding::ProfessionalDelivery(_) => None,
+        }
+    }
+
+    /// Return the still-image format when this preset publishes a frame sequence.
+    pub const fn image_sequence_format(&self) -> Option<ImageSequenceFormat> {
+        match self.artifact {
+            ExportArtifactEncoding::MediaFile(_) => None,
+            ExportArtifactEncoding::ImageSequence { format } => Some(format),
+            ExportArtifactEncoding::AudioStems { .. } => None,
+            ExportArtifactEncoding::ProfessionalDelivery(_) => None,
+        }
+    }
+
+    /// Return the shared WAV representation when this preset publishes stems.
+    pub const fn audio_stem_format(&self) -> Option<AudioStemFormat> {
+        match self.artifact {
+            ExportArtifactEncoding::AudioStems { format } => Some(format),
+            ExportArtifactEncoding::MediaFile(_) | ExportArtifactEncoding::ImageSequence { .. } => {
+                None
+            }
+            ExportArtifactEncoding::ProfessionalDelivery(_) => None,
+        }
+    }
+
+    /// Return the exact professional delivery request, when present.
+    pub const fn professional_delivery(&self) -> Option<&ProfessionalDeliveryOutput> {
+        match &self.artifact {
+            ExportArtifactEncoding::ProfessionalDelivery(delivery) => Some(delivery),
+            ExportArtifactEncoding::MediaFile(_)
+            | ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. } => None,
+        }
+    }
+
+    /// Exact audio-program selection required by this artifact.
+    pub const fn audio_program_selection(&self) -> ExportAudioProgramSelection {
+        match &self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => match media.audio {
+                AudioCodecConfig::Disabled => ExportAudioProgramSelection::Disabled,
+                AudioCodecConfig::Aac { .. }
+                | AudioCodecConfig::Pcm { .. }
+                | AudioCodecConfig::Mp3 { .. } => ExportAudioProgramSelection::Primary,
+            },
+            ExportArtifactEncoding::ImageSequence { .. } => ExportAudioProgramSelection::Disabled,
+            ExportArtifactEncoding::AudioStems { .. } => ExportAudioProgramSelection::All,
+            ExportArtifactEncoding::ProfessionalDelivery(_) => ExportAudioProgramSelection::Primary,
+        }
+    }
+
     /// Broadly compatible Rec.709 H.264/AAC MP4 delivery.
     pub fn h264_aac_sdr_1080p() -> Self {
         Self {
             name: "H.264/AAC SDR 1080p".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1920, height: 1080 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -303,6 +574,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -310,13 +582,18 @@ impl ExportPreset {
     pub fn hevc_main10_aac() -> Self {
         Self {
             name: "HEVC Main10/AAC".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::Hevc {
-                profile: HevcProfile::Main10,
-                rate_control: VideoRateControl::constant_quality(20),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::Hevc {
+                    profile: HevcProfile::Main10,
+                    rate_control: VideoRateControl::constant_quality(20),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Ten,
                 VideoRange::Legal,
@@ -324,19 +601,25 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         }
     }
 
     pub fn tiktok_vertical() -> Self {
         Self {
             name: "TikTok 1080×1920".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constrained_quality(20, 6_000, 12_000),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constrained_quality(20, 6_000, 12_000),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1080, height: 1920 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -344,19 +627,25 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
     pub fn proxy_720p() -> Self {
         Self {
             name: "Proxy 720p".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constant_quality(23),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(23),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1280, height: 720 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -364,6 +653,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -371,10 +661,15 @@ impl ExportPreset {
     pub fn prores_4444_alpha() -> Self {
         Self {
             name: "ProRes 4444 XQ + Alpha".into(),
-            container: Container::Mov,
-            video: VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
-            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mov,
+                video: VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
+                audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+                video_coding: VideoCodingStructure::IntraOnly,
+            }),
             resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Twelve,
                 VideoRange::Full,
@@ -382,7 +677,288 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::Preserve,
             color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         }
+    }
+
+    /// DNxHR HQX 10-bit 4:2:2 MOV intermediate with PCM audio.
+    pub fn dnxhr_hqx_intermediate() -> Self {
+        professional_media_preset(
+            "DNxHR HQX 10-bit Intermediate",
+            Container::Mov,
+            VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hqx },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        )
+    }
+
+    /// AVC-Intra Class 100 1080/25p video-only MXF intermediate.
+    pub fn avc_intra_100_intermediate() -> Self {
+        let mut preset = professional_media_preset(
+            "AVC-Intra Class 100 1080p25",
+            Container::Mxf,
+            VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class100 },
+            Some(Resolution { width: 1920, height: 1080 }),
+            ExportParameter::Explicit(Rational::FPS_25),
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        );
+        if let Some(media) = preset.media_file_mut() {
+            media.audio = AudioCodecConfig::Disabled;
+        }
+        preset
+    }
+
+    /// Uncompressed v210 10-bit 4:2:2 MOV master with PCM audio.
+    pub fn uncompressed_v210_master() -> Self {
+        professional_media_preset(
+            "Uncompressed v210 10-bit YUV",
+            Container::Mov,
+            VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Ten },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        )
+    }
+
+    /// Uncompressed r210 10-bit RGB MOV master with PCM audio.
+    pub fn uncompressed_r210_master() -> Self {
+        professional_media_preset(
+            "Uncompressed r210 10-bit RGB",
+            Container::Mov,
+            VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbTen },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Full,
+            ExportChromaSampling::Rgb,
+        )
+    }
+
+    /// Lossless, full-range sRGB PNG frames with straight alpha.
+    pub fn png_sequence() -> Self {
+        Self {
+            name: "PNG 图像序列".into(),
+            artifact: ExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 },
+            resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
+            video_signal: ExportVideoSignal::explicit(
+                DeliveryBitDepth::Eight,
+                VideoRange::Full,
+                ExportChromaSampling::Rgb,
+            ),
+            alpha_mode: ExportAlphaMode::Preserve,
+            color_target: ExportColorTarget::RenderingView(ColorSpace::Srgb),
+            legalizer: SignalLegalizer::Off,
+        }
+    }
+
+    /// Lossless, full-range sRGB 16-bit PNG frames with straight alpha.
+    pub fn png16_sequence() -> Self {
+        image_master_preset(
+            "PNG 16-bit 图像序列",
+            ImageSequenceFormat::Png16,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::RenderingView(ColorSpace::Srgb),
+        )
+    }
+
+    /// Scene-linear OpenEXR Half frames with straight alpha.
+    pub fn open_exr_half_sequence() -> Self {
+        image_master_preset(
+            "OpenEXR Half 图像序列",
+            ImageSequenceFormat::OpenExrHalf,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Scene-linear OpenEXR Float32 frames with straight alpha.
+    pub fn open_exr_float_sequence() -> Self {
+        image_master_preset(
+            "OpenEXR Float32 图像序列",
+            ImageSequenceFormat::OpenExrFloat,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Full-range 16-bit RGB DPX frames.
+    pub fn dpx16_sequence() -> Self {
+        image_master_preset(
+            "DPX 16-bit 图像序列",
+            ImageSequenceFormat::Dpx16,
+            ExportAlphaMode::FlattenBlack,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Lossless full-range 16-bit TIFF frames with straight alpha.
+    pub fn tiff16_sequence() -> Self {
+        image_master_preset(
+            "TIFF 16-bit 图像序列",
+            ImageSequenceFormat::Tiff16,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Lossless Float32 TIFF frames with straight alpha.
+    pub fn tiff_float_sequence() -> Self {
+        image_master_preset(
+            "TIFF Float32 图像序列",
+            ImageSequenceFormat::TiffFloat,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Lossless 24-bit WAV files for every public Program Output.
+    pub fn audio_stems_pcm24() -> Self {
+        Self {
+            name: "Program Output Stems（24-bit WAV）".into(),
+            artifact: ExportArtifactEncoding::AudioStems { format: AudioStemFormat::WavePcm24 },
+            resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
+            video_signal: ExportVideoSignal::default(),
+            alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
+        }
+    }
+
+    /// IMF Application ProRes package, RDD 45, 1080p25 Rec.709.
+    pub fn imf_app_prores_rdd45_1080p25() -> Self {
+        professional_delivery_preset(
+            "IMF Application ProRes RDD 45（1080p25）",
+            ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25,
+            Resolution { width: 1920, height: 1080 },
+            Rational::FPS_25,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+            ExportColorTarget::Colorimetric(ColorSpace::Rec709),
+        )
+    }
+
+    /// AMWA AS-11 X9 NABA HD progressive 720p59.94 delivery.
+    pub fn as11_x9_naba_hd_720p5994() -> Self {
+        professional_delivery_preset(
+            "AS-11 X9 NABA HD（720p59.94）",
+            ProfessionalDeliveryProfile::As11X9NabaHd720p5994,
+            Resolution { width: 1280, height: 720 },
+            Rational::FPS_5994,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+            ExportColorTarget::Colorimetric(ColorSpace::Rec709),
+        )
+    }
+
+    /// Unencrypted, unsigned SMPTE DCP 2D 2K Flat at 24 fps.
+    pub fn smpte_dcp_2k_flat_24() -> Self {
+        professional_delivery_preset(
+            "SMPTE DCP 2K Flat（24p）",
+            ProfessionalDeliveryProfile::SmpteDcp2kFlat24,
+            Resolution { width: 1998, height: 1080 },
+            Rational::FPS_24,
+            DeliveryBitDepth::Twelve,
+            VideoRange::Full,
+            ExportChromaSampling::Rgb,
+            // The renderer supplies display-linear Rec.709. The DCP Adapter
+            // owns the explicit ST 428-1 XYZ 12-bit output-referred encoding.
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn professional_delivery_preset(
+    name: &str,
+    profile: ProfessionalDeliveryProfile,
+    resolution: Resolution,
+    frame_rate: Rational,
+    bit_depth: DeliveryBitDepth,
+    range: VideoRange,
+    chroma_sampling: ExportChromaSampling,
+    color_target: ExportColorTarget,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.to_owned(),
+        artifact: ExportArtifactEncoding::ProfessionalDelivery(ProfessionalDeliveryOutput {
+            profile,
+            metadata: ProfessionalDeliveryMetadata::default(),
+        }),
+        resolution: Some(resolution),
+        frame_rate: ExportParameter::Explicit(frame_rate),
+        frame_sampling: ExportFrameSampling::FrameHold,
+        video_signal: ExportVideoSignal::explicit(bit_depth, range, chroma_sampling),
+        alpha_mode: ExportAlphaMode::FlattenBlack,
+        color_target,
+        legalizer: SignalLegalizer::Off,
+    }
+}
+
+fn image_master_preset(
+    name: &str,
+    format: ImageSequenceFormat,
+    alpha_mode: ExportAlphaMode,
+    color_target: ExportColorTarget,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.into(),
+        artifact: ExportArtifactEncoding::ImageSequence { format },
+        resolution: None,
+        frame_rate: ExportParameter::FollowSequence,
+        frame_sampling: ExportFrameSampling::FrameHold,
+        // Image representations own their exact integer/float scalar type.
+        // This legacy video-signal depth is deliberately not reinterpreted as
+        // the file sample type during delivery resolution.
+        video_signal: ExportVideoSignal {
+            bit_depth: ExportParameter::FollowSequence,
+            range: ExportParameter::Explicit(VideoRange::Full),
+            chroma_sampling: ExportChromaSampling::Rgb,
+        },
+        alpha_mode,
+        color_target,
+        legalizer: SignalLegalizer::Off,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn professional_media_preset(
+    name: &str,
+    container: Container,
+    video: VideoCodecConfig,
+    resolution: Option<Resolution>,
+    frame_rate: ExportParameter<Rational>,
+    bit_depth: DeliveryBitDepth,
+    range: VideoRange,
+    chroma_sampling: ExportChromaSampling,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.into(),
+        artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+            container,
+            video,
+            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+            video_coding: VideoCodingStructure::IntraOnly,
+        }),
+        resolution,
+        frame_rate,
+        frame_sampling: ExportFrameSampling::FrameHold,
+        video_signal: ExportVideoSignal::explicit(bit_depth, range, chroma_sampling),
+        alpha_mode: ExportAlphaMode::FlattenBlack,
+        color_target: ExportColorTarget::FollowSequence,
+        legalizer: SignalLegalizer::Off,
     }
 }
 
@@ -404,16 +980,61 @@ pub enum BuiltinExportPreset {
     Proxy720p,
     /// ProRes 4444 XQ with preserved alpha.
     ProRes4444Alpha,
+    /// DNxHR HQX 10-bit 4:2:2 intermediate.
+    DnxHrHqx,
+    /// AVC-Intra Class 100 1080/25p intermediate.
+    AvcIntra100,
+    /// Uncompressed v210 10-bit YUV master.
+    UncompressedV210,
+    /// Uncompressed r210 10-bit RGB master.
+    UncompressedR210,
+    /// Lossless numbered PNG frames with a durable manifest.
+    PngSequence,
+    /// Lossless 16-bit PNG image sequence.
+    Png16Sequence,
+    /// Scene-linear OpenEXR Half image sequence.
+    OpenExrHalfSequence,
+    /// Scene-linear OpenEXR Float32 image sequence.
+    OpenExrFloatSequence,
+    /// Full-range 16-bit DPX image sequence.
+    Dpx16Sequence,
+    /// Lossless 16-bit TIFF image sequence.
+    Tiff16Sequence,
+    /// Lossless Float32 TIFF image sequence.
+    TiffFloatSequence,
+    /// Lossless WAV package containing every public Program Output.
+    AudioStemsPcm24,
+    /// IMF Application ProRes RDD 45 package.
+    ImfAppProResRdd45,
+    /// AMWA AS-11 X9 NABA HD file.
+    As11X9NabaHd,
+    /// SMPTE DCP 2K Flat package.
+    SmpteDcp2kFlat24,
 }
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 20] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
         Self::Proxy720p,
         Self::ProRes4444Alpha,
+        Self::DnxHrHqx,
+        Self::AvcIntra100,
+        Self::UncompressedV210,
+        Self::UncompressedR210,
+        Self::PngSequence,
+        Self::Png16Sequence,
+        Self::OpenExrHalfSequence,
+        Self::OpenExrFloatSequence,
+        Self::Dpx16Sequence,
+        Self::Tiff16Sequence,
+        Self::TiffFloatSequence,
+        Self::AudioStemsPcm24,
+        Self::ImfAppProResRdd45,
+        Self::As11X9NabaHd,
+        Self::SmpteDcp2kFlat24,
     ];
 
     /// Stable non-localized identifier for Headless validation and preset selection.
@@ -424,6 +1045,21 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "tiktok-vertical",
             Self::Proxy720p => "proxy-720p",
             Self::ProRes4444Alpha => "prores-4444-alpha",
+            Self::DnxHrHqx => "dnxhr-hqx",
+            Self::AvcIntra100 => "avc-intra-100",
+            Self::UncompressedV210 => "uncompressed-v210",
+            Self::UncompressedR210 => "uncompressed-r210",
+            Self::PngSequence => "png-sequence",
+            Self::Png16Sequence => "png16-sequence",
+            Self::OpenExrHalfSequence => "openexr-half-sequence",
+            Self::OpenExrFloatSequence => "openexr-float-sequence",
+            Self::Dpx16Sequence => "dpx16-sequence",
+            Self::Tiff16Sequence => "tiff16-sequence",
+            Self::TiffFloatSequence => "tiff-float-sequence",
+            Self::AudioStemsPcm24 => "audio-stems-pcm24",
+            Self::ImfAppProResRdd45 => "imf-app-prores-rdd45",
+            Self::As11X9NabaHd => "as11-x9-naba-hd",
+            Self::SmpteDcp2kFlat24 => "smpte-dcp-2k-flat-24",
         }
     }
 
@@ -435,6 +1071,21 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "TikTok 竖屏 9:16",
             Self::Proxy720p => "代理文件 720p",
             Self::ProRes4444Alpha => "ProRes 4444 XQ + Alpha（12-bit）",
+            Self::DnxHrHqx => "DNxHR HQX（10-bit 4:2:2）",
+            Self::AvcIntra100 => "AVC-Intra Class 100（1080p25）",
+            Self::UncompressedV210 => "Uncompressed v210（10-bit YUV）",
+            Self::UncompressedR210 => "Uncompressed r210（10-bit RGB）",
+            Self::PngSequence => "PNG 图像序列（无损 + Alpha）",
+            Self::Png16Sequence => "PNG 16-bit 图像序列（无损 + Alpha）",
+            Self::OpenExrHalfSequence => "OpenEXR Half 图像序列（线性 + Alpha）",
+            Self::OpenExrFloatSequence => "OpenEXR Float32 图像序列（线性 + Alpha）",
+            Self::Dpx16Sequence => "DPX 16-bit 图像序列（线性 RGB）",
+            Self::Tiff16Sequence => "TIFF 16-bit 图像序列（无损 + Alpha）",
+            Self::TiffFloatSequence => "TIFF Float32 图像序列（无损 + Alpha）",
+            Self::AudioStemsPcm24 => "Program Output Stems（24-bit WAV）",
+            Self::ImfAppProResRdd45 => "IMF Application ProRes RDD 45（1080p25）",
+            Self::As11X9NabaHd => "AS-11 X9 NABA HD（720p59.94）",
+            Self::SmpteDcp2kFlat24 => "SMPTE DCP 2K Flat（24p）",
         }
     }
 
@@ -446,6 +1097,21 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => ExportPreset::tiktok_vertical(),
             Self::Proxy720p => ExportPreset::proxy_720p(),
             Self::ProRes4444Alpha => ExportPreset::prores_4444_alpha(),
+            Self::DnxHrHqx => ExportPreset::dnxhr_hqx_intermediate(),
+            Self::AvcIntra100 => ExportPreset::avc_intra_100_intermediate(),
+            Self::UncompressedV210 => ExportPreset::uncompressed_v210_master(),
+            Self::UncompressedR210 => ExportPreset::uncompressed_r210_master(),
+            Self::PngSequence => ExportPreset::png_sequence(),
+            Self::Png16Sequence => ExportPreset::png16_sequence(),
+            Self::OpenExrHalfSequence => ExportPreset::open_exr_half_sequence(),
+            Self::OpenExrFloatSequence => ExportPreset::open_exr_float_sequence(),
+            Self::Dpx16Sequence => ExportPreset::dpx16_sequence(),
+            Self::Tiff16Sequence => ExportPreset::tiff16_sequence(),
+            Self::TiffFloatSequence => ExportPreset::tiff_float_sequence(),
+            Self::AudioStemsPcm24 => ExportPreset::audio_stems_pcm24(),
+            Self::ImfAppProResRdd45 => ExportPreset::imf_app_prores_rdd45_1080p25(),
+            Self::As11X9NabaHd => ExportPreset::as11_x9_naba_hd_720p5994(),
+            Self::SmpteDcp2kFlat24 => ExportPreset::smpte_dcp_2k_flat_24(),
         }
     }
 }
@@ -460,6 +1126,34 @@ pub struct ExportConfig {
     /// Final namespace policy frozen with this job at queue admission.
     #[serde(default)]
     pub output_policy: ExportOutputPolicy,
+    /// Conservative encoded-essence reuse policy frozen with this job.
+    #[serde(default)]
+    pub smart_render: ExportSmartRenderPolicy,
+    /// Optional frozen broadcaster-specific Program Output QC profile.
+    /// Findings are evaluated before irreversible publication.
+    #[serde(default)]
+    pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
+    /// Frozen externally approved PSE provider; required when the QC profile requires regulatory analysis.
+    #[serde(default)]
+    pub regulatory_pse: Option<crate::RegulatoryPseProviderConfig>,
+    /// Exact immutable canonical ANC attachment; currently carried by AS-11 ST436.
+    #[serde(default)]
+    pub frozen_ancillary: Option<mondrian_broadcast::FrozenAncillaryProgram>,
+    /// Phase-owned approved BMX authority; never recreated by deserializing a job.
+    #[serde(skip)]
+    pub approved_bmx: Option<mondrian_media::BmxRuntimeHandle>,
+}
+
+/// Whether Export may reuse independently validated source video essence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportSmartRenderPolicy {
+    /// Never bypass Timeline pixel rendering and video encoding.
+    Disabled,
+    /// Reuse source video only when every author, delivery, physical packet,
+    /// and post-output invariant is proven; otherwise render normally.
+    #[default]
+    Automatic,
 }
 
 /// Namespace policy for the final export deliverable.
@@ -718,6 +1412,15 @@ pub struct ExportMediaDependency {
     pub path: PathBuf,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
+    /// Decoder/container family frozen by the admitted media probe.
+    #[serde(default)]
+    pub source_container: String,
+    /// Complete selected video-stream probe contract.
+    ///
+    /// This is required for encoded-essence reuse. Ordinary decode remains
+    /// compatible with dependencies captured before this evidence existed.
+    #[serde(default)]
+    pub source_video_stream: Option<VideoStreamInfo>,
     /// Exact physical video stream selected by the admitted media probe.
     ///
     /// Audio-only dependencies retain `None`. Every picture render plan
@@ -737,6 +1440,10 @@ pub struct ExportMediaDependency {
     /// Export may decode a delivery-sized sample, but authored Clip transforms
     /// remain expressed against this source extent.
     pub source_resolution: Option<mondrian_core::Resolution>,
+    /// Source SAR, scan, and display-orientation facts frozen from the same probe.
+    /// Audio-only dependencies retain `None`.
+    #[serde(default)]
+    pub picture: Option<mondrian_core::PictureStreamMetadata>,
     /// Frozen physical bindings for the audio Components used by this snapshot.
     #[serde(default)]
     pub audio_components: HashMap<AudioSourceComponentId, AudioSourceSelection>,

@@ -17,8 +17,8 @@ use mondrian_core::{AssetId, WorkingColorSpace};
 use mondrian_media::PreviewDecodeSessionContext;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    execute_cpu_output_boundary, RenderCpuColorExecutionSession, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole},
+    RenderCpuColorExecutionSession, TimelineCompositeScratch,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -105,8 +105,9 @@ fn execute_preview(
             "color-media slice contains no generated titles",
         ),
     };
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let resolved = match resolve_preview_timeline(
         sequence,
         state.sequences(),
@@ -166,20 +167,22 @@ fn execute_preview(
     let program_output_color = resolved
         .plan
         .color_context
-        .output_color_space
+        .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
-    let program_boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Export,
+    let program_boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Export,
         program_output_color,
-        &resolved.plan.color_context.output_transform,
-        resolved.plan.color_context.output_tone_map,
-        resolved.plan.color_context.engine.clone(),
+        resolved.plan.color_context.output_transform(),
+        resolved.plan.color_context.output_tone_map(),
+        resolved.plan.color_context.engine().clone(),
     )?;
-    let program_output = execute_cpu_output_boundary(&program_working.frame, &program_boundary)?
-        .result
-        .frame
-        .into_rgba();
+    let program_output = ProgramOutputModule::execute_cpu_rgba8(
+        &program_working.frame,
+        &program_boundary,
+        program_scratch.color_execution_mut(),
+    )?
+    .rgba;
     Ok(ColorMediaPreviewExecution {
         decoded,
         viewer_output: output,

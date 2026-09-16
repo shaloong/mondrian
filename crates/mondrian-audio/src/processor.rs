@@ -93,6 +93,24 @@ impl AudioProcessorExecutionContract {
         self.session_scratch_bytes
     }
 
+    /// Add Adapter-owned Session storage to the admitted scratch obligation.
+    ///
+    /// Process-isolated Adapters use this to account for fixed shared audio and
+    /// parameter exchange storage without exposing their transport layout to
+    /// the semantic Processor contract.
+    pub fn with_additional_session_scratch_bytes(
+        self,
+        additional_bytes: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        let session_scratch_bytes =
+            self.session_scratch_bytes.checked_add(additional_bytes).ok_or_else(|| {
+                AudioProcessorHostError::InvalidContract(
+                    "processor Session scratch obligation overflowed".to_owned(),
+                )
+            })?;
+        Ok(Self { session_scratch_bytes, ..self })
+    }
+
     pub(crate) fn admits(self, mode: AudioProcessingMode) -> bool {
         match mode {
             AudioProcessingMode::Realtime => self.realtime_capable,
@@ -135,6 +153,26 @@ pub enum AudioProcessorHostError {
     /// A processor failed while executing one admitted block.
     #[error("audio processor block execution failed: {0}")]
     Process(String),
+    /// An Adapter unwound across the Host boundary.
+    #[error("audio processor adapter panicked during {0}")]
+    AdapterPanicked(&'static str),
+    /// A supervised external Worker exceeded its admitted operation deadline.
+    #[error("isolated audio processor Worker exceeded its {operation} deadline")]
+    WorkerDeadlineExceeded {
+        /// Stable operation class whose deadline expired.
+        operation: &'static str,
+    },
+    /// A supervised external Worker crashed, disconnected, or violated protocol.
+    #[error("isolated audio processor Worker failed during {operation}: {detail}")]
+    WorkerFailed {
+        /// Stable operation class being executed.
+        operation: &'static str,
+        /// Bounded diagnostic or protocol detail.
+        detail: String,
+    },
+    /// A prior failure left an exclusive instance in unknown mutable state.
+    #[error("audio processor instance is poisoned and must be recreated")]
+    PoisonedInstance,
 }
 
 /// Exact generated owner of one processor occurrence.
@@ -252,6 +290,15 @@ pub trait AudioProcessorFactory: Send + Sync {
     /// Fixed latency, continuity, and processing-mode admission facts.
     fn execution_contract(&self) -> AudioProcessorExecutionContract;
 
+    /// Stable auxiliary-input buses negotiated for this Render Contract.
+    ///
+    /// The default is an exact empty contract. Adapters must return the same
+    /// value through Session creation; a prepared sidechain may target only a
+    /// declared key and exact semantic layout.
+    fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
+        AudioProcessorAuxiliaryInputContract::default()
+    }
+
     /// Create one exclusive mutable instance before realtime execution starts.
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
 }
@@ -341,6 +388,66 @@ pub struct AudioProcessorInputBus<'a> {
     pub interleaved: &'a [f32],
 }
 
+/// Simultaneous disjoint main/auxiliary bus borrow for one processor callback.
+///
+/// This is the mutation-safe Interface for sidechain DSP: processors can read
+/// one auxiliary bus while modifying the in-place main bus without copying or
+/// allocating on the realtime thread.
+pub struct AudioProcessorMainAndInputBuses<'a> {
+    /// Negotiated main-bus layout.
+    pub main_layout: AudioChannelLayout,
+    /// Exact frame count shared by both buses.
+    pub frames: usize,
+    /// Mutable in-place main-bus PCM.
+    pub main_interleaved: &'a mut [f32],
+    /// Read-only keyed auxiliary input.
+    pub auxiliary: AudioProcessorInputBus<'a>,
+}
+
+/// One stable processor auxiliary-input bus negotiated during preparation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryInputBusContract {
+    /// Definition-owned stable key used by author Routes and callback lookup.
+    pub bus_key: String,
+    /// Exact semantic layout accepted by this bus.
+    pub channel_layout: AudioChannelLayout,
+}
+
+/// Complete immutable auxiliary-input contract of one prepared processor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryInputContract {
+    /// Ordered auxiliary buses exposed by the realized definition.
+    pub buses: Vec<AudioProcessorAuxiliaryInputBusContract>,
+}
+
+impl AudioProcessorAuxiliaryInputContract {
+    pub(crate) fn validate(
+        &self,
+        main_layout: AudioChannelLayout,
+    ) -> Result<(), AudioProcessorHostError> {
+        let mut keys = std::collections::BTreeSet::new();
+        for bus in &self.buses {
+            if bus.bus_key.trim().is_empty()
+                || bus.bus_key.len() > 128
+                || bus.bus_key.chars().any(char::is_control)
+                || !keys.insert(bus.bus_key.as_str())
+            {
+                return Err(AudioProcessorHostError::InvalidContract(
+                    "processor auxiliary bus keys must be unique bounded non-empty strings"
+                        .to_owned(),
+                ));
+            }
+            if bus.channel_layout != main_layout {
+                return Err(AudioProcessorHostError::InvalidContract(format!(
+                    "processor auxiliary bus {} requires {:?}, but this host currently admits exact main-layout auxiliary buses ({main_layout:?})",
+                    bus.bus_key, bus.channel_layout
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Audio-bus view supplied to one processor callback.
 ///
 /// Current channel-strip inserts expose one in-place main bus. The keyed
@@ -355,6 +462,11 @@ pub trait AudioProcessorAudioIo {
     fn main_interleaved(&mut self) -> &mut [f32];
     /// Find one negotiated read-only auxiliary input by stable definition key.
     fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>>;
+    /// Borrow the mutable main bus and one read-only auxiliary bus together.
+    fn main_and_auxiliary_input(
+        &mut self,
+        bus_key: &str,
+    ) -> Option<AudioProcessorMainAndInputBuses<'_>>;
 }
 
 /// Default resolver for Mondrian built-ins. External definitions fail closed.

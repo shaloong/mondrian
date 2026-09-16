@@ -9,6 +9,7 @@ use crate::{
     EffectRenderPlan,
 };
 use crate::{
+    coverage::has_positive_coverage,
     graph::{EffectExecutionSchedule, EffectGraphIdentity},
     CompiledEffectGraph, EffectDomainTransition, EffectExecutionAdmissionError,
     EffectExecutionSession, EffectExecutionSessionConfig, EffectGraphNodeId, EffectGraphNodeKind,
@@ -400,7 +401,7 @@ fn execute_effect_graph(
                 }
                 outputs.insert(node.id, base_frame);
             }
-            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
                 let cancellation = ExecutionCancellationToken::new();
                 let raster = crate::PreparedMaskRaster::prepare(
                     shape,
@@ -414,7 +415,7 @@ fn execute_effect_graph(
                     node_id: node.id,
                     source: error,
                 })?;
-                let rgba = raster
+                let mut rgba = raster
                     .rasterize_rgba_u8(
                         crate::EffectPixelRoi::new(0, 0, width, height),
                         &cancellation,
@@ -423,6 +424,9 @@ fn execute_effect_graph(
                         node_id: node.id,
                         source: error,
                     })?;
+                if *invert {
+                    invert_alpha_mask_u8_in_place(&mut rgba);
+                }
                 outputs.insert(node.id, rgba);
             }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
@@ -486,6 +490,62 @@ fn execute_effect_graph(
                     );
                 }
                 outputs.insert(node.id, source);
+            }
+            EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                let Some(mut left_frame) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *left,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let Some(right_frame) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *right,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                combine_alpha_masks_u8_in_place(&mut left_frame, &right_frame, *mask_op);
+                release_execution_buffer(&mut buffer_pool, right_frame);
+                outputs.insert(node.id, left_frame);
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                let Some(mut base_frame) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *base,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let Some(graded_frame) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *graded,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let Some(matte_frame) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *matte,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                matte_mix_u8_in_place(&mut base_frame, &graded_frame, &matte_frame);
+                release_execution_buffer(&mut buffer_pool, graded_frame);
+                release_execution_buffer(&mut buffer_pool, matte_frame);
+                outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                 let Some(first_id) = inputs.first().copied() else {
@@ -801,7 +861,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 release_float_execution_buffer(&mut buffer_pool, overlay_frame);
                 outputs.insert(node.id, base_frame);
             }
-            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
                 let cancellation = ExecutionCancellationToken::new();
                 let raster = crate::PreparedMaskRaster::prepare(
                     shape,
@@ -815,7 +875,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     node_id: node.id,
                     source: error,
                 })?;
-                let rgba = raster
+                let mut rgba = raster
                     .rasterize_rgba_f32(
                         crate::EffectPixelRoi::new(0, 0, width, height),
                         &cancellation,
@@ -824,6 +884,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         node_id: node.id,
                         source: error,
                     })?;
+                if *invert {
+                    invert_alpha_mask_f32_in_place(&mut rgba);
+                }
                 outputs.insert(node.id, rgba);
             }
             EffectGraphNodeKind::Mask { input: input_id, mask, invert, mask_op } => {
@@ -848,6 +911,62 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 apply_alpha_mask_f32_in_place(&mut source, &mask_frame, *invert, *mask_op);
                 release_float_execution_buffer(&mut buffer_pool, mask_frame);
                 outputs.insert(node.id, source);
+            }
+            EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                let Some(mut left_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *left,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *left });
+                };
+                let Some(right_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *right,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *right });
+                };
+                combine_alpha_masks_f32_in_place(&mut left_frame, &right_frame, *mask_op);
+                release_float_execution_buffer(&mut buffer_pool, right_frame);
+                outputs.insert(node.id, left_frame);
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                let Some(mut base_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *base,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *base });
+                };
+                let Some(graded_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *graded,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *graded });
+                };
+                let Some(matte_frame) = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *matte,
+                    required_len,
+                ) else {
+                    return Err(EffectFloatExecutionError::MissingOutput { node_id: *matte });
+                };
+                matte_mix_f32_in_place(&mut base_frame, &graded_frame, &matte_frame);
+                release_float_execution_buffer(&mut buffer_pool, graded_frame);
+                release_float_execution_buffer(&mut buffer_pool, matte_frame);
+                outputs.insert(node.id, base_frame);
             }
             EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                 let Some(first_id) = inputs.first().copied() else {
@@ -1030,6 +1149,40 @@ impl EffectExecutionSession {
                 actual: base.len(),
             });
         }
+        self.apply_compiled_pass_rgba_f32_owned(
+            base.to_vec(),
+            width,
+            height,
+            compiled,
+            opacity,
+            blend_mode,
+            frame_seed,
+        )
+    }
+
+    /// Execute and blend one adjustment graph into an owned Float32 base.
+    ///
+    /// The caller transfers the base allocation across the Effect execution
+    /// Seam. Non-trivial passes reuse it for the blended output instead of
+    /// cloning a second full-frame base after graph execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_compiled_pass_rgba_f32_owned(
+        &mut self,
+        mut base: Vec<[f32; 4]>,
+        width: u32,
+        height: u32,
+        compiled: &CompiledEffectGraph,
+        opacity: f32,
+        blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+        let required_len = width as usize * height as usize;
+        if base.len() != required_len {
+            return Err(EffectFloatExecutionError::InputSizeMismatch {
+                expected: required_len,
+                actual: base.len(),
+            });
+        }
         admit_single_frame_execution(
             compiled,
             EffectProcessingBackend::Cpu,
@@ -1037,18 +1190,17 @@ impl EffectExecutionSession {
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
         if required_len == 0 {
-            return Ok(Vec::new());
+            return Ok(base);
         }
         let mode = blend_mode.unwrap_or(BlendMode::Normal);
         let opacity = opacity.clamp(0.0, 1.0);
-        if opacity <= 1.0e-4 || compiled.graph().is_identity() {
-            return Ok(base.to_vec());
+        if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
+            return Ok(base);
         }
 
-        let processed = self.apply_compiled_rgba_f32(base, width, height, compiled, frame_seed)?;
-        let mut out = base.to_vec();
-        blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
-        Ok(out)
+        let processed = self.apply_compiled_rgba_f32(&base, width, height, compiled, frame_seed)?;
+        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
+        Ok(base)
     }
 }
 
@@ -1108,6 +1260,47 @@ impl EffectExecutionSession {
                 actual: base.len(),
             });
         }
+        self.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
+            base.to_vec(),
+            width,
+            height,
+            compiled,
+            opacity,
+            blend_mode,
+            frame_seed,
+            domain_cache_key,
+            processor,
+        )
+    }
+
+    /// Execute and blend one adjustment graph into an owned Float32 base while
+    /// resolving explicit RGB processing-domain transitions.
+    ///
+    /// This is the ownership-preserving counterpart to
+    /// [`Self::apply_compiled_pass_rgba_f32_with_domain_processor`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_compiled_pass_rgba_f32_owned_with_domain_processor<F>(
+        &mut self,
+        mut base: Vec<[f32; 4]>,
+        width: u32,
+        height: u32,
+        compiled: &CompiledEffectGraph,
+        opacity: f32,
+        blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+        domain_cache_key: EffectDomainProcessorCacheKey,
+        processor: F,
+    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+    where
+        F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
+    {
+        let required_len = width as usize * height as usize;
+        if base.len() != required_len {
+            return Err(EffectFloatExecutionError::InputSizeMismatch {
+                expected: required_len,
+                actual: base.len(),
+            });
+        }
         admit_single_frame_execution(
             compiled,
             EffectProcessingBackend::Cpu,
@@ -1115,16 +1308,16 @@ impl EffectExecutionSession {
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
         if required_len == 0 {
-            return Ok(Vec::new());
+            return Ok(base);
         }
         let mode = blend_mode.unwrap_or(BlendMode::Normal);
         let opacity = opacity.clamp(0.0, 1.0);
-        if opacity <= 1.0e-4 || compiled.graph().is_identity() {
-            return Ok(base.to_vec());
+        if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
+            return Ok(base);
         }
 
         let processed = self.apply_compiled_rgba_f32_with_domain_processor(
-            base,
+            &base,
             width,
             height,
             compiled,
@@ -1132,9 +1325,8 @@ impl EffectExecutionSession {
             domain_cache_key,
             processor,
         )?;
-        let mut out = base.to_vec();
-        blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
-        Ok(out)
+        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
+        Ok(base)
     }
 }
 
@@ -1183,7 +1375,7 @@ impl EffectExecutionSession {
             out.clear();
             return Ok(());
         }
-        if opacity <= 1.0e-4 || compiled.graph().is_identity() {
+        if !has_positive_coverage(opacity.clamp(0.0, 1.0)) || compiled.graph().is_identity() {
             out.copy_from_slice(base);
             return Ok(());
         }
@@ -1375,6 +1567,8 @@ fn validate_float_effect_graph_shape(
             EffectGraphNodeKind::Blend { .. }
             | EffectGraphNodeKind::Mask { .. }
             | EffectGraphNodeKind::MaskSource { .. }
+            | EffectGraphNodeKind::MaskCombine { .. }
+            | EffectGraphNodeKind::MatteMix { .. }
             | EffectGraphNodeKind::MultiInput { .. } => {}
         }
     }
@@ -1409,6 +1603,15 @@ fn unsupported_float_graph_node(
 fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
+        EffectRenderOp::WhiteBalance { .. } => "white_balance",
+        EffectRenderOp::Primaries { .. } => "primaries",
+        EffectRenderOp::HdrGrading { .. } => "hdr_grading",
+        EffectRenderOp::AscCdl { .. } => "asc_cdl",
+        EffectRenderOp::GamutCompression { .. } => "gamut_compression",
+        EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
+        EffectRenderOp::ColorCurves { .. } => "color_curves",
+        EffectRenderOp::Qualifier { .. } => "qualifier",
+        EffectRenderOp::MattePreview { .. } => "matte_preview",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
         EffectRenderOp::Sharpen { .. } => "sharpen",
         EffectRenderOp::Vignette { .. } => "vignette",
@@ -1634,7 +1837,7 @@ fn blend_rgba_f32_in_place(
     frame_seed: i64,
 ) {
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-4 {
+    if !has_positive_coverage(opacity) {
         return;
     }
 
@@ -1666,7 +1869,7 @@ pub(crate) fn blend_rgba_f32_region_controlled<E>(
         return Ok(true);
     }
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-4 {
+    if !has_positive_coverage(opacity) {
         checkpoint()?;
         return Ok(true);
     }
@@ -1723,6 +1926,108 @@ fn apply_alpha_mask_in_place(
         };
         out_px[3] = unit_to_u8(result);
     }
+}
+
+fn invert_alpha_mask_u8_in_place(mask: &mut [u8]) {
+    for pixel in mask.chunks_exact_mut(4) {
+        pixel[3] = u8::MAX.saturating_sub(pixel[3]);
+    }
+}
+
+pub(crate) fn invert_alpha_mask_f32_in_place(mask: &mut [[f32; 4]]) {
+    for pixel in mask {
+        pixel[3] = 1.0 - pixel[3].clamp(0.0, 1.0);
+    }
+}
+
+fn combine_alpha_masks_u8_in_place(left: &mut [u8], right: &[u8], mask_op: crate::mask::MaskOp) {
+    for (left_pixel, right_pixel) in left.chunks_exact_mut(4).zip(right.chunks_exact(4)) {
+        let a = left_pixel[3] as f32 / 255.0;
+        let b = right_pixel[3] as f32 / 255.0;
+        left_pixel[3] = unit_to_u8(combine_mask_coverage(a, b, mask_op));
+    }
+}
+
+fn matte_mix_u8_in_place(base: &mut [u8], graded: &[u8], matte: &[u8]) {
+    for ((base_pixel, graded_pixel), matte_pixel) in
+        base.chunks_exact_mut(4).zip(graded.chunks_exact(4)).zip(matte.chunks_exact(4))
+    {
+        let weight = matte_pixel[3] as f32 / 255.0;
+        for channel in 0..3 {
+            base_pixel[channel] = unit_to_u8(
+                (base_pixel[channel] as f32 / 255.0) * (1.0 - weight)
+                    + (graded_pixel[channel] as f32 / 255.0) * weight,
+            );
+        }
+    }
+}
+
+fn combine_mask_coverage(a: f32, b: f32, mask_op: crate::mask::MaskOp) -> f32 {
+    use crate::mask::MaskOp;
+    let a = a.clamp(0.0, 1.0);
+    let b = b.clamp(0.0, 1.0);
+    match mask_op {
+        MaskOp::Add => a.max(b),
+        MaskOp::Subtract => a * (1.0 - b),
+        MaskOp::Intersect => a.min(b),
+        MaskOp::Difference => (a - b).abs(),
+    }
+}
+
+pub(crate) fn combine_alpha_masks_f32_in_place(
+    left: &mut [[f32; 4]],
+    right: &[[f32; 4]],
+    mask_op: crate::mask::MaskOp,
+) {
+    for (left_pixel, right_pixel) in left.iter_mut().zip(right) {
+        left_pixel[3] = combine_mask_coverage(left_pixel[3], right_pixel[3], mask_op);
+    }
+}
+
+pub(crate) fn combine_alpha_masks_f32_controlled<E>(
+    left: &mut [[f32; 4]],
+    right: &[[f32; 4]],
+    mask_op: crate::mask::MaskOp,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for (left_chunk, right_chunk) in left.chunks_mut(4_096).zip(right.chunks(4_096)) {
+        checkpoint()?;
+        combine_alpha_masks_f32_in_place(left_chunk, right_chunk, mask_op);
+    }
+    checkpoint()?;
+    Ok(())
+}
+
+pub(crate) fn matte_mix_f32_in_place(
+    base: &mut [[f32; 4]],
+    graded: &[[f32; 4]],
+    matte: &[[f32; 4]],
+) {
+    for ((base_pixel, graded_pixel), matte_pixel) in base.iter_mut().zip(graded).zip(matte) {
+        let weight = matte_pixel[3].clamp(0.0, 1.0);
+        for channel in 0..3 {
+            base_pixel[channel] =
+                base_pixel[channel] * (1.0 - weight) + graded_pixel[channel] * weight;
+        }
+        // Grade mattes are picture-color selectors, never coverage authority.
+        // Retain the base alpha verbatim, including HDR/float edge values.
+    }
+}
+
+pub(crate) fn matte_mix_f32_controlled<E>(
+    base: &mut [[f32; 4]],
+    graded: &[[f32; 4]],
+    matte: &[[f32; 4]],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for ((base_chunk, graded_chunk), matte_chunk) in
+        base.chunks_mut(4_096).zip(graded.chunks(4_096)).zip(matte.chunks(4_096))
+    {
+        checkpoint()?;
+        matte_mix_f32_in_place(base_chunk, graded_chunk, matte_chunk);
+    }
+    checkpoint()?;
+    Ok(())
 }
 
 fn apply_alpha_mask_f32_in_place(
@@ -2256,6 +2561,32 @@ mod tests {
     }
 
     #[test]
+    fn owned_float_effect_graph_pass_reuses_the_base_allocation() {
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![color_adjust(1.0, 1.0, 1.0)],
+        })
+        .expect("compile color adjust graph");
+        let base = vec![[1.25, 0.25, 0.125, 1.0]; 64];
+        let base_allocation = base.as_ptr();
+        let mut session = EffectExecutionSession::default();
+
+        let output = session
+            .apply_compiled_pass_rgba_f32_owned(
+                base,
+                8,
+                8,
+                &compiled,
+                0.5,
+                Some(BlendMode::Normal),
+                0,
+            )
+            .expect("owned float color adjust pass");
+
+        assert_eq!(output.as_ptr(), base_allocation);
+        assert!((output[0][0] - 1.875).abs() <= 1.0e-6);
+    }
+
+    #[test]
     fn float_effect_graph_pass_supports_non_normal_blend_modes() {
         let compiled = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![color_adjust(0.0, 1.0, 1.0)],
@@ -2434,6 +2765,7 @@ mod tests {
                         feather: 0.0,
                         expansion: 0.0,
                         opacity: 0.123_456,
+                        invert: false,
                     },
                 },
                 crate::EffectGraphNode {
@@ -2459,6 +2791,106 @@ mod tests {
         assert_eq!(&output[0][..3], &input[0][..3]);
         assert!((output[0][3] - 0.8 * 0.123_456).abs() <= 1.0e-6);
         assert!((output[0][3] * 255.0 - (output[0][3] * 255.0).round()).abs() > 1.0e-3);
+    }
+
+    fn grade_matte_graph(mask_op: crate::mask::MaskOp) -> Arc<CompiledEffectGraph> {
+        let graph = EffectRenderGraph {
+            nodes: vec![
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(0),
+                    kind: EffectGraphNodeKind::Source,
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(1),
+                    kind: EffectGraphNodeKind::UnaryEffect {
+                        input: EffectGraphNodeId(0),
+                        op: color_adjust(1.0, 1.0, 1.0),
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(2),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 0.75,
+                        invert: false,
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(3),
+                    kind: EffectGraphNodeKind::MaskSource {
+                        shape: crate::mask::MaskShape::Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            corner_radius: 0.0,
+                        },
+                        feather: 0.0,
+                        expansion: 0.0,
+                        opacity: 0.25,
+                        invert: false,
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(4),
+                    kind: EffectGraphNodeKind::MaskCombine {
+                        left: EffectGraphNodeId(2),
+                        right: EffectGraphNodeId(3),
+                        mask_op,
+                    },
+                },
+                crate::EffectGraphNode {
+                    id: EffectGraphNodeId(5),
+                    kind: EffectGraphNodeKind::MatteMix {
+                        base: EffectGraphNodeId(0),
+                        graded: EffectGraphNodeId(1),
+                        matte: EffectGraphNodeId(4),
+                    },
+                },
+            ],
+            output: Some(EffectGraphNodeId(5)),
+        };
+        crate::compile_reference_render_graph(graph).expect("compile grade-matte graph")
+    }
+
+    #[test]
+    fn mask_combine_and_matte_mix_cover_all_ops_on_rgba8_and_float() {
+        for (mask_op, weight) in [
+            (crate::mask::MaskOp::Add, 0.75),
+            (crate::mask::MaskOp::Subtract, 0.5625),
+            (crate::mask::MaskOp::Intersect, 0.25),
+            (crate::mask::MaskOp::Difference, 0.5),
+        ] {
+            let compiled = grade_matte_graph(mask_op);
+            let float_input = [[0.2, 0.3, 0.4, 0.42]];
+            let float_output =
+                apply_compiled_effect_graph_rgba_f32(&float_input, 1, 1, &compiled, 0)
+                    .expect("execute float grade matte");
+            for channel in 0..3 {
+                let expected = float_input[0][channel] * (1.0 + weight);
+                assert!((float_output[0][channel] - expected).abs() <= 1.0e-6);
+            }
+            assert_eq!(float_output[0][3], float_input[0][3]);
+
+            let u8_input = [51, 77, 102, 107];
+            let u8_output = apply_compiled_effect_graph(&u8_input, 1, 1, &compiled, 0)
+                .expect("execute RGBA8 grade matte");
+            for channel in 0..3 {
+                let base = u8_input[channel] as f32;
+                let graded = (base * 2.0).min(255.0);
+                let expected = base * (1.0 - weight) + graded * weight;
+                assert!((u8_output[channel] as f32 - expected).abs() <= 1.5);
+            }
+            assert_eq!(u8_output[3], u8_input[3]);
+        }
     }
 
     #[test]

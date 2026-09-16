@@ -3,10 +3,12 @@ use crate::{
     schema::{CREATE_FOLDERS_SQL, INIT_SQL},
 };
 use anyhow::Context;
-use mondrian_core::{AudioChannelLayout, MediaFileFingerprint, MediaInfo};
+use mondrian_core::{
+    timeline_data::AssetMediaInterpretation, AudioChannelLayout, MediaFileFingerprint, MediaInfo,
+};
 use rusqlite::{Connection, Transaction};
 /// Current asset-library SQLite schema version stored in `PRAGMA user_version`.
-pub const ASSET_LIBRARY_SCHEMA_VERSION: u32 = 5;
+pub const ASSET_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
 type SqliteMigrationFn = fn(&Transaction<'_>) -> anyhow::Result<()>;
 
@@ -22,6 +24,7 @@ const MIGRATIONS: &[SqliteMigrationStep] = &[
     SqliteMigrationStep { from: 2, to: 3, migrate: migrate_two_to_three },
     SqliteMigrationStep { from: 3, to: 4, migrate: migrate_three_to_four },
     SqliteMigrationStep { from: 4, to: 5, migrate: migrate_four_to_five },
+    SqliteMigrationStep { from: 5, to: 6, migrate: migrate_five_to_six },
 ];
 
 pub(crate) fn migrate_asset_library(connection: &mut Connection) -> anyhow::Result<()> {
@@ -161,6 +164,32 @@ fn migrate_four_to_five(transaction: &Transaction<'_>) -> anyhow::Result<()> {
         transaction.execute(
             "UPDATE assets SET metadata = ?1, audio_components = ?2 WHERE id = ?3",
             rusqlite::params![metadata, audio_components, asset_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_five_to_six(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // RAW development settings change executable pixels. Normalize every
+    // interpretation JSON document so schema v6 explicitly freezes the new
+    // default-compatible field and rejects invalid authored bounds.
+    let rows = {
+        let mut statement = transaction.prepare("SELECT id, interpretation FROM assets")?;
+        let mapped = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (asset_id, interpretation) in rows {
+        let interpretation = serde_json::from_str::<AssetMediaInterpretation>(&interpretation)
+            .with_context(|| format!("asset {asset_id} has invalid media interpretation"))?;
+        interpretation
+            .camera_raw
+            .validate()
+            .with_context(|| format!("asset {asset_id} has invalid Camera RAW interpretation"))?;
+        transaction.execute(
+            "UPDATE assets SET interpretation = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_string(&interpretation)?, asset_id],
         )?;
     }
     Ok(())
@@ -477,5 +506,40 @@ mod tests {
             sqlite_user_version(&connection).expect("version"),
             ASSET_LIBRARY_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn v5_interpretation_is_normalized_with_camera_raw_defaults() {
+        let mut connection = Connection::open_in_memory().expect("open");
+        connection.execute_batch(INIT_SQL).expect("current tables");
+        let mut legacy = serde_json::to_value(AssetMediaInterpretation::default())
+            .expect("serialize interpretation");
+        legacy.as_object_mut().expect("object interpretation").remove("camera_raw");
+        connection
+            .execute(
+                "INSERT INTO assets \
+                 (id, name, asset_type, path, metadata, interpretation, created_at, updated_at) \
+                 VALUES ('asset-1', 'RAW', 'still_image', 'frame.dng', \
+                 'null', ?1, 'now', 'now')",
+                [serde_json::to_string(&legacy).expect("legacy JSON")],
+            )
+            .expect("legacy row");
+        connection.pragma_update(None, "user_version", 5).expect("v5");
+
+        migrate_asset_library(&mut connection).expect("migrate");
+
+        let encoded: String = connection
+            .query_row(
+                "SELECT interpretation FROM assets WHERE id = 'asset-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated interpretation");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("normalized JSON");
+        let interpretation: AssetMediaInterpretation =
+            serde_json::from_value(value.clone()).expect("typed interpretation");
+        assert_eq!(interpretation.camera_raw, Default::default());
+        assert!(value.get("camera_raw").is_some());
+        assert_eq!(sqlite_user_version(&connection).expect("version"), 6);
     }
 }

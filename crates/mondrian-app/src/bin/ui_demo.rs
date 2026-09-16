@@ -1461,6 +1461,7 @@ fn route_demo_window_event(
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mondrian_platform::prepare_graphics_process()?;
     use winit::event_loop::EventLoop;
 
     let event_loop = EventLoop::new()?;
@@ -1586,13 +1587,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 ui_runtime.paint_shell_overlays(&mut encoder, &theme, b, last_cursor, &router);
 
-                let size = window.inner_size();
                 let frame_result = frame_renderer.render_draw_commands(
                     &device,
                     &queue,
                     &surface,
                     &config,
-                    (size.width, size.height),
                     encoder.finish(),
                 );
                 if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)

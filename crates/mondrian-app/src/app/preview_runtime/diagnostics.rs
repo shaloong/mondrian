@@ -100,6 +100,8 @@ pub struct PreviewPlaybackScheduleDiagnostics {
     pub forward_prefetch_min_frames: usize,
     /// Maximum allowed forward prefetch window.
     pub forward_prefetch_max_frames: usize,
+    /// Maximum queued plus in-flight prefetch decodes after Priming.
+    pub steady_prefetch_reservation_limit: usize,
     /// Playback prefetch passes whose frame rate produced a valid dynamic window.
     pub forward_prefetch_window_evaluations: u64,
     /// Playback prefetch passes skipped because frame rate could not produce a valid window.
@@ -137,6 +139,9 @@ pub struct PreviewDecodeWorkerExecutionDiagnostics {
     pub playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
     /// Progress for the shared Interactive/Still worker when two workers are available.
     pub non_playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
+    /// Progress for the static-image/Still worker when three workers are available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still: Option<mondrian_media::PreviewDecodeExecutionProgress>,
 }
 
 /// Cloneable read authority for the bounded Preview workers' media progress.
@@ -166,6 +171,7 @@ impl PreviewDecodeWorkerExecutionWatch {
                 MediaPreviewWorkerLane::Any => snapshot.any = progress,
                 MediaPreviewWorkerLane::Playback => snapshot.playback = progress,
                 MediaPreviewWorkerLane::NonPlayback => snapshot.non_playback = progress,
+                MediaPreviewWorkerLane::Still => snapshot.still = progress,
             }
         }
         snapshot
@@ -196,6 +202,10 @@ pub struct PreviewFutureMediaWindowDiagnostics {
     /// One planning turn observes each unique physical path at most once. A
     /// later turn must observe the path again.
     pub source_fingerprint_observations: u64,
+    /// Timeline frame whose distinct physical-source dependency closure is retained.
+    pub retained_cold_activation_frame: Option<i64>,
+    /// Media frames physically retained for the bounded cold activation closure.
+    pub retained_cold_activation_media_frames: usize,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -209,6 +219,10 @@ pub struct PreviewDiagnostics {
     pub future_media_window: PreviewFutureMediaWindowDiagnostics,
     /// Whether the sole visual execution worker terminated unexpectedly.
     pub visual_execution_health_failed: bool,
+    /// Whether the dependency observer is unavailable, including unpolled worker exit.
+    pub visual_dependency_health_failed: bool,
+    /// Live callback owner facts, observable without result polling.
+    pub work_callbacks: super::PreviewWorkCallbackEvidence,
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
     /// Requests that produced a current ready frame.
@@ -294,12 +308,14 @@ pub struct PreviewDiagnostics {
     pub preview_execution_generation: u64,
     /// Exact current-candidate bindings waiting on reused Broker work.
     pub media_existing_work_waiters: usize,
-    /// Existing-work retry authority retained until candidate evaluation acknowledges it.
-    pub media_existing_work_retry_pending: bool,
-    /// Current media requests that registered exact existing-work waiters.
-    pub media_existing_work_waiter_registrations: u64,
-    /// Retained existing-work retries acknowledged by real candidate evaluation.
-    pub media_existing_work_retry_acknowledgements: u64,
+    /// Current-candidate keys waiting for realtime execution pressure to settle.
+    pub media_execution_pressure_waiters: usize,
+    /// Media retry authority retained until candidate evaluation acknowledges it.
+    pub media_retry_pending: bool,
+    /// Current media requests that registered an owner-bound retry waiter.
+    pub media_retry_waiter_registrations: u64,
+    /// Retained media retries acknowledged by real candidate evaluation.
+    pub media_retry_acknowledgements: u64,
     /// Last exhaustive reason the GPU candidate returned Loading.
     pub last_gpu_loading_reason: Option<&'static str>,
     /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.
@@ -344,6 +360,10 @@ pub struct PreviewDiagnostics {
     pub decode_failures: u64,
     /// Failed background media decodes caused by a structured decode timeout.
     pub decode_timeout_failures: u64,
+    /// Failed decodes because the OS could not provide a required process or thread.
+    pub decode_execution_resource_unavailable_failures: u64,
+    /// Last exact production operation that could not acquire its OS resource.
+    pub decode_last_execution_resource_unavailable_operation: Option<&'static str>,
     /// Failed background media decodes caused by access-mode forward-scan budget exhaustion.
     pub decode_budget_exhausted_failures: u64,
     /// Playback-owned cancellation evidence from all semantic frame-work classes.
@@ -534,6 +554,10 @@ pub struct PreviewDiagnostics {
     /// aggregate hard current-working-set grant. App diagnostics do not
     /// reconstruct or rename that capacity authority.
     pub frame_store: mondrian_playback::PreviewFrameStoreDiagnostics,
+    /// Persistent post-composite Timeline cache queue and disk evidence.
+    pub timeline_render_cache: mondrian_render_cache::TimelineRenderCacheDiagnostics,
+    /// Whether the optional persistent cache worker could not start.
+    pub timeline_render_cache_start_failed: bool,
     /// Source/media color transforms into the timeline working space.
     pub color_input_transform_calls: u64,
     /// Pixels processed by source/media color transforms into the timeline working space.
@@ -719,7 +743,9 @@ pub struct PreviewDecodeLatencyBuckets {
     pub le_40ms: u64,
     /// Samples above 40 ms and at or below 50 ms.
     pub le_50ms: u64,
-    /// Samples above 50 ms and at or below 80 ms.
+    /// Samples above 50 ms and at or below 60 ms.
+    pub le_60ms: u64,
+    /// Samples above 60 ms and at or below 80 ms.
     pub le_80ms: u64,
     /// Samples above 80 ms.
     pub gt_80ms: u64,
@@ -733,7 +759,8 @@ impl PreviewDecodeLatencyBuckets {
             16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
             25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
             40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
-            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            50_001..=60_000 => self.le_60ms = self.le_60ms.saturating_add(1),
+            60_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
             _ => self.gt_80ms = self.gt_80ms.saturating_add(1),
         }
     }
@@ -744,6 +771,7 @@ impl PreviewDecodeLatencyBuckets {
             .saturating_add(self.le_25ms)
             .saturating_add(self.le_40ms)
             .saturating_add(self.le_50ms)
+            .saturating_add(self.le_60ms)
             .saturating_add(self.le_80ms)
             .saturating_add(self.gt_80ms)
     }
@@ -765,6 +793,7 @@ impl PreviewDecodeLatencyBuckets {
             (self.le_25ms, Some(25_000)),
             (self.le_40ms, Some(40_000)),
             (self.le_50ms, Some(50_000)),
+            (self.le_60ms, Some(60_000)),
             (self.le_80ms, Some(80_000)),
             (self.gt_80ms, None),
         ] {
@@ -868,7 +897,9 @@ pub struct PreviewDecodeWorkLatencyBuckets {
     pub le_40ms: u64,
     /// Samples above 40 ms and at or below 50 ms.
     pub le_50ms: u64,
-    /// Samples above 50 ms and at or below 80 ms.
+    /// Samples above 50 ms and at or below 60 ms.
+    pub le_60ms: u64,
+    /// Samples above 60 ms and at or below 80 ms.
     pub le_80ms: u64,
     /// Samples above 80 ms and at or below 120 ms.
     pub le_120ms: u64,
@@ -894,7 +925,8 @@ impl PreviewDecodeWorkLatencyBuckets {
             16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
             25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
             40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
-            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            50_001..=60_000 => self.le_60ms = self.le_60ms.saturating_add(1),
+            60_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
             80_001..=120_000 => self.le_120ms = self.le_120ms.saturating_add(1),
             120_001..=250_000 => self.le_250ms = self.le_250ms.saturating_add(1),
             250_001..=500_000 => self.le_500ms = self.le_500ms.saturating_add(1),
@@ -912,6 +944,7 @@ impl PreviewDecodeWorkLatencyBuckets {
             self.le_25ms,
             self.le_40ms,
             self.le_50ms,
+            self.le_60ms,
             self.le_80ms,
             self.le_120ms,
             self.le_250ms,
@@ -938,6 +971,7 @@ impl PreviewDecodeWorkLatencyBuckets {
             (self.le_25ms, Some(25_000)),
             (self.le_40ms, Some(40_000)),
             (self.le_50ms, Some(50_000)),
+            (self.le_60ms, Some(60_000)),
             (self.le_80ms, Some(80_000)),
             (self.le_120ms, Some(120_000)),
             (self.le_250ms, Some(250_000)),
@@ -1358,7 +1392,9 @@ impl PreviewDecodeAccessModeProfile {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
-            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+            | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessCameraRawDng
+            | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 self.in_process_cpu_frames = self.in_process_cpu_frames.saturating_add(1);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}
@@ -1695,6 +1731,7 @@ impl PreviewDecodeAccessModeProfile {
                 self.temporal_mismatch_failures = self.temporal_mismatch_failures.saturating_add(1);
             }
             MediaPreviewFailureReason::DecodeError
+            | MediaPreviewFailureReason::ExecutionResourceUnavailable { .. }
             | MediaPreviewFailureReason::WorkerPanicked
             | MediaPreviewFailureReason::ResidencyContractViolation
             | MediaPreviewFailureReason::ResidencyCapacityRejected => {}
@@ -1879,6 +1916,10 @@ pub struct PreviewDecodePerformanceSummary {
     pub decode_failures: u64,
     /// Failed preview decode results caused by structured decode timeouts.
     pub decode_timeout_failures: u64,
+    /// Failed decodes because the OS could not provide a required process or thread.
+    pub decode_execution_resource_unavailable_failures: u64,
+    /// Last exact production operation that could not acquire its OS resource.
+    pub decode_last_execution_resource_unavailable_operation: Option<&'static str>,
     /// Failed preview decode results caused by access-mode forward-scan budget exhaustion.
     pub decode_budget_exhausted_failures: u64,
     /// Playback-owned cancellation evidence used by production and Headless gates.
@@ -2044,7 +2085,7 @@ pub enum PreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 36;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 37;
 
 /// Default steady-state Preview decode budget.
 pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -2394,6 +2435,10 @@ impl PreviewDiagnostics {
             startup_preroll_queue_wait_max_us: self.decode_startup_preroll_queue_wait_max_us,
             decode_failures: self.decode_failures,
             decode_timeout_failures: self.decode_timeout_failures,
+            decode_execution_resource_unavailable_failures: self
+                .decode_execution_resource_unavailable_failures,
+            decode_last_execution_resource_unavailable_operation: self
+                .decode_last_execution_resource_unavailable_operation,
             decode_budget_exhausted_failures: self.decode_budget_exhausted_failures,
             cancellation: self.decode_cancellation,
             canceled_jobs: self.decode_canceled_jobs,

@@ -191,6 +191,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
         );
         push_decode_max_check(
             &mut checks,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_execution_resource_unavailable_failures",
+            summary.decode_execution_resource_unavailable_failures,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
             PreviewDecodePerformanceArea::RandomAccess,
             "preview_decode_forward_budget_exhausted_failures",
             summary.decode_budget_exhausted_failures,
@@ -2175,7 +2182,7 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_window_invalid_frame_rate",
             format!(
-                "forward_prefetch_invalid_frame_rate={} forward_prefetch_window_evaluations={} last_forward_prefetch_window_frames={:?} forward_prefetch_horizon_us={} forward_prefetch_min_frames={} forward_prefetch_max_frames={}",
+                "forward_prefetch_invalid_frame_rate={} forward_prefetch_window_evaluations={} last_forward_prefetch_window_frames={:?} forward_prefetch_horizon_us={} forward_prefetch_min_frames={} forward_prefetch_max_frames={} steady_prefetch_reservation_limit={}",
                 summary
                     .playback_schedule
                     .forward_prefetch_invalid_frame_rate,
@@ -2187,7 +2194,10 @@ fn push_preview_decode_root_causes_and_actions(
                     .last_forward_prefetch_window_frames,
                 summary.playback_schedule.forward_prefetch_horizon_us,
                 summary.playback_schedule.forward_prefetch_min_frames,
-                summary.playback_schedule.forward_prefetch_max_frames
+                summary.playback_schedule.forward_prefetch_max_frames,
+                summary
+                    .playback_schedule
+                    .steady_prefetch_reservation_limit
             ),
             "fix_sequence_prefetch_frame_rate_contract",
             "Ensure playback prefetch derives its window from a valid sequence frame rate instead of silently disabling cache warming.",
@@ -2299,6 +2309,22 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "inspect_access_mode_decode_timeout_budget",
             "Inspect access-mode decode strategy, hardware decode residency, proxy readiness, and timeout budget before widening worker concurrency.",
+            PreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if summary.decode_execution_resource_unavailable_failures > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewDecodePerformanceArea::CaptureIntegrity,
+            "preview_decode_execution_resource_unavailable",
+            format!(
+                "decode_execution_resource_unavailable_failures={} last_operation={:?}",
+                summary.decode_execution_resource_unavailable_failures,
+                summary.decode_last_execution_resource_unavailable_operation
+            ),
+            "restore_preview_execution_resource_capacity",
+            "Restore process or thread capacity required by the production Preview demux path, then rerun the same workload.",
             PreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -2659,8 +2685,8 @@ fn push_preview_render_root_causes_and_actions(
                 "cpu_output_boundary_us={}",
                 summary.max_frame_stage_durations.cpu_output_boundary_us
             ),
-            "move_preview_output_boundary_to_gpu",
-            "Route viewer output color/display transforms through the GPU output boundary.",
+            "profile_cpu_output_and_validate_gpu_route",
+            "Profile the CPU color processor, allocation, and memory bandwidth while preserving required CPU working-frame cache publication. Timing alone does not establish GPU output eligibility: check the typed route, color/alpha contract, readback requirements, and device admission before selecting an existing GPU or hybrid route.",
         ),
         PreviewRenderBottleneck::FramePackaging => push_render_root_cause_with_action(
             root_causes,

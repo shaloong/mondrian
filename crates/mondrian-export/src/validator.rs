@@ -1,24 +1,69 @@
 use crate::delivery::ffmpeg_audio_channel_layout;
+use crate::mezzanine::professional_mezzanine_contract;
 use crate::preset::{
-    AudioCodecConfig, Av1Profile, Container, H264Profile, HevcProfile, ProResProfile,
-    VideoCodecConfig,
+    AudioCodecConfig, Av1Profile, AvcIntraClass, Container, DnxHrProfile, H264Profile, HevcProfile,
+    ProResProfile, UncompressedVideoFormat, VideoCodecConfig,
 };
 use mondrian_core::{
     AudioChannelLayout, ExecutionCancellationToken, VideoContentLightMetadata,
     VideoHdrChromaticity, VideoHdrRational, VideoMasteringDisplayLuminance,
     VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
 };
+use mondrian_media::FfmpegCommand as Command;
 use mondrian_media::{run_supervised_command, SupervisedProcessPolicy, SupervisedStreamCapture};
 use mondrian_timeline::sequence::DeliveryBitDepth;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 const FFPROBE_DEADLINE: Duration = Duration::from_secs(30);
 const FFPROBE_REPORT_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const FFPROBE_FRAME_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+const FFPROBE_KEYFRAME_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const FFPROBE_STDERR_TAIL_LIMIT: usize = 64 * 1024;
+
+/// A finished-artifact validation failure, preserving command admission
+/// separately from output/codec evidence that may permit a render retry.
+#[derive(Debug, thiserror::Error)]
+pub enum ExportValidationError {
+    /// No FFprobe child was authorized; trying another render route cannot repair this.
+    #[error(transparent)]
+    CommandAdmission(#[from] mondrian_media::FfmpegCommandError),
+    /// The artifact, probe execution or decoded evidence did not satisfy its contract.
+    #[error("{0}")]
+    Output(String),
+    /// A native probe failed with original process and pipe cleanup evidence.
+    #[error("ffprobe {operation} failed: {source}")]
+    Process {
+        /// Bounded probe stage.
+        operation: &'static str,
+        /// Original supervised native failure.
+        #[source]
+        source: mondrian_media::SupervisedProcessError,
+    },
+    /// A completed probe returned unsuccessful or malformed evidence.
+    #[error("ffprobe {operation} rejected: {reason}")]
+    ProbeOutput {
+        /// Native probe stage.
+        operation: &'static str,
+        /// Original evidence rejection.
+        reason: String,
+        /// Bounded stdout/stderr, native exit, and actual consuming cleanup.
+        output: Box<mondrian_media::SupervisedProcessOutput>,
+    },
+    /// The caller's original deadline expired.
+    #[error("export validation original deadline exceeded")]
+    DeadlineExceeded,
+    /// The caller canceled the validation.
+    #[error("export validation canceled")]
+    Cancelled,
+}
+
+impl From<String> for ExportValidationError {
+    fn from(message: String) -> Self {
+        Self::Output(message)
+    }
+}
 
 /// Exact stream and duration contract that a finished export must prove.
 #[derive(Debug, Clone)]
@@ -60,6 +105,9 @@ pub struct MediaStreamSummary {
 pub struct ExpectedVideoConstraints {
     /// Exact encoded codec/profile identity.
     pub encoding: Option<ExpectedVideoEncoding>,
+    /// Exact codec/sample-entry tag when the selected container exposes a
+    /// stable independently useful identity.
+    pub codec_tag: Option<String>,
     /// Exact encoded sample depth.
     pub bit_depth: Option<u8>,
     /// Exact encoded width.
@@ -72,6 +120,12 @@ pub struct ExpectedVideoConstraints {
     pub fps_den: Option<i64>,
     /// Encoded signal fields that must match the finished video stream.
     pub signal: Option<ExpectedVideoSignalConstraints>,
+    /// Exact admitted picture structure to verify on the finished stream.
+    pub coding: Option<crate::video_encoding::ResolvedVideoCodingStructure>,
+    /// Require the independently decoded first frame to prove progressive scan.
+    pub require_progressive_frame: bool,
+    /// Require an interlaced first frame with the exact decoded field dominance.
+    pub require_interlaced_top_field_first: Option<bool>,
 }
 
 /// Codec/profile identities supported by the production export Adapter.
@@ -79,6 +133,8 @@ pub struct ExpectedVideoConstraints {
 pub enum ExpectedVideoEncoding {
     /// H.264 High Profile.
     H264High,
+    /// AS-11 X9 progressive AVC High 4:2:2 Intra, level 4.1.
+    H264High422Intra,
     /// HEVC Main Profile.
     HevcMain,
     /// HEVC Main 10 Profile.
@@ -97,14 +153,33 @@ pub enum ExpectedVideoEncoding {
     ProRes4444,
     /// ProRes 4444 XQ.
     ProRes4444Xq,
+    /// One exact Avid DNxHR profile.
+    DnxHr(DnxHrProfile),
+    /// One exact AVC-Intra class.
+    AvcIntra(AvcIntraClass),
+    /// One exact uncompressed RGB/YUV representation.
+    Uncompressed(UncompressedVideoFormat),
     /// Palette GIF.
     Gif,
 }
 
 impl ExpectedVideoEncoding {
-    const fn codec_name(self) -> &'static str {
+    fn professional_contract(self) -> Option<crate::mezzanine::ProfessionalMezzanineContract> {
+        let codec = match self {
+            Self::DnxHr(profile) => VideoCodecConfig::DnxHr { profile },
+            Self::AvcIntra(class) => VideoCodecConfig::AvcIntra { class },
+            Self::Uncompressed(format) => VideoCodecConfig::Uncompressed { format },
+            _ => return None,
+        };
+        professional_mezzanine_contract(&codec)
+    }
+
+    fn codec_name(self) -> &'static str {
+        if let Some(contract) = self.professional_contract() {
+            return contract.codec_name;
+        }
         match self {
-            Self::H264High => "h264",
+            Self::H264High | Self::H264High422Intra => "h264",
             Self::HevcMain | Self::HevcMain10 => "hevc",
             Self::Av1Main => "av1",
             Self::ProResProxy
@@ -113,13 +188,20 @@ impl ExpectedVideoEncoding {
             | Self::ProResHq
             | Self::ProRes4444
             | Self::ProRes4444Xq => "prores",
+            Self::DnxHr(_) | Self::AvcIntra(_) | Self::Uncompressed(_) => {
+                unreachable!("professional encoding resolved above")
+            }
             Self::Gif => "gif",
         }
     }
 
-    const fn accepted_profiles(self) -> &'static [&'static str] {
+    fn accepted_profiles(self) -> &'static [&'static str] {
+        if let Some(contract) = self.professional_contract() {
+            return contract.accepted_profiles;
+        }
         match self {
             Self::H264High => &["High"],
+            Self::H264High422Intra => &["High 4:2:2 Intra"],
             Self::HevcMain => &["Main"],
             Self::HevcMain10 => &["Main 10", "Main10"],
             Self::Av1Main => &["Main"],
@@ -129,8 +211,18 @@ impl ExpectedVideoEncoding {
             Self::ProResHq => &["HQ"],
             Self::ProRes4444 => &["4444"],
             Self::ProRes4444Xq => &["XQ", "4444 XQ"],
+            Self::DnxHr(_) | Self::AvcIntra(_) | Self::Uncompressed(_) => {
+                unreachable!("professional encoding resolved above")
+            }
             Self::Gif => &[],
         }
+    }
+
+    fn expected_level(self) -> Option<i32> {
+        if self == Self::H264High422Intra {
+            return Some(41);
+        }
+        self.professional_contract().and_then(|contract| contract.expected_level)
     }
 }
 
@@ -185,6 +277,10 @@ pub struct ExpectedVideoSignalConstraints {
     pub color_transfer: Option<String>,
     /// Exact matrix-coefficients tag.
     pub color_matrix: Option<String>,
+    /// Exact encoded sample aspect ratio.
+    pub sample_aspect_ratio: Option<mondrian_core::SampleAspectRatio>,
+    /// Exact encoded field-order tag.
+    pub field_order: Option<String>,
     /// Require primaries, transfer, and matrix tags to be absent.
     pub require_color_tags_absent: bool,
     /// Finished-output static HDR metadata policy.
@@ -221,6 +317,10 @@ pub struct ExportOutputProbe {
     pub container_major_brand: Option<String>,
     /// Best available container or stream duration.
     pub duration_secs: Option<f64>,
+    /// Number of encoded video streams advertised by the artifact.
+    pub video_stream_count: u32,
+    /// Number of encoded audio streams advertised by the artifact.
+    pub audio_stream_count: u32,
     /// First encoded video stream, when present.
     pub video: Option<ProbedVideoStream>,
     /// First encoded audio stream, when present.
@@ -234,6 +334,10 @@ pub struct ProbedVideoStream {
     pub codec_name: Option<String>,
     /// ffprobe profile identity.
     pub profile: Option<String>,
+    /// Container-visible codec/sample-entry tag.
+    pub codec_tag: Option<String>,
+    /// Codec level when ffprobe exposes one.
+    pub level: Option<i32>,
     /// Encoded width.
     pub width: Option<u32>,
     /// Encoded height.
@@ -256,6 +360,10 @@ pub struct ProbedVideoStream {
     pub color_transfer: Option<String>,
     /// Encoded matrix tag.
     pub color_matrix: Option<String>,
+    /// Encoded sample aspect ratio as reported by ffprobe.
+    pub sample_aspect_ratio: Option<String>,
+    /// Encoded field-order tag as reported by ffprobe.
+    pub field_order: Option<String>,
     /// Whether ST 2086 mastering-display metadata is present on the first frame.
     pub mastering_display_metadata_present: bool,
     /// Whether CTA-861.3 content-light metadata is present on the first frame.
@@ -324,6 +432,19 @@ struct FfprobeFrameReport {
 struct FfprobeFrame {
     #[serde(default)]
     side_data_list: Vec<FfprobeFrameSideData>,
+    interlaced_frame: Option<u8>,
+    top_field_first: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeKeyframeReport {
+    #[serde(default)]
+    frames: Vec<FfprobeKeyframe>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeKeyframe {
+    best_effort_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -331,6 +452,8 @@ struct FfprobeStream {
     codec_type: Option<String>,
     codec_name: Option<String>,
     profile: Option<String>,
+    codec_tag_string: Option<String>,
+    level: Option<i32>,
     width: Option<u32>,
     height: Option<u32>,
     r_frame_rate: Option<String>,
@@ -344,9 +467,15 @@ struct FfprobeStream {
     color_space: Option<String>,
     color_transfer: Option<String>,
     color_primaries: Option<String>,
+    sample_aspect_ratio: Option<String>,
+    field_order: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u32>,
     channel_layout: Option<String>,
+    #[serde(default)]
+    side_data_list: Vec<FfprobeFrameSideData>,
+    #[serde(default)]
+    tags: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -388,6 +517,9 @@ pub(crate) const fn expected_video_encoding(codec: &VideoCodecConfig) -> Expecte
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq } => {
             ExpectedVideoEncoding::ProRes4444Xq
         }
+        VideoCodecConfig::DnxHr { profile } => ExpectedVideoEncoding::DnxHr(*profile),
+        VideoCodecConfig::AvcIntra { class } => ExpectedVideoEncoding::AvcIntra(*class),
+        VideoCodecConfig::Uncompressed { format } => ExpectedVideoEncoding::Uncompressed(*format),
         VideoCodecConfig::Gif { .. } => ExpectedVideoEncoding::Gif,
     }
 }
@@ -422,7 +554,7 @@ pub(crate) const fn expected_audio_constraints(
 pub fn validate_export_output(
     output_path: &Path,
     expectations: &ExportValidationExpectations,
-) -> Result<ExportOutputProbe, String> {
+) -> Result<ExportOutputProbe, ExportValidationError> {
     validate_export_output_cancellable(
         output_path,
         expectations,
@@ -436,19 +568,47 @@ pub fn validate_export_output_cancellable(
     output_path: &Path,
     expectations: &ExportValidationExpectations,
     cancellation: &ExecutionCancellationToken,
-) -> Result<ExportOutputProbe, String> {
+) -> Result<ExportOutputProbe, ExportValidationError> {
+    validate_export_output_until(
+        output_path,
+        expectations,
+        cancellation,
+        Instant::now() + FFPROBE_DEADLINE,
+    )
+}
+
+/// Validate all stream, coding and frame probes under one caller-owned deadline.
+pub fn validate_export_output_until(
+    output_path: &Path,
+    expectations: &ExportValidationExpectations,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
+) -> Result<ExportOutputProbe, ExportValidationError> {
+    check_probe_boundary(cancellation, deadline)?;
     let metadata = std::fs::metadata(output_path)
         .map_err(|err| format!("读取导出文件失败 {}: {}", output_path.display(), err))?;
     if metadata.len() == 0 {
-        return Err(format!("导出文件大小为 0: {}", output_path.display()));
+        return Err(format!("导出文件大小为 0: {}", output_path.display()).into());
     }
 
-    let report = ffprobe_report(output_path, cancellation)?;
+    let report = ffprobe_report(output_path, cancellation, deadline)?;
     validate_report(&report, expectations)?;
 
-    // Every deliverable with a video stream must prove its first frame is
-    // decodable, not only HDR variants. Previously an SDR export with a
-    // corrupt interior GOP could pass QC without ever decoding a frame.
+    if let ExpectedStream::Required(expected_video) = &expectations.video
+        && let Some(coding) = expected_video.coding
+    {
+        validate_finished_video_coding(
+            output_path,
+            &report,
+            expected_video,
+            coding,
+            cancellation,
+            deadline,
+        )?;
+    }
+
+    // Every deliverable with a video stream must prove a bounded opening
+    // window is decodable and carries a stable scan contract.
     let has_video = report
         .streams
         .iter()
@@ -458,15 +618,23 @@ pub fn validate_export_output_cancellable(
         ExpectedStream::Forbidden => None,
     }
     .map(|signal| &signal.static_hdr_metadata);
-    let side_data = if has_video {
-        Some(ffprobe_first_video_frame_side_data(
-            output_path,
-            cancellation,
-        )?)
+    let frame_window = if has_video {
+        ffprobe_video_frame_window(output_path, cancellation, deadline)?
     } else {
-        None
+        Vec::new()
     };
-    match (expected_static_hdr, side_data.as_deref()) {
+    let first_frame = frame_window.first();
+    if let ExpectedStream::Required(expected_video) = &expectations.video {
+        if frame_window.is_empty() {
+            validate_frame_scan(None, expected_video)?;
+        }
+        for (index, frame) in frame_window.iter().enumerate() {
+            validate_frame_scan(Some(frame), expected_video)
+                .map_err(|error| format!("导出成品解码窗口第 {} 帧: {error}", index + 1))?;
+        }
+    }
+    let side_data = first_frame.map(|frame| frame.side_data_list.as_slice());
+    match (expected_static_hdr, side_data) {
         (None | Some(ExpectedStaticHdrMetadata::Unspecified), _) => {}
         (Some(ExpectedStaticHdrMetadata::Absent), Some(side_data)) => {
             validate_static_hdr_metadata_absent(side_data)?;
@@ -475,39 +643,96 @@ pub fn validate_export_output_cancellable(
             validate_static_hdr_metadata(side_data, expected)?;
         }
         (Some(ExpectedStaticHdrMetadata::Absent | ExpectedStaticHdrMetadata::Exact(_)), None) => {
-            return Err("未取得导出成品首帧，无法证明静态 HDR metadata 合同".to_string());
+            return Err("未取得导出成品首帧，无法证明静态 HDR metadata 合同".to_string().into());
         }
     }
-    Ok(build_output_probe(&report, side_data.as_deref()))
+    check_probe_boundary(cancellation, deadline)?;
+    Ok(build_output_probe(&report, side_data))
+}
+
+fn validate_frame_scan(
+    frame: Option<&FfprobeFrame>,
+    expected: &ExpectedVideoConstraints,
+) -> Result<(), String> {
+    if expected.require_progressive_frame
+        && frame.and_then(|frame| frame.interlaced_frame) != Some(0)
+    {
+        return Err("导出成品首帧未证明 progressive scan".to_owned());
+    }
+    let Some(expected_top_field_first) = expected.require_interlaced_top_field_first else {
+        return Ok(());
+    };
+    if frame.and_then(|frame| frame.interlaced_frame) != Some(1) {
+        return Err("导出成品首帧未证明 interlaced scan".to_owned());
+    }
+    let actual_top_field_first =
+        frame.and_then(|frame| frame.top_field_first).map(|value| value != 0);
+    if actual_top_field_first != Some(expected_top_field_first) {
+        return Err(format!(
+            "导出成品首帧场优先级不匹配：期望 top_field_first={expected_top_field_first}，实际 {}",
+            actual_top_field_first
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<missing>".to_owned())
+        ));
+    }
+    Ok(())
 }
 
 /// Probe an export into stable typed evidence without applying a delivery
 /// expectation. Video outputs must expose a decodable first frame so HDR
 /// metadata presence cannot silently remain unknown.
-pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
-    let cancellation = ExecutionCancellationToken::new();
-    let report = ffprobe_report(path, &cancellation)?;
+pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, ExportValidationError> {
+    probe_export_output_cancellable(path, &ExecutionCancellationToken::new())
+}
+
+/// Probe stable typed evidence while retaining caller cancellation authority.
+pub fn probe_export_output_cancellable(
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<ExportOutputProbe, ExportValidationError> {
+    let deadline = Instant::now() + FFPROBE_DEADLINE;
+    probe_export_output_until(path, cancellation, deadline)
+}
+
+/// Probe one artifact under the caller's existing non-renewing deadline.
+pub fn probe_export_output_until(
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
+) -> Result<ExportOutputProbe, ExportValidationError> {
+    check_probe_boundary(cancellation, deadline)?;
+    let report = ffprobe_report(path, cancellation, deadline)?;
     let has_video = report
         .streams
         .iter()
         .any(|stream| stream.codec_type.as_deref() == Some("video"));
-    let side_data = has_video
-        .then(|| ffprobe_first_video_frame_side_data(path, &cancellation))
-        .transpose()?;
-    Ok(build_output_probe(&report, side_data.as_deref()))
+    let frame_window = has_video
+        .then(|| ffprobe_video_frame_window(path, cancellation, deadline))
+        .transpose()?
+        .unwrap_or_default();
+    check_probe_boundary(cancellation, deadline)?;
+    Ok(build_output_probe(
+        &report,
+        frame_window.first().map(|frame| frame.side_data_list.as_slice()),
+    ))
 }
 
 /// Probe only stream presence and duration for lightweight media admission.
-pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
-    let report = ffprobe_report(path, &ExecutionCancellationToken::new())?;
+pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, ExportValidationError> {
+    let report = ffprobe_report(
+        path,
+        &ExecutionCancellationToken::new(),
+        Instant::now() + FFPROBE_DEADLINE,
+    )?;
     Ok(summarize_report(&report))
 }
 
 fn ffprobe_report(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<FfprobeReport, String> {
-    let mut command = mondrian_media::ffprobe_command();
+    deadline: Instant,
+) -> Result<FfprobeReport, ExportValidationError> {
+    let mut command = mondrian_media::ffprobe_command()?;
     command
         .arg("-v")
         .arg("error")
@@ -521,36 +746,42 @@ fn ffprobe_report(
         FFPROBE_REPORT_STDOUT_LIMIT,
         cancellation,
         "stream report",
+        deadline,
     )?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "ffprobe 失败（{}）: {}",
-            output.status,
-            stderr.trim()
-        ));
+        return Err(ExportValidationError::ProbeOutput {
+            operation: "stream report",
+            reason: format!("native exit {}", output.status),
+            output: Box::new(output),
+        });
     }
 
-    serde_json::from_slice::<FfprobeReport>(&output.stdout)
-        .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
+    serde_json::from_slice::<FfprobeReport>(&output.stdout).map_err(|err| {
+        ExportValidationError::ProbeOutput {
+            operation: "stream report",
+            reason: format!("解析 ffprobe 结果失败: {err}"),
+            output: Box::new(output),
+        }
+    })
 }
 
-fn ffprobe_first_video_frame_side_data(
+fn ffprobe_video_frame_window(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<Vec<FfprobeFrameSideData>, String> {
-    let mut command = mondrian_media::ffprobe_command();
+    deadline: Instant,
+) -> Result<Vec<FfprobeFrame>, ExportValidationError> {
+    let mut command = mondrian_media::ffprobe_command()?;
     command
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
         .arg("v:0")
         .arg("-read_intervals")
-        .arg("%+#1")
+        .arg("%+#8")
         .arg("-show_frames")
         .arg("-show_entries")
-        .arg("frame=side_data_list")
+        .arg("frame=side_data_list,interlaced_frame,top_field_first")
         .arg("-print_format")
         .arg("json")
         .arg(path);
@@ -558,49 +789,241 @@ fn ffprobe_first_video_frame_side_data(
         &mut command,
         FFPROBE_FRAME_STDOUT_LIMIT,
         cancellation,
-        "first-frame HDR metadata",
+        "opening-frame signal evidence",
+        deadline,
     )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = (|| -> Result<_, String> {
+        if !output.status.success() {
+            return Err(format!(
+                "ffprobe HDR metadata native exit {}",
+                output.status
+            ));
+        }
+        let report = serde_json::from_slice::<FfprobeFrameReport>(&output.stdout)
+            .map_err(|err| format!("解析 ffprobe 开场帧信号证据失败: {err}"))?;
+        if report.frames.is_empty() {
+            Err("ffprobe 未能解码导出视频的开场帧窗口".to_owned())
+        } else {
+            Ok(report.frames)
+        }
+    })();
+    result.map_err(|reason| ExportValidationError::ProbeOutput {
+        operation: "opening-frame signal evidence",
+        reason,
+        output: Box::new(output),
+    })
+}
+
+fn validate_finished_video_coding(
+    path: &Path,
+    report: &FfprobeReport,
+    expected: &ExpectedVideoConstraints,
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
+) -> Result<(), ExportValidationError> {
+    let max_interval_frames = match coding {
+        crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+            keyframe_interval_frames,
+            ..
+        }
+        | crate::video_encoding::ResolvedVideoCodingStructure::Av1RandomAccess {
+            keyframe_interval_frames,
+            ..
+        } => keyframe_interval_frames,
+        crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly => return Ok(()),
+    };
+    let stream = report
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .ok_or_else(|| "导出 GOP 校验缺少视频流".to_owned())?;
+    let (time_base_num, time_base_den) = stream
+        .time_base
+        .as_deref()
+        .and_then(parse_ratio_i64)
+        .ok_or_else(|| "导出 GOP 校验缺少有效视频 time_base".to_owned())?;
+    let fps_num = expected.fps_num.ok_or_else(|| "导出 GOP 校验缺少帧率分子".to_owned())?;
+    let fps_den = expected.fps_den.ok_or_else(|| "导出 GOP 校验缺少帧率分母".to_owned())?;
+
+    let mut command = mondrian_media::ffprobe_command()?;
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-skip_frame")
+        .arg("nokey")
+        .arg("-show_frames")
+        .arg("-show_entries")
+        .arg("frame=best_effort_timestamp")
+        .arg("-print_format")
+        .arg("json")
+        .arg(path);
+    let output = run_bounded_ffprobe(
+        &mut command,
+        FFPROBE_KEYFRAME_STDOUT_LIMIT,
+        cancellation,
+        "keyframe report",
+        deadline,
+    )?;
+    let result = (|| -> Result<_, String> {
+        if !output.status.success() {
+            return Err(format!("ffprobe GOP native exit {}", output.status));
+        }
+        let keyframes = serde_json::from_slice::<FfprobeKeyframeReport>(&output.stdout)
+            .map_err(|error| format!("解析 ffprobe GOP 结果失败: {error}"))?;
+        validate_keyframe_timestamps(
+            &keyframes.frames,
+            stream.start_pts,
+            stream.duration_ts,
+            time_base_num,
+            time_base_den,
+            fps_num,
+            fps_den,
+            max_interval_frames,
+        )
+    })();
+    result.map_err(|reason| ExportValidationError::ProbeOutput {
+        operation: "keyframe report",
+        reason,
+        output: Box::new(output),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_keyframe_timestamps(
+    frames: &[FfprobeKeyframe],
+    start_pts: Option<i64>,
+    duration_ts: Option<i64>,
+    time_base_num: i64,
+    time_base_den: i64,
+    fps_num: i64,
+    fps_den: i64,
+    max_interval_frames: u32,
+) -> Result<(), String> {
+    if time_base_num <= 0 || time_base_den <= 0 || fps_num <= 0 || fps_den <= 0 {
+        return Err("导出 GOP 校验合同包含无效 time_base/帧率".to_owned());
+    }
+    let timestamps = frames
+        .iter()
+        .map(|frame| {
+            frame
+                .best_effort_timestamp
+                .ok_or_else(|| "导出关键帧缺少 best_effort_timestamp".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = timestamps
+        .first()
+        .copied()
+        .ok_or_else(|| "导出视频没有可证明的关键帧".to_owned())?;
+    if let Some(start_pts) = start_pts
+        && first != start_pts
+    {
         return Err(format!(
-            "ffprobe HDR metadata 校验失败（{}）: {}",
-            output.status,
-            stderr.trim()
+            "导出视频首帧不是随机访问点：start_pts={start_pts}, first_key={first}"
         ));
     }
+    for pair in timestamps.windows(2) {
+        validate_keyframe_gap(
+            pair[1] - pair[0],
+            time_base_num,
+            time_base_den,
+            fps_num,
+            fps_den,
+            max_interval_frames,
+        )?;
+    }
+    if let (Some(start_pts), Some(duration_ts), Some(last)) =
+        (start_pts, duration_ts, timestamps.last().copied())
+    {
+        validate_keyframe_gap(
+            start_pts.saturating_add(duration_ts).saturating_sub(last),
+            time_base_num,
+            time_base_den,
+            fps_num,
+            fps_den,
+            max_interval_frames,
+        )?;
+    }
+    Ok(())
+}
 
-    let report = serde_json::from_slice::<FfprobeFrameReport>(&output.stdout)
-        .map_err(|err| format!("解析 ffprobe 首帧 HDR metadata 失败: {err}"))?;
-    report
-        .frames
-        .into_iter()
-        .next()
-        .map(|frame| frame.side_data_list)
-        .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
+fn validate_keyframe_gap(
+    gap_pts: i64,
+    time_base_num: i64,
+    time_base_den: i64,
+    fps_num: i64,
+    fps_den: i64,
+    max_interval_frames: u32,
+) -> Result<(), String> {
+    if gap_pts < 0 {
+        return Err("导出关键帧时间戳发生倒退".to_owned());
+    }
+    let actual = i128::from(gap_pts) * i128::from(time_base_num) * i128::from(fps_num);
+    let admitted =
+        i128::from(max_interval_frames) * i128::from(time_base_den) * i128::from(fps_den);
+    if actual > admitted {
+        return Err(format!(
+            "导出 GOP 超过准入上限：gap_pts={gap_pts}, max_interval_frames={max_interval_frames}"
+        ));
+    }
+    Ok(())
 }
 
 fn run_bounded_ffprobe(
     command: &mut Command,
     stdout_limit: usize,
     cancellation: &ExecutionCancellationToken,
-    operation: &str,
-) -> Result<mondrian_media::SupervisedProcessOutput, String> {
+    operation: &'static str,
+    deadline: Instant,
+) -> Result<mondrian_media::SupervisedProcessOutput, ExportValidationError> {
+    check_probe_boundary(cancellation, deadline)?;
     let policy = SupervisedProcessPolicy {
         pipe_stdin: false,
         stdout: SupervisedStreamCapture::Head { limit_bytes: stdout_limit, reject_excess: true },
         stderr: SupervisedStreamCapture::Tail { limit_bytes: FFPROBE_STDERR_TAIL_LIMIT },
-        deadline: Some(Instant::now() + FFPROBE_DEADLINE),
+        deadline: Some(deadline),
         ..SupervisedProcessPolicy::default()
     };
     run_supervised_command(command, None, policy, cancellation)
-        .map_err(|error| format!("ffprobe {operation} process failed: {error}"))
+        .map_err(|source| ExportValidationError::Process { operation, source })
+}
+
+fn check_probe_boundary(
+    cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
+) -> Result<(), ExportValidationError> {
+    if cancellation.is_canceled() {
+        return Err(ExportValidationError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(ExportValidationError::DeadlineExceeded);
+    }
+    Ok(())
 }
 
 fn validate_report(
     report: &FfprobeReport,
     expectations: &ExportValidationExpectations,
 ) -> Result<(), String> {
+    for stream in report
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("video"))
+    {
+        if stream.tags.keys().any(|key| key.eq_ignore_ascii_case("rotate"))
+            || stream.side_data_list.iter().any(|data| {
+                data.side_data_type.as_deref().is_some_and(|kind| {
+                    kind.eq_ignore_ascii_case("Display Matrix")
+                        || kind.to_ascii_lowercase().contains("cropping")
+                })
+            })
+        {
+            return Err("finished output contains an unsupported display matrix, rotation or container crop".to_owned());
+        }
+    }
     validate_container(report.format.as_ref(), &expectations.container)?;
     let video_streams = report
         .streams
@@ -621,6 +1044,13 @@ fn validate_report(
     if let (Some(stream), Some(expected)) = (video_stream, expected_video) {
         if let Some(encoding) = expected.encoding {
             validate_video_encoding(stream, encoding)?;
+        }
+        if let Some(expected_tag) = expected.codec_tag.as_deref() {
+            validate_exact_codec_field(
+                "codec tag",
+                expected_tag,
+                stream.codec_tag_string.as_deref(),
+            )?;
         }
         if let Some(expected_bit_depth) = expected.bit_depth {
             let actual_bit_depth = stream.pix_fmt.as_deref().and_then(pixel_format_bit_depth);
@@ -805,6 +1235,17 @@ fn validate_video_encoding(
         .iter()
         .any(|candidate| normalized_identity(candidate) == actual_profile)
     {
+        if let Some(expected_level) = expected.expected_level()
+            && stream.level != Some(expected_level)
+        {
+            return Err(format!(
+                "导出视频 level 不匹配：期望 {expected_level}，实际 {}",
+                stream
+                    .level
+                    .map(|level| level.to_string())
+                    .unwrap_or_else(|| "<missing>".to_owned())
+            ));
+        }
         return Ok(());
     }
     Err(format!(
@@ -888,6 +1329,7 @@ fn pixel_format_bit_depth(pixel_format: &str) -> Option<u8> {
             | "gbrap"
             | "gray"
             | "rgb24"
+            | "uyvy422"
             | "rgba"
             | "bgra"
             | "pal8"
@@ -937,6 +1379,30 @@ fn validate_video_signal(
         "视频范围",
         expected.color_range.as_deref(),
         stream.color_range.as_deref(),
+    )?;
+    if let Some(expected_ratio) = expected.sample_aspect_ratio {
+        let actual_ratio =
+            stream.sample_aspect_ratio.as_deref().and_then(parse_ratio_i64).and_then(
+                |(numerator, denominator)| {
+                    mondrian_core::SampleAspectRatio::new(
+                        u32::try_from(numerator).ok()?,
+                        u32::try_from(denominator).ok()?,
+                    )
+                },
+            );
+        if actual_ratio != Some(expected_ratio) {
+            return Err(format!(
+                "导出像素宽高比不匹配：期望 {}/{}, 实际 {}",
+                expected_ratio.numerator(),
+                expected_ratio.denominator(),
+                stream.sample_aspect_ratio.as_deref().unwrap_or("<missing>")
+            ));
+        }
+    }
+    validate_exact_video_field(
+        "场序",
+        expected.field_order.as_deref(),
+        stream.field_order.as_deref(),
     )?;
     if expected.require_color_tags_absent {
         for (name, actual) in [
@@ -1049,6 +1515,18 @@ fn build_output_probe(
     report: &FfprobeReport,
     side_data: Option<&[FfprobeFrameSideData]>,
 ) -> ExportOutputProbe {
+    let video_stream_count = report
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("video"))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let audio_stream_count = report
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .count()
+        .min(u32::MAX as usize) as u32;
     let video = report
         .streams
         .iter()
@@ -1062,6 +1540,8 @@ fn build_output_probe(
             ProbedVideoStream {
                 codec_name: stream.codec_name.clone(),
                 profile: stream.profile.clone(),
+                codec_tag: stream.codec_tag_string.clone(),
+                level: stream.level,
                 width: stream.width,
                 height: stream.height,
                 frame_rate_num: frame_rate.map(|(num, _)| num),
@@ -1073,6 +1553,8 @@ fn build_output_probe(
                 color_primaries: stream.color_primaries.clone(),
                 color_transfer: stream.color_transfer.clone(),
                 color_matrix: stream.color_space.clone(),
+                sample_aspect_ratio: stream.sample_aspect_ratio.clone(),
+                field_order: stream.field_order.clone(),
                 mastering_display_metadata_present: side_data.is_some_and(|side_data| {
                     side_data.iter().any(|data| {
                         data.side_data_type.as_deref().is_some_and(|kind| {
@@ -1107,6 +1589,8 @@ fn build_output_probe(
             .as_ref()
             .and_then(|format| format.tags.major_brand.clone()),
         duration_secs: summarize_report(report).duration_secs,
+        video_stream_count,
+        audio_stream_count,
         video,
         audio,
     }
@@ -1307,7 +1791,10 @@ fn summarize_report(report: &FfprobeReport) -> MediaStreamSummary {
 
 fn parse_ratio_i64(raw: &str) -> Option<(i64, i64)> {
     let trimmed = raw.trim();
-    let (numerator, denominator) = trimmed.split_once('/').unwrap_or((trimmed, "1"));
+    let (numerator, denominator) = trimmed
+        .split_once('/')
+        .or_else(|| trimmed.split_once(':'))
+        .unwrap_or((trimmed, "1"));
     let mut numerator = numerator.trim().parse::<i64>().ok()?;
     let mut denominator = denominator.trim().parse::<i64>().ok()?;
     if numerator <= 0 || denominator <= 0 {
@@ -1341,6 +1828,69 @@ fn parse_secs_f64(raw: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_probe_uses_original_deadline_and_retains_cleanup() {
+        let mut command = mondrian_media::ffprobe_command().expect("native ffprobe");
+        command.args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=16x16:rate=25,realtime",
+            "-show_frames",
+            "-of",
+            "json",
+        ]);
+        let started = Instant::now();
+        let result = run_bounded_ffprobe(
+            &mut command,
+            1024 * 1024,
+            &ExecutionCancellationToken::new(),
+            "deadline fixture",
+            started + Duration::from_millis(250),
+        );
+        let ExportValidationError::Process { source, .. } =
+            result.expect_err("live probe deadline")
+        else {
+            panic!("native process failure must retain its typed source");
+        };
+        assert!(source.is_deadline_exceeded(), "{source:#}");
+        let mondrian_media::SupervisedProcessError::Cleanup { cleanup, .. } = source else {
+            panic!("native cleanup receipt must remain attached");
+        };
+        assert!(cleanup.kill_error.is_none());
+        assert!(cleanup.native_exit_observed || cleanup.deadline_exceeded);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn decoded_frame_scan_validation_is_dominance_aware() {
+        let expected = ExpectedVideoConstraints {
+            require_interlaced_top_field_first: Some(true),
+            ..ExpectedVideoConstraints::default()
+        };
+        let tff = FfprobeFrame {
+            interlaced_frame: Some(1),
+            top_field_first: Some(1),
+            ..FfprobeFrame::default()
+        };
+        validate_frame_scan(Some(&tff), &expected).expect("TFF evidence");
+
+        let bff = FfprobeFrame { top_field_first: Some(0), ..tff.clone() };
+        assert!(validate_frame_scan(Some(&bff), &expected)
+            .expect_err("wrong dominance")
+            .contains("top_field_first"));
+        let progressive = FfprobeFrame {
+            interlaced_frame: Some(0),
+            top_field_first: Some(0),
+            ..FfprobeFrame::default()
+        };
+        assert!(validate_frame_scan(Some(&progressive), &expected)
+            .expect_err("progressive frame cannot prove interlace")
+            .contains("interlaced scan"));
+    }
+
     fn base_report() -> FfprobeReport {
         FfprobeReport {
             streams: vec![
@@ -1361,6 +1911,8 @@ mod tests {
                     color_space: Some("bt2020nc".to_string()),
                     color_transfer: Some("smpte2084".to_string()),
                     color_primaries: Some("bt2020".to_string()),
+                    sample_aspect_ratio: Some("1:1".to_string()),
+                    field_order: Some("progressive".to_string()),
                     ..FfprobeStream::default()
                 },
                 FfprobeStream {
@@ -1397,12 +1949,16 @@ mod tests {
             container: Container::Mp4,
             video: ExpectedStream::Required(ExpectedVideoConstraints {
                 encoding: Some(ExpectedVideoEncoding::HevcMain10),
+                codec_tag: None,
                 bit_depth: Some(10),
                 width: Some(1920),
                 height: Some(1080),
                 fps_num: Some(25),
                 fps_den: Some(1),
                 signal: None,
+                coding: None,
+                require_progressive_frame: false,
+                require_interlaced_top_field_first: None,
             }),
             audio: base_audio_expectation(),
             expected_duration_secs: Some(10.0),
@@ -1427,6 +1983,31 @@ mod tests {
         };
 
         assert!(validate_report(&report, &expected).is_ok());
+    }
+
+    #[test]
+    fn keyframe_validation_uses_exact_stream_time_base() {
+        let frames = [0, 25_600, 51_200]
+            .into_iter()
+            .map(|timestamp| FfprobeKeyframe { best_effort_timestamp: Some(timestamp) })
+            .collect::<Vec<_>>();
+
+        validate_keyframe_timestamps(&frames, Some(0), Some(64_000), 1, 12_800, 25, 1, 50)
+            .expect("two-second GOP and shorter tail");
+    }
+
+    #[test]
+    fn keyframe_validation_rejects_encoder_ignored_interval() {
+        let frames = [0, 38_400]
+            .into_iter()
+            .map(|timestamp| FfprobeKeyframe { best_effort_timestamp: Some(timestamp) })
+            .collect::<Vec<_>>();
+
+        let error =
+            validate_keyframe_timestamps(&frames, Some(0), Some(51_200), 1, 12_800, 25, 1, 50)
+                .expect_err("three-second gap exceeds admitted two-second GOP");
+
+        assert!(error.contains("GOP 超过准入上限"));
     }
 
     #[test]
@@ -1625,6 +2206,8 @@ mod tests {
                     color_primaries: Some("bt2020".to_owned()),
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
+                    sample_aspect_ratio: Some(mondrian_core::SampleAspectRatio::SQUARE),
+                    field_order: Some("progressive".to_owned()),
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Unspecified,
                 }),
@@ -1634,7 +2217,7 @@ mod tests {
             expected_duration_secs: None,
         };
 
-        assert!(validate_report(&report, &expected).is_ok());
+        validate_report(&report, &expected).expect("complete encoded signal must validate");
     }
 
     #[test]
@@ -1700,6 +2283,7 @@ mod tests {
     fn parse_ratio_i64_reduces_fraction_and_number() {
         assert_eq!(parse_ratio_i64("25/1"), Some((25, 1)));
         assert_eq!(parse_ratio_i64("60000/2002"), Some((30_000, 1_001)));
+        assert_eq!(parse_ratio_i64("40:33"), Some((40, 33)));
         assert_eq!(parse_ratio_i64("24"), Some((24, 1)));
         assert_eq!(parse_ratio_i64("0/0"), None);
     }
@@ -1791,7 +2375,7 @@ mod tests {
             "mondrian-export-signal-validation-{}.mp4",
             std::process::id()
         ));
-        let status = Command::new("ffmpeg")
+        let status = mondrian_media::ffmpeg_command().expect("admit signal fixture command")
             .args([
                 "-y",
                 "-hide_banner",
@@ -1805,12 +2389,14 @@ mod tests {
                 "format=rgba,scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt709",
                 "-c:v",
                 "libx264",
+                "-r",
+                "25",
                 "-pix_fmt",
                 "yuv420p",
                 "-color_range",
                 "tv",
                 "-x264-params",
-                "colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709",
+                "keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0:colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709",
             ])
             .arg(&path)
             .status()
@@ -1821,12 +2407,24 @@ mod tests {
             video: ExpectedStream::Required(ExpectedVideoConstraints {
                 width: Some(16),
                 height: Some(16),
+                fps_num: Some(25),
+                fps_den: Some(1),
+                coding: Some(
+                    crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+                        keyframe_interval_frames: 50,
+                        max_b_frames: 3,
+                        closed_gop: true,
+                        scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+                    },
+                ),
                 signal: Some(ExpectedVideoSignalConstraints {
                     pixel_format: Some("yuv420p".to_owned()),
                     color_range: Some("tv".to_owned()),
                     color_primaries: Some("bt709".to_owned()),
                     color_transfer: Some("iec61966-2-1".to_owned()),
                     color_matrix: Some("bt709".to_owned()),
+                    sample_aspect_ratio: None,
+                    field_order: None,
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Absent,
                 }),
@@ -1847,7 +2445,7 @@ mod tests {
             "mondrian-export-hdr10-validation-{}.mp4",
             std::process::id()
         ));
-        let output = Command::new("ffmpeg")
+        let output = mondrian_media::ffmpeg_command().expect("admit signal fixture command")
             .args([
                 "-y",
                 "-hide_banner",
@@ -1893,6 +2491,8 @@ mod tests {
                     color_primaries: Some("bt2020".to_owned()),
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
+                    sample_aspect_ratio: None,
+                    field_order: None,
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Exact(
                         ExpectedStaticHdrMetadataConstraints {
@@ -1922,6 +2522,6 @@ mod tests {
         let mismatch = validate_export_output(&path, &expectations)
             .expect_err("a mismatched post-encode MaxCLL contract must fail");
         let _ = std::fs::remove_file(path);
-        assert!(mismatch.contains("实际 1000/400"));
+        assert!(mismatch.to_string().contains("实际 1000/400"));
     }
 }

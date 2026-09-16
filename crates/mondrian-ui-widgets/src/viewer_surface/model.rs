@@ -19,8 +19,9 @@ const PREVIEW_QUALITY_MAX_WIDTH: f32 = 86.0;
 const ZOOM_MIN_WIDTH: f32 = 50.0;
 const ZOOM_MAX_WIDTH: f32 = 78.0;
 
-pub(super) fn aspect_ratio(source_width: u32, source_height: u32) -> f32 {
-    (source_width.max(1) as f32 / source_height.max(1) as f32).clamp(0.1, 10.0)
+pub(super) fn aspect_ratio(source_width: u32, source_height: u32, sample_aspect_ratio: f32) -> f32 {
+    (source_width.max(1) as f32 * sample_aspect_ratio / source_height.max(1) as f32)
+        .clamp(0.1, 10.0)
 }
 
 pub(super) fn canvas_viewport_rect(bounds: Rect) -> Rect {
@@ -62,11 +63,12 @@ pub(super) fn canvas_rect(
     bounds: Rect,
     source_width: u32,
     source_height: u32,
+    sample_aspect_ratio: f32,
     zoom_scale: Option<f32>,
 ) -> Rect {
     let available = canvas_viewport_rect(bounds);
     if let Some(scale) = zoom_scale {
-        let width = (source_width.max(1) as f32 * scale).round();
+        let width = (source_width.max(1) as f32 * sample_aspect_ratio * scale).round();
         let height = (source_height.max(1) as f32 * scale).round();
         return Rect::new(
             (available.x + (available.width - width) * 0.5).round(),
@@ -75,7 +77,10 @@ pub(super) fn canvas_rect(
             height.max(0.0),
         );
     }
-    fit_aspect(available, aspect_ratio(source_width, source_height))
+    fit_aspect(
+        available,
+        aspect_ratio(source_width, source_height, sample_aspect_ratio),
+    )
 }
 
 pub(super) fn visible_controls(bounds_width: f32) -> &'static [ViewerControl] {
@@ -313,7 +318,7 @@ mod tests {
     fn canvas_viewport_and_fit_rects_reserve_chrome_and_preserve_aspect() {
         let bounds = Rect::new(10.0, 20.0, 420.0, 260.0);
         let viewport = canvas_viewport_rect(bounds);
-        let fit = canvas_rect(bounds, 1920, 1080, None);
+        let fit = canvas_rect(bounds, 1920, 1080, 1.0, None);
 
         assert_eq!(viewport, Rect::new(26.0, 34.0, 388.0, 202.0));
         assert!((fit.width / fit.height - 16.0 / 9.0).abs() <= 0.001);
@@ -323,11 +328,22 @@ mod tests {
     #[test]
     fn fixed_zoom_uses_source_pixels_and_can_extend_outside_viewport() {
         let bounds = Rect::new(0.0, 0.0, 300.0, 200.0);
-        let canvas = canvas_rect(bounds, 3840, 2160, Some(0.25));
+        let canvas = canvas_rect(bounds, 3840, 2160, 1.0, Some(0.25));
 
         assert_eq!(canvas.width, 960.0);
         assert_eq!(canvas.height, 540.0);
         assert!(canvas.x < bounds.x);
+    }
+
+    #[test]
+    fn sequence_sample_aspect_ratio_affects_fit_and_fixed_zoom_geometry() {
+        let bounds = Rect::new(0.0, 0.0, 900.0, 700.0);
+        let fit = canvas_rect(bounds, 720, 480, 40.0 / 33.0, None);
+        let fixed = canvas_rect(bounds, 720, 480, 40.0 / 33.0, Some(1.0));
+
+        assert!((fit.width - fit.height * 20.0 / 11.0).abs() <= 1.0);
+        assert_eq!(fixed.width, 873.0);
+        assert_eq!(fixed.height, 480.0);
     }
 
     #[test]

@@ -1,5 +1,64 @@
 # Render Pipeline
 
+At the App media boundary, an admitted GPU consumer can receive compact CPU
+YUV before native decoder discovery. P010 remains CPU-resident and enters the
+existing renderer upload path; this is not evidence of hardware decoding or
+native surface import. CPU-addressable consumers and unmapped RGB formats keep
+their existing RGBA representation contracts.
+
+Decoded CPU media enters the renderer through the `Source Frame Preparation`
+Module. The Module consumes Media's immutable RGBA frame contract, validates
+payload extent and encoded-versus-linear-versus-DataTexture identity, and
+normalizes Alpha. It atomically constructs either a color-managed source bound
+to one `RenderInputTransform`, or a DataTexture working frame that preserves
+normalized numeric channels and executes zero OCIO/color stages. Preview and
+Export retain that prepared value for either exact CPU execution or the
+compositor-owned typed GPU DataTexture upload; the latter materializes
+`NonColorData + DataTexture` and can enter a working accumulator only through
+the explicit numeric-composite bypass. This shared seam prevents consumer
+Adapters from deriving color semantics from scalar type or bit depth, and
+structurally prevents payload/intent domain mismatches after preparation.
+
+The renderer presents color execution as four deep Modules rather than one
+generic stage API:
+
+```text
+MediaInputColorContext
+  -> color::source
+  -> color::working
+  -> color::program_output (ProgramColorContext-derived boundary)
+  -> color::monitor (Viewer only)
+```
+
+Preview and Export may schedule those Modules differently but cannot plan a
+generic stage graph, fill Program Output fields, or own renderer backend
+caches. CPU work shares one `RenderCpuColorExecutionSession`; GPU work shares
+one `GpuColorExecutionSession`, frame namespace, resource table, and texture
+pool. Export can detach one exact resident Program Output for an encoder or
+request an explicit readback without seeing materialization internals. Viewer
+retains Program Output before local monitor adaptation for scopes and performs
+only one final quantization.
+
+Camera RAW does not add a renderer-side color path. Media supplies a
+`SourceLinearRgb + LinearRec709 + Full` Float32 frame; Source Frame Preparation
+validates that contract, normalizes alpha once, and performs the same immutable
+input-to-working transform used for any other scene-linear source. Preview,
+Thumbnail, and Export may schedule differently but cannot demosaic, reapply RAW
+white balance/exposure, reinterpret range, or bypass the shared preparation
+seam. The current RAW Adapter is CPU-resident, so GPU-resident debayer and
+source-surface residency remain explicit unimplemented optimizations.
+
+Pointwise gamut/highlight grades stay in the same prepared Effect graph used by
+Preview and Export. CPU normalized-RGBA8 and Float32 dispatch call the same
+compiled grade objects; the production working compositor lowers them to two
+fused GPU point-op IDs. Gamut Compression passes only working-space identity
+and amount in its uniform, while shader and CPU mirror the reviewed fixed
+working/AP1 matrices and ACES 1.3 constants. Highlight Recovery passes
+threshold, rolloff, strength, and working-space CIE-Y coefficients. Both paths
+retain straight alpha, do no frame allocation or readback, and are qualified on
+a real wgpu device for Rec.709 and ACEScg. They never become a renderer-only
+filter or a Preview/Export fork.
+
 The intended render path is shared by preview and export:
 
 Tests that inspect prepared-program dependency currency must bind all assertions to
@@ -33,6 +92,9 @@ TimelineEvaluationRequest
   -> transient PreparedVisualFrameClosure
        -> exact nested instance/time/canvas/color/temporal bindings
        -> consumer-owned route evidence, no pixels
+  -> Prepared Visual Execution Module
+       -> validated iterative child-before-parent schedule
+       -> Preview or Export materialization Adapter
   -> TimelineRenderPlanElement materialization
   -> Clip Sampling / Generated Source
   -> Effect Graph Evaluation
@@ -41,16 +103,71 @@ TimelineEvaluationRequest
   -> Display or Export Encode
 ```
 
+`TimelineRenderIntent::ReferenceOutput` is the explicit third final-quality
+consumer intent. Its settings are full raster, Working color target, Final
+quality, and no frame drop. It deliberately stops before Program Output because
+`ReferenceOutputProgram` owns that boundary and physical packing. The
+validation endurance path supplies this intent to the same frozen Export
+Prepared Visual closure and execution Adapter used for exact-source Export
+materialization; it does not route through Preview representation selection,
+proxy preference, Viewer scaling, monitor/ICC processing, or presentation
+overlays. Preview, Export, and Reference may schedule differently, but none may
+reinterpret Timeline placement, nesting, Effects, Grades, or working color.
+
+For persistent working-frame reuse, each Preview materialization Adapter emits
+one exhaustive `ResolvedVisualNodeMaterializationIdentity`. The Renderer-owned
+Prepared Visual Module combines it with exact node time/raster/working/engine
+semantics to produce the opaque `ResolvedVisualFrameIdentity`; nested outputs
+carry that identity recursively into their parent. `mondrian-render-cache`
+accepts only this complete value and a physical extent/format/alpha envelope.
+This Seam is intentionally different from the Viewer presentation key and from
+the conservative Prepared Visual Author Fingerprint: Program Output, monitor,
+scheduling/provider evidence, and semantically irrelevant author revisions do
+not invalidate pre-output working pixels.
+
+Grade hierarchy is materialized in that shared path with the exact order
+`Group Pre -> Clip Effects/Masks -> Clip Grade -> Group Post -> Track
+Composite -> Timeline Grade`. The first four scopes compile into each selected
+Clip program. `TimelineRenderPlanElement::TimelineGrade` is a distinct
+full-composite element appended exactly once and last; it is not represented as
+a generated or adjustment Clip in Timeline author state. Export lowers that
+same element to its full-composite adjustment execution shape while retaining
+the exact same compiled `Arc` used by Preview.
+
+Timeline Grade executes over Float32 working pixels after all Track layers.
+An empty transparent Timeline still retains the explicit plan element for
+identity and diagnostics, but an alpha-preserving contract may prove pixel
+execution is a no-op. A temporal Timeline Grade currently fails closed: correct
+evaluation requires historical complete lower-composite frames, and Clip-local
+history cannot be substituted. This restriction is explicit admission evidence
+rather than a silent spatial approximation.
+
+Preview/Export parity tests compare hierarchy order, exact compiled-IR sharing,
+Float32 end-to-end pixels, Definition-scoped invalidation, blocker propagation,
+temporal rejection, and empty-transparent semantics. Prepared closures include
+Grade dependencies and cache signatures, so a Definition edit cannot reuse a
+stale composite even when Clip placement is unchanged.
+
 Timeline evaluation consumes exact Timeline Time in a declared Sequence domain
 and an explicit video Evaluation Grid. `TimelineEvaluationRequest` carries one
 `FramePosition`; its frame and time base cannot be separated or supplied
-through parallel fields. Evaluation requires that position's time base to
-exactly equal the prepared/source Sequence grid and requires a nonnegative
-frame. A mismatch fails closed before placement selection: the renderer never
-normalizes an equivalent-looking ratio, substitutes the source grid, or clamps
-a negative request to frame zero.
+through parallel fields. Evaluation accepts the Sequence picture grid or its
+exact doubled field grid and requires a nonnegative coordinate. Any other grid
+fails closed before placement selection: the renderer never normalizes an
+equivalent-looking ratio, substitutes the source grid, or clamps a negative
+request to frame zero.
 Subframe shutter/temporal samples use the same Timeline Time representation and
 do not introduce a renderer-private tick scale.
+
+`ProgramPictureSampling` is the sole Program scan scheduler. Progressive output
+requests one full-raster sample. Interlaced output requests two independent
+full-raster progressive evaluations at exact display-field instants and carries
+the row parity extracted from each. Animation, Transitions, nested Sequences,
+temporal Effect demand, random seeds, and cache identity therefore observe two
+real times; no woven frame enters an Effect or compositor. The Export-owned
+Interlaced Delivery Module applies a field-safe vertical `[1,2,1]/4` prefilter
+to each sample and atomically weaves TFF even/odd rows. Float masters cannot
+enter this quantized delivery boundary.
 
 Flattening retains two independent exact coordinates for each active Clip:
 `clip_time` for all Clip-owned visual processing and `source_sample` for
@@ -111,9 +228,14 @@ Duplicate Sequence identities, missing selected children, active-path cycles,
 depth overflow, Program identity/fingerprint mismatch, or a mixed registry
 revision fail closed. Export converts its half-open delivery interval to this
 checked inclusive form for immutable dependency capture; Preview lookahead uses
-the same closure and may binary-search for its first media-demand frame. The
-range closure contains no per-frame Render Plan, placement-instance execution
-node, pixels, decoder/GPU state, audio demand, or publication policy; those
+the same closure and may binary-search for its first media-demand frame or the
+first frame whose prefix introduces an Asset outside the current media set. The
+second query avoids synchronously evaluating every intervening frame when a
+realtime owner needs the next cold-source coordinate. It returns only a frame;
+the Preview Adapter still lowers the exact media requests and validates source
+fingerprints there. The range closure contains no per-frame Render Plan,
+placement-instance execution node, pixels, decoder/GPU state, audio demand, or
+publication policy; those
 belong to frame closure or the consumer.
 
 One `TimelineRenderPlan` describes one Sequence instance only. The renderer
@@ -137,6 +259,94 @@ any frame work. The separately named root role may alias the exact same
 borrowed object already present in the canonical collection; another object
 with the same identity is still ambiguous and rejected. Nested lookup is
 constant-time and the index cannot outlive the request snapshots it references.
+
+`execute_prepared_visual_closure` is the sole recursive-materialization driver
+after that closure is frozen. It validates the closure as one rooted instance
+tree, derives deterministic post-order with an explicit bounded stack, and
+invokes one `PreparedVisualExecutionAdapter` call per reachable node. Each call
+can inspect its immutable node, exact inbound binding, and already-finished
+direct-child outputs; it cannot select a different child, reopen Sequence
+author state, or recursively enter another node. The driver retains outputs
+under the closure's already-admitted conservative CPU active-byte bound and
+returns only the exact root result. Its Interface is intentionally small:
+Preview and Export are the two real Adapters, while decode, title rasterization,
+compositing, Pending/Unavailable semantics, Viewer presentation, delivery
+encoding, and publication stay in those owning Modules.
+
+For an Export deliverable, the Adapter first proves the entire prepared frame
+closure can lower to homogeneous GPU Effect plans and carries neither temporal
+batches nor heterogeneous payloads. Only then does the renderer-owned
+`GpuVisualFrameExecutor` start. It records source Effects, Cross Dissolve,
+adjustments, Grade elements, and the final working composite into the same
+`RenderGpuOutputBoundaryRuntime` frame table. Nested child results remain typed
+`GpuColorFrameHandle` values; a child/parent working-space mismatch becomes one
+explicit stock-OCIO GPU intermediate transform. The root handle enters Program
+Output/legalization/packing directly and performs exactly one readback at the
+encoder-pipe boundary. There is no nested or graph-internal readback.
+
+The GPU Visual Module and Viewer share the Renderer-owned Working Float Policy
+Interface. The current product decision is RGBA32F because no sealed Float16
+quality/performance bundle exists and the Effects/heterogeneous Implementations
+are not Float16-qualified. Each GPU visual record carries the exact decision;
+all nodes in one Export attempt must agree, and `ExportJobVisualDiagnostics`
+retains that decision beside peak active bytes/textures. Nested child-to-parent
+working transforms allocate the same selected format. Estimation, execution,
+and recorded output are compared explicitly, so a future policy change cannot
+quietly produce 8-byte estimates for 16-byte textures.
+
+GPU selection is whole-closure and pre-start. An unsupported graph, temporal
+closure, heterogeneous route, unavailable device, or active-resource rejection
+selects the complete CPU route before GPU pixels start. Once the GPU Adapter
+records the first node, device/composite/color/output failure is terminal for
+that attempt; it cannot silently replay the frame on CPU. CPU decode/upload is
+still an explicit input residency boundary when decoder-surface import is not
+qualified. At output, the generic encoder pipe remains an explicit readback
+boundary, while the qualified Windows HEVC route hands the detached root GPU
+texture to the same-device D3D12 resident-encode Adapter without host transfer.
+
+The CPU route enters one deep Renderer-owned CPU Visual Execution Module
+through `TimelineCompositeScratch`. Preview fallback and each Export visual
+Session own separate instances. The Module lazily creates a bounded pool of at
+most eight workers and runs only full-frame independent kernels above its
+configured threshold; it never uses Rayon's process-global pool or changes
+pixel order inside one pixel. One worker is an explicit scalar-reference
+policy. Runtime SIMD is selected inside the same Module only for a separately
+qualified opaque Cross Dissolve kernel; partial-alpha pixels retain the
+canonical scalar coverage algebra. The public execution diagnostics prove
+parallel dispatches and SIMD pixel counts rather than inferring acceleration
+from machine capability.
+
+Cross Dissolve endpoint canvases are checked out from two owner-retained
+Float32 buffers and restored on both success and failure. Their active bytes
+remain covered by the conservative three-frame Transition estimate. Retention
+is optional: actual capacities participate in the existing retained-scratch
+grant and are synchronously released after a frame when the owner cannot keep
+them. Diagnostics expose reuse hits. This adds Leverage at one compositing Seam
+without creating a parallel Preview/Export buffer policy.
+
+Before every visual node records, the Module checks the existing frame-table
+residency left by child nodes together with conservative new upload,
+source-domain, Transition, adjustment, and working-composite textures. Both
+logical bytes and texture count must fit the attempt-frozen
+`GpuVisualFrameExecutionResourceGrant`. The returned record exposes the exact
+admitted estimate; Export retains high-water diagnostics. Idle texture pooling
+is not active-allocation authority, and memory pressure cannot shrink this
+grant under a running attempt.
+
+This replaces both consumer-private recursive walkers. Temporal-vs-current
+nested selection is still decided earlier by the Frame Closure: a placement
+with a finite temporal batch binds only its exact temporal child requests and
+does not also bind the ordinary current child. The execution driver therefore
+materializes the selected closure without a second fallback interpretation.
+Structural corruption (missing node/output, wrong binding parent, multiple
+parents, cycle, unreachable node, or absent root output) fails before a parent
+Adapter can consume incomplete pixels. The iterative schedule also removes a
+consumer call stack proportional to nesting depth and creates the explicit
+execution Seam consumed by GPU-nested execution while leaving tighter physical
+lifetime reuse to its own renderer policy. GPU pass-fusion evidence and
+ROI/tile/damage scheduling are now owned by the checked Composite Execution Plan
+described below; it is not reconstructed by either closure consumer.
+
 Before lowering each distinct Sequence, the closure resolves exactly one
 `PreparedVisualProgramBinding` from the consumer-owned cache or frozen Export
 snapshot and retains its exact `Arc<PreparedVisualProgram>` on every instance
@@ -201,6 +411,14 @@ failure; admission rejects temporal or continuity obligations, unsupported
 exact modes, unresolvable domains in the selected representation, and every
 heterogeneous shape or placement outside the bounded production Adapter.
 
+Clip Power Windows do not become compositor alpha. Frame evaluation builds one
+`PreparedEffectProgram -> CompiledEffectGraph` for both consumers: the original
+source and graded branch feed `MatteMix`, while the ordered Window stack feeds
+it through `MaskSource` and `MaskCombine`. `MatteMix` changes working RGB only
+and retains the original programme alpha. A complete CPU Float32 route, finite
+temporal/ROI route, and admitted CPU-prefix/GPU-suffix route all consume this
+same graph and MaskOp algebra; Export has no parallel mask walker.
+
 Preflight freezes a versioned, conservative route-contract ledger containing
 placement, maximum extent, execution-plan residency/step/backend/precision
 shape, CPU/GPU partition, operation kinds, and resource upper bounds. Render
@@ -219,6 +437,105 @@ dynamic builder cannot rely on earlier admission evidence to enter an
 expensive consumer. A blocker outside the reachable closure cannot reject the
 job; the same blocker fails closed when an exported frame can actually reach
 it.
+
+Export presets describe one `ExportArtifactEncoding`; container/video/audio
+fields do not coexist beside it as a second authority. A media-file artifact
+resolves typed mux, video, audio, picture-structure, signal, and color
+contracts and is independently probed before file publication. A PNG image
+sequence resolves an intra-only 8-bit Full RGB/RGBA sRGB contract and disables
+audio by construction. It uses the same immutable Timeline snapshot, visual
+preflight, frame sampling, working compositor, and output color boundary as a
+media file; only the encoder transport and artifact validator differ.
+
+When a frozen broadcaster profile requests QC, Export converts the exact final
+delivery frame contract back to encoded Float32 RGBA after Program Output,
+Legalizer, and output quantization, then passes that borrowed raster to the
+Broadcast Module before the encoder write. This observation adds no second
+Timeline, color, or compositor interpretation. The current Interface admits
+only `DeliveryPictureAfterLegalizer`; a pre-Legalizer profile fails before
+rendering until that distinct tap is exposed. Smart Render and resident encode
+are ineligible because neither exposes the required host-visible sequence.
+
+For H.264 and HEVC media files, `hardware_encoding` owns encoder admission and
+argument lowering. FFmpeg registry presence is not capability evidence: the
+candidate must match the active Export renderer Adapter vendor and complete a
+bounded real one-frame encode using the exact codec profile and delivery pixel
+format. Qualified NVIDIA, Intel, and AMD adapters may select NVENC, QSV, or AMF;
+ordinary codec probe failure, a timeout with successful cleanup, an unsupported vendor, or unavailable
+Adapter evidence selects the explicit libx264/libx265 fallback before Timeline frame
+streaming begins. Authored static HDR metadata remains on libx265 until another
+backend has an exact metadata lowering. The generic FFmpeg rawvideo pipe is a
+CPU boundary and therefore records one CPU-to-encoder upload per frame; generic
+hardware encoder selection alone is acceleration evidence, never a zero-copy
+claim. During concurrent Playback, the resource coordinator can disable the
+Export render queue while a lightweight adapter-only request still admits the
+independent video engine; that request creates no second wgpu Device or Queue.
+Every job diagnostic retains the selected encoder, hardware-admission
+disposition, candidate implementation, renderer Adapter vendor/device/backend,
+and the CPU-rawvideo versus same-device-surface transport. A completed artifact
+therefore cannot be used as evidence that NVENC/QSV/AMF or resident encoding ran
+unless this production selection receipt says so. Probe failure remains an
+explicit software selection rather than disappearing behind the successful
+fallback artifact.
+
+Cancellation observed during admission returns cancellation before selecting
+either encoder. Provider identity failures and independent process/worker
+cleanup failures remain fatal even when cancellation races them. The same
+Media-owned cleanup predicate prevents Smart Render verification from requesting
+a pixel-render retry with unclosed probe resources, and prevents encoder shutdown
+from disguising a failed cleanup receipt as ordinary cancellation. No fallback
+may erase the original structured process error.
+
+Separate native resident HEVC routes are admitted only before frame execution for
+an exact closed-GOP HEVC Main/Main10, YUV420, flattened-alpha contract with
+Legalizer off, no authored static HDR metadata, and no VBV/maxrate/bufsize
+constraint. It accepts Rec.709 and limited-range Rec.2100 PQ; HLG and full-range
+PQ remain outside Export admission. Windows uses D3D12 Video Process and
+in-process `hevc_d3d12va`. Linux NVIDIA matches the active Vulkan physical-device
+UUID to one CUDA ordinal, compiles the same Program Output into the resident RGB
+texture, converts once to NV12/P010 in Vulkan compute, and copies the two planes
+device-to-device into FFmpeg-owned CUDA surfaces consumed by `hevc_nvenc`.
+Once this resident route is admitted, its prepared visual closure is required
+to execute on the GPU even when ordinary opportunistic GPU acceleration is
+disabled. An unsupported closure or unavailable GPU visual runtime rejects the
+route before its first encoder submission; it cannot insert a CPU composite and
+full-frame upload into a route reported as resident.
+The 4:2:0 conversion contract is explicit: production HEVC uses left-sited
+chroma, with a horizontal `[1,2,1]/4` and vertical `[1,1]/2` low-pass kernel,
+and writes the same location into the codec and frame metadata. This prevents
+the encoder's platform default from disagreeing with the pixels.
+The Vulkan completion wait names the exact conversion submission; CUDA copy
+completion is proved before Media can promote the move-only destination to a
+submit-ready frame. No process-global pending semaphore can be consumed by an
+unrelated concurrent Viewer submission.
+
+Media writes cadence, CICP, range, chroma location and sample aspect ratio into
+the native encoder context. Export's final video stream-copy mux adds no `scale`, `setsar`, or
+`pix_fmt` filter; doing so would both invalidate `-c:v copy` and create a second
+pixel interpretation after encoding. Diagnostics prove zero host readbacks,
+rawvideo writes, and CPU-to-encoder uploads. If the resident
+session cannot start, Export may rerun the complete generic route; after the
+first resident submission, any failure is terminal and no mixed-residency file
+is produced. The existing post-encode probe remains authoritative for
+codec/profile, signal, cadence, and GOP compliance on every route.
+
+Image-sequence execution writes numbered frames below one Storage-owned sibling
+directory. After FFmpeg exits, Export independently decodes every frame,
+requires the exact contiguous namespace and raster/alpha contract, hashes each
+payload, and durably writes a versioned manifest. Storage then synchronizes and
+publishes the complete populated directory with create-new semantics. The final
+route therefore never exposes a partial sequence, cancellation cannot authorize
+publication, and an existing directory wins without recursive replacement.
+
+Audio-stem execution uses the same directory-publication boundary but has no
+visual encoder path. The preset selects every frozen public Audio Program
+Output; Export renders each exact root independently through the shared Audio
+Runtime, converts it to PCM24 WAV, and probes codec, sample rate, semantic
+channel layout, and exact rational sample duration. A versioned manifest binds
+the ordered strong Output identities and captured labels to deterministic file
+names, byte lengths, SHA-256 identities, and per-output loudness evidence.
+Storage publishes the directory only after every stem and the manifest are
+durable and validated, so a package is an all-or-nothing export artifact.
 
 Preview performs that same dynamic evaluation before its canonical
 media-demand collector can publish a decode request and before a
@@ -342,6 +659,16 @@ remain `Working`, while MaskSource rasters become `NonColorData/AlphaMask`
 resources that color transforms reject. The GPU Mask pass consumes one of each,
 implements every canonical MaskOp plus inversion, changes only straight alpha,
 and has real-wgpu parity with the CPU Float32 graph for all eight combinations.
+Qualifier extends this exact value-domain route without adding another Preview
+or Export interpretation. A scene-linear upload enters the dedicated HSL/3D
+qualifier dispatch, whose Float32 output materialization is explicitly
+`AlphaMask`; the following canonical Mask dispatch returns a Working frame, or
+the Matte Preview dispatch returns opaque grayscale Working RGB. Denoise and
+Gaussian feather allocate their private separable-pass textures under the same
+one-submission physical admission authority: the qualifier is charged for its
+real one/two/four pass count rather than one semantic output. Completion-token,
+wait/signal, release, domain, and final-live-set validation all remain part of
+the frozen heterogeneous route.
 The prepared GPU suffix consumes the same value plan as explicit dispatch and
 release steps: a shared GPU value can feed two point-operation branches and a
 canonical scene-linear BlendMode join. Authored opacity and the complete
@@ -472,8 +799,11 @@ authority. Pre-submit renderer backpressure converts the already-reserved
 progress permit into an explicit renderer-cleanup barrier; the device worker
 drives that unindexed internal work and wakes a retry without fabricating a
 Viewer submission completion. An ordinary complete-GPU output may publish after
-queue-ordered submission while its capacity-one owner remains retained for
-physical completion evidence. A heterogeneous output cannot publish before its
+queue-ordered submission while its bounded cleanup owner remains retained for
+physical completion evidence. Submitted cleanup-owner and progress-permit
+capacity matches the four-frame CPU staging horizon; this absorbs bounded queue
+callback latency without increasing physical publication beyond one current and
+one prepared output. A heterogeneous output cannot publish before its
 exact callback and completed-batch validation. Timeout, device-poll failure, or
 authority revocation quarantines the submitted owner without freeing its visual
 terminal authority or Frame Store media-protection leases; its exact late
@@ -494,11 +824,15 @@ surface changed.
 
 Headless resource coordination samples and applies the App/Preview policy on
 every turn, but renderer-pool reconfiguration occurs only after exact
-completion polling proves the capacity-one submission slot idle. If an ordinary
-queue-ordered output is already visible while its owner awaits callback
+completion polling proves every submitted cleanup-owner slot idle. If the
+bounded owner set is full while ordinary queue-ordered outputs await callback
 retirement, the turn reports bounded backpressure and retries; it never treats
 that normal owner lifetime as a fatal Adapter error or trims resources beneath
-the submission.
+the submissions. Preview's domain seam is value-idempotent: level-triggered
+candidate polling may resample the same immutable decision, but equal policy
+does not repeatedly reconfigure Frame Store, decoder residency, Effects, color,
+or seek-index ownership on the realtime thread. A changed decision still
+applies on its first observed turn.
 
 Adapter teardown closes admission and appends one FIFO retirement envelope to
 the existing progress worker; the Window/UI or Headless caller performs no
@@ -513,6 +847,14 @@ pre-reserved before its worker is created and is held through retirement. The
 process admits at most four active-or-retiring Viewer device generations; a
 worker panic/disconnect quarantines both envelope and admission token, so
 repeated rebuilds cannot create an unbounded detached-worker or envelope leak.
+Ordinary product teardown keeps this non-blocking contract. The validation-only
+Headless consuming close uses the same retirement envelope and progress worker,
+then waits on a separate terminal channel within an explicit bound. Its receipt
+distinguishes accepted handoff, worker panic/disconnect, timeout, and exact
+resource retirement. A timeout drops only the join handle: the progress worker
+retains the envelope and admission token until safe release, while endurance
+qualification fails closed rather than converting an unfinished GPU lifetime
+into successful worker return.
 The Headless Adapter assigns every submission a unique resource key, retains
 the move-only `ViewerGpuPresentationOutputLease` in the submission owner, and
 moves it into a separate capacity-one current physical slot only after
@@ -681,11 +1023,14 @@ adaptation reuse its bounded OCIO processors on the same execution owner.
 Export owns the same resource only inside one job; Thumbnail owns one inside
 its dedicated worker. Convenience color helpers construct an uncached
 reference Session, so production loops must call their `_with_session`
-variants. No processor cache is hidden in thread-local or process-global state.
-This prevents a reopened Project with deliberately identical durable IDs and
-revisions from reusing process-local programs produced by the prior open
-lifetime. Export render sessions are snapshot-local cache owners and therefore
-start with a fresh scope. The
+variants. CPU execution handles and their mutable dynamic properties are never
+thread-local or process-shared. A bounded Core-owned OCIO Engine Artifact
+Registry is the deliberate exception: exact engine/request keys retain only
+immutable parent Processor graphs and use per-key single-flight construction.
+Reopened Projects may reuse such a graph only when their complete pinned engine
+identity and endpoints are equal; Project/Sequence IDs and revisions do not
+authorize reuse. Export render sessions remain snapshot-local execution-handle
+owners and therefore start with fresh mutable scope. The
 `PreparedVisualProgram::dependency_refresh_required` Interface is reserved for
 background observation: registry revision, retryable external-change blockers,
 and stale prepared dependencies request atomic eviction; permanent
@@ -709,6 +1054,9 @@ interpretation.
 
 Clip transforms are authored against stable source and Sequence picture
 extents, not against whichever decode/output sizes an execution happens to use.
+For file-backed pictures, the shared `ResolvedPictureGeometry` first converts
+encoded coordinates through exact source SAR and cardinal orientation; the
+authored Clip affine is composed outside that conversion exactly once.
 Preview and Export therefore lower them through the renderer-owned
 `project_affine_to_sampled_extents`: source authoring extent → decoded sampled
 extent and Sequence authoring extent → composite sampled extent. Export freezes
@@ -717,6 +1065,16 @@ width/height in its cache key. Media, nested Sequence, Solid Color, and both
 Transition endpoints use this same projection; Basic Title uses the equivalent
 cropped-title projection. A 4K-authored clip exported at 1080p must keep the
 same composition, not apply its auto-fit scale a second time.
+
+Export freezes source picture metadata beside the physical stream and source
+fingerprint. Its decode-cache identity includes the resolved picture geometry,
+temporal Effect requests retain the same placement overrides, and post-encode
+validation proves the Sequence sample-aspect and progressive field-order tags.
+
+A finite media or solid transform with an exactly zero affine determinant has
+zero raster area and contributes no pixels. CPU and GPU compositors skip that
+layer; it is not an unsupported-transform fallback. Non-finite and nonzero
+near-singular transforms remain invalid because they cannot be sampled safely.
 
 ## Current Implementation
 
@@ -879,6 +1237,16 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+Shot Match analysis is a renderer-owned read-only operation over that exact
+straight-alpha Float32 working frame. It ignores transparent and non-finite
+pixels, selects at most 262,144 samples with a deterministic regular stride,
+and derives per-channel 5/50/95 percentiles. The bounded sample vectors are
+sorted once (`O(n log n)` under the fixed cap); analysis allocates no
+resolution-sized duplicate frame and performs no OCIO, Program Output, monitor,
+or encoded-raster round trip. The renderer also owns the versioned affine
+Gain/Offset solver, while Core persists only its statistics/evidence contract
+and App owns the author transaction that creates a new Grade Version.
+
 Program and nested-sequence working canvases use transparent black as their
 initial value and retain straight coverage alpha through CPU and GPU
 compositing. Viewer background/checkerboard treatment is presentation-only and
@@ -959,6 +1327,35 @@ bridge pool. The media-owned decoder surface remains under the Frame Store
 native-resource grant instead of being counted twice. Native/GPU/CPU source
 alternatives are summed conservatively because a failed preferred path can
 have created partial resources before its correctness fallback is selected.
+Compact CPU YUV is a separate source alternative: its media-owned retained
+FFmpeg planes are charged by Frame Store residency, while the Viewer estimate
+charges uploaded `R16Unorm` luma/Cb/Cr textures, encoded-RGB intermediate, and
+working output. Interleaved native sources continue to use `R16Unorm` luma plus
+`Rg16Unorm` CbCr. The Renderer reuses the native-video YUV sampling pass with
+explicit 4:2:2 geometry and least-significant-bit 10-bit code alignment, then
+enters the sole OCIO GPU input stage. It never creates a CPU RGBA working
+fallback for this representation. Compact plane textures are Viewer-runtime
+resources: one slot is retained per contributing compact layer in a candidate,
+reset between candidates, reused only through queue-ordered submissions, and
+retired by critical trim or device reset. Steady playback therefore performs
+bounded texture updates rather than allocating two device textures per layer
+and frame. Those updates use a bounded renderer upload worker and reusable
+mapped transfer-buffer pool rather than per-plane `Queue::write_texture`
+staging allocations. Source stride is
+validated independently from the 256-byte-aligned GPU transfer stride; only
+visible rows are copied, so row padding never becomes picture data. Upload
+preparation is an explicit asynchronous backpressure state and publishes only
+a payload-free retry wake after the worker result is pollable. A command-free
+request-wide preflight schedules every distinct contributing compact source,
+including both active Cross Dissolve endpoints. CPU-complete Viewer lookahead
+starts that preparation before the frame becomes an immediate successor; the
+record boundary rechecks the same fact and emits no partial layer commands
+until all inputs are ready. Once ready, all plane copies are encoded before the
+YUV pass in the same submission. The whole transfer buffer is remapped and
+returned to the bounded worker pool only after GPU completion; a
+failed/abandoned Viewer candidate drops its unsubmitted buffer. Ordinary 4K
+planar 4:2:2 packs luma, Cb, and Cr into one checked buffer; larger valid planes
+receive an exact larger buffer rather than being truncated.
 For a heterogeneous source, source preparation uses the wgpu Adapter's
 non-aliasing physical recording bytes and texture count, not the semantic
 plan's optimal live-set peak. All extent, count, and byte arithmetic is
@@ -1014,8 +1411,13 @@ background, the compositor may fuse first-layer alpha initialization and the
 second source-over operation into one output write. Any missing condition
 selects the ordinary scalar element loop. The fused operation retains the same
 straight-alpha float equation, including canonical transparent initialization:
-an effective alpha at or below the compositor epsilon publishes zero RGBA
-rather than preserving hidden source RGB. It has separate execution evidence
+only exact zero effective Alpha publishes zero RGBA rather than preserving
+hidden source RGB. Every positive Float32 coverage or opacity, including one
+16-bit UNORM code, enters the same source-over equation. Working-set admission,
+Effect visitation, first-layer/two-layer fast paths, Preview GPU lowering, CPU
+execution, and WGSL recording use that identical contribution predicate, so a
+scheduler optimization cannot erase work that pixel execution would preserve.
+It has separate execution evidence
 so a performance gate cannot infer it from an authored two-layer shape. The
 named 4K fusion gate fixes resolution, rate, layer count, and blend shape,
 retains the complete output across release optimization, and requires both
@@ -1036,23 +1438,32 @@ and LUT, runs in this path through the same `mondrian-effects` float contract.
 Primary Color carries the Sequence working-space identity and coefficients into
 both CPU and GPU plans; contrast pivots at linear 0.18. LUT execution first
 satisfies its explicitly authored processing-domain transition, then applies
-the same domain-normalized tetrahedral cube on Preview and Export CPU paths.
-GPU LUT execution remains a typed blocker until a backend implements that exact
-contract; it may not substitute trilinear or guessed-domain output. Spatial
+the same domain-normalized tetrahedral cube on Preview and Export CPU or GPU
+paths. A GPU-resident source can fuse multiple creative LUT and point-grade
+nodes into the working compositor pass without a CPU prefix, upload, or
+readback. Non-scene-linear LUT domains use the existing renderer-owned OCIO
+round trip around the same point pass; the effects graph never guesses a
+domain. The compositor owns a bounded RGBA32F 3D-atlas cache keyed by the
+complete sorted LUT semantic set, independent of animated intensity and node
+order. Spatial
 effects use premultiplied-alpha sampling internally while the
 typed public frame remains straight-alpha. The Viewer spatial Module records its
 horizontal RGBA32F intermediate as `PremultipliedCoverage`; shader uniforms are
 derived from the input/output descriptors, and the vertical pass restores the
-declared straight/opaque output contract. Premultiplied frames are rejected at
+declared straight/opaque output contract. Its unassociation branch canonicalizes
+only exact zero; positive filter coverage is never discarded by a numerical
+epsilon. Premultiplied frames are rejected at
 OCIO, effect, composite, display-calibration and output seams. Affine geometric transforms (scale, rotate,
 translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy
 RGBA8 fallback. Custom processors without a float ABI and non-unary effect graph
 nodes are handled separately: custom processors remain diagnosed blockers until
-they expose an exact Float32 mode, while built-in Blend, Mask, MaskSource, and ordered MultiInput
-nodes execute in the CPU float DAG. Clip masks rasterize directly to float matte
-coverage. Solid layers must materialize their float source when they carry an
+they expose an exact Float32 mode, while built-in Blend, Mask, MaskSource,
+MaskCombine, MatteMix, and ordered MultiInput nodes execute in the CPU float DAG.
+Clip masks rasterize directly to float matte coverage. Power Window MatteMix
+retains base picture alpha rather than applying that coverage as Clip
+transparency. Solid layers must materialize their float source when they carry an
 effect graph or affine transform, execute that same compiled graph, and then use
 the shared layer sampler; diagnostics must never claim a solid effect is float
 while bypassing its pixel semantics.
@@ -1093,9 +1504,12 @@ remain blockers rather than color-conversion requests. GPU graph lowering also
 remains blocked until the GPU scheduler materializes the same OCIO edges.
 
 Encoded decoded media enters the graph as a typed source/import RGBA8 boundary
-(`CpuEncodedColorFrame::source_rgba8`). Scene-linear planar-f32 decoder output
-enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
-RGBA8 quantization while preserving the external source color identity.
+(`CpuEncodedColorFrame::source_rgba8`) or, for high-bit CPU decode, an
+`EncodedFloat` boundary (`CpuEncodedFloatColorFrame`). Scene-linear planar-f32
+decoder output enters as `LinearFloatSource`. App preview and thumbnails route
+all three through the same source-stage planner; encoded float executes the
+source transfer/primaries transform while linear float retains its scene-linear
+identity. Neither float route is relabeled as the other or quantized to RGBA8.
 Synthetic float data and effect graph intermediates use the same typed float
 entry point.
 Preview and export decode keys retain `DecodedVideoRangeContract`, not only an
@@ -1119,6 +1533,68 @@ decoder import and applies non-singular media affine transforms plus supported
 fused point effects in one working-space render pass. These operations must not
 materialize a CPU frame or schedule GPU readback; readback is reserved for an
 explicit presentation, debug, or encoder boundary.
+
+`GpuCompositeExecutionPlanner` is the backend-object-free planning Module for
+one ordered GPU working composite. Its Interface consumes the output extent and
+one exact or conservative footprint per Layer. The Implementation projects the
+source pixel domain through the authored affine transform, intersects every
+fused Crop operation, clamps the result to the canvas, and emits one
+conservative Layer-damage rectangle. Adjustment Layers remain full-canvas.
+Non-finite or otherwise unprovable author values are never allowed to shrink
+work; request validation rejects them before this Seam.
+
+Each plan owns the complete preservation rule. The first contributing Layer
+starts from transparent. For a later bounded Layer, up to four non-overlapping
+rectangles copy the unchanged complement from the previous accumulator, then a
+single render pass loads that destination and shades only the damage rectangle.
+A full-canvas Layer retains the ordinary full pass. This keeps straight-alpha
+BlendMode algebra bit-for-bit on the same shader while avoiding fragment/effect
+execution outside the conservative contribution region; it does not reinterpret
+OCIO or Effect math. `damage` here means only pixels that this Layer may change
+relative to its current accumulator. It is not a claim of cross-frame temporal
+damage reuse, because neither Preview nor Export currently supplies an
+authoritative previous-output identity at this Seam.
+
+Damage larger than 4096 pixels on either axis is split into deterministic,
+non-overlapping scissor tiles. All tiles share bindings and execute inside the
+same render pass, so 4K remains one draw and 8K is bounded without multiplying
+passes. A 4,096-tile hard limit rejects adversarial extents before constructing
+an unbounded schedule or allocating GPU resources. Tile coordinates remain
+full-canvas coordinates; shaders never receive tile-local geometry.
+Empty/off-canvas/zero-crop Layers are removed by the plan before upload or
+recording.
+
+`GpuCompositeExecutionDiagnostics` is execution evidence rather than graph
+inference. It reports eliminated Layers, render passes, tile draws, point
+operations and Layer passes fused with transform/blend, logical full-frame
+shader pixels, actual shaded pixels, avoided shader pixels, and preserved-copy
+pixels/regions. The older `gpu_composited_pixels` counter retains its
+output-canvas-pixel meaning for report compatibility. Viewer Preview and the
+Export `GpuVisualFrameExecutor` both call the same `GpuFrameCompositor`, consume
+the same plan, and aggregate the same record into product/performance JSONL.
+The point-grade subset includes ColorAdjust, creative LUT, working-space
+Bradford White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color Curves,
+HDR Grading, Vignette, deterministic Grain, and Crop. Effects owns validation and mathematical compilation; Renderer owns the
+bounded sixteen-operation uniform/WGSL execution. CPU Float32 and real-wgpu
+readback parity are gated at a `3e-5` maximum per-channel budget, including HDR
+values above one and the complete ordered primary-grade chain.
+Curves are compiled once to a shared immutable 256-sample table; GPU execution
+stores a three-row RGBA slab in the same bounded grade-resource 3D atlas used by
+creative LUTs instead of copying samples into every point-operation uniform.
+The CPU and WGSL paths share master/channel ordering, working-space luminance,
+secondary HSV math, neutral-secondary bypass, and unbounded RGB endpoint
+extrapolation.
+HDR Grading compiles Global plus six scene-linear luminance zones to one
+512×2 RGBA32F table. Renderer stores it in the same bounded grade-resource
+atlas family as creative LUT/curve resources and keys residency by the complete
+prepared semantic fingerprint. Unrelated animated point parameters therefore
+reuse the resident HDR table; diagnostics prove one upload, exact sample count,
+cache hits, evictions, and retained bytes. Its WGSL and CPU paths share the
+log2-relative-to-18%-grey sampling coordinate and interpolation rule.
+Creative LUT diagnostics separately prove immutable texture uploads, warm
+cache hits, evictions, oversized one-shot execution, and current resident GPU
+bytes. They are projected through Viewer product JSONL and headless performance
+reports; graph shape alone is never accepted as residency evidence.
 
 Rec.601 PAL/NTSC delivery keeps its distinct primaries, transfer, and matrix
 tags through the export signal contract; swscale matrix selection and
@@ -1144,7 +1620,9 @@ the full output texture back to the CPU.
 
 `GpuProgramScopesRuntime` is that real-time path. A demand-driven request
 records atomic-u32 histogram, waveform, vectorscope, and signal-excursion counts
-directly against the retained display-encoded Program Output texture. A second
+directly against an explicitly validated Program Output or pre-ICC Monitor
+Output texture. It bins either encoded IRE or transfer-decoded absolute nits;
+PQ and HLG share the Core reference semantics and GPU/CPU parity tests. A second
 compute pass materializes three RGBA8 linear display textures for the UI. The
 count buffer, pipelines, display textures, uniforms, and display bind group are
 retained by request shape; normal playback performs no scope readback. The only
@@ -1164,27 +1642,16 @@ RGBA8 `RenderPipeline`/`FrameCompositor` family is not a compatibility path:
 reintroducing a compositor requires the same ColorFrame identity, working-space
 semantics, resource grant, and Preview/Export parity as the production path.
 
-`RenderColorStagePlanner` sits between timeline evaluation/compositing and the
-CPU/GPU color executors. It produces ordered stage plans for CPU transforms,
-GPU OCIO transforms, upload, and readback. App and export crates should consume
-renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
-`RenderOutputColorBoundaryPlanner` is the final-output boundary wrapper around
-that planner. Its CPU-only mode is the current correctness execution path;
-its PreferGpu mode must produce GPU/upload/readback stages plus explicit
-blocker diagnostics instead of silently falling back to a CPU output stage.
-`RenderOutputColorBoundaryExecutor` is the lower-level CPU final-output
-execution boundary: callers choose an explicit strategy at construction time,
-and the executor owns the final-output plan/execute sequence instead of
-exposing low-level transform executors to app/export code. App/export CPU
-reference callers use `execute_cpu_output_boundary_rgba8(...)`, which returns
-encoded RGBA8 pixels plus transform/stage diagnostics as one boundary contract;
-native GPU app/export callers must use
-`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
-with `RenderGpuOutputBoundaryRuntimeOwnedBackendContext`. GPU planning,
+Private color-stage planners sit between semantic Module entry points and the
+CPU/GPU executors. They produce ordered CPU transform, GPU OCIO, upload, and
+readback plans, but App and Export cannot consume or mutate those plans.
+`ProgramOutputModule` owns CPU final-output plan/execute sequencing and returns
+pixels plus transform/stage diagnostics as one contract. Native GPU Export uses
+`GpuColorExecutionSession::record_program_output(...)`; GPU planning,
 backend-object preparation, or recording failures are reported structurally and
 must not silently run the CPU executor.
-The Window Viewer holds `RenderGpuOutputBoundaryRuntime` for one live
-device/surface execution Session. Export constructs a separate runtime inside
+The Window Viewer owns the same private runtime for one live device/surface
+execution Session. Export constructs a separate `GpuColorExecutionSession` inside
 one `ExportVisualRenderSession`: it is cold at attempt start, may reuse backend
 objects only across frames of that attempt, and is released at terminal
 publication. Optional final-output recording/readback owns an independent frame
@@ -1194,19 +1661,24 @@ declared CPU output fallback, but it does not poison the required
 CPU-prefix/GPU-tail backend. Once that shared backend is `Ready`, the only
 post-submit output-route failure that changes it to backoff is expiry of the
 bounded total GPU-readback deadline, where completion is no longer known. No
-runtime, frame table, or backoff state is process-global or shared between
-Viewer and Export jobs.
-The runtime owns the OCIO shader cache, pure backend prep cache, concrete
+runtime, device object, mutable uniform buffer, frame table, or backoff state is
+process-global or shared between Viewer and Export jobs. A bounded
+process-global plain-artifact registry may share one exact immutable OCIO
+shader/LUT/binding/uniform plan because its key includes the complete engine,
+request, language, and dynamic values; it owns no wgpu handle.
+The runtime owns an OCIO shader-plan front cache, pure backend prep cache, concrete
 backend-object cache, GPU frame id allocator, and GPU frame resource table, and
 exposes an executor-level record method that accepts only the per-submission
 device/queue/encoder/load-op context. Lower-level code that already owns a
 prepared pipeline, OCIO bind group, and pass node may still use
 `RenderGpuOutputBoundaryBackendContext`.
 Every `OcioGpuShaderRequest` carries the exact `ColorEngine`; this engine is part
-of the shader-cache key and is used by core while selecting the config and
-extracting the Processor shader. A Standard plan cannot be reused by ACES or
-Custom OCIO solely because source, destination, display, and view strings match.
-Normal project-engine switching does not flush unrelated warm shader plans.
+of both owner and shared plain-artifact keys. Core selects the process-global
+config only when the exact static parent Processor graph is absent, then derives
+the plain shader bundle without that lease. A Standard plan cannot be reused by
+ACES or Custom OCIO solely because source, destination, display, and view
+strings match. Normal project-engine switching does not flush unrelated warm
+shader plans.
 Every OCIO reuse and concrete-resource admission decision uses a private,
 domain-separated 32-byte canonical identity. Public `u64` shader, layout,
 resource, and node keys are diagnostic projections only. The full identity is
@@ -1217,6 +1689,15 @@ submitted to wgpu and validates row/length metadata; a caller-supplied or stale
 compact hash can never stand in for payload identity. Bind and record seams
 compare the full identities, so even an intentionally forced compact-key
 collision cannot authorize cross-contract reuse.
+Custom OCIO dynamic values are intentionally excluded from static backend
+object identities while remaining present in the extraction request and output
+semantics. On a backend-object cache hit, Renderer repacks the currently
+extracted uniform payload, compares its full resident payload hash, and writes
+only a changed buffer. Shader modules, LUTs, bind groups, pipeline layout,
+render pipeline, and pass node remain resident. `uniform_updates`,
+`uniform_reuses`, and `uniform_failures` expose that distinction; a reused
+static pipeline with a stale uniform payload is never reported as a successful
+record.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
@@ -1289,15 +1770,74 @@ terminates the attempt, while only total-deadline expiry records
 backoff. Map, unpack, planning, admission, or recording failures remain
 route-local and cannot poison required heterogeneous execution.
 
-Export readback is serialized through the export frame contract selected from
-delivery sample depth: 8-bit delivery writes RGBA8 raw-video bytes, while
+Export readback is serialized through one resolved export frame contract.
+Media-file delivery selects it from delivery sample depth: 8-bit delivery
+writes RGBA8 raw-video bytes, while
 10-bit and 12-bit delivery read the renderer GPU `Rgba16Float` boundary and
-pack normalized channels into FFmpeg `rgba64le` pipe bytes. When GPU output is
+pack normalized channels into the explicitly named `EncodedRgba16Unorm`
+contract and FFmpeg `rgba64le` pipe bytes. Renderer texture precision is not
+pipe sample encoding. The same deep contract module defines true
+`FloatMasterRgba16` (`rgbaf16le`, interleaved) and `FloatMasterRgba32`
+(`gbrapf32le`, planar G/B/R/A) seams. OpenEXR Half/Float32 and TIFF
+Float32 image Masters consume the true float seam. UNORM packing
+validates finite samples, clamps to `[0, 1]`, and quantizes once; float packing
+validates finite/range constraints and preserves negative or greater-than-one
+RGB values without normalized clamp, while coverage Alpha must remain finite
+and normalized. Its corpus proves byte layout and the bundled FFmpeg binary
+consumes every declared raw-video layout. PNG16, DPX16, and TIFF16 select the
+single UNORM16 quantization Seam; OpenEXR Half/Float32 select true float pipes.
+OpenEXR Half deliberately uses the planar Float32 pipe and performs its only
+Half quantization in the EXR encoder: the packaged FFmpeg's packed Float16
+conversion clamps extended-range RGB. Independent decode tests prove negative
+and greater-than-one samples survive while the file channels are actually F16;
+the native TIFF Float32 Adapter losslessly interleaves the same planar Float32
+frame without an RGBA8 or UNORM boundary. When GPU output is
 unavailable, 10/12-bit delivery CPU fallback must use the renderer-owned
 `execute_cpu_output_boundary_float(...)` helper, which applies the working ->
 output OCIO float transform without u8 quantization. The caller flattens the
 float result into `[f32]` and uses
-`ExportFrameContract::pack_rgba_f32(...)` to produce `rgba64le` pipe bytes.
+`ExportFrameContract::pack_rgba_f32(...)`; the selected UNORM16 contract alone
+performs the final normalized clamp and `rgba64le` quantization.
+
+`mondrian-export::image_sequence` owns the complete Image Sequence Master
+Module. Its Interface resolves representation, frame contract, encoder Adapter,
+output pixel format, extension, and Alpha capability once. Queue execution is
+a shallow consumer: it either streams exact frames to one supervised FFmpeg
+image2 process or calls the native TIFF Float32 Adapter per frame. Every staged
+frame is then independently decoded. PNG/TIFF validation proves exact integer
+or IEEE Float scalar type and channel count, EXR validation additionally proves
+the header's F16/F32 channel storage, and DPX validation proves its endian
+header, 16-bit RGB descriptor, dimensions, and a complete decode. The schema-2
+manifest records representation, frame contract, output pixel format, color
+target, Alpha policy, byte length, and SHA-256 for every zero-based
+`frame-00000000.ext` object before whole-directory publication. Cancellation or
+ordinary failure leaves no final namespace; create-new collision never merges
+partial inventories.
+
+`mondrian-export::mezzanine` is the corresponding deep Module for professional
+media-file essence. One closed contract owns DNxHR LB/SQ/HQ/HQX/444,
+AVC-Intra Class 100/200, and MOV 2vuy/v210/raw RGB/r210 lowering: software
+encoder Adapter, qualified container, profile/class, exact output pixel format,
+depth/chroma/range, Intra-only structure, raster/cadence constraints, runtime
+capability tokens, and finished-output codec/profile/level/tag evidence. Queue,
+delivery, validator, and App controls consume that authority. Hardware H.264
+selection cannot accept AVC-Intra. The codec-matrix test completes and
+re-probes every supported profile/container row; a second test runs four
+built-in presets through the real renderer, supervised FFmpeg process,
+finished-output validator, and durable file publication path. Professional MXF
+is currently video-only because FFmpeg does not preserve a probe-visible PCM
+channel-layout identity. XAVC is fail-closed: generic H.264 MXF essence is not
+treated as a Sony XAVC conformance contract.
+
+For raw MOV, the `2vuy`/`v210`/`raw `/`r210` sample entry and exact decoded
+pixel format prove representation. MOV omits a separate range tag for raw
+sample entries, so Legal/Full code mapping is owned by the explicit final scale
+Seam and fixed representation rather than guessed from absent metadata. RGB
+professional outputs explicitly write and re-probe primaries, transfer, and
+GBR matrix tags. When stream-level field order is absent, the existing bounded
+first-frame decode must prove `interlaced_frame=0`; missing evidence is not
+accepted as progressive.
+
 If both the GPU output path and renderer-owned CPU float helper fail, 10/12-bit
 export fails closed. It must never manufacture an `rgba64le` payload from an
 RGBA8 boundary. Export diagnostics record `FloatBoundaryUnavailable`, retain
@@ -1310,6 +1850,34 @@ OCIO export view/display-view transform, the export health report must fail
 with a structured output-transform issue instead of relying on the color-space
 pipeline's `tone_map` flag. That flag is not a substitute for an OCIO view
 transform.
+
+Export cadence is likewise a resolved delivery property rather than an
+incidental Sequence or FFmpeg default. `ExportPreset` either follows the
+Sequence rational frame rate or selects one exact supported constant rate;
+delivery admission resolves it before work begins and rejects unsupported
+rates. The selected Timeline interval remains an exact `TimelineTimeRange`.
+Only the per-output-frame evaluation seam converts its rational timestamp onto
+the Sequence grid, currently by an explicit predecessor-frame hold policy.
+Consequently 24000/1001, 25, 30000/1001, and 30 fps conversions do not
+accumulate floating-point drift, marked source offsets remain intact, and
+audio sample coverage is derived from exact output duration rather than a
+rounded source-frame count. Encoder input cadence and post-encode ffprobe
+expectations consume the same resolved numerator and denominator.
+
+Video picture structure is admitted by `mondrian-export::video_encoding`, not
+left to an FFmpeg build's defaults. H.264/HEVC presets carry maximum keyframe
+interval in output-time seconds, B-picture cap, closed/open GOP intent, and an
+explicit scene-cut policy. Admission converts the interval to frames with
+checked rational ceiling arithmetic (for example two seconds at 30000/1001 is
+60 frames) and rejects a codec-family mismatch before preflight/render. AV1
+uses a separate random-access/lookahead contract because AV1 references are not
+H.26x B pictures; ProRes and GIF are explicitly intra-only. The FFmpeg adapter
+emits generic GOP arguments and one encoder-native x264/x265 parameter
+dictionary, merging picture structure with VUI and HDR metadata so later
+options cannot overwrite earlier policy. The export panel edits these typed
+values and changes the picture-structure family whenever the codec family is
+changed.
+
 After encoding, `mondrian-export` runs ffprobe through one typed
 `ExportValidationExpectations` contract. Stream presence is a closed
 `Required(exact constraints) / Forbidden` algebra rather than independent
@@ -1328,6 +1896,13 @@ consumed by Headless acceptance. Encoder success without it is an export
 failure; the queue may publish `Completed` only after validation and atomic
 final publication.
 
+For admitted long-GOP H.264/HEVC and AV1 output, validation also asks ffprobe
+for keyframes only. It proves that the first stream timestamp is a random
+access point and that every adjacent and final-tail GOP stays within the
+resolved maximum interval. Comparisons combine stream time base and output
+frame rate in checked-width integer arithmetic; floating seconds cannot hide
+an encoder that ignored its GOP request.
+
 The encoder and validation CLI processes use
 `mondrian-media::SupervisedChild` as one lifecycle boundary. Encoder stderr is
 drained from spawn, not after raw-frame stdin has filled; frame allocations move
@@ -1336,8 +1911,8 @@ retains cancellation authority during rendering, video decode, audio source
 reads, pipe writes, encoder wait, and FFprobe validation. A canceled pipe write
 kills and reaps the encoder rather than waiting for FFmpeg to consume another
 frame. FFprobe uses a 30-second monotonic per-invocation deadline, strict
-bounded stdout (16 MiB for stream reports and 4 MiB for first-frame HDR
-evidence), and a 64 KiB stderr tail. Cancellation, deadline, output-limit, and
+bounded stdout (16 MiB for stream/keyframe reports and 4 MiB for first-frame
+HDR evidence), and a 64 KiB stderr tail. Cancellation, deadline, output-limit, and
 I/O stages remain distinguishable in the resulting failure instead of being
 collapsed into an exit-code string.
 
@@ -1382,8 +1957,10 @@ focused unit tests.
 GPU input transforms have their own renderer contract instead of piggybacking
 on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded
 `CpuSourceColorFrame` in the `Source` domain. Encoded RGBA8 uploads as
-`Rgba8Unorm`; scene-linear f32 uploads as `Rgba32Float` without quantization or
-an intermediate CPU OCIO transform. It then records the OCIO GPU input
+`Rgba8Unorm`; source-encoded and scene-linear f32 upload as `Rgba32Float`
+without quantization or an intermediate CPU OCIO transform. The encoded-float
+ownership conversion reuses the decoded allocation rather than copying a 4K
+frame. It then records the OCIO GPU input
 transform and produces a GPU-resident linear
 working frame in a renderer-selected `Rgba32Float` texture. The working format
 is not a caller option. It rejects CPU-only plans, plans with native GPU
@@ -1566,6 +2143,34 @@ Those latter outcomes fail the job with typed artifact evidence; none is
 collapsed into an ordinary encode failure or inferred by checking whether a
 path exists.
 
+### Conservative Smart Render
+
+`ExportSmartRenderPolicy::Automatic` is the App default, but it authorizes no
+semantic shortcut by itself. The frozen root `PreparedVisualProgram` must first
+return one `PreparedVisualSourceIdentity` for the complete selected interval.
+The corresponding `ExportMediaDependency` carries the admitted container plus
+the complete selected `VideoStreamInfo`; capture validates that this probe
+agrees with the parallel stream index, raster, picture, and color evidence.
+The Export Smart Render Module then requires the selected source range to equal
+the complete time-varying source extent and exact frame count, and requires
+codec/profile, raster, CFR cadence, SAR/scan/orientation, bit depth, chroma,
+Alpha, range, and resolved input/output color identity to match the
+`ResolvedExportDeliveryContract`. Input or output tone mapping, authored/static
+HDR metadata, incomplete probe facts, and non-identity color Views reject the
+optimization.
+
+The current executor remuxes only that complete video stream; it never uses
+`-ss`/`-t` to claim arbitrary GOP-aligned trimming. Program audio remains on the
+ordinary frozen Audio Program path and is encoded/muxed beside the copied
+video. Before the result can leave reversible execution, Media must prove
+ordered packet-payload identity and the existing output validator must still
+prove codec/profile, GOP/B-frame/closed-GOP policy, encoded signal, audio, and
+duration. Source revision is checked again before publication. Any eligibility,
+packet, remux, or validation failure falls back to the complete pixel
+render/video-encode path; cancellation remains cancellation. Successful jobs
+publish bounded `ExportSmartRenderEvidence` with source Asset, packet count,
+payload bytes, and packet-identity status.
+
 The optional `validation` build feature exposes a read-only semantic trace over
 the exact `PreparedVisualFrameClosure` already produced by each consumer. The
 trace normalizes scheduler generation while retaining the immutable Program
@@ -1715,6 +2320,13 @@ reports:
 explicit metadata/override totals, policy assumptions/rejections, data-texture
 bypasses, legacy RGBA8 reason totals, float/linear completeness, GPU blockers,
 GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
+The same immutable job-diagnostics publication also carries the optional
+`AudioLoudnessReport` generated from the exact rendered Program PCM before
+encoding. Audio-disabled delivery leaves it absent; audio-enabled delivery must
+publish either exact digital-silence evidence or a completed finite-signal
+BS.1770/EBU R128 and four-times true-peak observation. Missing or failed
+analysis is a terminal reversible-work failure, never a successful export with
+an empty metric.
 Export simulation perf JSONL includes this evidence only through the versioned
 `color_report`; `color_health*` fields are not a supported external report
 surface. Export simulation `passed` must include that report verdict: default
@@ -1896,18 +2508,40 @@ distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
 tests include negative and above-one working values and fail closed on NaN or
 infinity.
 
-The current Mondrian Standard package additionally has a digest-pinned numeric quality
-corpus. The same generated working-space samples execute through the production
-CPU OCIO SDR and PQ output boundaries; a separate implementation of the View is
-not used as the oracle. The corpus enforces objective invariants rather than
-self-comparison: finite normalized outputs, exact alpha preservation, neutral
-axis, monotonic tone response, dense non-negative hue-boundary continuity, a
-locally dense negative-channel continuity path, 10-bit ramp cardinality, and
-legal/full-range signal codes. Public ColorChecker 2005 D50 xyY coordinates are
-converted through an explicit Bradford D50-to-D65 adaptation and XYZ-to-linear
-Rec.2020 matrix before entering that same production boundary. They provide
-externally sourced stimuli, while future independent application frames provide
-external output evidence on top of the invariants.
+The current Mondrian Standard package additionally has a digest-pinned numeric
+quality corpus. The same generated working-space samples execute through the
+production CPU OCIO SDR and PQ output boundaries. That corpus enforces objective
+invariants rather than self-comparison: finite normalized outputs, exact alpha
+preservation, neutral axis, monotonic tone response, dense non-negative
+hue-boundary continuity, a locally dense negative-channel continuity path,
+10-bit ramp cardinality, and legal/full-range signal codes. Public ColorChecker
+2005 D50 xyY coordinates are converted through an explicit Bradford D50-to-D65
+adaptation and XYZ-to-linear Rec.2020 matrix before entering that same production
+boundary. This remains rendering-View regression and externally sourced
+stimulus evidence; it is not an absolute target oracle.
+
+Absolute technical-boundary qualification instead uses
+`independent-colorimetric-oracle-v1.json`. The complete file is SHA-256 pinned
+by its test target and records public specification/revision, origin, units, and
+numeric precision. It contains fixed IEC sRGB and BT.709 SDR transfer targets,
+ST 2084 PQ and BT.2100 HLG absolute-luminance targets, 8/10/12-bit full and
+studio-range codes, 8/10/16-bit Alpha edge codes including the smallest positive
+value, 4:2:0 and 4:2:2 left/center/top-left sample coordinates, Sharma-Wu-Dalal
+CIEDE2000 pairs, and the BT.2124 Annex 4 Delta E ITP pair. A test-only binary64
+implementation evaluates the transfer, chroma-geometry, CIEDE2000, and Delta E
+ITP equations without importing a production OCIO processor or production
+transform helper. The production PQ/HLG color-science boundary and native-YUV
+shader uniforms must then match those fixed targets.
+
+Integer output qualification uses the renderer-owned
+`CodeValueAccuracyBudget`/`CodeValueAccuracyReport`. It accepts an explicit
+1-through-16-bit scalar-code domain, rejects empty, mismatched, out-of-range, or
+invalid-budget evidence, and reports maximum, mean, nearest-rank P99, and worst
+sample index. Range expansion and channel interpretation stay outside the
+primitive so a gate cannot silently reinterpret full/studio range, RGB/YCbCr,
+or Alpha while measuring. The production Rec.709 Standard round-trip applies
+this gate separately to RGB and exact Alpha instead of retaining a peak-only
+assertion.
 
 Encoded SDR sRGB output validation uses a separate
 `SrgbDisplayAccuracyBudget`/`SrgbDisplayAccuracyReport` contract. It converts
@@ -1924,9 +2558,13 @@ This perceptual contract is deliberately named sRGB and rejects malformed
 RGBA8 buffers. It must not be applied to Rec.709, Display P3, PQ, HLG, or
 scene-linear data. HDR validation requires an absolute-luminance-aware model
 and target display contract rather than relabeling CIELAB thresholds.
-The production PQ GPU conformance gate applies that model to both the versioned
-Mondrian Standard 1000-nit View and the independent ACES 2 reference View,
-using the matching CPU OCIO processor as the semantic oracle.
+The production PQ GPU conformance test applies that model to both the versioned
+Mondrian Standard 1000-nit View and the ACES 2 reference View. Its matching CPU
+OCIO result is only CPU/GPU parity evidence; it is not labeled an independent
+absolute oracle. Public-specification absolute HDR targets are enforced by the
+independent corpus above. Full cross-application rendering-View frames remain a
+separate release-qualification obligation rather than being inferred from CPU
+parity.
 
 ## Engine-Owned Output View Transform
 
@@ -1952,6 +2590,12 @@ expectations. Nested Sequences remain working-domain render inputs and cannot
 select a different deliverable precision. Invalid 4:2:0/4:2:2 dimensions or
 profile/signal combinations fail at admission; the renderer must not crop,
 round, or ask FFmpeg to choose a substitute profile.
+An explicit root-delivery Legalizer forces an encoded-float output boundary,
+clamps normalized encoded RGB before exactly one target-format quantization,
+and preserves Alpha. The policy is frozen beside the other delivery facts and
+never enters nested execution. Legal/full `VideoRange` remains the later codec
+code-range projection, not a substitute for legalization. Smart Render rejects
+an active Legalizer and selects the complete render path.
 `expected_export_video_signal` is the single shared projection from that
 admitted delivery plus Sequence output color intent to encoded pixel format,
 range, CICP primaries/transfer/matrix, and static-HDR metadata expectation.
@@ -1967,8 +2611,23 @@ target-aware preset, Custom OCIO carries the requested output target and resolve
 its display/view/output-endpoint tuple from the pinned config identity, and an
 explicitly display-referred workflow carries `Colorimetric`.
 
-`DisplayManagementPolicy` is limited to monitor/profile identity, Viewer mode,
-and tone-map policy. It cannot replace the engine-owned output View. The sequence
+The resulting `ProgramColorContext` cannot be assembled or patched by a render
+consumer. Its private closed output is either `Encoded` or `Working`; root and
+nested construction plus explicit Export/rendering-View derivation are the only
+creation Seams. Each Seam validates the engine-qualified working space and the
+target-qualified intent, and stores rendering-View presence as the sole source
+of the public tone-map result. Nested frame-closure nodes therefore always end
+in the parent working domain and cannot derive an encoded boundary. Preview,
+Export, proxy, thumbnail, cache, and recursive-closure setup propagate a
+construction error as blocked/failed admission rather than relabeling an
+invalid context or substituting an unrelated fallback.
+
+`DisplayManagementPolicy` is limited to a validated monitor-output intent,
+optional ICC device calibration plus rendering intent, and Viewer SDR/HDR
+policy. Program Output tone mapping remains Sequence-authored and is not part
+of this machine-local policy. Exact OCIO display/view selections must map back
+to an engine-qualified standardized monitor target, so the policy cannot
+replace the engine-owned output View. The sequence
 settings UI therefore exposes the engine and output target, but no independent
 export display/view selector. This prevents preview pixels, encoded pixels, and
 container color metadata from describing different output transforms.
@@ -1987,12 +2646,15 @@ post-encode contract probes only the first decoded video frame when
 `StaticHdrMetadataPolicy::WriteAuthored` was selected, because FFmpeg exposes libx265 ST 2086 and
 MaxCLL/MaxFALL SEI as frame side data rather than stream fields. It compares the
 encoded values at the x265 chromaticity/luminance quantization scales and fails
-closed on missing, malformed, or changed metadata. Exports that do not request
-`Omit` deliveries incur no frame-side-data probe. Source HDR10+ and Dolby
-Vision metadata is never claimed as passthrough across rendered pixels: health
-reports warn on referenced dynamic-HDR sources, and enabling the current
-`WriteAuthored` request fails before encoding until a validated dynamic
-metadata authoring backend exists. The exact Project engine determines whether
+closed on missing, malformed, or changed metadata. `Omit` performs no dynamic
+metadata rewrite. Source dynamic metadata is never claimed as passthrough
+across rendered pixels. Exact preservation bypasses picture execution only
+after the Prepared Visual identity proves one complete unmodified source file,
+then verifies whole-file SHA-256 equality and re-probes the staged output;
+failure cannot fall back to ordinary render. Remake consumes the same frozen
+Prepared Visual Program fingerprint as picture execution and currently blocks
+before tool or encoder launch because no adopter-qualified/licensed generation
+and independent-validation Adapter is installed. The exact Project engine determines whether
 a Standard output-target contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed
 1000-nit content peak. ST 2086 mastering-display peak remains independent
 because it describes the authoring monitor, not the brightest content pixel; a
@@ -2044,16 +2706,21 @@ User scrub/play
     → RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
         → Program Output GPU transform (the same OCIO display/view intent as delivery)
         → retain the typed Program Output texture for scopes/cache diagnostics
-    → optional GpuProgramScopesRuntime::record()
-        → exact atomic aggregation from Program Output
-        → GPU-only histogram/waveform/vectorscope display textures
     → optional RenderGpuOutputBoundaryRuntime::record_wgpu_intermediate_color_transform_owned_backend()
         → stock-OCIO colorimetric Program Output → monitor adaptation
         → no pass when both display identities match
+    → optional GpuProgramScopesRuntime::record()
+        → exact atomic aggregation from the selected Program/Monitor tap
+        → encoded IRE or transfer-decoded absolute nits bins
+        → GPU-only histogram/waveform/vectorscope display textures
+    → optional GpuSignalMonitorRuntime::record()
+        → classify the selected Program/Monitor tap
+        → color the monitor-adapted presentation in one fused pass
+        → preserve Alpha; gamut alarm > zebra > false color
     → optional GPU ICC monitor calibration
     → queue.submit()
       → transfer the move-only presentation output lease
-      → install exact completion callback and retained capacity-one owner
+      → install exact completion callback and retained bounded cleanup owner
       → infallibly commit the exact wgpu SubmissionIndex through the permit
           → dedicated non-UI bounded PollType::Wait(exact index, 8 ms)
           → high-resolution remainder pacing on Windows; recheck exact callback
@@ -2091,7 +2758,8 @@ it permits same-class SDR-to-SDR or HDR-to-HDR colorimetric conversion and
 fails closed on SDR/HDR class changes because those require an explicit
 rendering/tone-mapping policy. The Viewer record retains both Program Output
 and final monitor handles in one pooled GPU resource table. Scopes consume the
-former; presentation and optional ICC calibration consume the latter. Neither
+operator-selected one; presentation and optional ICC calibration consume the
+monitor handle. ICC-calibrated device pixels are deliberately not a scope tap. Neither
 route performs upload/readback between these stages.
 
 Display invalidation likewise uses the full `DisplayOutputIdentity`, covering
@@ -2104,9 +2772,10 @@ diagnostic projections may be logged, but never authorize frame, LUT, or
 display-dependent resource reuse.
 
 Viewer GPU hardware timestamps and CPU command-recording attribution expose
-Program Output and Monitor Adaptation as separate stages. Identical identities
-still emit the ordered zero-duration monitor marker so profiling remains
-structurally comparable without adding a render pass.
+Program Output, Monitor Adaptation, Program Scopes, and Signal Monitoring as
+separate stages.
+Identical monitor identities still emit the ordered zero-duration marker so
+profiling remains structurally comparable without adding a render pass.
 
 Active-texture admission is not a scheduling-quality decision inside the
 renderer. Preview may respond to a typed rejection by issuing a later,
@@ -2127,6 +2796,9 @@ quantizes only after both transforms. Callers that need Program Output pixels
 for scopes use the retained-output API instead. The fallback therefore cannot
 replace the program View with the atlas identity or insert an intermediate
 RGBA8 round-trip.
+When signal monitoring is active, the CPU path uses the same Core classifier,
+selected Program/Monitor tap, priority, and Alpha policy as the fused GPU pass,
+then performs the same single final RGBA8 quantization.
 The Program Output transform makes exactly one owned typed output from the
 borrowed composite and exposes its contiguous `[f32; 4]` storage directly to
 OCIO. The presentation-only Interface then consumes and reuses that uniquely
@@ -2145,6 +2817,14 @@ CPU fallback is never silently used. Health reports distinguish:
 - `Pass` — Clean GPU color output.
 - `Warn` — GPU blocked but CPU fallback succeeded.
 - `Fail` — Fail-closed color rejection.
+
+`ViewerGpuExecutionRecord::fallback_reasons` belongs to an already successful
+record: it reports internal source/import or stage fallback evidence for the
+frame that was actually produced. The Window records that evidence but must not
+invalidate the Preview generation or request a second whole-frame CPU retry.
+Only an unsuccessful Viewer record or an explicit pre-recording blocker may
+request the CPU fallback path. This preserves the completed frame while still
+making every fallback observable.
 
 ### GPU Preview Cache Key
 
@@ -2209,10 +2889,10 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 
 ```
 Resolved preview layers
-  -> for each retained Windows D3D11 NV12/P010 media layer:
+  -> for each retained renderer-qualified native media layer:
        ViewerNativeVideoImportRuntime
-       -> bounded D3D11/DX12 shared-texture bridge entry
-       -> native YUV shader into encoded-float Rgba16Float source texture
+       -> exact zero-copy or declared GPU-bridge Adapter route
+       -> native YUV/RGB shader into encoded-float Rgba32Float source texture
        -> OCIO GPU input transform into Rgba32Float working texture
        -> insert returned working resource into the composite frame table
   -> for each media layer with a source/input contract:
@@ -2258,8 +2938,8 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 ### Capability Classification
 
 - **`GpuNative`** — All media sources are GPU-resident, every executed layer
-  uses a canonical BlendMode and a supported working-linear effect plan, and the
-  executed stack has ≤5 layers. Native D3D11 media enters through the bounded
+  uses a canonical BlendMode and a supported working-linear effect plan. Native
+  D3D11 media enters through the bounded
   low-copy import backend; procedural and adjustment layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
@@ -2272,8 +2952,15 @@ the renderer contract is covered by `from_gpu_working_frame()`.
   - `EffectRequiresCpu` — Effect graph needs CPU execution
   - `UnsupportedTransform` — Transform cannot be represented by the GPU compositor
   - `FrameNotGpuResident` — Frame must be uploaded
-  - `TooManyLayers` — Exceeds the bounded 5-layer GPU composite stack
   - `GpuUnavailable` — No GPU device/queue
+
+Layer count is not a capability blocker. The compositor preserves authored
+order with one pass per contributing layer and two ping-pong working-linear
+accumulators. Per-pass uniforms use reusable 128-slot pages that grow only when
+the admitted frame needs another chunk and reset after ordered submission.
+Viewer active-working-set count/byte grants remain the authority for source and
+intermediate textures, so removing the old five-layer gate does not create an
+unbudgeted GPU texture path.
 
 ### GPU resource residency
 
@@ -2376,6 +3063,26 @@ per-frame input bind groups reuse that layout instead of creating another
 layout object. LUT payload hashes are computed once when the immutable shader
 plan is extracted, rather than walking a 57^3 payload during every frame.
 
+Window generation startup resolves the active Sequence Program color context,
+display policy, monitor adaptation, output precision, and signal-monitoring
+carrier before publishing the new Viewer runtime. It prepares that exact
+Program Output backend in the same `ViewerGpuExecutionRuntime::color_output`
+cache later used by production recording. Preparation allocates no frame ID,
+records no command, and creates no parallel color or completion authority. The
+first production record must therefore observe a cache hit for an unchanged
+contract. A changed contract remains an ordinary cache miss under the same
+runtime owner. Headless cold-activation validation invokes the same seam with
+the candidate's exact production contract before timing the successor frame.
+
+This preparation is ordered on device-generation startup before normal frame
+submission. It must not run on a background thread concurrently with the
+generation's device-progress polling and active queue submissions: the Linux
+NVIDIA/wgpu backend can serialize driver pipeline creation behind that work and
+turn an attempted asynchronous warm-up into device backpressure. A preparation
+failure is logged at startup; the first production record still executes the
+same structured fail-closed planner and error path instead of treating warm-up
+failure as successful rendering.
+
 Every cache-hit authorization in this preparation chain uses a domain-separated
 32-byte canonical identity, including shader requests, extracted shader plans,
 translation artifacts, resource layouts, static pipelines, wrapper artifacts,
@@ -2425,6 +3132,40 @@ processor cache id, shader/LUT resource shape, cold and warm CPU record cost,
 GPU p50/p95/p99, and runtime-cache deltas. Its 5 ms default p95 budget and
 creation-free warm-path gate are independent of the View-versus-ACES gate so
 input-stage regressions cannot be hidden by output-stage results.
+
+Ignored hardware tests are invocation mechanics, not permission to omit release
+evidence. `GpuColorQualificationExecutionPolicy` owns the only distinction
+between `development-optional` and `sealed-required`. With no policy environment
+binding, broad cross-platform tests may retain diagnostic coverage by reporting
+an unavailable adapter. The exact sealed token turns adapter/device creation or
+missing timestamp-query support into a structured terminal error; misspelled or
+non-Unicode policy values also fail rather than selecting development behavior.
+
+`gpu-color-qualification.json` defines the closed Windows gate set: output-stage
+smoke/readback health, all Standard Views, Standard Rec.709 code parity,
+Standard and ACES PQ Delta E ITP, native YUV numeric decode, 4K Standard
+SDR/PQ/HLG View performance, and 4K identity/matrix/input transform performance.
+The external PowerShell supervisor runs every exact test under an independent
+wall-clock deadline and requires output proving exactly one test passed. It
+rejects any diagnostic skip, missing/duplicate report, non-passing health
+summary, absent report hash, or incomplete gate set.
+
+The dedicated `mondrian-gpu-color` self-hosted runner label is additive to the
+Windows reference-machine label. Qualification binds the clean source SHA and
+operator machine ID to both the captured Windows GPU/driver inventory and the
+wgpu adapter reported independently by the smoke and two performance gates.
+Every adapter-bearing report must agree byte-for-byte on name, backend, device
+type, driver, and driver information; the admitted adapter must be DX12,
+discrete, uniquely match the machine inventory name, and carry the exact
+captured driver version. WARP, a different physical GPU, driver rotation during
+the run, or one gate executing elsewhere fails before evidence publication.
+
+The schema-1 aggregate retains bounded build/gate exit facts, log hashes, report
+hashes, source/machine/profile identities, and zero skipped gates. Windows
+Commercial Engine evidence schema 2 now requires and hashes this GPU color
+report beside Complete Golden and Playback evidence. Release verification reads
+the same profile and rejects older manifests that contain no sealed GPU color
+qualification.
 
 Renderer-owned color stages share a device-scoped exact-contract texture pool
 across native import and Viewer output runtimes. A candidate returns its typed
@@ -2499,12 +3240,13 @@ and entering permanent active-working-set refusal.
 More than one live detached output is bounded backpressure, not an input to
 that component-wise formula. An unordered count/byte aggregate cannot identify
 which lease publication will replace and therefore cannot prove the following
-steady state. Window and Headless lifecycle occupancy prevents another record
-while a candidate lease is awaiting publication; admission nevertheless
-checks the capacity-one invariant and fails closed if an Adapter bug, reset
-race, or future multi-slot owner exposes two leases. A future multi-slot design
-must provide explicit replaceable lease identity and ownership transitions
-instead of weakening this check or reviving aggregate approximation.
+steady state. Window and Headless may retain several submitted cleanup owners,
+but stale prepared publication is retired before an exact current candidate is
+recorded; admission independently checks the capacity-one detached-output
+invariant and fails closed if an Adapter bug or reset race exposes two leases.
+A future multi-output publication design must provide explicit replaceable
+lease identity and ownership transitions instead of weakening this check or
+reviving aggregate approximation.
 
 This ledger spans pool generations: reset invalidates return authority and idle
 storage but an old-generation lease remains charged until its actual backend
@@ -2559,8 +3301,9 @@ and adjustment elements:
 - all executed layers may use any canonical `BlendMode`; the GPU shader shares
   the CPU Float32 straight-alpha algebra, and Dissolve consumes the complete
   frame seed plus destination pixel identity;
-- skipped leading/identity/zero-opacity adjustments do not consume capacity;
-  the remaining executed layer count must be ≤5.
+- skipped leading/identity/zero-opacity adjustments do not consume passes;
+  admitted contributing layers execute in authored order across reusable
+  uniform pages without a separate layer-count gate.
 
 If any condition is not met, the GPU-preview candidate path records
 `GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and
@@ -2572,3 +3315,46 @@ the raster CPU correctness path. This fail-closed gate is intentional:
 unsupported effects, blend modes, transforms, or resampling must not silently
 run through a visually different GPU approximation, and unsupported GPU
 compositing must not make transport controls or window close unresponsive.
+
+## Professional Reference Output
+
+Renderer exposes one distinct `ProgramOutputRole::ReferenceOutput` and the
+`ReferenceOutputProgram` full-raster clean-feed Seam. It applies canonical
+Sequence Program Output and then packs v210 10-bit 4:2:2 or portable 12-bit RGB
+plus exact embedded-audio intervals for the deep
+`mondrian-reference-output` Module. Viewer scale, comparison, monitor/ICC,
+Scopes, warnings, and presentation background cannot enter this route. The
+current Implementation is the CPU Float32 correctness path; a future resident
+GPU/device path must reuse this same Interface and color identity. See
+[Reference Output](reference-output.md).
+
+## Cross-Application Qualification Path
+
+The Renderer owns the only metric-dispatch and matrix-verdict Implementation.
+The sealed validation Adapter consumes a strict runtime profile plus one
+local-restricted evidence manifest, imports each artifact with explicit
+pre-decode resource limits, and evaluates one non-spliceable clean-source run.
+The report binds profile/stimulus/source/machine identity, the complete
+acquisition evidence, every pairwise distribution, missing matrix cells, and a
+self-verifying digest. The PowerShell supervisor serializes Cargo execution,
+enforces one exact ignored gate with a deadline, rejects skips and missing
+reports, and seals input/output/log hashes without recalculating color results.
+
+External capture is deliberately an Adapter outside realtime rendering:
+Blender may run headless against a pinned OCIO config, Resolve requires its
+installed scripting host and signed Project/preset, and Premiere remains a
+UI-hosted capture with operator verification for color settings not exposed by
+its automation Interface. No vendor application is launched by the ordinary
+Renderer or App process.
+
+Linux CUDA input adds a physical storage-buffer fetch to the shared native YUV
+decoder. Texture and buffer sources share the same interpolation and color
+kernel, followed by the same OCIO input transform. A CUDA bridge copies only
+encoded YUV storage; it cannot infer range, transfer, primaries or quality from
+the chosen provider. Preview/Export color semantics remain unchanged.
+
+Native YUV interpolation clamps each luma/chroma fetch to the visible raster,
+with chroma dimensions derived from the admitted subsampling contract. Decoder
+allocation padding is never part of the image, including scaled edge pixels.
+NV12/P010 storage-buffer and texture fetch parity tests use distinct poisoned
+allocation padding, odd visible extents, full/limited range and chroma siting.

@@ -1,9 +1,11 @@
 //! Platform-neutral process and system memory observation contracts.
 
 use crate::NoopPlatformService;
+use serde::{Deserialize, Serialize};
 
 /// Explicit ownership scope for one native process-memory observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessMemoryScope {
     /// Only the process that invoked the Adapter.
     CurrentProcess,
@@ -23,7 +25,8 @@ impl ProcessMemoryScope {
 }
 
 /// Native backend used to observe a process-memory footprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessMemoryProbeBackend {
     /// Windows Process Status API for exactly the calling process.
     WindowsCurrentProcessStatus,
@@ -88,7 +91,8 @@ impl ProcessMemoryProbeBackend {
 /// These metrics are intentionally not numerically interchangeable. They are
 /// suitable for same-platform plateau and budget evidence, while reports must
 /// preserve the metric whenever samples cross a persistence or telemetry Seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessPrivateMemoryMetric {
     /// Windows private committed virtual memory (`PrivateUsage`).
     WindowsPrivateCommit,
@@ -117,7 +121,8 @@ impl ProcessPrivateMemoryMetric {
 /// pages independently of application lifetime. A professional whole-product
 /// gate must additionally require `ProductProcessTree`, a complete inventory,
 /// and a non-zero observed process count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessMemoryProbeResult {
     /// Ownership scope requested from the Adapter.
     pub scope: ProcessMemoryScope,
@@ -268,8 +273,8 @@ pub trait ProcessMemoryProbe: Send + Sync {
 pub enum PhysicalMemoryCapacityProbeBackend {
     /// Windows `GetPhysicallyInstalledSystemMemory`.
     WindowsInstalledSystemMemory,
-    /// Linux `/proc/meminfo` `MemTotal` capacity.
-    LinuxProcfsMemTotal,
+    /// Linux installed DIMM sizes from the system udev DMI inventory.
+    LinuxUdevDmi,
     /// macOS `hw.memsize` sysctl capacity.
     MacOsHwMemsizeSysctl,
 }
@@ -279,7 +284,7 @@ impl PhysicalMemoryCapacityProbeBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WindowsInstalledSystemMemory => "windows-installed-system-memory",
-            Self::LinuxProcfsMemTotal => "linux-procfs-mem-total",
+            Self::LinuxUdevDmi => "linux-udev-dmi",
             Self::MacOsHwMemsizeSysctl => "macos-hw-memsize-sysctl",
         }
     }

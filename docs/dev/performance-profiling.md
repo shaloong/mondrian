@@ -22,6 +22,13 @@
 
 ## Existing Smoke Tests
 
+Prefer `scripts/perf/run-perf-suite.ps1` for the default serial suite. For
+manual App runs below, first build the same-profile packaged Preview worker
+with `cargo build -p mondrian-app --release -j 1 --bin mondrian` and the test
+runner with `cargo test -p mondrian-app --release -j 1 --lib --no-run`. Keep
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` unset. Do not compile or run another
+benchmark concurrently with measurements.
+
 ```powershell
 $perfRun = "target/perf/manual-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
 New-Item -ItemType Directory -Path $perfRun | Out-Null
@@ -45,6 +52,49 @@ substitutes for the reference-validation runner's real 4K HEVC Main10, device
 clock, long A/V synchronization, memory, and GPU-presentation gates. A test
 process that exits successfully after reporting `skipped` has not produced
 eligible performance evidence.
+
+The four default App smoke reports also carry schema-1 `owner_closure`
+evidence. Project lifecycle preserves its historical three-row JSONL shape by
+embedding the same closure receipt in each case; App UI, decode/cache, and
+continuous playback embed one receipt in their scenario record. The harness
+closes every admission first, then reclaims Preview workers and decoder-native
+residency before retiring the Viewer GPU generation and finally consuming
+`AppState`; every wait spends from one unchanged absolute deadline. This
+producer-before-device order is mandatory because a merely signaled Preview
+worker may still hold a renderer-qualified decoder root or native surface. The
+receipt retains the
+exact Preview/render-cache, GPU retirement, Project, Reference Output, Export,
+Audio/Audio Source, and App worker leaves. A missing receipt, a timeout,
+detach, panic, residual owner, render-cache startup failure, or boolean-only
+substitute is ineligible even when all timing cases pass.
+
+`MONDRIAN_PERF_SHUTDOWN_MS` controls that shared terminal budget and is clamped
+to 100 ms through 120 s; its default is 30 s. Performance output is a fresh,
+single-write JSONL artifact: publication truncates stale content, propagates
+directory/open/write errors, flushes, and calls `sync_all`. FFmpeg fixture
+generation failure writes an explicit `eligible:false`/`skipped` record and
+fails the producer instead of returning success.
+
+`scripts/perf/perf-owner-closure.psm1` is the shared suite/comparator validator.
+It reconstructs eligibility from every lifecycle leaf and a fixed App worker
+domain inventory instead of trusting aggregate booleans. Run
+`scripts/perf/test-perf-owner-closure.ps1 -ReportPath <project-jsonl>` to prove
+that the valid three-row receipt is accepted while missing leaves,
+contradictory aggregates, duplicate worker domains, boolean-only substitutes,
+and unequal per-row receipts are rejected.
+
+Clean shutdown and performance eligibility are independent. Keep failed
+samples even when the owner closure is clean; do not loosen budgets, conceal
+cold initialization with test-only warm-up, or remove required cache
+publication to turn a failure into a pass. Current local follow-ups and native
+platform transfer work are tracked in the
+[commercialization handoff](color-commercialization-handoff.md).
+
+The Realtime Performance Matrix's authoring row uses a 120-minute Program
+extent to qualify large-project operation scale; it is not a 120-minute
+wall-clock soak. Commercial long-duration claims use the separate serial
+72-hour contract and runbook in
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
 The reference audio gate uses report profile
 `cpal_av_48khz_30min_recovery_v2` and must be built and tested with the
@@ -254,7 +304,7 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema 36 records the media-layer policy contract
+`preview_decode_report` schema 37 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
@@ -308,7 +358,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema 36 also includes `playback_schedule`, the
+`preview_decode_report` schema 37 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. It also records `current_decode_decisions`,
@@ -339,12 +389,50 @@ non-playing seeks (`RandomAccessStillFrame`) and active playhead dragging
 scrub path. The smoke fails closed when either `ScrubCursor` or
 `RandomAccessStillFrame` has no successful profile samples; a profile schema
 without exercised samples is not acceptable coverage.
+The same smoke installs a real isolated persistent Timeline render-cache
+service under its temporary fixture root. After the first frame misses and is
+durably published through the bounded CPU Viewer fallback, the harness moves
+away, drains every earlier lookup/publication terminal, clears only Preview's
+in-memory residency, and returns to the exact frame. Both lookup submissions
+and verified hits must increase after that request-local baseline; a delayed
+hit from earlier work cannot qualify the new request. GPU-only presentation
+does not produce a CPU working-frame artifact and is not publication evidence.
+Eligible evidence therefore requires nonzero lookup, miss, publication,
+and hit counters; cache failure, corruption, or dropped terminal results fail
+closed. This is distinct from the recovery gate's Frame Store memory-pressure
+trim and must not be described as disk-cache pressure qualification.
+The headless App UI smoke likewise drives the production candidate and result
+pump seams for CPU fallback. Its presentation query only projects the retained
+output; repeatedly querying that projection cannot start or drain async work.
+The default suite first builds `mondrian-app --release --bin mondrian` and the
+App lib-test runner (`--no-run`) with one Cargo job, then runs tests serially.
+A shared build failure stops admission instead of retrying the same broken
+compilation for each measured case. Packaged Preview workers must come
+from that same profile/target directory; unset `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH`
+before running the suite. Running `cargo test --lib` alone does not build this
+required product executable. The shared validator requires typed JSON counters
+and booleans, exact unique Preview owner slots and case names, and sample-derived
+timing aggregates. It rejects string verdicts, missing samples, startup failures,
+and contradictory Export terminal receipts even if an aggregate claims success.
 For real 4K HEVC/HDR decode fixtures, run the ignored
 `preview_decode_fixture_sequence_perf_smoke` with
 `MONDRIAN_PREVIEW_DECODE_FIXTURE`, `MONDRIAN_PREVIEW_DECODE_SEQUENCE_FRAMES`,
 and `MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US`. The JSON report includes
 `p95_us` and `uncached_p95_us`; when the budget variable is set, the test fails
 if `p95_us` exceeds that gate.
+Pass an exact rational such as
+`MONDRIAN_PREVIEW_DECODE_FRAME_RATE='60000/1001'` for frame-by-frame codec
+comparisons. A decimal remains supported for approximate diagnostics, but its
+microsecond input quantization can select duplicate or skipped source samples
+and must not be used to compare decoder/demux implementations.
+Set `MONDRIAN_PREVIEW_DECODE_COMPACT_YUV=1` to retain the same planar CPU YUV
+payload used by the production GPU upload path instead of expanding each frame
+to CPU RGBA. To measure only the process-isolated format-I/O boundary, also set
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to a freshly built packaged Mondrian
+executable; leave it unset for the otherwise identical in-process
+`AVFormatContext` baseline. The report identifies `demux_mode`,
+`representation`, and the isolated worker's lifecycle/packet evidence so these
+two runs cannot be mistaken for different output contracts or a stale helper.
 `preview_media_external_access_mode_smoke` runs the same access-mode probe and
 gates against a caller-supplied real media file via
 `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`. Use it for 4K HEVC/HDR, camera originals,
@@ -369,12 +457,34 @@ not sit behind still-frame or scrub work.
 The real external continuous-playback smoke additionally emits
 `real_media_gates` and fails when those gates fail. Defaults are deliberately
 closer to production playback expectations than the broad wall-clock timeout:
-`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US=40000`,
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US=60000`,
 `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US=10000`, and
 `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT=95`. These gates are
 intended for 4K HEVC/HDR/Long-GOP fixture runs: a failure should drive
 hardware decode, proxy, scheduler, or renderer-residency work, not timeout
 widening. Override them only when documenting a different fixture class.
+The interaction suffix also resizes the production Viewer geometry while the
+transport remains clock-driven. Intermediate coordinates may be skipped when a
+native resize stalls the UI thread; forcing one Timeline frame per resize would
+slow transport and invalidate realtime evidence. The gate preserves authored
+Full output, limits any single displacement to the four-frame CPU staging
+horizon, and permits at most one isolated retained-frame hold per eight resize
+observations. Loading, blank/unavailable output, consecutive stale holds, or a
+second stale observation still fails. Ordinary continuous playback retains its
+exact-ready requirement. The twelve-observation pause/resume window applies the
+same four-frame displacement and no-blank/no-consecutive-stale rules, allowing
+at most one isolated retained-frame hold while GPU completion callbacks settle
+after resume.
+The 60 ms general real-media decode bound and its explicit 60 ms histogram
+boundary match the measured tail of direct FFmpeg software decode without
+rounding a 50-60 ms result up to 80 ms. It accommodates bounded frame-threaded
+software-decode bursts only when the independent exact Ready/publication,
+zero-clock-skip, queue-wait, and bounded-tail gates also pass. The same
+scenario-specific budget feeds both the nested decode-health report and the
+outer real-media gate; they never evaluate one sample set against conflicting
+50 ms and 60 ms policies. Its recurring-tail ceiling is derived from that same
+budget (300 ms for the general 60 ms fixture). The
+professional hardware qualification retains its stricter 40 ms p95 contract.
 The current-ready ratio uses the maximum of accepted Engine `Ready` deliveries
 and unique exact-current Viewer GPU publications. Both evidence streams
 de-duplicate by playback epoch and frame, and GPU publication coverage is also
@@ -663,3 +773,80 @@ untrusted samples remain visible through failure evidence instead of
 contaminating the stage distributions.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.
+
+### CPU output-boundary diagnosis
+
+Two explicitly ignored diagnostics separate execution cost from qualification:
+
+```powershell
+$env:MONDRIAN_CPU_OUTPUT_PROBE_REPORT = 'target/perf/cpu-output-boundary.json'
+cargo test -p mondrian-renderer --release -j 1 --test cpu_output_boundary_probe -- --ignored --nocapture --test-threads=1
+cargo test -p mondrian-core --release -j 1 --lib cpu_rgb_chunk_sizes_probe -- --ignored --nocapture --test-threads=1
+cargo test -p mondrian-renderer --release -j 1 --test cpu_quantization -- --ignored --nocapture --test-threads=1
+```
+
+Create the output directory first; the optional boundary report refuses to
+overwrite a previous measurement. It retains the process's first CPU boundary,
+same-owner warm observations, and a new owner using process-shared parent
+processors, with per-observation cache deltas and exact RGBA/input parity.
+Separate warm observations time Program Output, retained/consuming monitor
+adaptation, and reference scalar quantization (not the production SIMD kernel).
+Schema 2 names that scalar reference explicitly; complete boundary observations
+always execute the production presentation path. The independent quantization
+probe alternates the original loop with the exact current private kernel.
+New-owner reuse does not isolate CPU
+finalization: OCIO itself may cache CPU handles inside the shared parent.
+
+The Core probe compares warmed layouts with the exact same OCIO processors,
+rotates measurement order, and checks bitwise parity against whole-raster RGB
+execution. None of these diagnostics has authority to qualify a machine or replace
+the App smoke's original cold-frame budget with warmed samples. Run them
+serially, without another build or performance workload, and retain failed
+formal-smoke samples alongside subsequent measurements.
+
+## Commercial realtime performance matrix
+
+`tests/validation/realtime-performance-matrix.json` is the sealed COL-031
+contract. It is intentionally separate from the developer smoke suite and the
+Stress Project contract. Its exact coverage is:
+
+- the existing 30-minute real-video and real-audio/recovery reference gates;
+- a generated, attested 3840×2160 60 fps HEVC Main10 fixture driving 600
+  observations through the real dual-layer decode/publication path;
+- Renderer-owned 4K60 and 8K30 HDR/multilayer/multieffect/scopes GPU workloads;
+- the existing active-heavy and project-heavy 5/30/120-minute authoring
+  matrix, with timing enforcement enabled.
+
+Validate the closed contract without building or touching hardware:
+
+```powershell
+scripts/validation/invoke-realtime-performance-matrix.ps1 -ValidateOnly
+```
+
+Generate or validate the dedicated 4K60 fixture independently:
+
+```powershell
+scripts/validation/generate-realtime-performance-media.ps1
+```
+
+Run a complete reference-machine qualification only from a clean committed
+tree:
+
+```powershell
+scripts/validation/invoke-realtime-performance-matrix.ps1 `
+  -MachineId <operator-assigned-id> `
+  -RegenerateGeneratedFixtures
+```
+
+The supervisor holds a named mutex and runs every build/test sequentially, so
+App and Renderer release targets never compete for compiler, linker, GPU, or
+fixture ownership. It hashes the matrix, corpus, machine reports, fixtures,
+attestations, logs, and raw JSONL reports and binds both ends of the run to one
+Git revision. `passed-baseline` requires every exact gate and dimension on a
+qualified machine with an unchanged clean tree. Missing machine capability or
+an attested fixture is `unqualified`; an attempted gate that fails is
+`failed`. Neither condition is a successful skip.
+
+The current development machine must not be described as qualified merely
+because the contract and test targets compile. Physical execution evidence is
+produced only by the supervisor on a machine satisfying the sealed profile.

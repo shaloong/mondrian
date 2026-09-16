@@ -8,11 +8,13 @@
 use crate::decoder::decoded_video_range_from_ffmpeg;
 use ffmpeg_next as ffmpeg;
 use mondrian_core::icc::parse_icc_display_profile;
+use mondrian_core::timeline_data::FieldOrder;
 use mondrian_core::types::*;
 pub use mondrian_core::{
     is_picture_file_extension, resolve_video_color_metadata_declarations, AudioCodec,
     AudioStreamInfo, ChannelLayout, DecodedVideoRange, DetectedColorInterpretation, MediaInfo,
-    MediaProbeSnapshot, PixelFormat, ProResVariant, ProvenVideoSampling, VideoCodec,
+    MediaProbeSnapshot, PictureFieldTransportOrder, PictureOrientation, PictureStreamMetadata,
+    PixelFormat, ProResVariant, ProvenVideoSampling, SampleAspectRatio, VideoCodec,
     VideoCodecProfile, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
     VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
     VideoColorMetadataDeclaration, VideoColorMetadataDeclarationResolution, VideoColorMetadataHint,
@@ -516,8 +518,9 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
+    let camera_raw = crate::camera_raw::probe_camera_raw_metadata(path)?;
 
-    let input =
+    let mut input =
         ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
             path: path.display().to_string(),
             reason: e.to_string(),
@@ -548,6 +551,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
         let params = stream.parameters();
         match params.medium() {
             ffmpeg::media::Type::Video => {
+                let picture = picture_stream_metadata(&stream, &params);
                 let stream_duration =
                     duration_from_stream_ticks(stream.duration(), stream.time_base());
                 let mut color_metadata_hints = collect_color_metadata_hints(
@@ -575,6 +579,12 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         pixel_format = probed_pixel_format;
                         pixel_format_proven = true;
                     }
+                    if let Some(raw) = camera_raw.as_ref() {
+                        width = raw.width;
+                        height = raw.height;
+                        pixel_format = camera_raw_pixel_format(raw);
+                        pixel_format_proven = true;
+                    }
                     let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
                     bit_depth = pixel_format.bit_depth();
                     has_alpha = pixel_format.has_alpha();
@@ -596,11 +606,18 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
-                        codec: map_video_codec(params.id()),
+                        codec: map_video_codec_with_profile(
+                            params.id(),
+                            // SAFETY: `decoder` owns a live AVCodecContext for
+                            // this scope; reading the integer profile field does
+                            // not mutate or outlive that context.
+                            unsafe { (*decoder.as_ptr()).profile },
+                        ),
                         duration: stream_duration,
                         codec_profile: map_video_codec_profile(decoder.profile()),
                         width,
                         height,
+                        picture,
                         frame_rate,
                         frame_rate_proven,
                         pixel_format,
@@ -618,6 +635,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         } else {
                             None
                         },
+                        camera_raw: camera_raw.clone().map(Box::new),
                     });
                     continue;
                 }
@@ -631,11 +649,17 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
 
                 video_streams.push(VideoStreamInfo {
                     index: stream.index() as u32,
-                    codec: map_video_codec(params.id()),
+                    codec: map_video_codec_with_profile(
+                        params.id(),
+                        // SAFETY: `params` owns a live AVCodecParameters for
+                        // this stream; the profile field is read synchronously.
+                        unsafe { (*params.as_ptr()).profile },
+                    ),
                     duration: stream_duration,
                     codec_profile: VideoCodecProfile::Unknown,
                     width,
                     height,
+                    picture,
                     frame_rate,
                     frame_rate_proven,
                     pixel_format,
@@ -649,6 +673,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     has_alpha,
                     avg_bitrate: 0,
                     total_frames,
+                    camera_raw: camera_raw.clone().map(Box::new),
                 });
             }
             ffmpeg::media::Type::Audio => {
@@ -715,21 +740,27 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
         }
     }
 
-    for video in &mut video_streams {
-        if !video_stream_needs_frame_hdr_probe(video) {
-            continue;
-        }
-        match probe_first_frame_hdr_metadata(path, video.index) {
+    let hdr_streams = video_streams
+        .iter()
+        .filter(|video| video_stream_needs_frame_hdr_probe(video))
+        .map(|video| video.index)
+        .collect::<Vec<_>>();
+    for (stream_index, result) in probe_first_frames_hdr_metadata(&mut input, &hdr_streams) {
+        match result {
             Ok(frame_metadata) => {
-                merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
+                if let Some(video) =
+                    video_streams.iter_mut().find(|video| video.index == stream_index)
+                {
+                    merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
+                }
             }
             Err(reason) => {
                 tracing::warn!(
-                        "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
-                        path,
-                        video.index,
-                        reason
-                    );
+                    "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
+                    path,
+                    stream_index,
+                    reason
+                );
             }
         }
     }
@@ -1404,6 +1435,111 @@ fn collect_hdr_metadata_summaries(
         .collect()
 }
 
+fn picture_stream_metadata(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+    parameters: &ffmpeg::codec::Parameters,
+) -> PictureStreamMetadata {
+    // SAFETY: Parameters owns a valid AVCodecParameters for this shared borrow.
+    let raw = unsafe { &*parameters.as_ptr() };
+    let sample_aspect_ratio = u32::try_from(raw.sample_aspect_ratio.num)
+        .ok()
+        .zip(u32::try_from(raw.sample_aspect_ratio.den).ok())
+        .and_then(|(numerator, denominator)| SampleAspectRatio::new(numerator, denominator));
+    let field_transport_order = picture_field_transport_order(raw.field_order);
+    let field_order = match raw.field_order {
+        ffmpeg::ffi::AVFieldOrder::AV_FIELD_PROGRESSIVE => Some(FieldOrder::Progressive),
+        _ => field_transport_order.map(PictureFieldTransportOrder::display_field_order),
+    };
+    let orientation = stream
+        .side_data()
+        .find(|side_data| side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
+        .map(|side_data| picture_orientation_from_display_matrix(side_data.data()))
+        .unwrap_or_else(|| {
+            picture_orientation_from_legacy_metadata(stream.metadata().get("rotate"))
+        });
+    PictureStreamMetadata {
+        sample_aspect_ratio,
+        field_order,
+        field_transport_order,
+        orientation,
+    }
+}
+
+fn picture_field_transport_order(
+    value: ffmpeg::ffi::AVFieldOrder,
+) -> Option<PictureFieldTransportOrder> {
+    use ffmpeg::ffi::AVFieldOrder::*;
+    match value {
+        AV_FIELD_TT => Some(PictureFieldTransportOrder::TopTop),
+        AV_FIELD_BB => Some(PictureFieldTransportOrder::BottomBottom),
+        AV_FIELD_TB => Some(PictureFieldTransportOrder::TopBottom),
+        AV_FIELD_BT => Some(PictureFieldTransportOrder::BottomTop),
+        AV_FIELD_UNKNOWN | AV_FIELD_PROGRESSIVE => None,
+    }
+}
+
+fn picture_orientation_from_legacy_metadata(value: Option<&str>) -> PictureOrientation {
+    let Some(rotation) = value.and_then(|value| value.trim().parse::<i32>().ok()) else {
+        return PictureOrientation::Identity;
+    };
+    picture_orientation_from_clockwise_degrees(rotation)
+}
+
+fn picture_orientation_from_clockwise_degrees(degrees: i32) -> PictureOrientation {
+    match degrees.rem_euclid(360) {
+        0 => PictureOrientation::Identity,
+        90 => PictureOrientation::RotateClockwise90,
+        180 => PictureOrientation::Rotate180,
+        270 => PictureOrientation::RotateClockwise270,
+        _ => PictureOrientation::Unsupported,
+    }
+}
+
+fn picture_orientation_from_display_matrix(bytes: &[u8]) -> PictureOrientation {
+    const DISPLAY_MATRIX_BYTES: usize = 9 * std::mem::size_of::<i32>();
+    if bytes.len() < DISPLAY_MATRIX_BYTES {
+        return PictureOrientation::Unsupported;
+    }
+    let mut matrix = [0_i32; 9];
+    for (destination, chunk) in matrix.iter_mut().zip(bytes.chunks_exact(4).take(9)) {
+        *destination = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    // FFmpeg's row-vector display convention is:
+    // p' = a*p + c*q + x, q' = b*p + d*q + y.
+    let Some((a, b)) = cardinal_axis(matrix[0], matrix[1]) else {
+        return PictureOrientation::Unsupported;
+    };
+    let Some((c, d)) = cardinal_axis(matrix[3], matrix[4]) else {
+        return PictureOrientation::Unsupported;
+    };
+    match (a, c, b, d) {
+        (1, 0, 0, 1) => PictureOrientation::Identity,
+        (0, -1, 1, 0) => PictureOrientation::RotateClockwise90,
+        (-1, 0, 0, -1) => PictureOrientation::Rotate180,
+        (0, 1, -1, 0) => PictureOrientation::RotateClockwise270,
+        (-1, 0, 0, 1) => PictureOrientation::MirrorHorizontal,
+        (1, 0, 0, -1) => PictureOrientation::MirrorVertical,
+        (0, 1, 1, 0) => PictureOrientation::Transpose,
+        (0, -1, -1, 0) => PictureOrientation::Transverse,
+        _ => PictureOrientation::Unsupported,
+    }
+}
+
+fn cardinal_axis(horizontal: i32, vertical: i32) -> Option<(i8, i8)> {
+    let horizontal_abs = i64::from(horizontal).abs();
+    let vertical_abs = i64::from(vertical).abs();
+    let major = horizontal_abs.max(vertical_abs);
+    let minor = horizontal_abs.min(vertical_abs);
+    if major == 0 || minor.saturating_mul(100) > major {
+        return None;
+    }
+    if horizontal_abs > vertical_abs {
+        Some((horizontal.signum() as i8, 0))
+    } else {
+        Some((0, vertical.signum() as i8))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PictureFrameDrain {
     NeedInput,
@@ -1490,54 +1626,170 @@ fn video_stream_needs_frame_hdr_probe(stream: &VideoStreamInfo) -> bool {
         })
 }
 
-fn probe_first_frame_hdr_metadata(
-    path: &Path,
+#[derive(Debug, thiserror::Error)]
+enum FrameHdrProbeError {
+    #[error("video stream {0} is unavailable")]
+    StreamUnavailable(u32),
+    #[error("{stage} for HDR stream {stream_index}: {source}")]
+    Decoder {
+        stream_index: u32,
+        stage: &'static str,
+        source: ffmpeg::Error,
+    },
+    #[error("read first-frame HDR packet: {0}")]
+    PacketRead(ffmpeg::Error),
+    #[error("no decoded frame after {0} target packets")]
+    PacketBudget(usize),
+}
+
+type FrameHdrProbeResult = Result<Vec<VideoHdrMetadataSummary>, FrameHdrProbeError>;
+
+struct FirstFrameHdrProbe {
     stream_index: u32,
-) -> Result<Vec<VideoHdrMetadataSummary>, String> {
-    const MAX_VIDEO_PACKETS: usize = 512;
+    state: FirstFrameHdrProbeState,
+}
 
-    let mut input = ffmpeg::format::input(path)
-        .map_err(|error| format!("open first-frame HDR probe input: {error}"))?;
-    let parameters = input
-        .streams()
-        .find(|stream| stream.index() == stream_index as usize)
-        .map(|stream| stream.parameters())
-        .ok_or_else(|| format!("video stream {stream_index} is unavailable"))?;
-    let context = ffmpeg::codec::context::Context::from_parameters(parameters)
-        .map_err(|error| format!("create first-frame HDR decoder context: {error}"))?;
-    let mut decoder = context
-        .decoder()
-        .video()
-        .map_err(|error| format!("open first-frame HDR video decoder: {error}"))?;
+enum FirstFrameHdrProbeState {
+    Pending {
+        decoder: ffmpeg::decoder::Video,
+        target_packets: usize,
+    },
+    Complete(FrameHdrProbeResult),
+}
 
-    let mut target_packets = 0usize;
-    for (stream, packet) in input.packets() {
-        if stream.index() != stream_index as usize {
-            continue;
-        }
-        target_packets = target_packets.saturating_add(1);
-        decoder
-            .send_packet(&packet)
-            .map_err(|error| format!("send first-frame HDR packet: {error}"))?;
-        let mut decoded = ffmpeg::util::frame::video::Video::empty();
-        if decoder.receive_frame(&mut decoded).is_ok() {
-            return Ok(collect_frame_hdr_metadata_summaries(&decoded));
-        }
-        if target_packets >= MAX_VIDEO_PACKETS {
-            return Err(format!(
-                "no decoded frame after {MAX_VIDEO_PACKETS} packets"
-            ));
-        }
+impl FirstFrameHdrProbe {
+    fn new(input: &ffmpeg::format::context::Input, stream_index: u32) -> Self {
+        let decoder =
+            (|| {
+                let parameters = input
+                    .streams()
+                    .find(|stream| stream.index() == stream_index as usize)
+                    .map(|stream| stream.parameters())
+                    .ok_or(FrameHdrProbeError::StreamUnavailable(stream_index))?;
+                let context = ffmpeg::codec::context::Context::from_parameters(parameters)
+                    .map_err(|source| FrameHdrProbeError::Decoder {
+                        stream_index,
+                        stage: "create first-frame decoder context",
+                        source,
+                    })?;
+                context.decoder().video().map_err(|source| FrameHdrProbeError::Decoder {
+                    stream_index,
+                    stage: "open first-frame decoder",
+                    source,
+                })
+            })();
+        let state = match decoder {
+            Ok(decoder) => FirstFrameHdrProbeState::Pending { decoder, target_packets: 0 },
+            Err(error) => FirstFrameHdrProbeState::Complete(Err(error)),
+        };
+        Self { stream_index, state }
     }
 
-    decoder
-        .send_eof()
-        .map_err(|error| format!("flush first-frame HDR decoder: {error}"))?;
-    let mut decoded = ffmpeg::util::frame::video::Video::empty();
-    decoder
-        .receive_frame(&mut decoded)
-        .map_err(|error| format!("decode first HDR frame at end of stream: {error}"))?;
-    Ok(collect_frame_hdr_metadata_summaries(&decoded))
+    fn is_pending(&self) -> bool {
+        matches!(self.state, FirstFrameHdrProbeState::Pending { .. })
+    }
+
+    fn send(&mut self, packet: Option<&ffmpeg::Packet>) {
+        const MAX_VIDEO_PACKETS: usize = 512;
+        let FirstFrameHdrProbeState::Pending { decoder, target_packets } = &mut self.state else {
+            return;
+        };
+        let result = (|| {
+            match packet {
+                Some(packet) => {
+                    *target_packets += 1;
+                    decoder.send_packet(packet)
+                }
+                None => decoder.send_eof(),
+            }
+            .map_err(|source| FrameHdrProbeError::Decoder {
+                stream_index: self.stream_index,
+                stage: "send first-frame HDR input",
+                source,
+            })?;
+            let mut decoded = ffmpeg::util::frame::video::Video::empty();
+            match decoder.receive_frame(&mut decoded) {
+                Ok(()) => Ok(Some(collect_frame_hdr_metadata_summaries(&decoded))),
+                Err(ffmpeg::Error::Other { errno })
+                    if packet.is_some() && errno == ffmpeg::error::EAGAIN =>
+                {
+                    if *target_packets >= MAX_VIDEO_PACKETS {
+                        Err(FrameHdrProbeError::PacketBudget(MAX_VIDEO_PACKETS))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Err(source) => Err(FrameHdrProbeError::Decoder {
+                    stream_index: self.stream_index,
+                    stage: "receive first HDR frame",
+                    source,
+                }),
+            }
+        })();
+        match result {
+            Ok(None) => {}
+            Ok(Some(metadata)) => self.state = FirstFrameHdrProbeState::Complete(Ok(metadata)),
+            Err(error) => self.state = FirstFrameHdrProbeState::Complete(Err(error)),
+        }
+    }
+}
+
+fn probe_first_frames_hdr_metadata(
+    input: &mut ffmpeg::format::context::Input,
+    stream_indices: &[u32],
+) -> Vec<(
+    u32,
+    Result<Vec<VideoHdrMetadataSummary>, FrameHdrProbeError>,
+)> {
+    // Stream-info retains its probed packets on this same input. Consume that
+    // original demux position once for all target streams; reopening or seeking
+    // per stream both repeats discovery and can miss another stream's first frame.
+    let mut probes = stream_indices
+        .iter()
+        .map(|&index| FirstFrameHdrProbe::new(input, index))
+        .collect::<Vec<_>>();
+    while probes.iter().any(FirstFrameHdrProbe::is_pending) {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(input) {
+            Ok(()) => {
+                if let Some(probe) =
+                    probes.iter_mut().find(|probe| probe.stream_index as usize == packet.stream())
+                {
+                    probe.send(Some(&packet));
+                }
+            }
+            Err(ffmpeg::Error::Eof) => {
+                for probe in &mut probes {
+                    probe.send(None);
+                }
+                break;
+            }
+            Err(source) => {
+                for probe in &mut probes {
+                    if probe.is_pending() {
+                        probe.state = FirstFrameHdrProbeState::Complete(Err(
+                            FrameHdrProbeError::PacketRead(source),
+                        ));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    probes
+        .into_iter()
+        .map(|probe| {
+            let result = match probe.state {
+                FirstFrameHdrProbeState::Complete(result) => result,
+                FirstFrameHdrProbeState::Pending { .. } => Err(FrameHdrProbeError::Decoder {
+                    stream_index: probe.stream_index,
+                    stage: "finish first-frame HDR probe",
+                    source: ffmpeg::Error::Eof,
+                }),
+            };
+            (probe.stream_index, result)
+        })
+        .collect()
 }
 
 fn collect_frame_hdr_metadata_summaries(
@@ -1816,11 +2068,52 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
         Pixel::YUV420P10LE => Some(PixelFormat::Yuv420p10le),
         Pixel::YUV422P10LE => Some(PixelFormat::Yuv422p10le),
         Pixel::YUV444P10LE => Some(PixelFormat::Yuv444p10le),
+        Pixel::YUV420P12LE => Some(PixelFormat::Yuv420p12le),
+        Pixel::YUV422P12LE => Some(PixelFormat::Yuv422p12le),
+        Pixel::YUV444P12LE => Some(PixelFormat::Yuv444p12le),
+        Pixel::YUV420P16LE => Some(PixelFormat::Yuv420p16le),
+        Pixel::YUV422P16LE => Some(PixelFormat::Yuv422p16le),
+        Pixel::YUV444P16LE => Some(PixelFormat::Yuv444p16le),
+        Pixel::GBRP10LE => Some(PixelFormat::Gbrp10le),
+        Pixel::GBRP12LE => Some(PixelFormat::Gbrp12le),
+        Pixel::GBRP16LE => Some(PixelFormat::Gbrp16le),
+        Pixel::GBRAP10LE => Some(PixelFormat::Gbrap10le),
+        Pixel::GBRAP12LE => Some(PixelFormat::Gbrap12le),
+        Pixel::GBRAP16LE => Some(PixelFormat::Gbrap16le),
+        Pixel::GBRPF32LE => Some(PixelFormat::Gbrpf32le),
+        Pixel::GBRPF32BE => Some(PixelFormat::Gbrpf32be),
+        Pixel::GBRAPF32LE => Some(PixelFormat::Gbrapf32le),
+        Pixel::GBRAPF32BE => Some(PixelFormat::Gbrapf32be),
         Pixel::RGB24 => Some(PixelFormat::Rgb24),
         Pixel::RGBA => Some(PixelFormat::Rgba),
+        Pixel::RGBA64LE => Some(PixelFormat::Rgba64le),
         Pixel::NV12 => Some(PixelFormat::Nv12),
         Pixel::P010LE => Some(PixelFormat::P010),
+        Pixel::P012LE => Some(PixelFormat::P012),
+        Pixel::P016LE => Some(PixelFormat::P016),
+        Pixel::BAYER_RGGB8 => Some(PixelFormat::BayerRggb8),
+        Pixel::BAYER_BGGR8 => Some(PixelFormat::BayerBggr8),
+        Pixel::BAYER_GBRG8 => Some(PixelFormat::BayerGbrg8),
+        Pixel::BAYER_GRBG8 => Some(PixelFormat::BayerGrbg8),
+        Pixel::BAYER_RGGB16LE => Some(PixelFormat::BayerRggb16le),
+        Pixel::BAYER_BGGR16LE => Some(PixelFormat::BayerBggr16le),
+        Pixel::BAYER_GBRG16LE => Some(PixelFormat::BayerGbrg16le),
+        Pixel::BAYER_GRBG16LE => Some(PixelFormat::BayerGrbg16le),
         _ => None,
+    }
+}
+
+fn camera_raw_pixel_format(raw: &mondrian_core::CameraRawMetadata) -> PixelFormat {
+    use mondrian_core::CameraRawCfaPattern;
+    match (raw.cfa_pattern, raw.bit_depth <= 8) {
+        (CameraRawCfaPattern::Rggb, true) => PixelFormat::BayerRggb8,
+        (CameraRawCfaPattern::Bggr, true) => PixelFormat::BayerBggr8,
+        (CameraRawCfaPattern::Gbrg, true) => PixelFormat::BayerGbrg8,
+        (CameraRawCfaPattern::Grbg, true) => PixelFormat::BayerGrbg8,
+        (CameraRawCfaPattern::Rggb, false) => PixelFormat::BayerRggb16le,
+        (CameraRawCfaPattern::Bggr, false) => PixelFormat::BayerBggr16le,
+        (CameraRawCfaPattern::Gbrg, false) => PixelFormat::BayerGbrg16le,
+        (CameraRawCfaPattern::Grbg, false) => PixelFormat::BayerGrbg16le,
     }
 }
 
@@ -1936,7 +2229,7 @@ fn normalized_stream_metadata(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
 }
 
-fn map_video_codec(id: ffmpeg::codec::Id) -> VideoCodec {
+fn map_video_codec_with_profile(id: ffmpeg::codec::Id, profile: i32) -> VideoCodec {
     use ffmpeg::codec::Id;
 
     match id {
@@ -1944,10 +2237,29 @@ fn map_video_codec(id: ffmpeg::codec::Id) -> VideoCodec {
         Id::HEVC => VideoCodec::H265,
         Id::AV1 => VideoCodec::Av1,
         Id::VP9 => VideoCodec::Vp9,
-        Id::PRORES => VideoCodec::ProRes(ProResVariant::Standard),
+        Id::PRORES => VideoCodec::ProRes(match profile {
+            ffmpeg::ffi::FF_PROFILE_PRORES_PROXY => ProResVariant::Proxy,
+            ffmpeg::ffi::FF_PROFILE_PRORES_LT => ProResVariant::Lt,
+            ffmpeg::ffi::FF_PROFILE_PRORES_HQ => ProResVariant::Hq,
+            ffmpeg::ffi::FF_PROFILE_PRORES_4444 => ProResVariant::R4444,
+            ffmpeg::ffi::FF_PROFILE_PRORES_XQ => ProResVariant::R4444Xq,
+            _ => ProResVariant::Standard,
+        }),
+        Id::DNXHD
+            if matches!(
+                profile,
+                ffmpeg::ffi::FF_PROFILE_DNXHR_LB
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_SQ
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQ
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQX
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_444
+            ) =>
+        {
+            VideoCodec::DnxHr
+        }
         Id::DNXHD => VideoCodec::DnxHd,
         Id::CFHD => VideoCodec::Cineform,
-        Id::RAWVIDEO => VideoCodec::Raw,
+        Id::RAWVIDEO | Id::V210 | Id::V210X | Id::R210 => VideoCodec::Raw,
         other => VideoCodec::Other(format!("{other:?}")),
     }
 }
@@ -1983,6 +2295,109 @@ fn map_audio_codec(id: ffmpeg::codec::Id) -> AudioCodec {
 mod tests {
     use super::*;
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    fn display_matrix_bytes(matrix: [i32; 9]) -> Vec<u8> {
+        matrix.into_iter().flat_map(i32::to_ne_bytes).collect()
+    }
+
+    #[test]
+    fn display_matrix_classification_preserves_all_cardinal_orientations() {
+        let fixed = 1 << 16;
+        let unit = 1 << 30;
+        for (matrix, expected) in [
+            (
+                [fixed, 0, 0, 0, fixed, 0, 0, 0, unit],
+                PictureOrientation::Identity,
+            ),
+            (
+                [0, fixed, 0, -fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::RotateClockwise90,
+            ),
+            (
+                [-fixed, 0, 0, 0, -fixed, 0, 0, 0, unit],
+                PictureOrientation::Rotate180,
+            ),
+            (
+                [0, -fixed, 0, fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::RotateClockwise270,
+            ),
+            (
+                [-fixed, 0, 0, 0, fixed, 0, 0, 0, unit],
+                PictureOrientation::MirrorHorizontal,
+            ),
+            (
+                [fixed, 0, 0, 0, -fixed, 0, 0, 0, unit],
+                PictureOrientation::MirrorVertical,
+            ),
+            (
+                [0, fixed, 0, fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::Transpose,
+            ),
+            (
+                [0, -fixed, 0, -fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::Transverse,
+            ),
+        ] {
+            assert_eq!(
+                picture_orientation_from_display_matrix(&display_matrix_bytes(matrix)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_or_truncated_display_matrix_fails_closed() {
+        let diagonal = 46_341;
+        assert_eq!(
+            picture_orientation_from_display_matrix(&display_matrix_bytes([
+                diagonal,
+                diagonal,
+                0,
+                -diagonal,
+                diagonal,
+                0,
+                0,
+                0,
+                1 << 30,
+            ])),
+            PictureOrientation::Unsupported
+        );
+        assert_eq!(
+            picture_orientation_from_display_matrix(&[0; 8]),
+            PictureOrientation::Unsupported
+        );
+    }
+
+    #[test]
+    fn ffmpeg_field_orders_preserve_coded_and_display_order() {
+        use ffmpeg::ffi::AVFieldOrder::*;
+        assert_eq!(picture_field_transport_order(AV_FIELD_UNKNOWN), None);
+        assert_eq!(picture_field_transport_order(AV_FIELD_PROGRESSIVE), None);
+        assert_eq!(
+            picture_field_transport_order(AV_FIELD_TT),
+            Some(PictureFieldTransportOrder::TopTop)
+        );
+        assert_eq!(
+            picture_field_transport_order(AV_FIELD_TB),
+            Some(PictureFieldTransportOrder::TopBottom)
+        );
+        assert_eq!(
+            picture_field_transport_order(AV_FIELD_BB),
+            Some(PictureFieldTransportOrder::BottomBottom)
+        );
+        assert_eq!(
+            picture_field_transport_order(AV_FIELD_BT),
+            Some(PictureFieldTransportOrder::BottomTop)
+        );
+        assert_eq!(
+            PictureFieldTransportOrder::TopBottom.display_field_order(),
+            FieldOrder::LowerFirst
+        );
+        assert_eq!(
+            PictureFieldTransportOrder::BottomTop.display_field_order(),
+            FieldOrder::UpperFirst
+        );
+    }
 
     fn cicp_metadata_from_interpretation(
         interpretation: &DetectedColorInterpretation,
@@ -2071,6 +2486,23 @@ mod tests {
     }
 
     #[test]
+    fn probe_maps_float_rgb_without_losing_precision_or_alpha() {
+        use ffmpeg::util::format::pixel::Pixel;
+        for (native, expected, alpha) in [
+            (Pixel::GBRPF32LE, PixelFormat::Gbrpf32le, false),
+            (Pixel::GBRPF32BE, PixelFormat::Gbrpf32be, false),
+            (Pixel::GBRAPF32LE, PixelFormat::Gbrapf32le, true),
+            (Pixel::GBRAPF32BE, PixelFormat::Gbrapf32be, true),
+        ] {
+            let format = map_pixel_format(native).expect("proven Float32 RGB format");
+            assert_eq!(format, expected);
+            assert_eq!(format.bit_depth(), 32);
+            assert_eq!(format.has_alpha(), alpha);
+            assert!(format.is_rgb());
+        }
+    }
+
+    #[test]
     fn probe_mapping_keeps_unknown_frame_rate_and_pixel_format_unproven() {
         assert_eq!(
             map_rational(ffmpeg::Rational(0, 0)),
@@ -2138,6 +2570,29 @@ mod tests {
         assert_eq!(
             map_video_codec_profile(ffmpeg::codec::Profile::Unknown),
             VideoCodecProfile::Unknown
+        );
+    }
+
+    #[test]
+    fn probe_mapping_distinguishes_dnxhr_and_uncompressed_essence() {
+        assert_eq!(
+            map_video_codec_with_profile(
+                ffmpeg::codec::Id::DNXHD,
+                ffmpeg::ffi::FF_PROFILE_DNXHR_HQX,
+            ),
+            VideoCodec::DnxHr
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::DNXHD, 0),
+            VideoCodec::DnxHd
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::V210, 0),
+            VideoCodec::Raw
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::R210, 0),
+            VideoCodec::Raw
         );
     }
 
@@ -3760,7 +4215,7 @@ mod tests {
             "mondrian-media-frame-hdr-probe-{}.mp4",
             std::process::id()
         ));
-        let output = std::process::Command::new("ffmpeg")
+        let output = crate::ffmpeg_command().expect("admit HDR probe fixture command")
             .args([
                 "-y",
                 "-hide_banner",
@@ -3818,6 +4273,65 @@ mod tests {
             content_light,
             Some(VideoHdrMetadataPayload::ContentLightLevel(_))
         ));
+    }
+
+    #[test]
+    fn frame_hdr_probe_consumes_one_input_for_interleaved_streams() {
+        let directory = tempfile::tempdir().expect("HDR probe fixture directory");
+        let path = directory.path().join("two-hdr-streams.mp4");
+        let output = crate::ffmpeg_command().expect("admit HDR fixture command")
+            .args([
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-n",
+                "-filter_threads", "2",
+                "-f", "lavfi", "-i", "color=red:s=16x16:r=2:d=1",
+                "-f", "lavfi", "-i", "color=blue:s=16x16:r=2:d=1",
+                "-map", "0:v", "-map", "1:v", "-c:v", "libx265",
+                "-pix_fmt", "yuv420p10le", "-threads", "2",
+                "-color_range", "tv", "-color_primaries", "bt2020",
+                "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
+                "-x265-params:v:0",
+                "pools=1:frame-threads=1:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll=1000,400",
+                "-x265-params:v:1",
+                "pools=1:frame-threads=1:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll=2000,600",
+            ])
+            .arg(&path).output().expect("encode interleaved HDR fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(&path).expect("initialize FFmpeg");
+        let mut input = ffmpeg::format::input(&path).expect("open original input");
+        assert!(probe_first_frames_hdr_metadata(&mut input, &[]).is_empty());
+        // The metadata supplement must consume the original input owner, not
+        // reopen a pathname that may no longer identify the same object.
+        #[cfg(unix)]
+        std::fs::remove_file(&path).expect("unlink already-open fixture");
+        let results = probe_first_frames_hdr_metadata(&mut input, &[u32::MAX, 0, 1]);
+        assert_eq!(results.len(), 3);
+        assert!(matches!(
+            results[0].1,
+            Err(FrameHdrProbeError::StreamUnavailable(u32::MAX))
+        ));
+        for (position, expected) in [(1, (1000, 400)), (2, (2000, 600))] {
+            let (stream, metadata) = &results[position];
+            assert_eq!(*stream, (position - 1) as u32);
+            let metadata = metadata.as_ref().expect("first frame metadata");
+            let content = metadata
+                .iter()
+                .find_map(|item| match &item.payload {
+                    Some(VideoHdrMetadataPayload::ContentLightLevel(content)) => Some(content),
+                    _ => None,
+                })
+                .expect("stream-specific content light metadata");
+            assert_eq!(
+                (
+                    content.max_content_light_level,
+                    content.max_frame_average_light_level
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

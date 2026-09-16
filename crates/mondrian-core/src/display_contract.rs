@@ -26,6 +26,7 @@
 //!    monitor change, scale factor change, and surface reconfiguration all
 //!    trigger a full contract re-resolve.
 
+use crate::color_models::DisplayManagementPolicy;
 use crate::types::ColorSpace;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,10 +95,12 @@ impl std::fmt::Display for DisplayPlatform {
 
 /// Status of the OS monitor ICC profile for the current display.
 ///
-/// If the user requests an ICC profile (`MonitorProfileReference::IccProfile`)
-/// and the OS cannot provide one, the contract **must not** silently fall back
-/// to Rec.709 / sRGB. Instead it records one of the failure statuses below and
-/// emits a `DisplayOutputBlocker::MonitorIccProfileUnsupported` or
+/// If the user requests device calibration through
+/// [`DisplayCalibrationPolicy::OsDefault`] or
+/// [`DisplayCalibrationPolicy::IccProfilePath`] and the profile cannot be
+/// resolved, the contract **must not** silently fall back to Rec.709 / sRGB.
+/// Instead it records one of the failure statuses below and emits a
+/// `DisplayOutputBlocker::MonitorIccProfileUnsupported` or
 /// `MonitorIccProfileInvalid`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MonitorProfileStatus {
@@ -487,6 +490,9 @@ impl std::fmt::Display for DisplayValidationStatus {
 /// display policy change, OCIO config generation change).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayOutputSnapshot {
+    /// Complete validated machine-local policy used to resolve this snapshot.
+    #[serde(default)]
+    pub display_management_policy: DisplayManagementPolicy,
     /// Stable display identifier.
     pub display_id: DisplayId,
     /// Platform.
@@ -552,6 +558,16 @@ impl DisplayOutputIdentity {
         &self.0
     }
 
+    /// Encode the complete identity as lowercase hexadecimal.
+    pub fn to_hex(self) -> String {
+        use std::fmt::Write as _;
+        let mut output = String::with_capacity(64);
+        for byte in self.0 {
+            write!(&mut output, "{byte:02x}").expect("writing to String is infallible");
+        }
+        output
+    }
+
     /// Compact diagnostic projection. Never use this value for equality.
     pub fn diagnostic_key(self) -> u64 {
         let mut bytes = [0_u8; 8];
@@ -562,6 +578,7 @@ impl DisplayOutputIdentity {
 
 #[derive(Serialize)]
 struct DisplayOutputIdentityPayload<'a> {
+    display_management_policy: &'a DisplayManagementPolicy,
     display_id: &'a DisplayId,
     platform: DisplayPlatform,
     scale_factor: ScaleFactorPpm,
@@ -604,6 +621,7 @@ impl DisplayOutputSnapshot {
     /// Compute the full canonical identity used for invalidation and reuse.
     pub fn contract_identity(&self) -> DisplayOutputIdentity {
         let payload = DisplayOutputIdentityPayload {
+            display_management_policy: &self.display_management_policy,
             display_id: &self.display_id,
             platform: self.platform,
             scale_factor: self.scale_factor,
@@ -628,7 +646,7 @@ impl DisplayOutputSnapshot {
                 unreachable!("DisplayOutputIdentityPayload serialization is infallible: {error}")
             }
         };
-        let domain = b"mondrian.display-output-contract.v1";
+        let domain = b"mondrian.display-output-contract.v2";
         let mut digest = Sha256::new();
         digest.update((domain.len() as u64).to_le_bytes());
         digest.update(domain);
@@ -644,6 +662,7 @@ mod tests {
 
     fn sdr_pass_snapshot() -> DisplayOutputSnapshot {
         DisplayOutputSnapshot {
+            display_management_policy: DisplayManagementPolicy::default(),
             display_id: DisplayId {
                 name: Some("Test Monitor".to_owned()),
                 position: (0, 0),
@@ -689,10 +708,36 @@ mod tests {
     }
 
     #[test]
+    fn contract_identity_hex_preserves_all_256_bits() {
+        let identity = sdr_pass_snapshot().contract_identity();
+        let hex = identity.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert_eq!(
+            hex,
+            identity
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        );
+    }
+
+    #[test]
     fn contract_identity_changes_with_surface_format() {
         let a = sdr_pass_snapshot();
         let mut b = sdr_pass_snapshot();
         b.surface_format = "Rgba16Float".to_owned();
+        assert_ne!(a.contract_identity(), b.contract_identity());
+    }
+
+    #[test]
+    fn contract_identity_changes_with_icc_rendering_intent() {
+        let a = sdr_pass_snapshot();
+        let mut b = sdr_pass_snapshot();
+        b.display_management_policy = b
+            .display_management_policy
+            .with_icc_rendering_intent(crate::IccRenderingIntent::AbsoluteColorimetric);
         assert_ne!(a.contract_identity(), b.contract_identity());
     }
 

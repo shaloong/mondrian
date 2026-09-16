@@ -8,19 +8,26 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use mondrian_playback::PlaybackEpoch;
+use mondrian_render_cache::{TimelineRenderCacheFrame, TimelineRenderCacheIdentity};
 use mondrian_renderer::{
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineCompositeDiagnostics,
-    TimelineCompositeScratch,
+    color::RenderColorStageDiagnostics, CpuColorFrame, RenderColorTransformDiagnostics,
+    TimelineCompositeDiagnostics, TimelineCompositeScratch,
 };
 use mondrian_timeline::sequence::ProgramColorContext;
 
-use super::preview_cpu_execution::{composite_resolved_preview, PreviewCpuExecutionDurations};
+use super::preview_cpu_execution::{
+    composite_resolved_preview_with_signal_monitoring,
+    present_preview_working_with_signal_monitoring, PreviewCpuExecutionDurations,
+    PreviewWorkingCompositeOutput,
+};
 use super::preview_execution::PreviewOutputKey;
 use super::preview_raster_frame::{
     preview_raster_presentation_contract, preview_raster_resource_key, PreviewRasterFrame,
 };
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_viewer_plan::ResolvedPreviewElement;
 use super::preview_work_notification::PreviewWorkNotifier;
 
@@ -28,6 +35,8 @@ const REQUEST_CAPACITY: usize = 1;
 const RESULT_CAPACITY: usize = 1;
 
 pub(crate) struct PreviewCpuFallbackRequest {
+    pub(crate) cpu_materialization_active_bytes: u64,
+    pub(crate) cpu_working_set_grant: mondrian_renderer::TimelineCpuWorkingSetGrant,
     pub(crate) generation: u64,
     pub(crate) epoch: PlaybackEpoch,
     pub(crate) output_key: PreviewOutputKey,
@@ -35,6 +44,10 @@ pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) height: u32,
     pub(crate) elements: Arc<[ResolvedPreviewElement]>,
     pub(crate) color_context: ProgramColorContext,
+    pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) cached_working: Option<CpuColorFrame>,
+    pub(crate) monitoring_tap: mondrian_core::ProgramScopesTap,
+    pub(crate) monitoring_settings: mondrian_core::SignalMonitoringSettings,
 }
 
 pub(crate) struct PreviewCpuFallbackReady {
@@ -43,6 +56,7 @@ pub(crate) struct PreviewCpuFallbackReady {
     pub(crate) output_key: PreviewOutputKey,
     pub(crate) frame: PreviewRasterFrame,
     pub(crate) execution: PreviewCpuFallbackExecutionEvidence,
+    pub(crate) render_cache_frame: Option<TimelineRenderCacheFrame>,
 }
 
 pub(crate) struct PreviewCpuFallbackExecutionEvidence {
@@ -111,18 +125,50 @@ impl PreviewCpuFallbackTask {
     pub(crate) fn try_poll(&self) -> Option<PreviewCpuFallbackResult> {
         self.results.as_ref()?.try_recv().ok()
     }
+
+    pub(crate) fn shutdown_and_wait(mut self) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker()
+    }
+
+    pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker_until(deadline)
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) {
+        self.requests.take();
+        self.results.take();
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
+    }
+
+    fn stop_worker_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(PreviewOwnedWorkerShutdown::NotStarted, |worker| {
+            PreviewOwnedWorkerShutdown::join_until(worker, deadline)
+        })
+    }
 }
 
 impl Drop for PreviewCpuFallbackTask {
     fn drop(&mut self) {
-        self.requests.take();
-        // Disconnect publication before joining: the bounded worker may be
-        // blocked publishing a second result while the first remains unread.
-        self.results.take();
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("Preview CPU fallback worker panicked during shutdown");
+        match self.stop_worker_until(Instant::now()) {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
+                tracing::warn!("Preview CPU fallback worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("Preview CPU fallback shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("Preview CPU fallback Drop detached its active worker");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
     }
 }
@@ -143,13 +189,14 @@ fn cpu_fallback_worker(
             Err("Viewer CPU fallback worker panicked".to_owned())
         });
         let result = match result {
-            Ok((frame, execution)) => {
+            Ok((frame, execution, render_cache_frame)) => {
                 PreviewCpuFallbackResult::Ready(Box::new(PreviewCpuFallbackReady {
                     generation: request.generation,
                     epoch: request.epoch,
                     output_key: request.output_key,
                     frame,
                     execution,
+                    render_cache_frame,
                 }))
             }
             Err(reason) => PreviewCpuFallbackResult::Failed(PreviewCpuFallbackFailed {
@@ -169,35 +216,141 @@ fn cpu_fallback_worker(
 fn execute_cpu_fallback(
     request: &PreviewCpuFallbackRequest,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<(PreviewRasterFrame, PreviewCpuFallbackExecutionEvidence), String> {
+) -> Result<
+    (
+        PreviewRasterFrame,
+        PreviewCpuFallbackExecutionEvidence,
+        Option<TimelineRenderCacheFrame>,
+    ),
+    String,
+> {
+    scratch.reconfigure_cpu_working_set(request.cpu_working_set_grant);
+    scratch
+        .admit_cpu_active_working_set(
+            request.cpu_materialization_active_bytes,
+            mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+        )
+        .map_err(|error| error.to_string())?;
     let contract = preview_raster_presentation_contract(&request.color_context)
         .map_err(|error| error.to_string())?;
-    let execution = composite_resolved_preview(
-        request.width,
-        request.height,
-        &request.elements,
-        &request.color_context,
-        scratch,
-    )
+    let execution = match &request.cached_working {
+        Some(frame) => present_preview_working_with_signal_monitoring(
+            PreviewWorkingCompositeOutput {
+                frame: frame.clone(),
+                composite_diagnostics: TimelineCompositeDiagnostics::default(),
+                input_color_diagnostics: Vec::new(),
+                input_color_stage_diagnostics: RenderColorStageDiagnostics::default(),
+                execution_durations: PreviewCpuExecutionDurations::default(),
+            },
+            &request.color_context,
+            request.monitoring_tap,
+            request.monitoring_settings,
+            scratch,
+        ),
+        None => composite_resolved_preview_with_signal_monitoring(
+            request.width,
+            request.height,
+            &request.elements,
+            &request.color_context,
+            request.monitoring_tap,
+            request.monitoring_settings,
+            scratch,
+        ),
+    }
     .map_err(|error| error.to_string())?;
+    let super::preview_cpu_execution::PreviewCompositeOutput {
+        rgba,
+        working_frame,
+        composite_diagnostics,
+        input_color_diagnostics,
+        input_color_stage_diagnostics,
+        color_diagnostics,
+        monitor_color_diagnostics,
+        color_stage_diagnostics,
+        execution_durations,
+    } = execution;
     let frame = PreviewRasterFrame::new(
         preview_raster_resource_key(&request.output_key),
         request.width,
         request.height,
         contract.color_space,
-        execution.rgba,
+        rgba,
     )
     .map_err(|error| error.to_string())?;
+    let render_cache_frame = request
+        .render_cache_identity
+        .filter(|_| request.cached_working.is_none())
+        .and_then(|identity| {
+            TimelineRenderCacheFrame::new(identity, working_frame.into_rgba_f32()).ok()
+        });
     Ok((
         frame,
         PreviewCpuFallbackExecutionEvidence {
-            composite_diagnostics: execution.composite_diagnostics,
-            input_color_diagnostics: execution.input_color_diagnostics,
-            input_color_stage_diagnostics: execution.input_color_stage_diagnostics,
-            color_diagnostics: execution.color_diagnostics,
-            monitor_color_diagnostics: execution.monitor_color_diagnostics,
-            color_stage_diagnostics: execution.color_stage_diagnostics,
-            execution_durations: execution.execution_durations,
+            composite_diagnostics,
+            input_color_diagnostics,
+            input_color_stage_diagnostics,
+            color_diagnostics,
+            monitor_color_diagnostics,
+            color_stage_diagnostics,
+            execution_durations,
         },
+        render_cache_frame,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_materialization_worker_installs_owner_grant_before_allocating() {
+        let sequence = mondrian_timeline::Sequence::new("CPU root admission");
+        let grant = mondrian_renderer::TimelineCpuWorkingSetGrant {
+            max_active_bytes: 512 * 1024 * 1024,
+            max_retained_scratch_bytes: 0,
+        };
+        let request = PreviewCpuFallbackRequest {
+            cpu_materialization_active_bytes: 663_552_000,
+            cpu_working_set_grant: grant,
+            generation: 1,
+            epoch: mondrian_playback::PlaybackEngine::new(sequence.time_base(), Default::default())
+                .expect("engine")
+                .snapshot()
+                .epoch,
+            output_key: PreviewOutputKey::new(
+                sequence.id,
+                3840,
+                2160,
+                super::super::preview_execution::PreviewSemanticIdentityBuilder::new(
+                    b"cpu-grant-test",
+                )
+                .finish_identity(),
+            ),
+            width: 3840,
+            height: 2160,
+            elements: Arc::from([]),
+            color_context: sequence
+                .settings
+                .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+                .expect("context"),
+            render_cache_identity: None,
+            cached_working: None,
+            monitoring_tap: Default::default(),
+            monitoring_settings: Default::default(),
+        };
+        let mut scratch = TimelineCompositeScratch::default();
+        let error = match execute_cpu_fallback(&request, &mut scratch) {
+            Err(error) => error,
+            Ok(_) => panic!("unfunded CPU root executed"),
+        };
+        assert!(
+            error.contains("663552000") && error.contains("536870912"),
+            "{error}"
+        );
+        assert_eq!(scratch.cpu_working_set_diagnostics().grant, grant);
+        assert_eq!(
+            scratch.cpu_working_set_diagnostics().retained_scratch_bytes,
+            0
+        );
+    }
 }

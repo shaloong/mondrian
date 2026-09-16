@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "id": "platform-driver-display-matrix-v1",
+  "execution_policy": "sealed-required",
+  "runtime_profile_schema_version": 1,
+  "build_manifest_schema_version": 1,
+  "owner_verifier_script": "scripts/validation/verify-platform-driver-display-lane.ps1",
+  "source_verifier_script": "scripts/validation/verify-platform-driver-display-source.ps1",
+  "bundle_verifier_script": "scripts/validation/verify-platform-driver-display-matrix.ps1",
+  "cross_machine_row_aggregation_required": true,
+  "atomic_row_execution_required": true,
+  "row_execution_is_serial": true,
+  "clean_source_required": true,
+  "exact_target_artifact_required": true,
+  "executed_runtime_image_required": true,
+  "common_release_candidate_required": true,
+  "common_build_manifest_required": true,
+  "exact_environment_before_after_required": true,
+  "owner_verified_leaf_receipts_required": true,
+  "source_evidence_required": true,
+  "environment_snapshots_required": true,
+  "capture_authority_manifest_required": true,
+  "capture_authority_manifest_schema_version": 1,
+  "separately_approved_verifier_tools_required": true,
+  "runtime_cargo_replay_forbidden": true,
+  "hosted_ci_is_not_physical_evidence": true,
+  "capability_skip_forbidden": true,
+  "required_platform_backends": [
+    { "platform": "windows", "backend": "dx12" },
+    { "platform": "mac_os", "backend": "metal" },
+    { "platform": "linux", "backend": "vulkan" }
+  ],
+  "required_scenarios_per_platform": [
+    "sdr_srgb",
+    "display_p3",
+    "hdr_pq",
+    "managed_icc"
+  ],
+  "required_evidence_per_cell": [
+    "platform_probe",
+    "gpu_color",
+    "viewer_display"
+  ],
+  "required_evidence_owners": [
+    { "kind": "platform_probe", "owner": "mondrian-platform", "verifier_id": "platform-display-probe-v1", "report_schema_version": 1 },
+    { "kind": "gpu_color", "owner": "mondrian-renderer", "verifier_id": "gpu-color-qualification-v1", "report_schema_version": 1 },
+    { "kind": "viewer_display", "owner": "mondrian-app", "verifier_id": "viewer-display-qualification-v1", "report_schema_version": 1 }
+  ],
+  "owner_verifier_contracts": {
+    "raw_evidence_schema_version": 1,
+    "machine_report_schema_version": 1,
+    "gpu_color_required_gates": [
+      "output-smoke",
+      "standard-all-views-accuracy",
+      "standard-rec709-accuracy",
+      "standard-pq-delta-e-itp",
+      "aces-pq-delta-e-itp",
+      "native-yuv-color-accuracy",
+      "standard-view-4k-performance",
+      "standard-input-4k-performance"
+    ],
+    "qualified_gate_status": "qualified",
+    "raw_json_must_be_owner_evaluated": true
+  },
+  "source_evidence_contracts": {
+    "schema_version": 1,
+    "environment_snapshot_schema_version": 1,
+    "platform_probe_producer_script": "scripts/validation/invoke-platform-display-probe-source.ps1",
+    "platform_probe_static_roles": [
+      "authority-challenge.json",
+      "build.stderr",
+      "build.stdout",
+      "capture-plan.json",
+      "producer-binary",
+      "supervisor-summary.json"
+    ],
+    "gpu_color_profile_path": "tests/validation/platform-gpu-color-gates.json",
+    "gpu_color_producer_script": "scripts/validation/invoke-platform-gpu-color-source.ps1",
+    "source_role_pattern": "^[a-z0-9][a-z0-9._-]{0,95}$",
+    "owners": [
+      {
+        "kind": "platform_probe",
+        "source_verifier_id": "platform-display-probe-source-replay-v1"
+      },
+      {
+        "kind": "gpu_color",
+        "source_verifier_id": "gpu-color-source-replay-v1"
+      },
+      {
+        "kind": "viewer_display",
+        "source_verifier_id": "viewer-display-source-replay-v1"
+      }
+    ],
+    "gpu_color_static_roles": [
+      "authority-challenge.json",
+      "profile.json",
+      "supervisor-summary.json",
+      "build.stdout",
+      "build.stderr"
+    ],
+    "gpu_color_gate_roles": [
+      "stdout",
+      "stderr",
+      "measurement.json",
+      "report.json"
+    ],
+    "viewer_static_roles": [
+      "operator-observation.json"
+    ],
+    "viewer_scenario_roles": [
+      "product.jsonl",
+      "stimulus.json"
+    ]
+  },
+  "native_probe_rules": {
+    "windows": {
+      "managed_icc": ["windows_color_profile_display_default", "windows_wcs"],
+      "wide_color_hdr": ["windows_display_config"]
+    },
+    "mac_os": {
+      "managed_icc": ["mac_os_core_graphics"],
+      "wide_color_hdr_edr": ["mac_os_app_kit"]
+    },
+    "linux": {
+      "managed_icc": ["wayland_color_management_v1", "x11_root_property"],
+      "wide_color_hdr": ["wayland_color_management_v1"],
+      "drm_edid_is_capability_only": true
+    }
+  },
+  "limits": {
+    "maximum_profile_bytes": 1048576,
+    "maximum_campaign_bytes": 8388608,
+    "maximum_artifact_bytes": 8589934592,
+    "maximum_source_evidence_file_bytes": 268435456,
+    "maximum_source_evidence_lane_bytes": 1073741824,
+    "maximum_total_evidence_bytes": 68719476736,
+    "maximum_cells": 32,
+    "maximum_items_per_cell": 16
+  },
+  "runner": {
+    "verifier_tool_id": "platform_qualification_replay",
+    "timeout_seconds": 1800,
+    "report_schema_version": 1
+  },
+  "acceptance": {
+    "qualified_status_required": true,
+    "exact_cell_closure_required": true,
+    "unique_row_run_ids_required": true,
+    "same_source_revision_required": true,
+    "same_release_candidate_required": true,
+    "build_manifest_hash_required": true,
+    "per_cell_product_artifact_required": true,
+    "profile_hash_required": true,
+    "machine_report_hash_required": true,
+    "raw_evidence_hash_required": true,
+    "environment_drift_forbidden": true,
+    "software_adapter_forbidden": true,
+    "missing_is_incomplete_not_pass": true,
+    "report_self_verification_required": true
+  },
+  "viewer_scenario_acceptance": {
+    "ready_health_required": true,
+    "valid_display_contract_required": true,
+    "external_texture_presentation_required": true,
+    "zero_readback_stages_required": true,
+    "carrier_reuse_required_for_wide_color_and_hdr": true,
+    "operator_observation_required": true,
+    "capability_skip_forbidden": true,
+    "full_output_contract_sha256_required": true,
+    "exact_environment_sha256_required": true,
+    "executed_runtime_image_sha256_required": true
+  }
+}

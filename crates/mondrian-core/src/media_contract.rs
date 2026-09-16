@@ -5,7 +5,8 @@
 //! does not depend on the concrete media Adapter.
 
 use crate::{
-    AudioChannelLayout, ColorSpace, Rational, VideoHdrMetadataPayload, MAX_AUDIO_CHANNELS,
+    AudioChannelLayout, ColorSpace, PictureStreamMetadata, Rational, VideoHdrMetadataPayload,
+    MAX_AUDIO_CHANNELS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -98,6 +99,17 @@ impl MediaFileFingerprint {
             .ok()
             .and_then(|file| Self::from_open_file(&file))
             .unwrap_or_default()
+    }
+
+    /// Capture revision evidence from the caller's already-open file object.
+    ///
+    /// This is the exact-handle form of [`Self::capture`]. It is intended for
+    /// admission paths that must hash bytes, observe filesystem identity, and
+    /// retain one object without reopening a mutable pathname between those
+    /// operations. An unsupported filesystem or failed metadata query returns
+    /// incomplete evidence that does not authorize reuse.
+    pub fn capture_open_file(file: &File) -> Self {
+        Self::from_open_file(file).unwrap_or_default()
     }
 
     /// Build portable metadata evidence the caller already fetched.
@@ -338,8 +350,24 @@ pub enum AudioCodec {
 }
 
 /// Encoded pixel format identified by a media probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PixelFormat {
+    /// 8-bit RGGB Bayer color-filter array.
+    BayerRggb8,
+    /// 8-bit BGGR Bayer color-filter array.
+    BayerBggr8,
+    /// 8-bit GBRG Bayer color-filter array.
+    BayerGbrg8,
+    /// 8-bit GRBG Bayer color-filter array.
+    BayerGrbg8,
+    /// 16-bit RGGB Bayer color-filter array.
+    BayerRggb16le,
+    /// 16-bit BGGR Bayer color-filter array.
+    BayerBggr16le,
+    /// 16-bit GBRG Bayer color-filter array.
+    BayerGbrg16le,
+    /// 16-bit GRBG Bayer color-filter array.
+    BayerGrbg16le,
     /// Planar YUV 4:2:0, 8-bit.
     Yuv420p,
     /// Planar YUV 4:2:2, 8-bit.
@@ -352,33 +380,129 @@ pub enum PixelFormat {
     Yuv422p10le,
     /// Planar YUV 4:4:4, 10-bit little-endian.
     Yuv444p10le,
+    /// Planar YUV 4:2:0, 12-bit little-endian.
+    Yuv420p12le,
+    /// Planar YUV 4:2:2, 12-bit little-endian.
+    Yuv422p12le,
+    /// Planar YUV 4:4:4, 12-bit little-endian.
+    Yuv444p12le,
+    /// Planar YUV 4:2:0, 16-bit little-endian.
+    Yuv420p16le,
+    /// Planar YUV 4:2:2, 16-bit little-endian.
+    Yuv422p16le,
+    /// Planar YUV 4:4:4, 16-bit little-endian.
+    Yuv444p16le,
+    /// Planar GBR, 10-bit little-endian.
+    Gbrp10le,
+    /// Planar GBR, 12-bit little-endian.
+    Gbrp12le,
+    /// Planar GBR, 16-bit little-endian.
+    Gbrp16le,
+    /// Planar GBRA, 10-bit little-endian.
+    Gbrap10le,
+    /// Planar GBRA, 12-bit little-endian.
+    Gbrap12le,
+    /// Planar GBRA, 16-bit little-endian.
+    Gbrap16le,
+    /// Planar GBR IEEE Float32, little-endian.
+    Gbrpf32le,
+    /// Planar GBR IEEE Float32, big-endian.
+    Gbrpf32be,
+    /// Planar GBRA IEEE Float32, little-endian.
+    Gbrapf32le,
+    /// Planar GBRA IEEE Float32, big-endian.
+    Gbrapf32be,
     /// Packed RGB24.
     Rgb24,
     /// Packed RGBA8.
     Rgba,
+    /// Packed RGBA16 little-endian.
+    Rgba64le,
     /// Two-plane 8-bit NV12.
     Nv12,
     /// Two-plane 10-bit P010.
     P010,
+    /// Two-plane 12-bit P012.
+    P012,
+    /// Two-plane 16-bit P016.
+    P016,
 }
 
 impl PixelFormat {
     /// Nominal component bit depth.
     pub const fn bit_depth(self) -> u8 {
         match self {
+            Self::Gbrpf32le | Self::Gbrpf32be | Self::Gbrapf32le | Self::Gbrapf32be => 32,
+            Self::BayerRggb16le
+            | Self::BayerBggr16le
+            | Self::BayerGbrg16le
+            | Self::BayerGrbg16le => 16,
             Self::Yuv420p10le | Self::Yuv422p10le | Self::Yuv444p10le | Self::P010 => 10,
+            Self::Gbrp10le | Self::Gbrap10le => 10,
+            Self::Yuv420p12le
+            | Self::Yuv422p12le
+            | Self::Yuv444p12le
+            | Self::Gbrp12le
+            | Self::Gbrap12le
+            | Self::P012 => 12,
+            Self::Yuv420p16le
+            | Self::Yuv422p16le
+            | Self::Yuv444p16le
+            | Self::Gbrp16le
+            | Self::Gbrap16le
+            | Self::Rgba64le
+            | Self::P016 => 16,
             _ => 8,
         }
     }
 
     /// Whether the encoded format carries Alpha.
     pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::Rgba)
+        matches!(
+            self,
+            Self::Rgba
+                | Self::Rgba64le
+                | Self::Gbrap10le
+                | Self::Gbrap12le
+                | Self::Gbrap16le
+                | Self::Gbrapf32le
+                | Self::Gbrapf32be
+        )
     }
 
     /// Whether samples are already encoded as RGB rather than YCbCr.
     pub const fn is_rgb(self) -> bool {
-        matches!(self, Self::Rgb24 | Self::Rgba)
+        matches!(
+            self,
+            Self::Rgb24
+                | Self::Rgba
+                | Self::Rgba64le
+                | Self::Gbrp10le
+                | Self::Gbrp12le
+                | Self::Gbrp16le
+                | Self::Gbrap10le
+                | Self::Gbrap12le
+                | Self::Gbrap16le
+                | Self::Gbrpf32le
+                | Self::Gbrpf32be
+                | Self::Gbrapf32le
+                | Self::Gbrapf32be
+        )
+    }
+
+    /// Whether samples form a one-component camera color-filter array.
+    pub const fn is_bayer(self) -> bool {
+        matches!(
+            self,
+            Self::BayerRggb8
+                | Self::BayerBggr8
+                | Self::BayerGbrg8
+                | Self::BayerGrbg8
+                | Self::BayerRggb16le
+                | Self::BayerBggr16le
+                | Self::BayerGbrg16le
+                | Self::BayerGrbg16le
+        )
     }
 }
 
@@ -388,7 +512,7 @@ impl PixelFormat {
 /// serialized shape remains stable when an Adapter cannot map a decoder pixel
 /// format. Consumers must use [`VideoStreamInfo::proven_sampling`] instead of
 /// interpreting those fallback fields directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvenVideoSampling {
     /// Exact encoded pixel format.
     pub pixel_format: PixelFormat,
@@ -1286,6 +1410,9 @@ pub struct VideoStreamInfo {
     pub width: u32,
     /// Encoded raster height.
     pub height: u32,
+    /// Exact scan, sample geometry, and source display-orientation evidence.
+    #[serde(default)]
+    pub picture: PictureStreamMetadata,
     /// Canonicalized average frame rate.
     pub frame_rate: Rational,
     /// Whether the frame rate came from positive decoder evidence.
@@ -1323,11 +1450,18 @@ pub struct VideoStreamInfo {
     pub avg_bitrate: u64,
     /// Exact or bounded-probe-proven frame count.
     pub total_frames: Option<u64>,
+    /// Camera RAW probe facts when a closed RAW Adapter owns this stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_raw: Option<Box<crate::CameraRawMetadata>>,
 }
 
 impl VideoStreamInfo {
     /// Return the only source identity allowed to drive media pixels.
     pub fn executable_color_space(&self) -> Option<ColorSpace> {
+        if let Some(raw) = self.camera_raw.as_ref() {
+            return (raw.has_color_matrix && raw.has_as_shot_neutral)
+                .then_some(ColorSpace::LinearRec709);
+        }
         self.color_interpretation.executable_color_space_from_probe(
             self.proven_sampling(),
             self.color_metadata.as_ref(),
@@ -1483,6 +1617,7 @@ pub fn is_picture_file_extension(path: &Path) -> bool {
     matches!(
         extension.to_ascii_lowercase().as_str(),
         "bmp"
+            | "dng"
             | "dpx"
             | "exr"
             | "gif"
@@ -1512,6 +1647,7 @@ mod tests {
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture: PictureStreamMetadata::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format: PixelFormat::P010,
@@ -1521,6 +1657,7 @@ mod tests {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth,
             has_alpha,
             avg_bitrate: 20_000_000,
@@ -1557,6 +1694,31 @@ mod tests {
             warnings: Vec::new(),
             user_overridable: true,
         }
+    }
+
+    #[test]
+    fn camera_raw_requires_complete_development_metadata_for_execution() {
+        let mut stream = video_stream(true, 16, false);
+        stream.pixel_format = PixelFormat::BayerRggb16le;
+        stream.camera_raw = Some(Box::new(crate::CameraRawMetadata {
+            adapter: crate::CameraRawAdapter::Dng,
+            cfa_pattern: crate::CameraRawCfaPattern::Rggb,
+            width: 3_840,
+            height: 2_160,
+            bit_depth: 16,
+            compression: 1,
+            camera_make: None,
+            camera_model: None,
+            has_color_matrix: true,
+            has_as_shot_neutral: true,
+        }));
+        assert_eq!(
+            stream.executable_color_space(),
+            Some(ColorSpace::LinearRec709)
+        );
+
+        stream.camera_raw.as_mut().expect("RAW metadata").has_color_matrix = false;
+        assert_eq!(stream.executable_color_space(), None);
     }
 
     fn color_metadata_with_matrix(matrix: VideoColorTag) -> VideoColorMetadata {
@@ -1597,6 +1759,27 @@ mod tests {
         assert_eq!(video_stream(false, 8, false).proven_sampling(), None);
         assert_eq!(video_stream(true, 8, false).proven_sampling(), None);
         assert_eq!(video_stream(true, 10, true).proven_sampling(), None);
+    }
+
+    #[test]
+    fn float_rgb_sampling_retains_precision_alpha_and_rejects_fallback_facts() {
+        for format in [
+            PixelFormat::Gbrpf32le,
+            PixelFormat::Gbrpf32be,
+            PixelFormat::Gbrapf32le,
+            PixelFormat::Gbrapf32be,
+        ] {
+            assert_eq!(format.bit_depth(), 32);
+            assert!(format.is_rgb());
+            let mut stream = video_stream(true, 32, format.has_alpha());
+            stream.pixel_format = format;
+            assert!(stream.proven_sampling().is_some());
+            stream.bit_depth = 16;
+            assert!(stream.proven_sampling().is_none());
+            stream.bit_depth = 32;
+            stream.has_alpha = !format.has_alpha();
+            assert!(stream.proven_sampling().is_none());
+        }
     }
 
     #[test]

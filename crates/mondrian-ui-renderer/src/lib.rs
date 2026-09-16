@@ -15,6 +15,7 @@ pub mod command;
 pub mod context;
 pub mod pipeline;
 pub mod shape;
+pub mod surface_presentation;
 
 pub use atlas::TextureAtlas;
 pub use command::{
@@ -26,3 +27,4 @@ pub use context::{
 };
 pub use mondrian_ui_core::CornerRadii;
 pub use shape::{generate_rect_vertices, RectVertex};
+pub use surface_presentation::{UiSurfacePresentation, UiSurfacePresentationError};

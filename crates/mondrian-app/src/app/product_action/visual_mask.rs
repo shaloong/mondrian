@@ -5,7 +5,10 @@
 //! re-derived from the current Authoring Session at dispatch.
 
 use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
-use mondrian_core::mask_data::{MaskComponent, MaskShape, MaskShapeInterpolation};
+use mondrian_core::mask_data::{
+    MaskComponent, MaskShape, MaskShapeInterpolation, MaskTrackingDirection, MaskTrackingModel,
+    MaskTrackingSettings,
+};
 use mondrian_core::{ClipId, MaskId};
 use mondrian_timeline::{clip::Clip, sequence::Sequence, MaskRelativePlacement};
 use serde::{Deserialize, Serialize};
@@ -33,6 +36,12 @@ pub const VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED: &str = "set_shape_animation_e
 pub const VISUAL_MASK_WRITE_SHAPE: &str = "write_shape";
 /// External action name for writing one stable-address Mask scalar parameter.
 pub const VISUAL_MASK_SET_PARAMETER_VALUE: &str = "set_parameter_value";
+/// External action name for starting a new tracking analysis.
+pub const VISUAL_MASK_START_TRACKING: &str = "start_tracking";
+/// External action name for canceling queued or running tracking.
+pub const VISUAL_MASK_CANCEL_TRACKING: &str = "cancel_tracking";
+/// External action name for recomputing the persisted tracking recipe.
+pub const VISUAL_MASK_RECOMPUTE_TRACKING: &str = "recompute_tracking";
 
 /// Closed product operations owned by one Clip-local Mask stack.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +64,12 @@ pub enum VisualMaskProductAction {
     WriteShape(VisualMaskWriteShapePayload),
     /// Write one scalar parameter through stable author identity.
     SetParameterValue(Box<VisualMaskSetParameterValuePayload>),
+    /// Start one immutable background tracking analysis.
+    StartTracking(VisualMaskStartTrackingPayload),
+    /// Cancel the target's latest queued or running analysis.
+    CancelTracking(VisualMaskTargetPayload),
+    /// Recompute the target's last completed recipe without cache reuse.
+    RecomputeTracking(VisualMaskTargetPayload),
 }
 
 /// Clip and initial geometry for one Mask insertion.
@@ -153,6 +168,22 @@ pub struct VisualMaskSetParameterValuePayload {
     pub value: PropertyValue,
 }
 
+/// Stable target plus bounded analysis intent for a new tracking request.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualMaskStartTrackingPayload {
+    /// Canonical Clip identity.
+    pub clip_id: ClipId,
+    /// Stable Mask identity.
+    pub mask_id: MaskId,
+    /// Requested target or planar motion model.
+    pub model: MaskTrackingModel,
+    /// Requested traversal around the current anchor frame.
+    pub direction: MaskTrackingDirection,
+    /// Explicit bounded analysis settings.
+    pub settings: MaskTrackingSettings,
+}
+
 pub(super) fn visual_mask_action_available(
     state: &AppState,
     action: &VisualMaskProductAction,
@@ -237,7 +268,39 @@ pub(super) fn visual_mask_action_available(
                     .is_some()
             })
         }
+        VisualMaskProductAction::StartTracking(payload) => {
+            visual_mask_target(sequence, payload.clip_id, payload.mask_id).is_some_and(|target| {
+                target.track_unlocked
+                    && !target.mask.locked
+                    && target.clip.media_asset_id().is_some()
+                    && !state.is_playing()
+                    && !tracking_is_active(state, payload.clip_id, payload.mask_id)
+            })
+        }
+        VisualMaskProductAction::CancelTracking(payload) => {
+            tracking_is_active(state, payload.clip_id, payload.mask_id)
+        }
+        VisualMaskProductAction::RecomputeTracking(payload) => {
+            visual_mask_target(sequence, payload.clip_id, payload.mask_id).is_some_and(|target| {
+                target.track_unlocked
+                    && !target.mask.locked
+                    && target.mask.tracking.is_some()
+                    && !state.is_playing()
+                    && !tracking_is_active(state, payload.clip_id, payload.mask_id)
+            })
+        }
     }
+}
+
+fn tracking_is_active(state: &AppState, clip_id: ClipId, mask_id: MaskId) -> bool {
+    state.visual_tracking_status(clip_id, mask_id).is_some_and(|status| {
+        matches!(
+            status.phase,
+            super::super::visual_tracking::VisualTrackingPhase::Queued
+                | super::super::visual_tracking::VisualTrackingPhase::Analyzing
+                | super::super::visual_tracking::VisualTrackingPhase::Canceling
+        )
+    })
 }
 
 #[derive(Clone, Copy)]

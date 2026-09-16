@@ -182,7 +182,7 @@ pub struct NativeVideoImportGpuTimingDiagnostics {
     pub inactive_reason: Option<String>,
     /// Native imports that returned a valid working-frame output.
     ///
-    /// A bridge failure after ambiguous GPU queue acceptance is intentionally
+    /// A native-import failure after ambiguous GPU queue acceptance is intentionally
     /// excluded because it formed no usable Viewer native-import output. This
     /// is output coverage, not an inventory of every possibly accepted GPU
     /// command buffer.
@@ -458,27 +458,6 @@ impl NativeVideoImportGpuTimingRuntime {
             return;
         }
         self.ring = Some(ring);
-    }
-
-    pub(super) fn submission_failed_after_queue(
-        &mut self,
-        probe: NativeVideoImportGpuTimingProbe,
-        reason: String,
-    ) {
-        if matches!(
-            &probe.disposition,
-            NativeVideoImportGpuTimingProbeDisposition::Recording(_)
-        ) {
-            // The bridge can report a raw release failure after the wgpu
-            // command buffer was accepted. Never recycle its query resources
-            // when submission is ambiguous. It is not added to
-            // `submitted_imports`: no usable native working-frame output was
-            // formed, and these diagnostics measure output coverage rather
-            // than every command buffer the GPU may have accepted.
-            self.disable(format!(
-                "native-import timestamp submission became ambiguous: {reason}"
-            ));
-        }
     }
 
     pub(super) fn after_submit(&mut self, probe: NativeVideoImportGpuTimingProbe) {
@@ -1293,6 +1272,7 @@ mod tests {
 
     #[test]
     fn activated_runtime_reports_scheduled_samples_bounded_drop_and_failed_scope_tokens() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance = wgpu::Instance::default();
         let Ok(adapter) =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))

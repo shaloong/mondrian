@@ -13,9 +13,12 @@ mod audio_component_mapping;
 mod audio_device_catalog;
 mod audio_mixer;
 mod audio_processor_rack;
+mod background_runtime;
 mod color_management_controls;
 pub mod commands;
 pub(crate) mod display_probe_impl;
+#[cfg(feature = "validation")]
+mod event_loop_owner;
 pub mod host;
 pub mod icons;
 mod inspector_source_timing;
@@ -40,9 +43,17 @@ pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;
 pub mod startup;
+#[cfg(feature = "validation")]
+pub mod surface_reopen_batch_receipt;
+#[cfg(feature = "validation")]
+pub mod surface_reopen_report;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod title_bar;
 pub mod window;
 pub mod window_controls;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod window_generation_history;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) mod window_outer_receipt;
 pub mod workspace_layout;

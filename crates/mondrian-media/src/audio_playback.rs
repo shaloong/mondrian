@@ -8,7 +8,9 @@ use crate::audio::{
 use crate::audio_output::RealtimeAudioOutputRecycleError;
 use crate::audio_output::{
     RealtimeAudioOutputEvent, RealtimeAudioOutputLossReason, RealtimeAudioOutputManager,
+    RealtimeAudioOutputShutdownEvidence,
 };
+use crate::owner_lifetime::{abandon_io_error, dispose_canonical_or_abandon_opaque_panic_payload};
 use crate::{
     AudioBuffer, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
     RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputOpenFailure,
@@ -21,9 +23,11 @@ use mondrian_core::{
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::io;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // One poll consumes at most one output lifecycle event. That event can rotate
@@ -31,6 +35,11 @@ use thiserror::Error;
 // underrun can rotate once more, but no newly scheduled work is completed in
 // the same poll. Reserving two rotations therefore covers every mutation path.
 const MAX_GENERATION_ROTATIONS_PER_POLL: u64 = 2;
+const RENDER_WORKER_TERMINAL_UNKNOWN: u8 = 0;
+const RENDER_WORKER_TERMINAL_NORMAL: u8 = 1;
+const RENDER_WORKER_TERMINAL_PANICKED: u8 = 2;
+const RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED: u8 = 3;
+const MAX_RETIRED_RENDER_OWNERS: usize = 256;
 
 /// Versioned scheduling policy for realtime Audio Playback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +90,9 @@ pub enum AudioPlaybackConfigError {
     /// Render windows and watermark must fit atomically in the fixed device queue.
     #[error("audio playback chunk and high watermark must fit the device queue")]
     ExceedsOutputCapacity,
+    /// The configured render queue must fit in the bounded retirement handoff.
+    #[error("audio playback in-flight capacity exceeds render-owner retirement capacity")]
+    ExceedsRetirementCapacity,
 }
 
 /// Failure to create the realtime Audio Playback execution owner.
@@ -92,6 +104,9 @@ pub enum AudioPlaybackCreateError {
     /// The owned PCM render worker could not be created.
     #[error("failed to spawn Audio Playback render worker: {0}")]
     RenderWorkerSpawn(#[source] io::Error),
+    /// The bounded foreign-render-owner retirement worker could not be created.
+    #[error("failed to spawn Audio Playback render-owner retirement worker: {0}")]
+    RenderRetirementWorkerSpawn(#[source] io::Error),
 }
 
 /// Validation-only controlled-recycle request failure.
@@ -112,13 +127,156 @@ pub enum AudioPlaybackValidationError {
     UnsupportedAdapter,
 }
 
-/// Failure while synchronously reclaiming the owned PCM render worker.
+/// Failure while synchronously reclaiming Audio Playback workers.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlaybackShutdownError {
     /// The render worker panicked before it could be joined.
     #[error("Audio Playback render worker panicked")]
     RenderWorkerPanicked,
+    /// The concrete output-device lifecycle worker panicked.
+    #[error("Audio Playback output-device worker panicked")]
+    OutputWorkerPanicked,
+    /// Shutdown was attempted from one of the workers it owns.
+    #[error("Audio Playback could not synchronously join a worker from that same thread")]
+    CurrentThreadDetachments,
+    /// Lifetime worker accounting did not close despite no explicit panic.
+    #[error("Audio Playback worker lifetime accounting did not close")]
+    IncompleteWorkerClosure,
 }
+
+/// Synchronous lifetime closure evidence for Audio Playback workers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AudioPlaybackShutdownEvidence {
+    /// Evidence schema version.
+    pub schema_version: u32,
+    /// PCM render workers successfully started over this owner lifetime.
+    pub render_workers_started: u32,
+    /// PCM render workers synchronously joined.
+    pub render_workers_terminated: u32,
+    /// Joined PCM render workers whose thread body panicked.
+    pub render_worker_panics: u32,
+    /// Opaque render-worker panic payloads deliberately abandoned.
+    pub render_worker_owner_abandonments: u32,
+    /// Joined render workers whose supervisor terminal stamp was absent or invalid.
+    pub render_worker_terminal_evidence_missing: u32,
+    /// PCM render workers detached because shutdown ran on that same thread.
+    pub render_current_thread_detachments: u32,
+    /// Dedicated foreign-render-owner retirement workers successfully started.
+    pub render_retirement_workers_started: u32,
+    /// Retirement workers synchronously joined after draining their bounded queue.
+    pub render_retirement_workers_terminated: u32,
+    /// Retirement workers whose supervised runtime panicked.
+    pub render_retirement_worker_panics: u32,
+    /// Opaque retirement-worker panic payloads deliberately abandoned.
+    pub render_retirement_worker_owner_abandonments: u32,
+    /// Joined retirement workers missing a valid supervisor terminal stamp.
+    pub render_retirement_worker_terminal_evidence_missing: u32,
+    /// Retirement workers detached because shutdown ran on that same thread.
+    pub render_retirement_current_thread_detachments: u32,
+    /// Concrete output-device lifecycle closure evidence.
+    pub output: RealtimeAudioOutputShutdownEvidence,
+    /// Foreign output/renderer owners whose shutdown or destructor panicked.
+    pub foreign_owner_panics: u32,
+    /// Foreign output/renderer owners or opaque payloads deliberately abandoned.
+    pub foreign_owner_abandonments: u32,
+    /// Deadline-bounded shutdown coordinators successfully created.
+    pub shutdown_coordinators_started: u32,
+    /// Deadline-bounded shutdown coordinators observed returned.
+    pub shutdown_coordinators_terminated: u32,
+    /// Shutdown coordinator creation failures.
+    pub shutdown_coordinator_start_failures: u32,
+    /// Shutdown coordinators that panicked before publishing a receipt.
+    pub shutdown_coordinator_panics: u32,
+    /// Shutdown coordinators still running at the shared deadline.
+    pub shutdown_coordinator_timeouts: u32,
+    /// Shutdown coordinators detached after the shared deadline.
+    pub shutdown_coordinator_detachments: u32,
+    /// Shutdown coordinator spawners that panicked before returning a handle.
+    pub shutdown_coordinator_spawner_panics: u32,
+    /// Audio/output owners or opaque payloads deliberately abandoned.
+    pub shutdown_coordinator_owner_abandonments: u32,
+    /// Whether complete render/output facts were available at the deadline.
+    pub shutdown_resource_facts_complete_at_deadline: bool,
+    /// Whether Audio Playback owner lifetime was unresolved at the deadline.
+    pub shutdown_owner_lifetime_unresolved_at_deadline: bool,
+}
+
+impl AudioPlaybackShutdownEvidence {
+    /// Current-schema clean evidence when no Audio Playback owner exists.
+    pub const fn no_owner() -> Self {
+        Self {
+            schema_version: 3,
+            render_workers_started: 0,
+            render_workers_terminated: 0,
+            render_worker_panics: 0,
+            render_worker_owner_abandonments: 0,
+            render_worker_terminal_evidence_missing: 0,
+            render_current_thread_detachments: 0,
+            render_retirement_workers_started: 0,
+            render_retirement_workers_terminated: 0,
+            render_retirement_worker_panics: 0,
+            render_retirement_worker_owner_abandonments: 0,
+            render_retirement_worker_terminal_evidence_missing: 0,
+            render_retirement_current_thread_detachments: 0,
+            output: RealtimeAudioOutputShutdownEvidence::no_worker_owner(),
+            foreign_owner_panics: 0,
+            foreign_owner_abandonments: 0,
+            shutdown_coordinators_started: 0,
+            shutdown_coordinators_terminated: 0,
+            shutdown_coordinator_start_failures: 0,
+            shutdown_coordinator_panics: 0,
+            shutdown_coordinator_timeouts: 0,
+            shutdown_coordinator_detachments: 0,
+            shutdown_coordinator_spawner_panics: 0,
+            shutdown_coordinator_owner_abandonments: 0,
+            shutdown_resource_facts_complete_at_deadline: true,
+            shutdown_owner_lifetime_unresolved_at_deadline: false,
+        }
+    }
+
+    /// Whether both render and concrete-device workers closed exactly.
+    pub const fn all_workers_terminated(self) -> bool {
+        self.schema_version == 3
+            && self.render_workers_started == self.render_workers_terminated
+            && self.render_worker_panics == 0
+            && self.render_worker_owner_abandonments == 0
+            && self.render_worker_terminal_evidence_missing == 0
+            && self.render_current_thread_detachments == 0
+            && self.render_retirement_workers_started == self.render_retirement_workers_terminated
+            && self.render_retirement_worker_panics == 0
+            && self.render_retirement_worker_owner_abandonments == 0
+            && self.render_retirement_worker_terminal_evidence_missing == 0
+            && self.render_retirement_current_thread_detachments == 0
+            && self.output.all_workers_terminated()
+            && self.foreign_owner_panics == 0
+            && self.foreign_owner_abandonments == 0
+            && self.shutdown_coordinators_started == self.shutdown_coordinators_terminated
+            && self.shutdown_coordinator_start_failures == 0
+            && self.shutdown_coordinator_panics == 0
+            && self.shutdown_coordinator_timeouts == 0
+            && self.shutdown_coordinator_detachments == 0
+            && self.shutdown_coordinator_spawner_panics == 0
+            && self.shutdown_coordinator_owner_abandonments == 0
+            && self.shutdown_resource_facts_complete_at_deadline
+            && !self.shutdown_owner_lifetime_unresolved_at_deadline
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderWorkerJoinOutcome {
+    Terminated,
+    Panicked,
+    TerminalEvidenceMissing,
+    CurrentThreadSkipped,
+}
+
+struct AudioPlaybackShutdownCoordinatorResult {
+    evidence: AudioPlaybackShutdownEvidence,
+    completed_at: Instant,
+}
+
+type AudioPlaybackShutdownTask =
+    Box<dyn FnOnce() -> AudioPlaybackShutdownCoordinatorResult + Send + 'static>;
 
 /// Failure to lower or advance one realtime Audio Playback sample coordinate.
 ///
@@ -271,14 +429,10 @@ pub enum AudioRenderRecoveryDisposition {
 /// Implementations may decode and mix, but must return exactly the requested
 /// rate, channels, and frame count. Independent-window errors become
 /// same-duration silence; generation-state errors invalidate all work in that
-/// generation. Both paths emit structured evidence and never shift media time.
+/// generation. The continuity contract is installed explicitly alongside the
+/// renderer, so this foreign execution trait has no second contract authority.
+/// Both paths emit structured evidence and never shift media time.
 pub trait AudioPcmRenderer: Send + Sync + 'static {
-    /// Declare whether a failed window poisons later work in the generation.
-    /// The value must remain invariant for the lifetime of the renderer.
-    fn continuity_model(&self) -> AudioPcmContinuityModel {
-        AudioPcmContinuityModel::IndependentWindows
-    }
-
     /// Render one exact timeline-media window.
     fn render(
         &self,
@@ -530,7 +684,18 @@ struct RenderCompletion {
     generation: u64,
     request: AudioPcmRenderRequest,
     continuity_model: AudioPcmContinuityModel,
-    result: mondrian_core::Result<AudioBuffer>,
+    result: RenderCompletionResult,
+}
+
+enum RenderCompletionResult {
+    Rendered(AudioBuffer),
+    Failed(String),
+}
+
+#[derive(Clone)]
+struct PreparedAudioPcmRenderer {
+    owner: Arc<dyn AudioPcmRenderer>,
+    continuity_model: AudioPcmContinuityModel,
 }
 
 struct RenderQueueState {
@@ -542,10 +707,16 @@ struct RenderWorkQueue {
     state: Mutex<RenderQueueState>,
     wake: Condvar,
     capacity: usize,
+    retirement_queue: Arc<RenderOwnerRetirementQueue>,
+    retirement_tracker: Arc<ForeignOwnerRetirementTracker>,
 }
 
 impl RenderWorkQueue {
-    fn new(capacity: usize) -> Self {
+    fn new(
+        capacity: usize,
+        retirement_queue: Arc<RenderOwnerRetirementQueue>,
+        retirement_tracker: Arc<ForeignOwnerRetirementTracker>,
+    ) -> Self {
         Self {
             state: Mutex::new(RenderQueueState {
                 pending: VecDeque::with_capacity(capacity),
@@ -553,6 +724,8 @@ impl RenderWorkQueue {
             }),
             wake: Condvar::new(),
             capacity,
+            retirement_queue,
+            retirement_tracker,
         }
     }
 
@@ -579,22 +752,25 @@ impl RenderWorkQueue {
         }
     }
 
-    fn clear_pending(&self) -> usize {
+    fn take_pending(&self) -> VecDeque<RenderWork> {
         let mut state = self.state.lock();
-        let count = state.pending.len();
-        state.pending.clear();
-        count
+        std::mem::take(&mut state.pending)
     }
 
-    fn stop(&self) {
+    fn stop(&self) -> VecDeque<RenderWork> {
         let mut state = self.state.lock();
         state.stopped = true;
-        state.pending.clear();
+        let pending = std::mem::take(&mut state.pending);
         self.wake.notify_all();
+        pending
     }
 }
 
-trait AudioOutputAdapter {
+trait AudioOutputAdapter: Send {
+    fn shutdown_signal(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
     fn poll(&mut self) -> Option<RealtimeAudioOutputEvent>;
     fn enqueue(&mut self, buffer: &AudioBuffer) -> Result<(), RealtimeAudioOutputEnqueueError>;
     fn clear(&self);
@@ -615,8 +791,16 @@ trait AudioOutputAdapter {
     fn capacity_frames(&self) -> Option<usize>;
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot>;
 
+    fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        RealtimeAudioOutputShutdownEvidence::no_worker_owner()
+    }
+
     fn set_device_selection(&self, _selection: RealtimeAudioOutputDeviceSelection) -> bool {
         false
+    }
+
+    fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        RealtimeAudioOutputDeviceSelection::SystemDefault
     }
     #[cfg(feature = "validation")]
     fn request_controlled_recycle(
@@ -627,7 +811,346 @@ trait AudioOutputAdapter {
     }
 }
 
+struct OwnedAudioOutput {
+    owner: Option<Box<dyn AudioOutputAdapter>>,
+}
+
+impl OwnedAudioOutput {
+    fn new(owner: Box<dyn AudioOutputAdapter>) -> Self {
+        Self { owner: Some(owner) }
+    }
+
+    fn take(&mut self) -> Option<Box<dyn AudioOutputAdapter>> {
+        self.owner.take()
+    }
+}
+
+impl Deref for OwnedAudioOutput {
+    type Target = dyn AudioOutputAdapter;
+
+    fn deref(&self) -> &Self::Target {
+        self.owner
+            .as_deref()
+            .expect("Audio output owner must be present while playback is live")
+    }
+}
+
+impl DerefMut for OwnedAudioOutput {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.owner
+            .as_deref_mut()
+            .expect("Audio output owner must be present while playback is live")
+    }
+}
+
+type OrdinaryAudioOwnerDropTask = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OrdinaryAudioOwnerHandoffEvidence {
+    start_failures: u32,
+    spawner_panics: u32,
+    owner_abandonments: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ForeignOwnerRetirementEvidence {
+    panics: u32,
+    owner_abandonments: u32,
+}
+
+#[derive(Default)]
+struct ForeignOwnerRetirementTracker {
+    evidence: Mutex<ForeignOwnerRetirementEvidence>,
+}
+
+impl ForeignOwnerRetirementTracker {
+    fn record(&self, evidence: ForeignOwnerRetirementEvidence) {
+        let mut retained = self.evidence.lock();
+        retained.panics = retained.panics.saturating_add(evidence.panics);
+        retained.owner_abandonments =
+            retained.owner_abandonments.saturating_add(evidence.owner_abandonments);
+    }
+
+    fn snapshot(&self) -> ForeignOwnerRetirementEvidence {
+        *self.evidence.lock()
+    }
+}
+
+#[derive(Default)]
+struct RetiredRenderOwners {
+    pending: VecDeque<RenderWork>,
+    renderers: VecDeque<Arc<dyn AudioPcmRenderer>>,
+    errors: VecDeque<mondrian_core::MondrianError>,
+}
+
+impl RetiredRenderOwners {
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.renderers.is_empty() && self.errors.is_empty()
+    }
+
+    fn owner_units(&self) -> usize {
+        self.pending
+            .len()
+            .saturating_add(self.renderers.len())
+            .saturating_add(self.errors.len())
+    }
+
+    fn merge(&mut self, mut other: Self) -> Result<(), Self> {
+        if self.owner_units().saturating_add(other.owner_units()) > MAX_RETIRED_RENDER_OWNERS {
+            return Err(other);
+        }
+        self.pending.append(&mut other.pending);
+        self.renderers.append(&mut other.renderers);
+        self.errors.append(&mut other.errors);
+        Ok(())
+    }
+}
+
+struct RenderOwnerRetirementQueueState {
+    pending: VecDeque<RetiredRenderOwners>,
+    stopped: bool,
+}
+
+struct RenderOwnerRetirementQueue {
+    state: Mutex<RenderOwnerRetirementQueueState>,
+    wake: Condvar,
+    faulted: Arc<AtomicBool>,
+}
+
+impl RenderOwnerRetirementQueue {
+    fn new(faulted: Arc<AtomicBool>) -> Self {
+        Self {
+            state: Mutex::new(RenderOwnerRetirementQueueState {
+                pending: VecDeque::with_capacity(1),
+                stopped: false,
+            }),
+            wake: Condvar::new(),
+            faulted,
+        }
+    }
+
+    fn push(&self, retired: RetiredRenderOwners) -> Result<(), RetiredRenderOwners> {
+        if retired.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.state.lock();
+        if state.stopped {
+            self.faulted.store(true, AtomicOrdering::Release);
+            return Err(retired);
+        }
+        let pushed = match state.pending.back_mut() {
+            Some(batch) => batch.merge(retired),
+            None if retired.owner_units() <= MAX_RETIRED_RENDER_OWNERS => {
+                state.pending.push_back(retired);
+                Ok(())
+            }
+            None => Err(retired),
+        };
+        if let Err(retired) = pushed {
+            self.faulted.store(true, AtomicOrdering::Release);
+            return Err(retired);
+        }
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn pop(&self) -> Option<RetiredRenderOwners> {
+        let mut state = self.state.lock();
+        loop {
+            if let Some(retired) = state.pending.pop_front() {
+                return Some(retired);
+            }
+            if state.stopped {
+                return None;
+            }
+            self.wake.wait(&mut state);
+        }
+    }
+
+    fn stop(&self) {
+        let mut state = self.state.lock();
+        state.stopped = true;
+        self.wake.notify_all();
+    }
+
+    fn take_pending(&self) -> VecDeque<RetiredRenderOwners> {
+        std::mem::take(&mut self.state.lock().pending)
+    }
+
+    fn mark_faulted(&self) {
+        self.faulted.store(true, AtomicOrdering::Release);
+    }
+}
+
+fn retire_render_owners(mut retired: RetiredRenderOwners) -> ForeignOwnerRetirementEvidence {
+    let mut evidence = ForeignOwnerRetirementEvidence::default();
+    while let Some(work) = retired.pending.pop_front() {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(work)))
+        {
+            evidence.panics = evidence.panics.saturating_add(1);
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                evidence.owner_abandonments = evidence.owner_abandonments.saturating_add(1);
+            }
+        }
+    }
+    while let Some(renderer) = retired.renderers.pop_front() {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(renderer)))
+        {
+            evidence.panics = evidence.panics.saturating_add(1);
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                evidence.owner_abandonments = evidence.owner_abandonments.saturating_add(1);
+            }
+        }
+    }
+    while let Some(error) = retired.errors.pop_front() {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(error)))
+        {
+            evidence.panics = evidence.panics.saturating_add(1);
+            evidence.owner_abandonments = evidence.owner_abandonments.saturating_add(1);
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                evidence.owner_abandonments = evidence.owner_abandonments.saturating_add(1);
+            }
+        }
+    }
+    evidence
+}
+
+fn enqueue_retired_render_owners(
+    queue: &RenderOwnerRetirementQueue,
+    tracker: &ForeignOwnerRetirementTracker,
+    retired: RetiredRenderOwners,
+) {
+    if let Err(retired) = queue.push(retired) {
+        let owner_units = retired.owner_units().min(u32::MAX as usize) as u32;
+        std::mem::forget(retired);
+        tracker
+            .record(ForeignOwnerRetirementEvidence { panics: 0, owner_abandonments: owner_units });
+    }
+}
+
+fn run_render_owner_retirement_worker(
+    queue: &RenderOwnerRetirementQueue,
+    tracker: &ForeignOwnerRetirementTracker,
+) {
+    while let Some(retired) = queue.pop() {
+        let evidence = retire_render_owners(retired);
+        if evidence.panics > 0 || evidence.owner_abandonments > 0 {
+            queue.mark_faulted();
+        }
+        tracker.record(evidence);
+    }
+}
+
+fn handoff_audio_output_owner(owner: Box<dyn AudioOutputAdapter>) {
+    handoff_ordinary_audio_owner(owner);
+}
+
+fn handoff_ordinary_audio_owner<T>(owner: T)
+where
+    T: Send + 'static,
+{
+    let evidence = handoff_ordinary_audio_owner_with_spawner(owner, |work| {
+        thread::Builder::new().name("mondrian-audio-owner-drop".to_owned()).spawn(work)
+    });
+    if evidence.start_failures > 0 || evidence.spawner_panics > 0 {
+        tracing::error!(
+            start_failures = evidence.start_failures,
+            spawner_panics = evidence.spawner_panics,
+            owner_abandonments = evidence.owner_abandonments,
+            "Audio Playback ordinary-drop owner handoff failed closed"
+        );
+    }
+}
+
+/// Move a renderer that could not enter a qualified `AudioPlayback` owner off
+/// the caller thread.
+///
+/// This is only for construction/unavailable fallbacks where no Playback
+/// receipt can exist. Live Playback rejection paths use its tracked retirement
+/// worker instead.
+pub fn handoff_unqualified_audio_pcm_renderer(renderer: Arc<dyn AudioPcmRenderer>) {
+    handoff_ordinary_audio_owner(renderer);
+}
+
+fn handoff_ordinary_audio_owner_with_spawner<T, F>(
+    owner: T,
+    spawn: F,
+) -> OrdinaryAudioOwnerHandoffEvidence
+where
+    T: Send + 'static,
+    F: FnOnce(OrdinaryAudioOwnerDropTask) -> io::Result<JoinHandle<()>>,
+{
+    let retained_owner = Arc::new(Mutex::new(Some(owner)));
+    let worker_owner = Arc::clone(&retained_owner);
+    let work: OrdinaryAudioOwnerDropTask = Box::new(move || {
+        let Some(owner) = worker_owner.lock().take() else {
+            return;
+        };
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner)))
+        {
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                tracing::error!(
+                    "Audio Playback ordinary-drop owner panicked with an opaque payload"
+                );
+            } else {
+                tracing::error!("Audio Playback ordinary-drop owner panicked");
+            }
+        }
+    });
+    let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawn(work)));
+    match spawn_result {
+        Ok(Ok(worker)) => {
+            drop(worker);
+            OrdinaryAudioOwnerHandoffEvidence::default()
+        }
+        Ok(Err(error)) => {
+            let (_kind, error_owner_abandoned) = abandon_io_error(error);
+            let owner_abandonments = abandon_retained_owner(&retained_owner);
+            OrdinaryAudioOwnerHandoffEvidence {
+                start_failures: 1,
+                owner_abandonments: owner_abandonments
+                    .saturating_add(u32::from(error_owner_abandoned)),
+                ..OrdinaryAudioOwnerHandoffEvidence::default()
+            }
+        }
+        Err(payload) => {
+            let payload_abandoned =
+                u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload));
+            OrdinaryAudioOwnerHandoffEvidence {
+                start_failures: 1,
+                spawner_panics: 1,
+                owner_abandonments: abandon_retained_owner(&retained_owner)
+                    .saturating_add(payload_abandoned),
+            }
+        }
+    }
+}
+
+fn abandon_retained_owner<T>(owner: &Arc<Mutex<Option<T>>>) -> u32 {
+    let Some(owner) = owner.lock().take() else {
+        return 0;
+    };
+    std::mem::forget(owner);
+    1
+}
+
+fn abandon_retained_audio_playback_owner(owner: &Arc<Mutex<Option<AudioPlayback>>>) -> u32 {
+    let mut retained = owner.lock();
+    let Some(mut owner) = retained.take() else {
+        return 0;
+    };
+    owner.begin_shutdown();
+    owner.render_retirement_queue.stop();
+    std::mem::forget(owner);
+    1
+}
+
 impl AudioOutputAdapter for RealtimeAudioOutputManager {
+    fn shutdown_signal(&self) -> Option<Arc<AtomicBool>> {
+        Some(RealtimeAudioOutputManager::shutdown_signal(self))
+    }
+
     fn poll(&mut self) -> Option<RealtimeAudioOutputEvent> {
         RealtimeAudioOutputManager::poll(self)
     }
@@ -677,8 +1200,16 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
         RealtimeAudioOutputManager::snapshot(self)
     }
 
+    fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        RealtimeAudioOutputManager::shutdown_and_wait(self)
+    }
+
     fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
         RealtimeAudioOutputManager::set_device_selection(self, selection)
+    }
+
+    fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        RealtimeAudioOutputManager::device_selection(self)
     }
 
     #[cfg(feature = "validation")]
@@ -704,12 +1235,21 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
 /// Deep Module owning realtime output, render worker, generations, watermarks, and preroll.
 pub struct AudioPlayback {
     config: AudioPlaybackConfig,
-    output: Box<dyn AudioOutputAdapter>,
+    output: OwnedAudioOutput,
+    output_shutdown_signal: Option<Arc<AtomicBool>>,
     render_queue: Arc<RenderWorkQueue>,
+    render_retirement_queue: Arc<RenderOwnerRetirementQueue>,
+    render_retirement_faulted: Arc<AtomicBool>,
+    foreign_owner_retirements: Arc<ForeignOwnerRetirementTracker>,
     render_worker: Option<JoinHandle<()>>,
+    render_worker_terminal: Arc<AtomicU8>,
+    render_retirement_worker: Option<JoinHandle<()>>,
+    render_retirement_worker_terminal: Arc<AtomicU8>,
     completion_rx: mpsc::Receiver<RenderCompletion>,
+    shutdown_pending_render_work: VecDeque<RenderWork>,
     render_execution_unavailable: bool,
-    renderer: Option<Arc<dyn AudioPcmRenderer>>,
+    shutdown_requested: bool,
+    renderer: Option<PreparedAudioPcmRenderer>,
     generation: u64,
     generation_cancellation: ExecutionCancellationToken,
     generation_entry_pending: bool,
@@ -733,11 +1273,24 @@ pub struct AudioPlayback {
     recovery_preroll: bool,
     output_lifecycle: AudioOutputLifecycleDiagnostics,
     latest_output_device_evidence: Option<RealtimeAudioOutputDeviceEvidence>,
+    render_workers_started: u32,
+    render_workers_terminated: u32,
+    render_worker_panics: u32,
+    render_worker_owner_abandonments: u32,
+    render_worker_terminal_evidence_missing: u32,
+    render_current_thread_detachments: u32,
+    render_retirement_workers_started: u32,
+    render_retirement_workers_terminated: u32,
+    render_retirement_worker_panics: u32,
+    render_retirement_worker_owner_abandonments: u32,
+    render_retirement_worker_terminal_evidence_missing: u32,
+    render_retirement_current_thread_detachments: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AudioPlaybackPollPreflight {
     authority: AudioSamplePosition,
+    activation_authority: Option<AudioSamplePosition>,
     chunk_frames: i64,
     elapsed_skip_frames: Option<usize>,
     admission_target_frames: usize,
@@ -753,6 +1306,7 @@ impl AudioPlayback {
     /// Construct Audio Playback with the validated product policy.
     pub fn product_default() -> Result<Self, AudioPlaybackCreateError> {
         let config = AudioPlaybackConfig::product_default();
+        validate_config(config)?;
         Self::with_output(
             config,
             Box::new(RealtimeAudioOutputManager::new(
@@ -764,6 +1318,7 @@ impl AudioPlayback {
 
     /// Construct production Audio Playback with a dedicated CPAL lifecycle thread and render worker.
     pub fn new(config: AudioPlaybackConfig) -> Result<Self, AudioPlaybackCreateError> {
+        validate_config(config)?;
         let output = RealtimeAudioOutputManager::new(config.sample_rate, config.channel_layout);
         Self::with_output(config, Box::new(output))
     }
@@ -773,6 +1328,7 @@ impl AudioPlayback {
         config: AudioPlaybackConfig,
         selection: RealtimeAudioOutputDeviceSelection,
     ) -> Result<Self, AudioPlaybackCreateError> {
+        validate_config(config)?;
         let output = RealtimeAudioOutputManager::new_with_device_selection(
             config.sample_rate,
             config.channel_layout,
@@ -794,21 +1350,117 @@ impl AudioPlayback {
         spawner: impl FnOnce(
             Arc<RenderWorkQueue>,
             mpsc::Sender<RenderCompletion>,
+            Arc<AtomicU8>,
         ) -> io::Result<JoinHandle<()>>,
     ) -> Result<Self, AudioPlaybackCreateError> {
-        validate_config(config)?;
-        let render_queue = Arc::new(RenderWorkQueue::new(config.max_in_flight));
+        if let Err(error) = validate_config(config) {
+            handoff_audio_output_owner(output);
+            return Err(error.into());
+        }
+        let output_shutdown_signal = output.shutdown_signal();
+        let foreign_owner_retirements = Arc::new(ForeignOwnerRetirementTracker::default());
+        let render_retirement_faulted = Arc::new(AtomicBool::new(false));
+        let render_retirement_queue = Arc::new(RenderOwnerRetirementQueue::new(Arc::clone(
+            &render_retirement_faulted,
+        )));
+        let render_retirement_worker_terminal =
+            Arc::new(AtomicU8::new(RENDER_WORKER_TERMINAL_UNKNOWN));
+        let retirement_spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawn_render_owner_retirement_worker(
+                Arc::clone(&render_retirement_queue),
+                Arc::clone(&foreign_owner_retirements),
+                Arc::clone(&render_retirement_worker_terminal),
+            )
+        }));
+        let render_retirement_worker = match retirement_spawn {
+            Ok(Ok(worker)) => worker,
+            Ok(Err(error)) => {
+                let (kind, error_owner_abandoned) = abandon_io_error(error);
+                if error_owner_abandoned {
+                    tracing::error!(
+                        "Audio Playback retirement-worker spawn error owner was abandoned"
+                    );
+                }
+                handoff_audio_output_owner(output);
+                return Err(AudioPlaybackCreateError::RenderRetirementWorkerSpawn(
+                    io::Error::from(kind),
+                ));
+            }
+            Err(payload) => {
+                let opaque_payload_abandoned =
+                    dispose_canonical_or_abandon_opaque_panic_payload(payload);
+                handoff_audio_output_owner(output);
+                if opaque_payload_abandoned {
+                    tracing::error!(
+                        "Audio Playback render-owner retirement spawner panicked with an opaque payload"
+                    );
+                }
+                return Err(AudioPlaybackCreateError::RenderRetirementWorkerSpawn(
+                    io::Error::other("Audio Playback render-owner retirement spawner panicked"),
+                ));
+            }
+        };
+        let render_queue = Arc::new(RenderWorkQueue::new(
+            config.max_in_flight,
+            Arc::clone(&render_retirement_queue),
+            Arc::clone(&foreign_owner_retirements),
+        ));
         let worker_queue = Arc::clone(&render_queue);
         let (completion_tx, completion_rx) = mpsc::channel::<RenderCompletion>();
-        let render_worker = spawner(worker_queue, completion_tx)
-            .map_err(AudioPlaybackCreateError::RenderWorkerSpawn)?;
+        let render_worker_terminal = Arc::new(AtomicU8::new(RENDER_WORKER_TERMINAL_UNKNOWN));
+        let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawner(
+                worker_queue,
+                completion_tx,
+                Arc::clone(&render_worker_terminal),
+            )
+        }));
+        let render_worker = match spawn_result {
+            Ok(Ok(worker)) => worker,
+            Ok(Err(error)) => {
+                let (kind, error_owner_abandoned) = abandon_io_error(error);
+                if error_owner_abandoned {
+                    tracing::error!("Audio Playback render-worker spawn error owner was abandoned");
+                }
+                render_retirement_queue.stop();
+                join_initial_retirement_worker(render_retirement_worker);
+                handoff_audio_output_owner(output);
+                return Err(AudioPlaybackCreateError::RenderWorkerSpawn(
+                    io::Error::from(kind),
+                ));
+            }
+            Err(payload) => {
+                let opaque_payload_abandoned =
+                    dispose_canonical_or_abandon_opaque_panic_payload(payload);
+                render_retirement_queue.stop();
+                join_initial_retirement_worker(render_retirement_worker);
+                handoff_audio_output_owner(output);
+                if opaque_payload_abandoned {
+                    tracing::error!(
+                        "Audio Playback render-worker spawner panicked with an opaque payload"
+                    );
+                }
+                return Err(AudioPlaybackCreateError::RenderWorkerSpawn(
+                    io::Error::other("Audio Playback render-worker spawner panicked"),
+                ));
+            }
+        };
         Ok(Self {
             config,
-            output,
+            output: OwnedAudioOutput::new(output),
+            output_shutdown_signal,
             render_queue,
+            render_retirement_queue,
+            render_retirement_faulted,
+            foreign_owner_retirements,
             render_worker: Some(render_worker),
+            render_worker_terminal,
+            render_retirement_worker: Some(render_retirement_worker),
+            render_retirement_worker_terminal,
             completion_rx,
+            shutdown_pending_render_work: VecDeque::with_capacity(config.max_in_flight),
             render_execution_unavailable: false,
+            shutdown_requested: false,
             renderer: None,
             generation: 1,
             generation_cancellation: ExecutionCancellationToken::new(),
@@ -833,21 +1485,505 @@ impl AudioPlayback {
             recovery_preroll: false,
             output_lifecycle: AudioOutputLifecycleDiagnostics::default(),
             latest_output_device_evidence: None,
+            render_workers_started: 1,
+            render_workers_terminated: 0,
+            render_worker_panics: 0,
+            render_worker_owner_abandonments: 0,
+            render_worker_terminal_evidence_missing: 0,
+            render_current_thread_detachments: 0,
+            render_retirement_workers_started: 1,
+            render_retirement_workers_terminated: 0,
+            render_retirement_worker_panics: 0,
+            render_retirement_worker_owner_abandonments: 0,
+            render_retirement_worker_terminal_evidence_missing: 0,
+            render_retirement_current_thread_detachments: 0,
         })
     }
 
-    /// Cancel, wake, and synchronously reclaim the owned render worker.
-    pub fn shutdown(mut self) -> Result<(), AudioPlaybackShutdownError> {
-        self.stop_render_worker()
+    /// Cancel, wake, and synchronously reclaim render and output workers.
+    pub fn shutdown(self) -> Result<(), AudioPlaybackShutdownError> {
+        let evidence = self.shutdown_and_wait();
+        if evidence.render_worker_panics > 0 || evidence.render_retirement_worker_panics > 0 {
+            Err(AudioPlaybackShutdownError::RenderWorkerPanicked)
+        } else if evidence.output.worker_panics > 0 {
+            Err(AudioPlaybackShutdownError::OutputWorkerPanicked)
+        } else if evidence.render_current_thread_detachments > 0
+            || evidence.render_retirement_current_thread_detachments > 0
+            || evidence.output.current_thread_detachments > 0
+        {
+            Err(AudioPlaybackShutdownError::CurrentThreadDetachments)
+        } else if !evidence.all_workers_terminated() {
+            Err(AudioPlaybackShutdownError::IncompleteWorkerClosure)
+        } else {
+            Ok(())
+        }
     }
 
-    fn stop_render_worker(&mut self) -> Result<(), AudioPlaybackShutdownError> {
-        self.generation_cancellation.cancel();
-        self.render_queue.stop();
-        let Some(worker) = self.render_worker.take() else {
-            return Ok(());
+    /// Stop PCM production and synchronously reclaim render and device workers.
+    pub fn shutdown_and_wait(mut self) -> AudioPlaybackShutdownEvidence {
+        self.begin_shutdown();
+        self.stop_render_worker();
+        self.flush_shutdown_pending_render_work();
+        if let Some(renderer) = self.renderer.take() {
+            self.handoff_retired_render_owners(VecDeque::new(), Some(renderer.owner));
+        }
+        self.stop_render_retirement_worker();
+        let retirement = self.foreign_owner_retirements.snapshot();
+        let mut foreign_owner_panics = retirement.panics;
+        let mut foreign_owner_abandonments = retirement.owner_abandonments;
+        let mut resource_facts_complete = true;
+        let mut owner_lifetime_unresolved = false;
+        if retirement.panics > 0
+            || retirement.owner_abandonments > 0
+            || self.render_retirement_workers_started != self.render_retirement_workers_terminated
+            || self.render_retirement_worker_panics > 0
+            || self.render_retirement_worker_owner_abandonments > 0
+            || self.render_retirement_worker_terminal_evidence_missing > 0
+            || self.render_retirement_current_thread_detachments > 0
+        {
+            resource_facts_complete = false;
+            owner_lifetime_unresolved = true;
+        }
+        let output = match self.output.take() {
+            Some(mut output_owner) => {
+                let shutdown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    output_owner.shutdown_and_wait()
+                }));
+                match shutdown {
+                    Ok(evidence) => {
+                        let drop_result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                drop(output_owner)
+                            }));
+                        if let Err(payload) = drop_result {
+                            foreign_owner_panics = foreign_owner_panics.saturating_add(1);
+                            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                                foreign_owner_abandonments =
+                                    foreign_owner_abandonments.saturating_add(1);
+                            }
+                            resource_facts_complete = false;
+                            owner_lifetime_unresolved = true;
+                        }
+                        evidence
+                    }
+                    Err(payload) => {
+                        foreign_owner_panics = foreign_owner_panics.saturating_add(1);
+                        if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                            foreign_owner_abandonments =
+                                foreign_owner_abandonments.saturating_add(1);
+                        }
+                        // The Adapter already violated its shutdown contract.
+                        // Running its foreign destructor on this thread could
+                        // block or panic again, so abandon it explicitly.
+                        std::mem::forget(output_owner);
+                        foreign_owner_abandonments = foreign_owner_abandonments.saturating_add(1);
+                        resource_facts_complete = false;
+                        owner_lifetime_unresolved = true;
+                        RealtimeAudioOutputShutdownEvidence::default()
+                    }
+                }
+            }
+            None => {
+                resource_facts_complete = false;
+                owner_lifetime_unresolved = true;
+                RealtimeAudioOutputShutdownEvidence::default()
+            }
         };
-        worker.join().map_err(|_| AudioPlaybackShutdownError::RenderWorkerPanicked)
+        if self.render_workers_started != self.render_workers_terminated
+            || self.render_worker_panics > 0
+            || self.render_worker_owner_abandonments > 0
+            || self.render_worker_terminal_evidence_missing > 0
+            || self.render_current_thread_detachments > 0
+            || !output.all_workers_terminated()
+        {
+            resource_facts_complete = false;
+            owner_lifetime_unresolved = true;
+        }
+        AudioPlaybackShutdownEvidence {
+            schema_version: 3,
+            render_workers_started: self.render_workers_started,
+            render_workers_terminated: self.render_workers_terminated,
+            render_worker_panics: self.render_worker_panics,
+            render_worker_owner_abandonments: self.render_worker_owner_abandonments,
+            render_worker_terminal_evidence_missing: self.render_worker_terminal_evidence_missing,
+            render_current_thread_detachments: self.render_current_thread_detachments,
+            render_retirement_workers_started: self.render_retirement_workers_started,
+            render_retirement_workers_terminated: self.render_retirement_workers_terminated,
+            render_retirement_worker_panics: self.render_retirement_worker_panics,
+            render_retirement_worker_owner_abandonments: self
+                .render_retirement_worker_owner_abandonments,
+            render_retirement_worker_terminal_evidence_missing: self
+                .render_retirement_worker_terminal_evidence_missing,
+            render_retirement_current_thread_detachments: self
+                .render_retirement_current_thread_detachments,
+            output,
+            foreign_owner_panics,
+            foreign_owner_abandonments,
+            shutdown_coordinators_started: 0,
+            shutdown_coordinators_terminated: 0,
+            shutdown_coordinator_start_failures: 0,
+            shutdown_coordinator_panics: 0,
+            shutdown_coordinator_timeouts: 0,
+            shutdown_coordinator_detachments: 0,
+            shutdown_coordinator_spawner_panics: 0,
+            shutdown_coordinator_owner_abandonments: 0,
+            shutdown_resource_facts_complete_at_deadline: resource_facts_complete,
+            shutdown_owner_lifetime_unresolved_at_deadline: owner_lifetime_unresolved,
+        }
+    }
+
+    /// Close PCM admission and cooperatively stop Mondrian-owned render work.
+    ///
+    /// The concrete output's signal is captured at construction and reduced to
+    /// one atomic store here. The foreign output Adapter is deliberately not
+    /// called from this seam; its shutdown and destructor execute only inside
+    /// a consuming closure bounded by the campaign-wide absolute deadline.
+    pub fn begin_shutdown(&mut self) {
+        self.shutdown_requested = true;
+        self.generation_cancellation.cancel();
+        let mut pending = self.render_queue.stop();
+        self.shutdown_pending_render_work.append(&mut pending);
+        if let Some(signal) = &self.output_shutdown_signal {
+            signal.store(true, AtomicOrdering::Release);
+        }
+    }
+
+    fn flush_shutdown_pending_render_work(&mut self) {
+        let pending = std::mem::take(&mut self.shutdown_pending_render_work);
+        self.handoff_retired_render_owners(pending, None);
+    }
+
+    fn handoff_retired_render_owners(
+        &self,
+        pending: VecDeque<RenderWork>,
+        renderer: Option<Arc<dyn AudioPcmRenderer>>,
+    ) {
+        let renderers = renderer.map_or_else(VecDeque::new, |renderer| VecDeque::from([renderer]));
+        enqueue_retired_render_owners(
+            &self.render_retirement_queue,
+            &self.foreign_owner_retirements,
+            RetiredRenderOwners { pending, renderers, errors: VecDeque::new() },
+        );
+    }
+
+    /// Consume Audio Playback through one absolute qualification deadline.
+    ///
+    /// Foreign device teardown is isolated in a tracked coordinator so a
+    /// broken Adapter produces timeout/detach evidence instead of hanging the
+    /// caller past the campaign-wide deadline.
+    pub fn shutdown_until(self, deadline: Instant) -> AudioPlaybackShutdownEvidence {
+        self.shutdown_until_with_spawner(deadline, |work| {
+            thread::Builder::new()
+                .name("mondrian-audio-endurance-shutdown".to_owned())
+                .spawn(work)
+        })
+    }
+
+    fn shutdown_until_with_spawner<F>(
+        mut self,
+        deadline: Instant,
+        spawn: F,
+    ) -> AudioPlaybackShutdownEvidence
+    where
+        F: FnOnce(
+            AudioPlaybackShutdownTask,
+        ) -> io::Result<JoinHandle<AudioPlaybackShutdownCoordinatorResult>>,
+    {
+        self.begin_shutdown();
+        let owner = Arc::new(Mutex::new(Some(self)));
+        let coordinator_owner = Arc::clone(&owner);
+        let work: AudioPlaybackShutdownTask = Box::new(move || {
+            let shutdown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(owner) = coordinator_owner.lock().take() else {
+                    return AudioPlayback::coordinator_failure(0, 0, 0, 0, 0, 0, 0, 1);
+                };
+                owner.shutdown_and_wait()
+            }));
+            let evidence = match shutdown {
+                Ok(evidence) => evidence,
+                Err(payload) => {
+                    let owner_abandonments =
+                        u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload));
+                    AudioPlayback::coordinator_failure(0, 0, 0, 1, 0, 0, 0, owner_abandonments)
+                }
+            };
+            AudioPlaybackShutdownCoordinatorResult { evidence, completed_at: Instant::now() }
+        });
+        let coordinator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawn(work)));
+        let coordinator = match coordinator {
+            Ok(Ok(coordinator)) => coordinator,
+            Ok(Err(error)) => {
+                let (_kind, error_owner_abandoned) = abandon_io_error(error);
+                let owner_abandonments = abandon_retained_audio_playback_owner(&owner)
+                    .saturating_add(u32::from(error_owner_abandoned));
+                return AudioPlayback::coordinator_failure(0, 0, 1, 0, 0, 0, 0, owner_abandonments);
+            }
+            Err(payload) => {
+                let payload_abandoned =
+                    u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload));
+                let owner_abandonments =
+                    abandon_retained_audio_playback_owner(&owner).saturating_add(payload_abandoned);
+                return AudioPlayback::coordinator_failure(0, 0, 1, 0, 0, 0, 1, owner_abandonments);
+            }
+        };
+
+        loop {
+            if coordinator.is_finished() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                if coordinator.is_finished() {
+                    continue;
+                }
+                drop(coordinator);
+                let retained_owner_abandonments = abandon_retained_audio_playback_owner(&owner);
+                return AudioPlayback::coordinator_failure(
+                    1,
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    retained_owner_abandonments,
+                );
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        match coordinator.join() {
+            Ok(result) => {
+                let mut evidence = result.evidence;
+                evidence.shutdown_coordinators_started = 1;
+                evidence.shutdown_coordinators_terminated = 1;
+                let retained_owner_abandonments = abandon_retained_audio_playback_owner(&owner);
+                evidence.shutdown_coordinator_owner_abandonments = evidence
+                    .shutdown_coordinator_owner_abandonments
+                    .saturating_add(retained_owner_abandonments);
+                if retained_owner_abandonments > 0 {
+                    evidence.shutdown_resource_facts_complete_at_deadline = false;
+                    evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
+                }
+                if result.completed_at > deadline {
+                    evidence.shutdown_coordinator_timeouts =
+                        evidence.shutdown_coordinator_timeouts.saturating_add(1);
+                    evidence.shutdown_resource_facts_complete_at_deadline = false;
+                    evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
+                }
+                evidence
+            }
+            Err(payload) => {
+                let payload_abandoned =
+                    u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload));
+                let owner_abandonments =
+                    abandon_retained_audio_playback_owner(&owner).saturating_add(payload_abandoned);
+                AudioPlayback::coordinator_failure(
+                    1,
+                    1,
+                    0,
+                    1,
+                    u32::from(Instant::now() > deadline),
+                    0,
+                    0,
+                    owner_abandonments,
+                )
+            }
+        }
+    }
+
+    fn coordinator_failure(
+        started: u32,
+        terminated: u32,
+        start_failures: u32,
+        panics: u32,
+        timeouts: u32,
+        detachments: u32,
+        spawner_panics: u32,
+        owner_abandonments: u32,
+    ) -> AudioPlaybackShutdownEvidence {
+        AudioPlaybackShutdownEvidence {
+            schema_version: 3,
+            shutdown_coordinators_started: started,
+            shutdown_coordinators_terminated: terminated,
+            shutdown_coordinator_start_failures: start_failures,
+            shutdown_coordinator_panics: panics,
+            shutdown_coordinator_timeouts: timeouts,
+            shutdown_coordinator_detachments: detachments,
+            shutdown_coordinator_spawner_panics: spawner_panics,
+            shutdown_coordinator_owner_abandonments: owner_abandonments,
+            shutdown_resource_facts_complete_at_deadline: false,
+            shutdown_owner_lifetime_unresolved_at_deadline: true,
+            ..AudioPlaybackShutdownEvidence::default()
+        }
+    }
+
+    fn stop_render_worker(&mut self) {
+        self.begin_shutdown();
+        let Some(worker) = self.render_worker.take() else {
+            return;
+        };
+        self.join_render_worker(worker);
+    }
+
+    /// Request ordinary-drop shutdown without waiting for renderer code.
+    ///
+    /// Returns `true` when a still-running worker was detached. In that case
+    /// the started worker intentionally remains absent from the terminated
+    /// count, preventing this path from looking like qualified clean closure.
+    fn stop_render_worker_without_waiting(&mut self) -> bool {
+        self.begin_shutdown();
+        let Some(worker) = self.render_worker.take() else {
+            return false;
+        };
+        if worker.is_finished() {
+            self.join_render_worker(worker);
+            false
+        } else {
+            drop(worker);
+            true
+        }
+    }
+
+    fn stop_render_retirement_worker(&mut self) {
+        self.render_retirement_queue.stop();
+        if let Some(worker) = self.render_retirement_worker.take() {
+            self.join_render_retirement_worker(worker);
+        }
+        self.abandon_pending_render_retirements();
+    }
+
+    fn stop_render_retirement_worker_without_waiting(&mut self) -> bool {
+        self.render_retirement_queue.stop();
+        let detached = if let Some(worker) = self.render_retirement_worker.take() {
+            if worker.is_finished() {
+                self.join_render_retirement_worker(worker);
+                false
+            } else {
+                drop(worker);
+                true
+            }
+        } else {
+            false
+        };
+        self.abandon_pending_render_retirements();
+        detached
+    }
+
+    fn abandon_pending_render_retirements(&mut self) {
+        let pending = self.render_retirement_queue.take_pending();
+        let owner_units = pending
+            .iter()
+            .map(RetiredRenderOwners::owner_units)
+            .fold(0_usize, usize::saturating_add);
+        if owner_units == 0 {
+            return;
+        }
+        for retired in pending {
+            std::mem::forget(retired);
+        }
+        self.render_retirement_queue.mark_faulted();
+        self.foreign_owner_retirements.record(ForeignOwnerRetirementEvidence {
+            panics: 0,
+            owner_abandonments: owner_units.min(u32::MAX as usize) as u32,
+        });
+    }
+
+    fn join_render_retirement_worker(&mut self, worker: JoinHandle<()>) -> RenderWorkerJoinOutcome {
+        let outcome = if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            RenderWorkerJoinOutcome::CurrentThreadSkipped
+        } else {
+            match worker.join() {
+                Ok(()) => {
+                    match self.render_retirement_worker_terminal.load(AtomicOrdering::Acquire) {
+                        RENDER_WORKER_TERMINAL_NORMAL => RenderWorkerJoinOutcome::Terminated,
+                        RENDER_WORKER_TERMINAL_PANICKED => RenderWorkerJoinOutcome::Panicked,
+                        RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED => {
+                            self.render_retirement_worker_owner_abandonments =
+                                self.render_retirement_worker_owner_abandonments.saturating_add(1);
+                            RenderWorkerJoinOutcome::Panicked
+                        }
+                        _ => RenderWorkerJoinOutcome::TerminalEvidenceMissing,
+                    }
+                }
+                Err(payload) => {
+                    if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                        self.render_retirement_worker_owner_abandonments =
+                            self.render_retirement_worker_owner_abandonments.saturating_add(1);
+                    }
+                    RenderWorkerJoinOutcome::Panicked
+                }
+            }
+        };
+        match outcome {
+            RenderWorkerJoinOutcome::Terminated => {
+                self.render_retirement_workers_terminated =
+                    self.render_retirement_workers_terminated.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::Panicked => {
+                self.render_retirement_workers_terminated =
+                    self.render_retirement_workers_terminated.saturating_add(1);
+                self.render_retirement_worker_panics =
+                    self.render_retirement_worker_panics.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::TerminalEvidenceMissing => {
+                self.render_retirement_workers_terminated =
+                    self.render_retirement_workers_terminated.saturating_add(1);
+                self.render_retirement_worker_terminal_evidence_missing =
+                    self.render_retirement_worker_terminal_evidence_missing.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::CurrentThreadSkipped => {
+                self.render_retirement_current_thread_detachments =
+                    self.render_retirement_current_thread_detachments.saturating_add(1);
+            }
+        }
+        outcome
+    }
+
+    fn join_render_worker(&mut self, worker: JoinHandle<()>) -> RenderWorkerJoinOutcome {
+        let outcome = if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            RenderWorkerJoinOutcome::CurrentThreadSkipped
+        } else {
+            match worker.join() {
+                Ok(()) => match self.render_worker_terminal.load(AtomicOrdering::Acquire) {
+                    RENDER_WORKER_TERMINAL_NORMAL => RenderWorkerJoinOutcome::Terminated,
+                    RENDER_WORKER_TERMINAL_PANICKED => RenderWorkerJoinOutcome::Panicked,
+                    RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED => {
+                        self.render_worker_owner_abandonments =
+                            self.render_worker_owner_abandonments.saturating_add(1);
+                        RenderWorkerJoinOutcome::Panicked
+                    }
+                    _ => RenderWorkerJoinOutcome::TerminalEvidenceMissing,
+                },
+                Err(payload) => {
+                    if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                        self.render_worker_owner_abandonments =
+                            self.render_worker_owner_abandonments.saturating_add(1);
+                    }
+                    RenderWorkerJoinOutcome::Panicked
+                }
+            }
+        };
+        match outcome {
+            RenderWorkerJoinOutcome::Terminated => {
+                self.render_workers_terminated = self.render_workers_terminated.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::Panicked => {
+                self.render_workers_terminated = self.render_workers_terminated.saturating_add(1);
+                self.render_worker_panics = self.render_worker_panics.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::TerminalEvidenceMissing => {
+                self.render_workers_terminated = self.render_workers_terminated.saturating_add(1);
+                self.render_worker_terminal_evidence_missing =
+                    self.render_worker_terminal_evidence_missing.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::CurrentThreadSkipped => {
+                self.render_current_thread_detachments =
+                    self.render_current_thread_detachments.saturating_add(1);
+            }
+        }
+        outcome
     }
 
     /// Install one immutable timeline PCM Adapter and start a new generation at `anchor`.
@@ -855,23 +1991,36 @@ impl AudioPlayback {
         &mut self,
         anchor: AudioSamplePosition,
         renderer: Arc<dyn AudioPcmRenderer>,
+        continuity_model: AudioPcmContinuityModel,
     ) -> Result<(), AudioPlaybackError> {
-        self.validate_reprime_anchor(anchor)?;
-        self.ensure_render_execution_available()?;
-        self.reprime_prevalidated(anchor, false, Some(renderer))
+        if let Err(error) = self
+            .validate_reprime_anchor_pure(anchor)
+            .and_then(|()| self.ensure_render_execution_available())
+            .and_then(|()| self.validate_reprime_output())
+        {
+            self.handoff_retired_render_owners(VecDeque::new(), Some(renderer));
+            return Err(error);
+        }
+        self.reprime_prevalidated(
+            anchor,
+            false,
+            Some(PreparedAudioPcmRenderer { owner: renderer, continuity_model }),
+        )
     }
 
     /// Remove timeline PCM rendering and invalidate all outstanding work.
     pub fn clear_source(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
-        self.validate_reprime_anchor(anchor)?;
+        self.validate_reprime_anchor_pure(anchor)?;
         self.ensure_render_execution_available()?;
+        self.validate_reprime_output()?;
         self.reprime_prevalidated(anchor, false, None)
     }
 
     /// Invalidate outstanding work and restart PCM scheduling at an exact timeline anchor.
     pub fn reprime(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
-        self.validate_reprime_anchor(anchor)?;
+        self.validate_reprime_anchor_pure(anchor)?;
         self.ensure_render_execution_available()?;
+        self.validate_reprime_output()?;
         self.consecutive_render_generation_failures = 0;
         self.render_blocked = false;
         self.reprime_prevalidated(anchor, false, self.renderer.clone())
@@ -883,8 +2032,9 @@ impl AudioPlayback {
     /// state. Timeline-to-sample lowering remains an upstream transport
     /// responsibility; this method only enforces the Media-side contract.
     pub fn validate_anchor(&self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
-        self.validate_reprime_anchor(anchor)?;
-        self.ensure_render_execution_available()
+        self.validate_reprime_anchor_pure(anchor)?;
+        self.ensure_render_execution_available()?;
+        self.validate_reprime_output()
     }
 
     /// Request destruction and normal reopen of the exact current concrete
@@ -898,26 +2048,36 @@ impl AudioPlayback {
     }
 
     fn ensure_render_execution_available(&self) -> Result<(), AudioPlaybackError> {
-        if self.render_execution_unavailable {
+        if self.render_execution_unavailable
+            || self.shutdown_requested
+            || self.render_retirement_faulted.load(AtomicOrdering::Acquire)
+            || self.render_worker.as_ref().is_none_or(JoinHandle::is_finished)
+            || self.render_retirement_worker.as_ref().is_none_or(JoinHandle::is_finished)
+        {
             Err(AudioPlaybackError::ExecutionUnavailable)
         } else {
             Ok(())
         }
     }
 
-    fn validate_reprime_anchor(
+    fn validate_reprime_anchor_pure(
         &self,
         anchor: AudioSamplePosition,
     ) -> Result<(), AudioPlaybackError> {
         self.validate_sample_anchor(anchor)?;
-        self.validate_output_contract()?;
         self.generation.checked_add(1).ok_or(AudioPlaybackError::CoordinateOverflow)?;
+        Ok(())
+    }
+
+    fn validate_reprime_output(&self) -> Result<(), AudioPlaybackError> {
+        self.validate_output_contract()?;
         self.output.validate_deactivation()?;
         Ok(())
     }
 
     fn validate_poll_arithmetic(
         &self,
+        mode: AudioPlaybackMode,
         authority: AudioSamplePosition,
     ) -> Result<AudioPlaybackPollPreflight, AudioPlaybackError> {
         self.validate_sample_anchor(authority)?;
@@ -941,9 +2101,43 @@ impl AudioPlayback {
             .checked_add(maximum_sample_span)
             .ok_or(AudioPlaybackError::CoordinateOverflow)?;
         let output_snapshot = self.output.snapshot();
+        // The owner trims PCM to the predicted audible activation point, not
+        // the earlier wall-clock poll. The host delay names the callback tail;
+        // it is also the first-frame time of the next equal-sized callback.
+        let activation_authority = match output_snapshot {
+            Some(snapshot) if mode.permits_consumption() && !snapshot.active => {
+                match (
+                    snapshot.last_callback_playback_delay,
+                    snapshot.last_callback_age,
+                ) {
+                    (Some(delay), Some(age)) if snapshot.callback_count > 0 => {
+                        let lead_frames = delay
+                            .saturating_sub(age)
+                            .as_nanos()
+                            .checked_mul(u128::from(self.config.sample_rate))
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?
+                            .div_ceil(1_000_000_000);
+                        let lead_frames = i64::try_from(lead_frames)
+                            .map_err(|_| AudioPlaybackError::CoordinateOverflow)?;
+                        let sample = authority
+                            .sample()
+                            .checked_add(lead_frames)
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?;
+                        sample
+                            .checked_add(maximum_sample_span)
+                            .ok_or(AudioPlaybackError::CoordinateOverflow)?;
+                        Some(AudioSamplePosition::new(sample, authority.rate()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => Some(authority),
+        };
         let elapsed_skip_frames = if output_snapshot.is_some_and(|snapshot| !snapshot.active) {
             self.generation_render_anchor
-                .map(|render_anchor| authority.samples_since(render_anchor))
+                .map(|render_anchor| {
+                    activation_authority.unwrap_or(authority).samples_since(render_anchor)
+                })
                 .transpose()?
                 .and_then(|delta| usize::try_from(delta).ok())
         } else {
@@ -972,6 +2166,7 @@ impl AudioPlayback {
             .min(capacity_frames);
         Ok(AudioPlaybackPollPreflight {
             authority,
+            activation_authority,
             chunk_frames,
             elapsed_skip_frames,
             admission_target_frames,
@@ -982,15 +2177,27 @@ impl AudioPlayback {
         &mut self,
         anchor: AudioSamplePosition,
         recovery_preroll: bool,
-        renderer: Option<Arc<dyn AudioPcmRenderer>>,
+        renderer: Option<PreparedAudioPcmRenderer>,
     ) -> Result<(), AudioPlaybackError> {
-        let quiescence_token = self.output.deactivate()?;
-        self.renderer = renderer;
-        self.output.clear();
-        self.canceled_render_count = self
-            .canceled_render_count
-            .saturating_add(self.render_queue.clear_pending() as u64);
+        let quiescence_token = match self.output.deactivate() {
+            Ok(token) => token,
+            Err(error) => {
+                if let Some(renderer) = renderer {
+                    self.handoff_retired_render_owners(VecDeque::new(), Some(renderer.owner));
+                }
+                return Err(error.into());
+            }
+        };
         self.generation_cancellation.cancel();
+        let retired_renderer = std::mem::replace(&mut self.renderer, renderer);
+        self.output.clear();
+        let pending = self.render_queue.take_pending();
+        self.canceled_render_count =
+            self.canceled_render_count.saturating_add(pending.len() as u64);
+        self.handoff_retired_render_owners(
+            pending,
+            retired_renderer.map(|renderer| renderer.owner),
+        );
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.generation += 1;
         self.generation_entry_pending = true;
@@ -1041,16 +2248,16 @@ impl AudioPlayback {
         mode: AudioPlaybackMode,
         authority: AudioSamplePosition,
     ) -> Result<AudioPlaybackPoll, AudioPlaybackError> {
-        // This is the sole fallible part of a poll. It reserves every possible
-        // generation rotation and the largest sample-cursor advance before an
-        // output event, completion, queue entry, or callback state is consumed.
-        let preflight = self.validate_poll_arithmetic(authority)?;
-        let mut elapsed_skip_frames = preflight.elapsed_skip_frames;
-        let mut admission_target_frames = preflight.admission_target_frames;
-        let mut generation_rotations = 0_u64;
         let mut events = Vec::new();
-
-        if self.render_execution_unavailable {
+        if self.render_execution_unavailable || self.shutdown_requested {
+            return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
+        }
+        if self.render_retirement_faulted.load(AtomicOrdering::Acquire) {
+            if self.mark_render_execution_unavailable() {
+                events.push(AudioPlaybackEvent::RenderWorkerStoppedUnexpectedly {
+                    reason: "render-owner retirement became unavailable".to_owned(),
+                });
+            }
             return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
         if let Some(reason) = self.finished_render_worker_reason() {
@@ -1059,6 +2266,14 @@ impl AudioPlayback {
             }
             return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
+
+        // This is the sole fallible part of a poll. It reserves every possible
+        // generation rotation and the largest sample-cursor advance before an
+        // output event, completion, queue entry, or callback state is consumed.
+        let preflight = self.validate_poll_arithmetic(mode, authority)?;
+        let mut elapsed_skip_frames = preflight.elapsed_skip_frames;
+        let mut admission_target_frames = preflight.admission_target_frames;
+        let mut generation_rotations = 0_u64;
 
         let should_poll_output =
             self.output.snapshot().is_some() || (mode.renders_pcm() && self.renderer.is_some());
@@ -1380,8 +2595,8 @@ impl AudioPlayback {
                 let work = RenderWork {
                     generation: self.generation,
                     request,
-                    continuity_model: renderer.continuity_model(),
-                    renderer: Arc::clone(renderer),
+                    continuity_model: renderer.continuity_model,
+                    renderer: Arc::clone(&renderer.owner),
                     cancellation: self.generation_cancellation.clone(),
                 };
                 if self.render_queue.push(work).is_err() {
@@ -1399,6 +2614,8 @@ impl AudioPlayback {
                 self.activation_preroll_satisfied = true;
                 self.consecutive_render_generation_failures = 0;
                 if mode.permits_consumption()
+                    && generation_rotations == 0
+                    && let Some(activation_authority) = preflight.activation_authority
                     && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
                 {
                     let skip_frames =
@@ -1407,9 +2624,9 @@ impl AudioPlayback {
                         self.quiescence_token.ok_or(AudioPlaybackError::MissingQuiescenceToken)?;
                     match self.output.activate_after_discard(token, skip_frames) {
                         Ok(()) => {
-                            self.media_anchor = Some(preflight.authority);
+                            self.media_anchor = Some(activation_authority);
                             self.stream_media_anchor =
-                                Some((token.stream_generation, preflight.authority));
+                                Some((token.stream_generation, activation_authority));
                             self.recovery_preroll = false;
                         }
                         Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
@@ -1459,9 +2676,17 @@ impl AudioPlayback {
         let Some(worker) = self.render_worker.take() else {
             return Some("render worker ownership was lost".to_owned());
         };
-        Some(match worker.join() {
-            Ok(()) => "render worker exited without shutdown".to_owned(),
-            Err(_) => "render worker panicked".to_owned(),
+        Some(match self.join_render_worker(worker) {
+            RenderWorkerJoinOutcome::Terminated => {
+                "render worker exited without shutdown".to_owned()
+            }
+            RenderWorkerJoinOutcome::Panicked => "render worker panicked".to_owned(),
+            RenderWorkerJoinOutcome::TerminalEvidenceMissing => {
+                "render worker exited without supervisor terminal evidence".to_owned()
+            }
+            RenderWorkerJoinOutcome::CurrentThreadSkipped => {
+                "render worker could not join itself".to_owned()
+            }
         })
     }
 
@@ -1470,10 +2695,11 @@ impl AudioPlayback {
         authority: AudioSamplePosition,
         recovery_preroll: bool,
     ) {
-        self.canceled_render_count = self
-            .canceled_render_count
-            .saturating_add(self.render_queue.clear_pending() as u64);
         self.generation_cancellation.cancel();
+        let pending = self.render_queue.take_pending();
+        self.canceled_render_count =
+            self.canceled_render_count.saturating_add(pending.len() as u64);
+        self.handoff_retired_render_owners(pending, None);
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.generation += 1;
         self.generation_entry_pending = true;
@@ -1502,12 +2728,15 @@ impl AudioPlayback {
             }
         }
         self.output_generation_ready = false;
-        self.canceled_render_count = self
-            .canceled_render_count
-            .saturating_add(self.render_queue.clear_pending() as u64);
-        self.render_queue.stop();
         self.generation_cancellation.cancel();
-        self.renderer = None;
+        let pending = self.render_queue.stop();
+        self.canceled_render_count =
+            self.canceled_render_count.saturating_add(pending.len() as u64);
+        let retired_renderer = self.renderer.take();
+        self.handoff_retired_render_owners(
+            pending,
+            retired_renderer.map(|renderer| renderer.owner),
+        );
         self.in_flight = 0;
         self.generation_render_anchor = None;
         self.media_anchor = None;
@@ -1529,6 +2758,11 @@ impl AudioPlayback {
         self.output.set_device_selection(selection)
     }
 
+    /// Snapshot the machine-local output-device intent.
+    pub fn output_device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        self.output.device_selection()
+    }
+
     /// Most recent successful physical device/configuration negotiation.
     ///
     /// Evidence remains available after loss so diagnostics can explain which
@@ -1540,7 +2774,12 @@ impl AudioPlayback {
     /// Return immutable state without advancing workers or lifecycle.
     pub fn snapshot(&self, mode: AudioPlaybackMode) -> AudioPlaybackSnapshot {
         let output = self.output.snapshot();
-        let state = if self.render_execution_unavailable {
+        let state = if self.render_execution_unavailable
+            || self.shutdown_requested
+            || self.render_retirement_faulted.load(AtomicOrdering::Acquire)
+            || self.render_worker.as_ref().is_none_or(JoinHandle::is_finished)
+            || self.render_retirement_worker.as_ref().is_none_or(JoinHandle::is_finished)
+        {
             AudioPlaybackState::ExecutionUnavailable
         } else {
             match output {
@@ -1576,8 +2815,33 @@ impl AudioPlayback {
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
-        if let Err(error) = self.stop_render_worker() {
-            tracing::error!(%error, "failed to reclaim Audio Playback render worker");
+        let render_worker_detached = self.stop_render_worker_without_waiting();
+        self.flush_shutdown_pending_render_work();
+        let retirement_worker_detached = self.stop_render_retirement_worker_without_waiting();
+        if let Some(output) = self.output.take() {
+            handoff_ordinary_audio_owner(output);
+        }
+        if let Some(renderer) = self.renderer.take() {
+            handoff_ordinary_audio_owner(renderer.owner);
+        }
+        if self.render_worker_panics > 0 {
+            tracing::error!("Audio Playback render worker panicked during shutdown");
+        }
+        if self.render_current_thread_detachments > 0 {
+            tracing::error!("Audio Playback render worker could not synchronously join itself");
+        }
+        if render_worker_detached {
+            tracing::warn!(
+                "Audio Playback render worker was still running and detached during ordinary drop"
+            );
+        }
+        if self.render_retirement_worker_panics > 0 {
+            tracing::error!("Audio Playback render-owner retirement worker panicked");
+        }
+        if retirement_worker_detached {
+            tracing::warn!(
+                "Audio Playback render-owner retirement worker was still running and detached during ordinary drop"
+            );
         }
     }
 }
@@ -1585,28 +2849,145 @@ impl Drop for AudioPlayback {
 fn spawn_render_worker(
     worker_queue: Arc<RenderWorkQueue>,
     completion_tx: mpsc::Sender<RenderCompletion>,
+    terminal: Arc<AtomicU8>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new().name("mondrian-audio-render".to_owned()).spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_render_worker(&worker_queue, &completion_tx)
+        }));
+        let terminal_outcome = match outcome {
+            Ok(terminal_outcome) => terminal_outcome,
+            Err(payload) => {
+                if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                    RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                } else {
+                    RENDER_WORKER_TERMINAL_PANICKED
+                }
+            }
+        };
+        terminal.store(terminal_outcome, AtomicOrdering::Release);
+    })
+}
+
+fn spawn_render_owner_retirement_worker(
+    queue: Arc<RenderOwnerRetirementQueue>,
+    tracker: Arc<ForeignOwnerRetirementTracker>,
+    terminal: Arc<AtomicU8>,
 ) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
-        .name("mondrian-audio-render".to_owned())
-        .spawn(move || run_render_worker(&worker_queue, &completion_tx))
+        .name("mondrian-audio-render-retirement".to_owned())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_render_owner_retirement_worker(&queue, &tracker)
+            }));
+            let terminal_outcome = match outcome {
+                Ok(()) => RENDER_WORKER_TERMINAL_NORMAL,
+                Err(payload) => {
+                    let opaque = dispose_canonical_or_abandon_opaque_panic_payload(payload);
+                    queue.mark_faulted();
+                    if opaque {
+                        RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                    } else {
+                        RENDER_WORKER_TERMINAL_PANICKED
+                    }
+                }
+            };
+            terminal.store(terminal_outcome, AtomicOrdering::Release);
+        })
+}
+
+fn join_initial_retirement_worker(worker: JoinHandle<()>) {
+    if worker.thread().id() == thread::current().id() {
+        drop(worker);
+        return;
+    }
+    if let Err(payload) = worker.join() {
+        let _ = dispose_canonical_or_abandon_opaque_panic_payload(payload);
+    }
+}
+
+#[cfg(test)]
+fn supervise_render_worker(terminal: &AtomicU8, work: impl FnOnce()) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+    let terminal_outcome = match outcome {
+        Ok(()) => RENDER_WORKER_TERMINAL_NORMAL,
+        Err(payload) => {
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+            } else {
+                RENDER_WORKER_TERMINAL_PANICKED
+            }
+        }
+    };
+    terminal.store(terminal_outcome, AtomicOrdering::Release);
 }
 
 fn run_render_worker(
     worker_queue: &RenderWorkQueue,
     completion_tx: &mpsc::Sender<RenderCompletion>,
-) {
+) -> u8 {
     while let Some(work) = worker_queue.pop() {
-        let result = work.renderer.render(work.request, &work.cancellation);
-        if completion_tx
-            .send(RenderCompletion {
-                generation: work.generation,
-                request: work.request,
-                continuity_model: work.continuity_model,
+        let RenderWork {
+            generation,
+            request,
+            continuity_model,
+            renderer,
+            cancellation,
+        } = work;
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            renderer.render(request, &cancellation)
+        }));
+        enqueue_retired_render_owners(
+            &worker_queue.retirement_queue,
+            &worker_queue.retirement_tracker,
+            RetiredRenderOwners {
+                pending: VecDeque::new(),
+                renderers: VecDeque::from([renderer]),
+                errors: VecDeque::new(),
+            },
+        );
+        let result = match rendered {
+            Ok(result) => stabilize_render_result(
                 result,
-            })
+                &worker_queue.retirement_queue,
+                &worker_queue.retirement_tracker,
+            ),
+            Err(payload) => {
+                return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                    RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                } else {
+                    RENDER_WORKER_TERMINAL_PANICKED
+                };
+            }
+        };
+        if completion_tx
+            .send(RenderCompletion { generation, request, continuity_model, result })
             .is_err()
         {
             break;
+        }
+    }
+    RENDER_WORKER_TERMINAL_NORMAL
+}
+
+fn stabilize_render_result(
+    result: mondrian_core::Result<AudioBuffer>,
+    retirement_queue: &RenderOwnerRetirementQueue,
+    retirement_tracker: &ForeignOwnerRetirementTracker,
+) -> RenderCompletionResult {
+    match result {
+        Ok(buffer) => RenderCompletionResult::Rendered(buffer),
+        Err(error) => {
+            enqueue_retired_render_owners(
+                retirement_queue,
+                retirement_tracker,
+                RetiredRenderOwners {
+                    pending: VecDeque::new(),
+                    renderers: VecDeque::new(),
+                    errors: VecDeque::from([error]),
+                },
+            );
+            RenderCompletionResult::Failed("audio renderer returned an execution error".to_owned())
         }
     }
 }
@@ -1624,6 +3005,9 @@ fn validate_config(config: AudioPlaybackConfig) -> Result<(), AudioPlaybackConfi
     }
     if config.preroll_frames > config.high_watermark_frames {
         return Err(AudioPlaybackConfigError::PrerollExceedsHighWatermark);
+    }
+    if config.max_in_flight >= MAX_RETIRED_RENDER_OWNERS {
+        return Err(AudioPlaybackConfigError::ExceedsRetirementCapacity);
     }
     let output_capacity_frames = output_capacity_frames(config.sample_rate)
         .ok_or(AudioPlaybackConfigError::ExceedsOutputCapacity)?;
@@ -1643,9 +3027,12 @@ fn output_capacity_frames(sample_rate: u32) -> Option<usize> {
 
 fn validate_rendered_buffer(
     request: AudioPcmRenderRequest,
-    result: mondrian_core::Result<AudioBuffer>,
+    result: RenderCompletionResult,
 ) -> Result<AudioBuffer, String> {
-    let buffer = result.map_err(|error| error.to_string())?;
+    let buffer = match result {
+        RenderCompletionResult::Rendered(buffer) => buffer,
+        RenderCompletionResult::Failed(reason) => return Err(reason),
+    };
     if buffer.sample_rate != request.sample_rate {
         return Err(format!(
             "rendered sample rate {} does not match requested {}",
@@ -1677,8 +3064,28 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::collections::VecDeque;
+    use std::fmt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+
+    #[derive(Debug)]
+    struct DropProbe {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl fmt::Display for DropProbe {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("opaque Audio Playback test owner")
+        }
+    }
+
+    impl std::error::Error for DropProbe {}
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
 
     fn output_contract(
         sample_rate: u32,
@@ -1728,11 +3135,28 @@ mod tests {
         controlled_recycle_requests: Vec<u64>,
     }
 
+    #[derive(Default)]
+    struct FakeOutputControl {
+        shutdown_signal: Option<Arc<AtomicBool>>,
+        shutdown_started: Option<Arc<AtomicBool>>,
+        shutdown_release: Option<Arc<AtomicBool>>,
+        shutdown_panic_payload_dropped: Option<Arc<AtomicBool>>,
+        shutdown_evidence: Option<RealtimeAudioOutputShutdownEvidence>,
+        drop_started: Option<Arc<AtomicBool>>,
+        drop_release: Option<Arc<AtomicBool>>,
+        drop_finished: Option<Arc<AtomicBool>>,
+    }
+
     struct FakeOutput {
         state: Arc<Mutex<FakeOutputState>>,
+        control: FakeOutputControl,
     }
 
     impl AudioOutputAdapter for FakeOutput {
+        fn shutdown_signal(&self) -> Option<Arc<AtomicBool>> {
+            self.control.shutdown_signal.as_ref().map(Arc::clone)
+        }
+
         fn poll(&mut self) -> Option<RealtimeAudioOutputEvent> {
             self.state.lock().events.pop_front()
         }
@@ -1888,6 +3312,24 @@ mod tests {
             self.state.lock().snapshot
         }
 
+        fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+            if let Some(started) = &self.control.shutdown_started {
+                started.store(true, Ordering::Release);
+            }
+            if let Some(release) = &self.control.shutdown_release {
+                while !release.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            }
+            if let Some(dropped) = self.control.shutdown_panic_payload_dropped.take() {
+                std::panic::panic_any(DropProbe { dropped });
+            }
+            self.control
+                .shutdown_evidence
+                .take()
+                .unwrap_or_else(RealtimeAudioOutputShutdownEvidence::no_worker_owner)
+        }
+
         #[cfg(feature = "validation")]
         fn request_controlled_recycle(
             &self,
@@ -1909,6 +3351,22 @@ mod tests {
         }
     }
 
+    impl Drop for FakeOutput {
+        fn drop(&mut self) {
+            if let Some(started) = &self.control.drop_started {
+                started.store(true, Ordering::Release);
+            }
+            if let Some(release) = &self.control.drop_release {
+                while !release.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            }
+            if let Some(finished) = &self.control.drop_finished {
+                finished.store(true, Ordering::Release);
+            }
+        }
+    }
+
     struct RecordingRenderer {
         requests: Arc<Mutex<Vec<AudioPcmRenderRequest>>>,
         wrong_frame_count: bool,
@@ -1918,6 +3376,12 @@ mod tests {
         entered: Arc<AtomicBool>,
         released: Arc<AtomicBool>,
         canceled: Arc<AtomicBool>,
+    }
+
+    struct DetachedPanicRenderer {
+        entered: Arc<AtomicBool>,
+        released: Arc<AtomicBool>,
+        payload_dropped: Arc<AtomicBool>,
     }
 
     struct FailOnceStatefulRenderer {
@@ -1931,6 +3395,53 @@ mod tests {
 
     struct AlwaysFailStatefulRenderer {
         requests: Arc<Mutex<Vec<AudioPcmRenderRequest>>>,
+    }
+
+    struct DropTrackingRenderer {
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug)]
+    struct BlockingRenderError {
+        drop_started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl fmt::Display for BlockingRenderError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("blocking render error")
+        }
+    }
+
+    impl std::error::Error for BlockingRenderError {}
+
+    impl Drop for BlockingRenderError {
+        fn drop(&mut self) {
+            self.drop_started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+    }
+
+    impl Drop for DropTrackingRenderer {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    impl AudioPcmRenderer for DropTrackingRenderer {
+        fn render(
+            &self,
+            request: AudioPcmRenderRequest,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
+            Ok(AudioBuffer::silent(
+                request.sample_rate,
+                request.channel_layout,
+                request.frame_count,
+            ))
+        }
     }
 
     impl AudioPcmRenderer for GateRenderer {
@@ -1955,6 +3466,20 @@ mod tests {
         }
     }
 
+    impl AudioPcmRenderer for DetachedPanicRenderer {
+        fn render(
+            &self,
+            _request: AudioPcmRenderRequest,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
+            self.entered.store(true, Ordering::Release);
+            while !self.released.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            std::panic::panic_any(DropProbe { dropped: Arc::clone(&self.payload_dropped) });
+        }
+    }
+
     impl AudioPcmRenderer for RecordingRenderer {
         fn render(
             &self,
@@ -1976,10 +3501,6 @@ mod tests {
     }
 
     impl AudioPcmRenderer for FailOnceStatefulRenderer {
-        fn continuity_model(&self) -> AudioPcmContinuityModel {
-            AudioPcmContinuityModel::GenerationState
-        }
-
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -2003,10 +3524,6 @@ mod tests {
     }
 
     impl AudioPcmRenderer for StatefulRecordingRenderer {
-        fn continuity_model(&self) -> AudioPcmContinuityModel {
-            AudioPcmContinuityModel::GenerationState
-        }
-
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -2022,10 +3539,6 @@ mod tests {
     }
 
     impl AudioPcmRenderer for AlwaysFailStatefulRenderer {
-        fn continuity_model(&self) -> AudioPcmContinuityModel {
-            AudioPcmContinuityModel::GenerationState
-        }
-
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -2107,7 +3620,7 @@ mod tests {
         };
         let result = validate_rendered_buffer(
             request,
-            Ok(AudioBuffer::silent(
+            RenderCompletionResult::Rendered(AudioBuffer::silent(
                 request.sample_rate,
                 AudioChannelLayout::Mono,
                 request.frame_count,
@@ -2130,7 +3643,7 @@ mod tests {
         };
         let result = validate_rendered_buffer(
             request,
-            Ok(AudioBuffer {
+            RenderCompletionResult::Rendered(AudioBuffer {
                 samples: vec![0.0; 21],
                 sample_rate: request.sample_rate,
                 channel_layout: request.channel_layout,
@@ -2143,6 +3656,12 @@ mod tests {
     }
 
     fn fake_output() -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {
+        fake_output_with_control(FakeOutputControl::default())
+    }
+
+    fn fake_output_with_control(
+        control: FakeOutputControl,
+    ) -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {
         let contract = output_contract(1_000, AudioChannelLayout::Stereo);
         let snapshot = RealtimeAudioOutputSnapshot {
             captured_at: std::time::Instant::now(),
@@ -2151,11 +3670,11 @@ mod tests {
             callback_consumed_frames: 0,
             active_callback_consumed_frames: 0,
             active_duration: None,
-            callback_count: 0,
+            callback_count: 1,
             underrun_frames: 0,
             last_callback_frames: 10,
-            last_callback_playback_delay: Some(Duration::from_millis(10)),
-            last_callback_age: None,
+            last_callback_playback_delay: Some(Duration::ZERO),
+            last_callback_age: Some(Duration::ZERO),
             buffered_frames: 0,
             stream_failed: false,
             active: false,
@@ -2175,7 +3694,10 @@ mod tests {
             #[cfg(feature = "validation")]
             controlled_recycle_requests: Vec::new(),
         }));
-        (Box::new(FakeOutput { state: Arc::clone(&state) }), state)
+        (
+            Box::new(FakeOutput { state: Arc::clone(&state), control }),
+            state,
+        )
     }
 
     fn poll_until_settled(
@@ -2225,6 +3747,7 @@ mod tests {
                     requests: Arc::clone(&requests),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
 
@@ -2266,6 +3789,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
 
@@ -2310,6 +3834,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: true,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
 
@@ -2345,6 +3870,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         let initial_generation = playback.snapshot(AudioPlaybackMode::Consume).generation;
@@ -2391,6 +3917,7 @@ mod tests {
                     requests: Arc::clone(&requests),
                     failed: AtomicBool::new(false),
                 }),
+                AudioPcmContinuityModel::GenerationState,
             )
             .expect("valid audio anchor");
         let authority = sample_position(5);
@@ -2464,6 +3991,7 @@ mod tests {
             .prepare(
                 sample_position(0),
                 Arc::new(AlwaysFailStatefulRenderer { requests: Arc::clone(&requests) }),
+                AudioPcmContinuityModel::GenerationState,
             )
             .expect("valid audio anchor");
         let authority = sample_position(5);
@@ -2540,9 +4068,164 @@ mod tests {
     }
 
     #[test]
+    fn retirement_capacity_accepts_255_in_flight_and_rejects_256() {
+        let mut config = test_config();
+        config.max_in_flight = MAX_RETIRED_RENDER_OWNERS - 1;
+        assert_eq!(validate_config(config), Ok(()));
+
+        config.max_in_flight = MAX_RETIRED_RENDER_OWNERS;
+        assert_eq!(
+            validate_config(config),
+            Err(AudioPlaybackConfigError::ExceedsRetirementCapacity)
+        );
+    }
+
+    #[test]
+    fn stopped_retirement_queue_faults_and_never_drops_renderer_on_caller() {
+        let faulted = Arc::new(AtomicBool::new(false));
+        let queue = RenderOwnerRetirementQueue::new(Arc::clone(&faulted));
+        let tracker = ForeignOwnerRetirementTracker::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        queue.stop();
+
+        enqueue_retired_render_owners(
+            &queue,
+            &tracker,
+            RetiredRenderOwners {
+                pending: VecDeque::new(),
+                renderers: VecDeque::from([Arc::new(DropTrackingRenderer {
+                    dropped: Arc::clone(&dropped),
+                }) as Arc<dyn AudioPcmRenderer>]),
+                errors: VecDeque::new(),
+            },
+        );
+
+        assert!(faulted.load(Ordering::Acquire));
+        assert!(!dropped.load(Ordering::Acquire));
+        assert_eq!(tracker.snapshot().owner_abandonments, 1);
+    }
+
+    #[test]
+    fn render_completion_stabilizes_foreign_error_without_render_caller_drop() {
+        let faulted = Arc::new(AtomicBool::new(false));
+        let queue = Arc::new(RenderOwnerRetirementQueue::new(Arc::clone(&faulted)));
+        let tracker = Arc::new(ForeignOwnerRetirementTracker::default());
+        let terminal = Arc::new(AtomicU8::new(RENDER_WORKER_TERMINAL_UNKNOWN));
+        let worker = spawn_render_owner_retirement_worker(
+            Arc::clone(&queue),
+            Arc::clone(&tracker),
+            Arc::clone(&terminal),
+        )
+        .expect("retirement worker");
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+
+        let completion = stabilize_render_result(
+            Err(mondrian_core::MondrianError::Other(anyhow::Error::new(
+                BlockingRenderError {
+                    drop_started: Arc::clone(&drop_started),
+                    release: Arc::clone(&release),
+                },
+            ))),
+            &queue,
+            &tracker,
+        );
+
+        assert!(matches!(completion, RenderCompletionResult::Failed(_)));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !drop_started.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(drop_started.load(Ordering::Acquire));
+        assert!(!faulted.load(Ordering::Acquire));
+        release.store(true, Ordering::Release);
+        queue.stop();
+        worker.join().expect("retirement worker exits");
+        assert_eq!(
+            terminal.load(Ordering::Acquire),
+            RENDER_WORKER_TERMINAL_NORMAL
+        );
+        assert_eq!(
+            tracker.snapshot(),
+            ForeignOwnerRetirementEvidence::default()
+        );
+    }
+
+    #[test]
+    fn retirement_fault_rejects_prepare_without_mutating_generation() {
+        let (output, _) = fake_output();
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let generation = playback.generation;
+        playback.render_retirement_faulted.store(true, Ordering::Release);
+
+        let result = playback.prepare(
+            sample_position(0),
+            Arc::new(RecordingRenderer {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                wrong_frame_count: false,
+            }),
+            AudioPcmContinuityModel::IndependentWindows,
+        );
+
+        assert_eq!(result, Err(AudioPlaybackError::ExecutionUnavailable));
+        assert_eq!(playback.generation, generation);
+        assert!(playback.renderer.is_none());
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Consume).state,
+            AudioPlaybackState::ExecutionUnavailable
+        );
+    }
+
+    #[test]
+    fn explicit_continuity_contract_is_the_single_cached_authority() {
+        let (output, _) = fake_output();
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        playback
+            .prepare(
+                sample_position(0),
+                Arc::new(RecordingRenderer {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                    wrong_frame_count: false,
+                }),
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .expect("explicit continuity contract is sufficient");
+
+        assert_eq!(
+            playback.renderer.as_ref().map(|renderer| renderer.continuity_model),
+            Some(AudioPcmContinuityModel::GenerationState)
+        );
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn residual_retirement_owner_forces_top_level_receipt_unresolved() {
+        let (output, _) = fake_output();
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let dropped = Arc::new(AtomicBool::new(false));
+        playback.renderer = Some(PreparedAudioPcmRenderer {
+            owner: Arc::new(DropTrackingRenderer { dropped: Arc::clone(&dropped) }),
+            continuity_model: AudioPcmContinuityModel::IndependentWindows,
+        });
+        playback.render_retirement_queue.stop();
+
+        let evidence = playback.shutdown_and_wait();
+
+        assert!(!dropped.load(Ordering::Acquire));
+        assert_eq!(evidence.foreign_owner_abandonments, 1);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
     fn render_worker_spawn_failure_does_not_construct_audio_playback() {
         let (output, state) = fake_output();
-        let result = AudioPlayback::with_output_and_spawner(test_config(), output, |_, _| {
+        let result = AudioPlayback::with_output_and_spawner(test_config(), output, |_, _, _| {
             Err(io::Error::other("injected spawn failure"))
         });
 
@@ -2560,12 +4243,14 @@ mod tests {
         let mut playback = AudioPlayback::with_output_and_spawner(
             test_config(),
             output,
-            move |_, completion_tx| {
+            move |_, completion_tx, terminal| {
                 thread::Builder::new()
                     .name("mondrian-audio-render-disconnect-test".to_owned())
                     .spawn(move || {
-                        drop(completion_tx);
-                        release_rx.recv().expect("release injected render worker");
+                        supervise_render_worker(&terminal, || {
+                            drop(completion_tx);
+                            release_rx.recv().expect("release injected render worker");
+                        });
                     })
             },
         )
@@ -2616,7 +4301,7 @@ mod tests {
     fn render_worker_panic_fails_closed_instead_of_leaving_phantom_work() {
         let (output, _) = fake_output();
         let mut playback =
-            AudioPlayback::with_output_and_spawner(test_config(), output, |_, completion_tx| {
+            AudioPlayback::with_output_and_spawner(test_config(), output, |_, completion_tx, _| {
                 thread::Builder::new()
                     .name("mondrian-audio-render-panic-test".to_owned())
                     .spawn(move || {
@@ -2653,6 +4338,13 @@ mod tests {
         );
         assert_eq!(failure.snapshot.in_flight, 0);
         assert_eq!(playback.render_queue.state.lock().pending.len(), 0);
+        let evidence = playback.shutdown_and_wait();
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert_eq!(evidence.render_worker_panics, 1);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
     }
 
     #[test]
@@ -2661,7 +4353,570 @@ mod tests {
         let playback =
             AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
 
-        playback.shutdown().expect("join render worker");
+        let evidence = playback.shutdown_and_wait();
+
+        assert_eq!(evidence.schema_version, 3);
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert_eq!(evidence.render_worker_panics, 0);
+        assert_eq!(evidence.output.workers_started, 0);
+        assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn dirty_output_receipt_propagates_to_top_level_owner_facts() {
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            shutdown_evidence: Some(RealtimeAudioOutputShutdownEvidence {
+                worker_owner_abandonments: 1,
+                ..RealtimeAudioOutputShutdownEvidence::no_worker_owner()
+            }),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        let evidence = playback.shutdown_and_wait();
+
+        assert_eq!(evidence.output.worker_owner_abandonments, 1);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn joined_render_worker_without_supervisor_stamp_fails_closed() {
+        let (output, _) = fake_output();
+        let playback = AudioPlayback::with_output_and_spawner(test_config(), output, |_, _, _| {
+            thread::Builder::new().name("unstamped-render-worker".to_owned()).spawn(|| {})
+        })
+        .expect("spawn unstamped render worker");
+
+        let evidence = playback.shutdown_and_wait();
+
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert_eq!(evidence.render_worker_terminal_evidence_missing, 1);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn begin_shutdown_only_sets_the_captured_output_signal() {
+        let output_signal = Arc::new(AtomicBool::new(false));
+        let foreign_shutdown_started = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            shutdown_signal: Some(Arc::clone(&output_signal)),
+            shutdown_started: Some(Arc::clone(&foreign_shutdown_started)),
+            ..FakeOutputControl::default()
+        });
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        playback.begin_shutdown();
+
+        assert!(output_signal.load(Ordering::Acquire));
+        assert!(!foreign_shutdown_started.load(Ordering::Acquire));
+        assert_eq!(
+            playback.prepare(
+                sample_position(0),
+                Arc::new(RecordingRenderer {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                    wrong_frame_count: false,
+                }),
+                AudioPcmContinuityModel::IndependentWindows,
+            ),
+            Err(AudioPlaybackError::ExecutionUnavailable)
+        );
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Consume).state,
+            AudioPlaybackState::ExecutionUnavailable
+        );
+        let evidence = playback.shutdown_and_wait();
+        assert!(foreign_shutdown_started.load(Ordering::Acquire));
+        assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn shutdown_evidence_rejects_default_stale_and_incomplete_receipts() {
+        assert!(!AudioPlaybackShutdownEvidence::default().all_workers_terminated());
+        let clean = AudioPlaybackShutdownEvidence::no_owner();
+        assert!(clean.all_workers_terminated());
+        assert!(
+            !AudioPlaybackShutdownEvidence { schema_version: 2, ..clean }.all_workers_terminated()
+        );
+        assert!(!AudioPlaybackShutdownEvidence {
+            shutdown_resource_facts_complete_at_deadline: false,
+            ..clean
+        }
+        .all_workers_terminated());
+        assert!(!AudioPlaybackShutdownEvidence {
+            shutdown_coordinator_owner_abandonments: 1,
+            ..clean
+        }
+        .all_workers_terminated());
+    }
+
+    #[test]
+    fn deadline_shutdown_returns_exact_clean_coordinator_receipt() {
+        let (output, _) = fake_output();
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        let evidence = playback.shutdown_until(Instant::now() + Duration::from_secs(2));
+
+        assert_eq!(evidence.schema_version, 3);
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 0);
+        assert_eq!(evidence.shutdown_coordinator_panics, 0);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn joined_completion_after_deadline_is_late_but_still_reclaimed() {
+        let (output, _) = fake_output();
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let deadline = Instant::now() - Duration::from_secs(1);
+
+        let evidence = playback.shutdown_until_with_spawner(deadline, |work| {
+            let result = work();
+            let carrier = thread::spawn(move || result);
+            while !carrier.is_finished() {
+                thread::yield_now();
+            }
+            Ok(carrier)
+        });
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn running_foreign_output_shutdown_times_out_and_detaches() {
+        let shutdown_started = Arc::new(AtomicBool::new(false));
+        let shutdown_release = Arc::new(AtomicBool::new(false));
+        let drop_finished = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            shutdown_started: Some(Arc::clone(&shutdown_started)),
+            shutdown_release: Some(Arc::clone(&shutdown_release)),
+            drop_finished: Some(Arc::clone(&drop_finished)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        let evidence = playback.shutdown_until(Instant::now() + Duration::from_millis(20));
+
+        let started_deadline = Instant::now() + Duration::from_secs(2);
+        while !shutdown_started.load(Ordering::Acquire) && Instant::now() < started_deadline {
+            thread::yield_now();
+        }
+        let observed_start = shutdown_started.load(Ordering::Acquire);
+        shutdown_release.store(true, Ordering::Release);
+        let drop_deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_finished.load(Ordering::Acquire) && Instant::now() < drop_deadline {
+            thread::yield_now();
+        }
+
+        assert!(observed_start);
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 0);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 1);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+        assert!(drop_finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn coordinator_spawn_error_abandons_foreign_owner_without_caller_drop() {
+        let output_drop_started = Arc::new(AtomicBool::new(false));
+        let output_drop_release = Arc::new(AtomicBool::new(false));
+        let error_dropped = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            drop_started: Some(Arc::clone(&output_drop_started)),
+            drop_release: Some(Arc::clone(&output_drop_release)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let retirement_terminal = Arc::clone(&playback.render_retirement_worker_terminal);
+        let observed_error_drop = Arc::clone(&error_dropped);
+
+        let evidence = playback
+            .shutdown_until_with_spawner(Instant::now() + Duration::from_secs(2), move |_work| {
+                Err(io::Error::other(DropProbe { dropped: observed_error_drop }))
+            });
+
+        assert_eq!(evidence.shutdown_coordinators_started, 0);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert!(evidence.shutdown_coordinator_owner_abandonments >= 2);
+        assert!(!error_dropped.load(Ordering::Acquire));
+        assert!(!output_drop_started.load(Ordering::Acquire));
+        assert!(!evidence.all_workers_terminated());
+        let terminal_deadline = Instant::now() + Duration::from_secs(2);
+        while retirement_terminal.load(Ordering::Acquire) == RENDER_WORKER_TERMINAL_UNKNOWN
+            && Instant::now() < terminal_deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(
+            retirement_terminal.load(Ordering::Acquire),
+            RENDER_WORKER_TERMINAL_NORMAL
+        );
+        output_drop_release.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn coordinator_spawner_opaque_panic_never_drops_payload_or_foreign_owner() {
+        let output_drop_started = Arc::new(AtomicBool::new(false));
+        let output_drop_release = Arc::new(AtomicBool::new(false));
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            drop_started: Some(Arc::clone(&output_drop_started)),
+            drop_release: Some(Arc::clone(&output_drop_release)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let observed_payload_drop = Arc::clone(&payload_dropped);
+
+        let evidence = playback
+            .shutdown_until_with_spawner(Instant::now() + Duration::from_secs(2), move |_work| {
+                std::panic::panic_any(DropProbe { dropped: observed_payload_drop })
+            });
+
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
+        assert_eq!(evidence.shutdown_coordinator_spawner_panics, 1);
+        assert!(evidence.shutdown_coordinator_owner_abandonments >= 2);
+        assert!(!payload_dropped.load(Ordering::Acquire));
+        assert!(!output_drop_started.load(Ordering::Acquire));
+        assert!(!evidence.all_workers_terminated());
+        output_drop_release.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn coordinator_join_opaque_panic_is_safe_and_retains_owner_abandonment() {
+        let output_drop_started = Arc::new(AtomicBool::new(false));
+        let output_drop_release = Arc::new(AtomicBool::new(false));
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            drop_started: Some(Arc::clone(&output_drop_started)),
+            drop_release: Some(Arc::clone(&output_drop_release)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let observed_payload_drop = Arc::clone(&payload_dropped);
+
+        let evidence = playback.shutdown_until_with_spawner(
+            Instant::now() + Duration::from_secs(2),
+            move |work| {
+                Ok(thread::spawn(move || {
+                    drop(work);
+                    std::panic::panic_any(DropProbe { dropped: observed_payload_drop })
+                }))
+            },
+        );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_panics, 1);
+        assert!(evidence.shutdown_coordinator_owner_abandonments >= 2);
+        assert!(!payload_dropped.load(Ordering::Acquire));
+        assert!(!output_drop_started.load(Ordering::Acquire));
+        assert!(!evidence.all_workers_terminated());
+        output_drop_release.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn joined_coordinator_panic_after_deadline_is_also_timed_out() {
+        let (output, _) = fake_output();
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        let evidence =
+            playback.shutdown_until_with_spawner(Instant::now() - Duration::from_secs(1), |work| {
+                let coordinator = thread::spawn(move || {
+                    drop(work);
+                    panic!("synthetic late coordinator panic")
+                });
+                while !coordinator.is_finished() {
+                    thread::yield_now();
+                }
+                Ok(coordinator)
+            });
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_panics, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn opaque_foreign_shutdown_panic_is_caught_and_abandoned() {
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            shutdown_panic_payload_dropped: Some(Arc::clone(&payload_dropped)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+
+        let evidence = playback.shutdown_until(Instant::now() + Duration::from_secs(2));
+
+        assert_eq!(evidence.foreign_owner_panics, 1);
+        assert!(evidence.foreign_owner_abandonments >= 2);
+        assert!(!payload_dropped.load(Ordering::Acquire));
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn opaque_render_worker_panic_payload_is_never_dropped_by_shutdown_caller() {
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let observed_payload_drop = Arc::clone(&payload_dropped);
+        let (output, _) = fake_output();
+        let playback =
+            AudioPlayback::with_output_and_spawner(test_config(), output, move |_, _, _| {
+                thread::Builder::new()
+                    .name("mondrian-audio-render-opaque-panic-test".to_owned())
+                    .spawn(move || {
+                        std::panic::panic_any(DropProbe { dropped: observed_payload_drop });
+                    })
+            })
+            .expect("spawn injected render worker");
+
+        let evidence = playback.shutdown_and_wait();
+
+        assert_eq!(evidence.render_worker_panics, 1);
+        assert_eq!(evidence.render_worker_owner_abandonments, 1);
+        assert!(!payload_dropped.load(Ordering::Acquire));
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn ordinary_drop_hands_blocking_foreign_output_to_detached_owner() {
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let drop_release = Arc::new(AtomicBool::new(false));
+        let drop_finished = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            drop_started: Some(Arc::clone(&drop_started)),
+            drop_release: Some(Arc::clone(&drop_release)),
+            drop_finished: Some(Arc::clone(&drop_finished)),
+            ..FakeOutputControl::default()
+        });
+        let playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let (drop_complete_tx, drop_complete_rx) = mpsc::channel();
+
+        let dropper = thread::spawn(move || {
+            drop(playback);
+            drop_complete_tx.send(()).expect("publish ordinary drop completion");
+        });
+        let returned = drop_complete_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop_release.store(true, Ordering::Release);
+        dropper.join().expect("ordinary Audio Playback drop returns");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_finished.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+
+        assert!(
+            returned,
+            "ordinary Drop blocked on foreign output destruction"
+        );
+        assert!(drop_started.load(Ordering::Acquire));
+        assert!(drop_finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_owner_handoff_spawn_error_abandons_owner_and_foreign_error() {
+        let owner_dropped = Arc::new(AtomicBool::new(false));
+        let error_dropped = Arc::new(AtomicBool::new(false));
+        let observed_error_drop = Arc::clone(&error_dropped);
+
+        let evidence = handoff_ordinary_audio_owner_with_spawner(
+            DropProbe { dropped: Arc::clone(&owner_dropped) },
+            move |_work| Err(io::Error::other(DropProbe { dropped: observed_error_drop })),
+        );
+
+        assert_eq!(evidence.start_failures, 1);
+        assert_eq!(evidence.spawner_panics, 0);
+        assert_eq!(evidence.owner_abandonments, 2);
+        assert!(!owner_dropped.load(Ordering::Acquire));
+        assert!(!error_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_owner_handoff_opaque_spawner_panic_is_safe() {
+        let owner_dropped = Arc::new(AtomicBool::new(false));
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let observed_payload_drop = Arc::clone(&payload_dropped);
+
+        let evidence = handoff_ordinary_audio_owner_with_spawner(
+            DropProbe { dropped: Arc::clone(&owner_dropped) },
+            move |_work| std::panic::panic_any(DropProbe { dropped: observed_payload_drop }),
+        );
+
+        assert_eq!(evidence.start_failures, 1);
+        assert_eq!(evidence.spawner_panics, 1);
+        assert_eq!(evidence.owner_abandonments, 2);
+        assert!(!owner_dropped.load(Ordering::Acquire));
+        assert!(!payload_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn render_worker_spawn_error_hands_foreign_output_off_caller() {
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let drop_release = Arc::new(AtomicBool::new(false));
+        let drop_finished = Arc::new(AtomicBool::new(false));
+        let (output, _) = fake_output_with_control(FakeOutputControl {
+            drop_started: Some(Arc::clone(&drop_started)),
+            drop_release: Some(Arc::clone(&drop_release)),
+            drop_finished: Some(Arc::clone(&drop_finished)),
+            ..FakeOutputControl::default()
+        });
+
+        let result = AudioPlayback::with_output_and_spawner(test_config(), output, |_, _, _| {
+            Err(io::Error::other("synthetic render-worker spawn failure"))
+        });
+
+        drop_release.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_finished.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+
+        assert!(matches!(
+            result,
+            Err(AudioPlaybackCreateError::RenderWorkerSpawn(_))
+        ));
+        assert!(drop_started.load(Ordering::Acquire));
+        assert!(drop_finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_drop_detaches_a_render_worker_that_has_not_finished() {
+        let (output, _) = fake_output();
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = Arc::clone(&exited);
+        let playback = AudioPlayback::with_output_and_spawner(
+            test_config(),
+            output,
+            move |render_queue, _, terminal| {
+                thread::Builder::new().name("mondrian-audio-render-drop-test".to_owned()).spawn(
+                    move || {
+                        supervise_render_worker(&terminal, || {
+                            assert!(render_queue.pop().is_none());
+                            while !worker_release.load(Ordering::Acquire) {
+                                thread::yield_now();
+                            }
+                            worker_exited.store(true, Ordering::Release);
+                        });
+                    },
+                )
+            },
+        )
+        .expect("spawn injected render worker");
+
+        let (drop_complete_tx, drop_complete_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(playback);
+            drop_complete_tx.send(()).expect("publish drop completion");
+        });
+        let returned_without_worker_exit =
+            drop_complete_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release.store(true, Ordering::Release);
+        dropper.join().expect("ordinary Audio Playback drop must not panic");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !exited.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            returned_without_worker_exit,
+            "ordinary drop blocked on the render worker"
+        );
+        assert!(exited.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn detached_production_render_worker_abandons_opaque_panic_inside_worker_runtime() {
+        let (output, _) = fake_output();
+        let mut playback =
+            AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
+        let terminal = Arc::clone(&playback.render_worker_terminal);
+        let entered = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        playback
+            .prepare(
+                sample_position(0),
+                Arc::new(DetachedPanicRenderer {
+                    entered: Arc::clone(&entered),
+                    released: Arc::clone(&released),
+                    payload_dropped: Arc::clone(&payload_dropped),
+                }),
+                AudioPcmContinuityModel::IndependentWindows,
+            )
+            .expect("prepare detached-panic renderer");
+        playback
+            .poll(AudioPlaybackMode::Consume, sample_position(0))
+            .expect("admit detached-panic work");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !entered.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(entered.load(Ordering::Acquire));
+        let (drop_complete_tx, drop_complete_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(playback);
+            drop_complete_tx.send(()).expect("publish playback drop completion");
+        });
+        let returned = drop_complete_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        released.store(true, Ordering::Release);
+        dropper.join().expect("ordinary Audio Playback drop returns");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while terminal.load(AtomicOrdering::Acquire)
+            != RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(
+            terminal.load(AtomicOrdering::Acquire),
+            RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+        );
+        assert!(
+            returned,
+            "ordinary Audio Playback drop blocked on the render worker"
+        );
+        assert!(!payload_dropped.load(Ordering::Acquire));
     }
 
     #[test]
@@ -2703,6 +4958,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect_err("wrong sample rate must fail before commit");
 
@@ -2728,6 +4984,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("single anchor is representable");
         let before = playback.snapshot(AudioPlaybackMode::Consume);
@@ -2756,10 +5013,13 @@ mod tests {
         let (output, state) = fake_output();
         let mut playback =
             AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
-        playback.renderer = Some(Arc::new(RecordingRenderer {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            wrong_frame_count: false,
-        }));
+        playback.renderer = Some(PreparedAudioPcmRenderer {
+            owner: Arc::new(RecordingRenderer {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                wrong_frame_count: false,
+            }),
+            continuity_model: AudioPcmContinuityModel::IndependentWindows,
+        });
         playback.generation = u64::MAX - 1;
         let position = sample_position(0);
         let before = playback.snapshot(AudioPlaybackMode::Consume);
@@ -2795,6 +5055,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         poll_until_settled(&mut playback, sample_position(0));
@@ -2863,6 +5124,7 @@ mod tests {
                     requests: Arc::clone(&requests),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         {
@@ -2910,6 +5172,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("prepare current generation");
         assert_eq!(
@@ -2964,6 +5227,7 @@ mod tests {
             .prepare(
                 sample_position(0),
                 Arc::new(StatefulRecordingRenderer { requests: Arc::clone(&requests) }),
+                AudioPcmContinuityModel::GenerationState,
             )
             .expect("valid audio anchor");
         poll_until_settled_in_mode(
@@ -3007,6 +5271,45 @@ mod tests {
     }
 
     #[test]
+    fn hidden_preroll_activation_includes_the_remaining_device_delay() {
+        let (output, state) = fake_output();
+        {
+            let mut output = state.lock();
+            let snapshot = output.snapshot.as_mut().expect("output snapshot");
+            snapshot.callback_count = 1;
+            snapshot.last_callback_playback_delay = Some(Duration::from_millis(20));
+            snapshot.last_callback_age = Some(Duration::from_millis(5));
+        }
+        let mut playback = AudioPlayback::with_output(test_config(), output)
+            .expect("production Audio Playback owner");
+        playback.generation_render_anchor = Some(sample_position(0));
+        let preflight = playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(5))
+            .expect("bounded activation preflight");
+        assert_eq!(
+            preflight.elapsed_skip_frames,
+            Some(20),
+            "the first audible sample must include the remaining 15 ms device delay"
+        );
+        assert_eq!(preflight.activation_authority, Some(sample_position(20)));
+        let frozen = playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(5))
+            .expect("frozen preroll");
+        assert_eq!(frozen.elapsed_skip_frames, Some(5));
+        assert_eq!(
+            playback
+                .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(i64::MAX)),
+            Err(AudioPlaybackError::CoordinateOverflow)
+        );
+        state.lock().snapshot.as_mut().expect("output snapshot").last_callback_age = None;
+        assert!(playback
+            .validate_poll_arithmetic(AudioPlaybackMode::Consume, sample_position(5))
+            .expect("unknown timing may fill but not activate")
+            .activation_authority
+            .is_none());
+    }
+
+    #[test]
     fn hidden_preroll_catch_up_uses_physical_capacity_and_negative_delta_waits() {
         let (output, _) = fake_output();
         let mut playback =
@@ -3014,12 +5317,12 @@ mod tests {
         playback.generation_render_anchor = Some(sample_position(0));
 
         let exact_boundary = playback
-            .validate_poll_arithmetic(sample_position(1_980))
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(1_980))
             .expect("skip plus preroll exactly fits two-second queue");
         assert_eq!(exact_boundary.elapsed_skip_frames, Some(1_980));
         assert_eq!(exact_boundary.admission_target_frames, 2_000);
         assert_eq!(
-            playback.validate_poll_arithmetic(sample_position(1_981)),
+            playback.validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(1_981)),
             Err(AudioPlaybackError::HiddenPrerollExceedsOutputCapacity {
                 skip_frames: 1_981,
                 preroll_frames: 20,
@@ -3029,7 +5332,7 @@ mod tests {
 
         playback.generation_render_anchor = Some(sample_position(10));
         let waiting = playback
-            .validate_poll_arithmetic(sample_position(5))
+            .validate_poll_arithmetic(AudioPlaybackMode::Preroll, sample_position(5))
             .expect("authority before hidden interval waits without unsigned wrap");
         assert_eq!(waiting.elapsed_skip_frames, None);
     }
@@ -3049,6 +5352,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             ),
             Err(AudioPlaybackError::OutputSampleRateMismatch { expected: 1_000, actual: 48_000 })
         );
@@ -3116,6 +5420,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("exact sample anchor");
 
@@ -3135,6 +5440,7 @@ mod tests {
                     requests: Arc::new(Mutex::new(Vec::new())),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         poll_until_settled(&mut playback, sample_position(0));
@@ -3235,6 +5541,7 @@ mod tests {
                     released: Arc::clone(&released),
                     canceled: Arc::clone(&canceled),
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         playback
@@ -3257,6 +5564,7 @@ mod tests {
                     requests: Arc::clone(&current_requests),
                     wrong_frame_count: false,
                 }),
+                AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("valid audio anchor");
         let cancellation_deadline = Instant::now() + Duration::from_millis(50);

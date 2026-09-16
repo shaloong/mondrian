@@ -108,6 +108,27 @@ impl Transform2D {
         Self { properties }
     }
 
+    /// Whether this transform is provably the static identity operation.
+    ///
+    /// This is intentionally stricter than evaluating a few sample times:
+    /// any authored keyframe rejects identity reuse even when its current
+    /// value happens to equal the default. Execution optimizations can
+    /// therefore rely on this evidence without sampling an animation curve.
+    pub fn is_static_identity(&self) -> bool {
+        let expected = [
+            (Self::POSITION_PATH, PropertyValue::Vec2(Vec2::ZERO)),
+            (Self::SCALE_PATH, PropertyValue::Vec2(Vec2::ONE)),
+            (Self::ROTATION_PATH, PropertyValue::Float(0.0)),
+            (Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(Vec2::ZERO)),
+            (Self::OPACITY_PATH, PropertyValue::Float(1.0)),
+        ];
+        expected.into_iter().all(|(path, expected)| {
+            self.properties.property(path).is_some_and(|property| {
+                !property.is_animated() && property.static_value() == &expected
+            })
+        })
+    }
+
     /// 求值为 3x3 仿射变换矩阵
     ///
     /// T(position) · R(rotation) · S(scale) · T(-anchor)
@@ -122,8 +143,8 @@ impl Transform2D {
         let sin_r = rot.sin();
 
         // pos + R * S * (v - anchor) for vertex v
-        let tx = pos.x + scale.x * (cos_r * (-anchor.x) - sin_r * (-anchor.y));
-        let ty = pos.y + scale.y * (sin_r * (-anchor.x) + cos_r * (-anchor.y));
+        let tx = pos.x - scale.x * cos_r * anchor.x + scale.y * sin_r * anchor.y;
+        let ty = pos.y - scale.x * sin_r * anchor.x - scale.y * cos_r * anchor.y;
 
         glam::Mat3::from_cols(
             glam::Vec3::new(scale.x * cos_r, scale.x * sin_r, 0.0),
@@ -507,6 +528,14 @@ pub struct Clip {
     /// 蒙版列表（按顺序叠加渲染）
     #[serde(default)]
     pub masks: AuthoringList<MaskComponent>,
+    /// Optional Sequence-owned shared grade applied after the legacy linear
+    /// Clip effect stack. The strong reference is validated by `Sequence`.
+    #[serde(default)]
+    pub grade: Option<mondrian_core::GradeDefinitionId>,
+    /// Optional Resolve-style grade group. A Clip belongs to at most one group;
+    /// the group contributes pre-Clip and post-Clip shared grade scopes.
+    #[serde(default)]
+    pub grade_group: Option<mondrian_core::GradeGroupId>,
     /// Optional Sequence-local edit-synchronization group. Every member with
     /// the same identity participates in linked selection/edit operations.
     #[serde(default)]
@@ -538,6 +567,8 @@ impl AuthoringFootprint for Clip {
             transform,
             effects,
             masks,
+            grade: _,
+            grade_group: _,
             link_group: _,
             audio_components,
             is_disabled: _,
@@ -601,6 +632,8 @@ impl Clip {
             transform: Transform2D::identity(),
             effects: AuthoringList::new(),
             masks: AuthoringList::new(),
+            grade: None,
+            grade_group: None,
             link_group: None,
             audio_components: AuthoringList::new(),
             is_disabled: false,
@@ -932,6 +965,9 @@ impl Clip {
         }
         for mask in &mut self.masks {
             mask.id = MaskId::new();
+            if let Some(tracking) = &mut mask.tracking {
+                tracking.id = mondrian_core::TrackingId::new();
+            }
             for shape_key in &mut mask.shape_keyframes {
                 shape_key.id = mondrian_core::KeyframeId::new();
             }
@@ -1256,6 +1292,20 @@ impl Clip {
             return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
         }
         mask.write_shape(time, shape, interpolation)
+    }
+
+    /// Atomically publish one completed tracking result on an unlocked Mask.
+    pub fn apply_mask_tracking_result(
+        &mut self,
+        mask_id: MaskId,
+        recipe: mondrian_core::mask_data::MaskTrackingRecipe,
+        generated: Vec<(TimelineTime, MaskShape)>,
+    ) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.apply_tracking_result(recipe, generated)
     }
 
     fn mask_mut(&mut self, mask_id: MaskId) -> Result<&mut MaskComponent> {
@@ -2053,6 +2103,32 @@ mod tests {
         let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 100.0).abs() < 0.01, "ty={}", m.col(2).y);
+    }
+
+    #[test]
+    fn non_uniform_scale_rotates_anchor_with_each_source_axis() {
+        let mut transform = Transform2D::identity();
+        transform.set_position(glam::Vec2::new(100.0, 200.0));
+        transform.set_scale(glam::Vec2::new(2.0, 3.0));
+        transform.set_anchor_point(glam::Vec2::new(10.0, 20.0));
+        transform
+            .properties
+            .set_static_value(Transform2D::ROTATION_PATH, PropertyValue::Float(90.0))
+            .expect("set rotation");
+
+        let matrix = transform.evaluate_matrix(tt(0));
+        let mapped_anchor = matrix.transform_point2(glam::Vec2::new(10.0, 20.0));
+
+        assert!(
+            (mapped_anchor.x - 100.0).abs() < 0.01,
+            "x={}",
+            mapped_anchor.x
+        );
+        assert!(
+            (mapped_anchor.y - 200.0).abs() < 0.01,
+            "y={}",
+            mapped_anchor.y
+        );
     }
 
     #[test]

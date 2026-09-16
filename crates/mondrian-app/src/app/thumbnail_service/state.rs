@@ -32,6 +32,13 @@ pub(super) struct ThumbnailJob {
     pub(super) cancellation: ExecutionCancellationToken,
 }
 
+/// Bounded dispatch keeps normal backpressure distinct from transport failure.
+pub(super) enum ThumbnailDispatchOutcome {
+    Sent,
+    Full(ThumbnailJob),
+    Closed(ThumbnailJob),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ThumbnailWorkerIdentity {
     pub(super) key: ThumbnailRequestKey,
@@ -96,6 +103,7 @@ pub(super) struct ThumbnailCounters {
 }
 
 pub(super) struct ThumbnailState {
+    pub(super) closed: bool,
     pub(super) generation: u64,
     pub(super) color_context: Option<ProgramColorContext>,
     pub(super) admit_automatic: bool,
@@ -116,6 +124,7 @@ pub(super) struct ThumbnailState {
 impl Default for ThumbnailState {
     fn default() -> Self {
         Self {
+            closed: false,
             generation: 1,
             color_context: None,
             admit_automatic: true,

@@ -11,9 +11,10 @@ use mondrian_ui_core::shortcut::ShortcutBinding;
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 
 use crate::app::ui_actions::{
-    app_shell_about_action, app_shell_import_media_dialog_action,
-    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_preferences_action, app_shell_project_settings_action, app_shell_quit_action,
+    app_shell_about_action, app_shell_gallery_capture_current_action,
+    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_preferences_action,
+    app_shell_project_settings_action, app_shell_quit_action,
     app_shell_save_project_as_dialog_action, timeline_create_basic_title_action,
 };
 
@@ -225,6 +226,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             action_toggle_fullscreen,
         ),
         command(
+            "viewer.capture_gallery_still",
+            "捕获 Gallery Still",
+            "捕获 Gallery Still",
+            AppUiCommandCategory::View,
+            None,
+            action_capture_gallery_still,
+        ),
+        command(
             "timeline.split_at_playhead",
             "在播放头处分割",
             "在播放头处分割",
@@ -263,6 +272,30 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::Transport,
             Some(ShortcutBinding::new(KeyCode::Home, Modifiers::none())),
             action_go_to_start,
+        ),
+        command(
+            "transport.shuttle_reverse",
+            "反向播放 / 加速",
+            "反向播放 / 加速",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::J, Modifiers::none())),
+            action_shuttle_reverse,
+        ),
+        command(
+            "transport.shuttle_stop",
+            "停止穿梭播放",
+            "停止穿梭播放",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::K, Modifiers::none())),
+            action_shuttle_stop,
+        ),
+        command(
+            "transport.shuttle_forward",
+            "正向播放 / 加速",
+            "正向播放 / 加速",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::L, Modifiers::none())),
+            action_shuttle_forward,
         ),
         command(
             "transport.go_to_end",
@@ -490,6 +523,9 @@ fn action_preferences() -> Action {
 fn action_toggle_fullscreen() -> Action {
     Action::ToggleFullscreen
 }
+fn action_capture_gallery_still() -> Action {
+    app_shell_gallery_capture_current_action()
+}
 fn action_split_at_playhead() -> Action {
     Action::SplitClipAtPlayhead
 }
@@ -501,6 +537,15 @@ fn action_mark_out() -> Action {
 }
 fn action_go_to_start() -> Action {
     Action::GoToStart
+}
+fn action_shuttle_reverse() -> Action {
+    Action::ShuttleReverse
+}
+fn action_shuttle_stop() -> Action {
+    Action::ShuttleStop
+}
+fn action_shuttle_forward() -> Action {
+    Action::ShuttleForward
 }
 fn action_go_to_end() -> Action {
     Action::GoToEnd

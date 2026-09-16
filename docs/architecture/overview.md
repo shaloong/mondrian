@@ -1,5 +1,7 @@
 # Architecture Overview
 
+Core encoded sampling contracts explicitly retain planar GBR/GBRA IEEE Float32 in both byte orders. Their proven depth is 32 bits, with Alpha present only for GBRA; unknown or contradictory probe facts remain inadmissible. These are source facts, not a claim of a hardware YUV surface.
+
 Mondrian is a native video editor organized around strict crate boundaries. The self-hosted winit/wgpu UI is the product path; old egui-era modules have been removed or are no longer architectural reference.
 
 ## Layers
@@ -13,9 +15,12 @@ mondrian-app
   -> mondrian-editor-state
   -> mondrian-project
   -> mondrian-playback
+  -> mondrian-render-cache
   -> mondrian-audio
+  -> mondrian-broadcast
+  -> mondrian-reference-output
   -> mondrian-ui-* crates
-  -> mondrian-assets / mondrian-timeline / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
+  -> mondrian-assets / mondrian-timeline / mondrian-interchange / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
 
 foundation:
   mondrian-storage
@@ -31,7 +36,7 @@ foundation:
   Asset Library snapshots, Project, Recovery, Export, and regenerable media
   products add their own policy above it. See
   [Storage Publication](storage-publication.md).
-- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, and timeline render-plan data traits. It owns no executable Render Graph; visual graph definition/compilation lives only in `mondrian-effects`, and frame-plan evaluation lives in `mondrian-renderer`. It must not depend on UI, platform, media, renderer, or app crates.
+- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, bounded format-specific Dynamic HDR value objects, automation/keyframe data (including validated structured Qualifier samples), mask/effect data, and timeline render-plan data traits. Dynamic HDR core types identify ST 2094-40 Application #4 or Dolby metadata semantics without carrying licenses, executable paths, entitlements, or certification claims. Effect types and parameter identities are stable persisted author data only; executable grade/Qualifier mathematics remains in `mondrian-effects`. Core owns no executable Render Graph; visual graph definition/compilation lives only in `mondrian-effects`, and frame-plan evaluation lives in `mondrian-renderer`. It must not depend on UI, platform, media, renderer, or app crates.
 - `mondrian-editor-state`: the UI-independent `AuthoringSession`, editor
   actions, selection/navigation state, and bounded project-wide Undo/Redo.
   Transactions validate and atomically install detached candidates. History
@@ -42,7 +47,14 @@ foundation:
   owns dependency/lock/link-group admission and Timeline owns atomic map
   replacement.
 - `mondrian-platform-core`: narrow platform service traits and native-fact result
-  types, including stable per-user state-directory discovery. It makes no OS
+  types, including stable per-user state-directory discovery, plus the deep
+  platform/driver/display Matrix Module that compiles exact commercial rows and
+  deterministically correlates owner-verified physical evidence. Its separate
+  [Commercial Endurance Qualification](commercial-endurance-qualification.md)
+  Module compiles bounded 72-hour workload evidence without owning product
+  execution or filesystem capture. Normalized
+  receipts remain small Core values; original probe/GPU/Viewer bytes are sealed
+  and replayed by platform validation Adapters. It makes no OS
   calls and owns no product filesystem namespace or persistence policy.
 - `mondrian-platform`: desktop platform implementations such as clipboard,
   dialogs, file reveal, stable per-user state-directory discovery,
@@ -71,6 +83,24 @@ foundation:
   failure enters one bounded background CPU Viewer Adapter, never an inline UI
   thread composite, and leaves it only after a replacement GPU generation is
   ready.
+  Validation-only commercial endurance runs enter one serial campaign
+  coordinator owned by the App composition root. The coordinator owns exact
+  phase order, monotonic cadence, process-tree memory sampling, bounded evidence
+  publication, and the shutdown-before-terminal-sample rule; concrete product
+  runtimes remain responsible for real Playback, Reference Output, Export,
+  recovery, and synchronous worker-closure receipts.
+  Preview's receipt closes its complete media/visual/fallback/title/render-cache
+  worker inventory rather than treating an empty decode queue as process
+  quiescence.
+  The validation Headless owner group additionally consumes Audio lifetime
+  evidence and an explicitly bounded GPU device-generation retirement receipt;
+  timeout or incomplete handoff remains failed closure while the progress
+  worker retains safe-release authority.
+  Visual Mask tracking is another instance-owned execution domain: its bounded
+  dedicated worker freezes exact author/media input, decodes exact stills,
+  delegates only image analysis to Effects, and returns through one
+  revision-checked author transaction. It does not share realtime Preview work
+  admission or create a second Mask interpretation.
 - `mondrian-assets`: SQLite-backed Project asset-library index and durable
   file/generated-source records. It consumes only the foundation-owned media
   probe contract; FFmpeg and generated-pixel execution cannot enter this
@@ -80,6 +110,11 @@ foundation:
 - `mondrian-timeline`: sequence/track/clip domain model, editing commands, and
   the revision-bound Prepared Visual Schedule used to index immutable visual
   placement semantics for production execution.
+- `mondrian-interchange`: bounded native OTIO, CMX 3600, FCP 7 XML, and
+  helper-isolated AAF Adapters. It owns one private exact lowering model and
+  machine-readable preservation evidence, while canonical `Sequence` remains
+  the only public author authority. See
+  [Timeline Interchange](timeline-interchange.md).
 - `mondrian-media`: FFmpeg probing/decoding plus media source, waveform, proxy,
   cache, Audio Playback, and physical output adapters. It does not interpret
   Timeline audio routing or processor order.
@@ -88,14 +123,36 @@ foundation:
   Program Runtime, prepared contribution/route PDC, and media source interfaces.
   Real plugin hosts, parameter-event delivery, layout negotiation, and richer
   processors deepen this crate; format-only placeholder crates are not created.
+- `mondrian-broadcast`: versioned broadcaster QC profiles, bounded streaming
+  picture-analysis evidence, canonical ST 291 Type 2 packets, and registered
+  ATC/AFD/CDP transport constructors. It owns neither Timeline caption
+  authoring nor vendor/file carriage; see
+  [Broadcast QC And Ancillary Data](broadcast-qc-and-ancillary.md).
+- `mondrian-reference-output`: platform-neutral exact professional-output
+  signal, v210/RGB12, embedded-s24, and atomic ancillary payload contracts,
+  bounded scheduled
+  playout, lifecycle evidence, and concrete Windows DeckLink API 12.0/AJA SDK
+  18.1.0 native adapters with independent raw ANC capture. Native no-device
+  validation does not close physical hardware or other-OS qualification.
+  It never owns Program Output color interpretation or Viewer/Export policy;
+  see [Reference Output](reference-output.md).
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or
   concrete timeline ownership.
+- `mondrian-render-cache`: bounded asynchronous storage for verified,
+  content-addressed post-composite working-linear Timeline frames. It owns the
+  lossless artifact format, validation, atomic publication and local disk LRU;
+  it owns no Preview scheduling, Viewer display transform or implicit Export
+  substitution. See [Timeline Render Cache](timeline-render-cache.md).
 - `mondrian-effects`: visual-effect registry, typed execution contracts,
-  definition/resource-bound Effect preparation, RGBA graph
-  compilation/execution, mask rasterization, and visual plugin-effect
-  contracts; it is not the audio processor host.
+  definition/resource-bound Effect preparation, backend-neutral primary-grade
+  ACES 1.3 gamut compression, scene-linear highlight chroma reconstruction,
+  and HSL/3D Qualifier/matte-refinement mathematics, explicit RGB/AlphaMask
+  domain graph compilation/execution, mask rasterization, deterministic bounded
+  object/planar tracking analysis, and visual
+  plugin-effect contracts; it is not the audio processor host and owns no wgpu
+  objects.
 - `mondrian-renderer`: revision-bound Prepared Visual Program compilation,
   per-Clip Effect and visual Transition readiness, per-Sequence render-plan
   lowering, and the transient canonical `PreparedVisualFrameClosure` that
@@ -111,11 +168,22 @@ foundation:
   alternatives are intentionally absent. Its frame-lowering Interface consumes
   flat visual items; only preparation reads immutable Sequence revisions, and
   the recursive closure owns no pixels or consumer scheduling.
+  Dedicated heterogeneous GPU passes execute explicit Qualifier
+  `SceneLinearRgb -> AlphaMask` and Matte Preview
+  `AlphaMask -> SceneLinearRgb` operations, with private refinement textures
+  included in physical admission rather than hidden behind semantic outputs.
+  The same route executes product Power Windows as CPU-rasterized
+  `MaskSource` values followed by GPU `MaskCombine` and `MatteMix`; the latter
+  changes graded RGB while preserving programme alpha. Preview and Export bind
+  the same compiled graph and physical admission evidence.
 - `mondrian-export`: export presets, queue, canonical selected-range visual
   closure preflight, job-local materialization/FFmpeg encoding, and timeline
   export orchestration. Raw Sequence snapshots stop at closure preparation;
   frame materialization retains only frozen media/color facts and closure
-  nodes. It must not maintain a second nested Sequence walker.
+  nodes. Its constrained IMF RDD 45, AS-11 X9, and SMPTE DCP rows are owned by
+  one profile-qualified packaging/validation Module; see
+  [Professional Delivery](professional-delivery.md). It must not maintain a
+  second nested Sequence walker or a second filesystem publication model.
 - `mondrian-ai`: experimental Provider contracts and workflow schema. Its
   current orchestrator fails closed because no production Provider or editor
   mutation Adapter is installed. Lifecycle events are observation-only:
@@ -140,6 +208,10 @@ Lower layers cannot depend on higher layers:
   one immutable Sequence revision to bind the schedule and Effect programs,
   then repeated execution returns to the flat Interface.
 - Effects own effect evaluation, but pure effect data lives in core so timeline can store effects without depending on the evaluator.
+- Structured RGB/YRGB and secondary curve authoring likewise lives in Core as
+  validated normalized points. Effects alone compiles sampled execution
+  resources, Renderer alone owns device residency/WGSL, and App UI only lowers
+  `CurveEditor` gestures to stable-address author actions.
 - UI widgets dispatch `Action`; app decides what actions mean. `AppState`
   rejects shell-only, unknown-namespace, and unimplemented Actions with a
   structured error. Empty Undo/Redo history likewise returns typed
@@ -236,6 +308,22 @@ candidate.
 - UI visual values must come from theme tokens, not hardcoded colors/spacing/radii.
 - Command/menu/shortcut/plugin entry points should flow through a command registry, not private per-menu business logic.
 - Preview and export should share render semantics. Different scheduling or caching is allowed; different interpretation is not.
+- Interlaced Program Output is two exact progressive field-time evaluations,
+  never one woven Effect/compositor input. Media owns deinterlacing; Renderer
+  owns exact field sampling; Export owns prefilter/weave and finished-signal
+  evidence. Codec flags do not constitute support by themselves.
 - Realtime transport has exactly one Clock Master and is owned by the
   [Playback Engine](playback-engine.md); Viewer, decode, render, and audio
   adapters report observations rather than mutating transport.
+
+The validation-only Media runtime may depend on the platform-neutral
+`mondrian-platform-core` capsule-closure value contract. That foundation owns
+strict serde/replay predicates and no process, filesystem, FFmpeg or App owner.
+Media owns native capsule execution; App consumes and publishes its raw closure
+with the separate Surface/EventLoop receipt under endurance run/report schema 4.
+
+`mondrian-validation-launcher` is an FFmpeg-free validation entrypoint and shared
+Windows namespace policy. Its dependency direction stays below Media/App: plain
+bootstrap contracts and OS object ownership only; it has no authoring or media
+interpretation. Media and App enable it only for validation. See
+`native-validation-launcher.md` for the consuming outer process/Job owner.

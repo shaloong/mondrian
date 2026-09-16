@@ -1,12 +1,10 @@
 //! 音频缓冲区与混合器
 
 use crate::audio_device::{
-    prepare_realtime_audio_output, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
-    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputOpenFailure,
-    RealtimeAudioOutputOpenFailureCode,
+    prepare_realtime_audio_output, PreparedRealtimeAudioOutputBackend, RealtimeAudioOutputContract,
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceSelection,
+    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode,
 };
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{FromSample, SizedSample};
 use crossbeam_queue::ArrayQueue;
 #[cfg(test)]
 use mondrian_core::MondrianError;
@@ -18,6 +16,41 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+mod cpal_output;
+#[cfg(target_os = "windows")]
+mod windows_wasapi_output;
+
+enum RealtimeAudioOutputStream {
+    Cpal {
+        _stream: cpal::Stream,
+    },
+    #[cfg(target_os = "windows")]
+    WindowsWasapiNamed {
+        _stream: windows_wasapi_output::WindowsWasapiNamedOutputStream,
+    },
+}
+
+// Native timestamps name the first frame; callback counters name the end.
+fn callback_tail_playback_delay(
+    first_frame_delay: Duration,
+    frames: usize,
+    sample_rate: u32,
+) -> Result<Duration, mondrian_core::AudioTimeError> {
+    use mondrian_core::AudioTimeError;
+    if sample_rate == 0 {
+        return Err(AudioTimeError::ZeroSampleRate);
+    }
+    let rate = u128::from(sample_rate);
+    let frames = frames as u128;
+    let seconds = u64::try_from(frames / rate).map_err(|_| AudioTimeError::PositionOverflow)?;
+    let nanos = u64::try_from(((frames % rate) * 1_000_000_000).div_ceil(rate))
+        .map_err(|_| AudioTimeError::PositionOverflow)?;
+    Duration::from_secs(seconds)
+        .checked_add(Duration::from_nanos(nanos))
+        .and_then(|span| first_frame_delay.checked_add(span))
+        .ok_or(AudioTimeError::PositionOverflow)
+}
 
 /// 原始 PCM 音频缓冲区（f32 交错格式）
 #[derive(Debug, Clone)]
@@ -95,7 +128,7 @@ pub(crate) struct RealtimeAudioOutput {
     activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
     snapshot_cache: Arc<Mutex<Option<RealtimeAudioOutputSnapshot>>>,
-    _stream: cpal::Stream,
+    _stream: RealtimeAudioOutputStream,
 }
 
 /// Sendable control/observation handle for a stream owned by its device thread.
@@ -110,7 +143,7 @@ pub(crate) struct RealtimeAudioOutputHandle {
 }
 
 /// Cloneable read-only evidence handle retained by the device worker after
-/// the concrete CPAL stream is destroyed.
+/// the concrete physical stream is destroyed.
 pub(crate) struct RealtimeAudioOutputObserver {
     contract: RealtimeAudioOutputContract,
     queue: Arc<ArrayQueue<f32>>,
@@ -230,7 +263,7 @@ pub struct RealtimeAudioOutputSnapshot {
     /// captured. Consumers must bind callback age and active duration to this
     /// instant rather than to a later queue-processing time.
     pub captured_at: Instant,
-    /// Concrete CPAL stream generation.
+    /// Concrete physical output stream generation.
     pub stream_generation: u64,
     /// Exact device contract selected from the current candidate enumeration.
     pub contract: RealtimeAudioOutputContract,
@@ -246,13 +279,15 @@ pub struct RealtimeAudioOutputSnapshot {
     pub underrun_frames: u64,
     /// Frame count requested by the latest callback.
     pub last_callback_frames: u32,
-    /// Predicted callback-to-device playback delay reported by the audio host.
+    /// Predicted delay until the endpoint of the latest callback reaches the
+    /// device. Native first-frame timestamps include the callback's frame span
+    /// here so this delay and the consumed-frame counter name the same point.
     pub last_callback_playback_delay: Option<Duration>,
     /// Runtime age of the latest callback, or `None` before the first callback.
     pub last_callback_age: Option<Duration>,
     /// PCM frames currently waiting in the output queue.
     pub buffered_frames: usize,
-    /// Whether CPAL reported an asynchronous stream error.
+    /// Whether the physical output Adapter reported an asynchronous stream error.
     pub stream_failed: bool,
     /// Whether playback consumption is currently enabled.
     pub active: bool,
@@ -531,7 +566,7 @@ impl RealtimeAudioOutputTelemetry {
         underrun_frames: usize,
         playback_delay: Duration,
     ) {
-        // CPAL serializes callbacks for one stream. The checked writer flag
+        // Every physical Adapter serializes callbacks for one stream. The checked writer flag
         // makes that contract observable and lets readers reject a torn set of
         // independently atomic callback facts without ever locking this path.
         if self.snapshot_revision.load(Ordering::Acquire) == u64::MAX
@@ -628,126 +663,48 @@ impl RealtimeAudioOutput {
                 RealtimeAudioOutputCreateError::Open(failure) => failure,
             },
         )?);
-        let telemetry_for_error = Arc::clone(&telemetry);
-        let err_fn = move |_error| {
-            telemetry_for_error.stream_failed.store(true, Ordering::Release);
-        };
-
-        let build = |error: cpal::Error| {
-            RealtimeAudioOutputOpenFailure::after_selection(
-                RealtimeAudioOutputOpenFailureCode::StreamBuildFailed,
-                contract,
-                error.to_string(),
-            )
-        };
-        let stream = match prepared.sample_format {
-            cpal::SampleFormat::I8 => build_sample_stream::<i8>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::I16 => build_sample_stream::<i16>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::I32 => build_sample_stream::<i32>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::I64 => build_sample_stream::<i64>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::U8 => build_sample_stream::<u8>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::U16 => build_sample_stream::<u16>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::U32 => build_sample_stream::<u32>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::U64 => build_sample_stream::<u64>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::F32 => build_sample_stream::<f32>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            cpal::SampleFormat::F64 => build_sample_stream::<f64>(
-                &prepared.device,
-                &prepared.config,
-                Arc::clone(&queue),
-                Arc::clone(&callback_control),
-                Arc::clone(&telemetry),
-                err_fn,
-            )
-            .map_err(build)?,
-            _ => {
-                return Err(RealtimeAudioOutputOpenFailure::after_selection(
-                    RealtimeAudioOutputOpenFailureCode::SampleFormatUnsupported,
+        let stream = match prepared.backend {
+            PreparedRealtimeAudioOutputBackend::Cpal { device, config, sample_format } => {
+                let stream = cpal_output::build_and_start(
+                    &device,
+                    &config,
+                    sample_format,
+                    Arc::clone(&queue),
+                    Arc::clone(&callback_control),
+                    Arc::clone(&telemetry),
                     contract,
-                    "selected CPAL sample format has no callback implementation",
+                )?;
+                RealtimeAudioOutputStream::Cpal { _stream: stream }
+            }
+            #[cfg(target_os = "windows")]
+            PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed {
+                endpoint_id,
+                channel_mask,
+            } => {
+                let stream = windows_wasapi_output::WindowsWasapiNamedOutputStream::start(
+                    endpoint_id,
+                    contract.sample_rate,
+                    usize::from(contract.channels()),
+                    channel_mask,
+                    Arc::clone(&queue),
+                    Arc::clone(&callback_control),
+                    Arc::clone(&telemetry),
                 )
-                .into());
+                .map_err(|error| {
+                    let (start_failed, detail) = error.into_stage_and_detail();
+                    RealtimeAudioOutputOpenFailure::after_selection(
+                        if start_failed {
+                            RealtimeAudioOutputOpenFailureCode::StreamStartFailed
+                        } else {
+                            RealtimeAudioOutputOpenFailureCode::StreamBuildFailed
+                        },
+                        contract,
+                        detail,
+                    )
+                })?;
+                RealtimeAudioOutputStream::WindowsWasapiNamed { _stream: stream }
             }
         };
-
-        stream.play().map_err(|error| {
-            RealtimeAudioOutputOpenFailure::after_selection(
-                RealtimeAudioOutputOpenFailureCode::StreamStartFailed,
-                contract,
-                error.to_string(),
-            )
-        })?;
 
         let snapshot_cache = Arc::new(Mutex::new(None));
         let device_evidence = Arc::new(prepared.evidence);
@@ -800,7 +757,7 @@ impl RealtimeAudioOutput {
         self.callback_control.confirm_if_quiescent();
     }
 
-    /// Capture callback-consumption and health evidence without touching CPAL.
+    /// Capture callback-consumption and health evidence without touching the platform stream.
     pub(crate) fn snapshot(&self) -> RealtimeAudioOutputSnapshot {
         capture_output_snapshot(
             self.contract,
@@ -1079,52 +1036,40 @@ fn capture_output_snapshot(
     }
 }
 
-fn build_sample_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    queue: Arc<ArrayQueue<f32>>,
-    callback_control: Arc<RealtimeAudioCallbackControl>,
-    telemetry: Arc<RealtimeAudioOutputTelemetry>,
-    err_fn: impl FnMut(cpal::Error) + Send + 'static,
-) -> std::result::Result<cpal::Stream, cpal::Error>
-where
-    T: SizedSample + FromSample<f32>,
-{
-    let channels = config.channels.max(1) as usize;
-    device.build_output_stream(
-        *config,
-        move |data: &mut [T], info| {
-            let frames = data.len() / channels;
-            let playback_delay = callback_playback_delay(info);
-            let active_block = callback_control.begin_callback_block(&telemetry);
-            if !active_block {
-                data.fill(T::EQUILIBRIUM);
-                telemetry.record_callback(false, frames, 0, playback_delay);
-                callback_control.finish_callback_block(false, &telemetry);
-                return;
-            }
-            let mut missing_samples = 0usize;
-            for s in data {
-                let value = queue
-                    .pop()
-                    .unwrap_or_else(|| {
-                        missing_samples = missing_samples.saturating_add(1);
-                        0.0
-                    })
-                    .clamp(-1.0, 1.0);
-                *s = T::from_sample(value);
-            }
-            telemetry.record_callback(true, frames, missing_samples / channels, playback_delay);
-            callback_control.finish_callback_block(true, &telemetry);
-        },
-        err_fn,
-        None,
-    )
-}
-
-fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
-    let timestamp = info.timestamp();
-    timestamp.playback.duration_since(timestamp.callback)
+#[cfg(target_os = "windows")]
+fn render_f32_output_block(
+    data: &mut [f32],
+    channels: usize,
+    queue: &ArrayQueue<f32>,
+    callback_control: &RealtimeAudioCallbackControl,
+    telemetry: &RealtimeAudioOutputTelemetry,
+    playback_delay: Duration,
+) {
+    let frames = data.len() / channels.max(1);
+    let active_block = callback_control.begin_callback_block(telemetry);
+    if !active_block {
+        data.fill(0.0);
+        telemetry.record_callback(false, frames, 0, playback_delay);
+        callback_control.finish_callback_block(false, telemetry);
+        return;
+    }
+    let mut missing_samples = 0usize;
+    for sample in data {
+        *sample = queue
+            .pop()
+            .unwrap_or_else(|| {
+                missing_samples = missing_samples.saturating_add(1);
+                0.0
+            })
+            .clamp(-1.0, 1.0);
+    }
+    telemetry.record_callback(
+        true,
+        frames,
+        missing_samples / channels.max(1),
+        playback_delay,
+    );
+    callback_control.finish_callback_block(true, telemetry);
 }
 
 #[cfg(test)]
@@ -1143,7 +1088,7 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
         asset_id: path.display().to_string(),
         reason: format!("audio output layout {channel_layout:?} has no explicit FFmpeg lowering"),
     })?;
-    let output = crate::ffmpeg_command()
+    let output = crate::ffmpeg_command()?
         .arg("-v")
         .arg("error")
         .arg("-i")
@@ -1190,6 +1135,21 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn callback_delay_names_the_counter_endpoint_on_the_exact_sample_grid() {
+        use std::time::Duration;
+        assert_eq!(
+            super::callback_tail_playback_delay(Duration::from_millis(20), 512, 48_000),
+            Ok(Duration::from_nanos(30_666_667))
+        );
+        assert_eq!(
+            super::callback_tail_playback_delay(Duration::ZERO, 0, 48_000),
+            Ok(Duration::ZERO)
+        );
+        assert!(super::callback_tail_playback_delay(Duration::ZERO, 1, 0).is_err());
+        assert!(super::callback_tail_playback_delay(Duration::MAX, 1, 48_000).is_err());
+    }
+
     use super::*;
 
     fn output_contract(

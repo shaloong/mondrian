@@ -45,6 +45,75 @@ fail-closed before any tolerance comparison. `public_specification` and
 export be added later without claiming that Mondrian-generated goldens already
 establish subjective parity.
 
+Cross-application color qualification uses two committed contracts:
+
+- `tests/validation/cross-application-color-stimulus-v1.json` fixes analytic
+  patches, raster/orientation, rational cadence, frame identity, Alpha, and the
+  admitted linear/sRGB/PQ lanes.
+- `tests/validation/cross-application-color-qualification.json` fixes the
+  sealed supervisor policy and pins the exact stimulus bytes.
+
+The exact application versions/builds and their hashes belong to a reviewed
+runtime profile, not a rolling checked-in placeholder. Restricted `.blend`,
+Resolve Project/DRP, `.prproj`, presets, settings dumps, attestations, and
+output payloads stay under the prepared runner's ignored
+`tests/fixtures/large/cross-application/` corpus. A schema-v1 evidence manifest
+binds them to one run. Generate final evidence only from a clean exact source:
+
+```powershell
+pwsh -File scripts/validation/invoke-cross-application-color-qualification.ps1 `
+  -RuntimeProfilePath <qualified-profile.json> `
+  -EvidenceManifestPath <evidence-manifest.json> `
+  -MachineReportPath <machine-report.json> `
+  -ExpectedSourceSha <40-character-git-sha> `
+  -OutputDirectory <new-output-directory>
+```
+
+The supervisor runs only
+`sealed_cross_application_corpus_qualification`, with one Cargo job and a
+bounded deadline. The integration Adapter independently decodes PNG/OpenEXR/
+JSON Float payloads, verifies actual encoded byte counts, applies the compiled
+limits before decode, and writes the report even when the matrix is incomplete
+or a comparison fails. Only `qualified` with no missing artifacts is sealable.
+Harness tests and self-generated payloads prove protocol behavior but are not
+Blender/Resolve/Premiere qualification evidence.
+See [Cross-Application Color Capture](cross-application-color-capture.md) for
+the application-specific acquisition and claim-boundary procedure.
+
+Cross-platform physical display qualification uses
+`tests/validation/platform-driver-display-matrix.json`. It requires exact
+Windows/DX12, macOS/Metal, and Linux/Vulkan rows, with SDR sRGB, Display P3, PQ
+HDR, and managed ICC scenarios plus platform-probe, GPU-color, and physical
+Viewer receipts on every row. Scenario coverage is the union of explicit rows
+per platform, so Linux X11 SDR/ICC and Wayland P3/PQ remain separate. Rows
+execute serially and are sealed independently; the final matrix may aggregate
+multiple physical machines only when profile,
+source, release-candidate, and build-manifest identities match; each platform
+retains its own package and actually executed runtime-image SHA. The independent
+bundle verifier requires external trust anchors, replays the original native
+probe/GPU-gate/Viewer JSONL source closure into each normalized owner receipt,
+requires a separately hashed external capture-authority manifest, snapshots the
+complete evidence closure, then replays Matrix evaluation before accepting the
+deterministic report. GPU gates use the checked-in cross-platform gate profile,
+exact one-test Cargo output, and test-emitted finite measurements; Viewer replay
+recomputes the full Core display-contract identity. Native Platform and GPU
+producers must echo a single-use authority challenge from the real process;
+managed ICC replay rebuilds the exact calibration LUT and compares profile and
+processor identity across Platform and Viewer. Native captures wait for a fresh
+authority acknowledgement before each mutually exclusive SDR/P3/HDR state and
+return the output identity resolved by the same OS probe. Final replay loads
+checked scripts/contracts into memory from the trusted Git archive and runs only
+separately hash-approved Core/Matrix replay binaries; runtime Cargo is forbidden.
+Missing rows remain incomplete.
+Hosted CI and DRM/EDID capability never become display qualification. See
+[Platform / Driver / Display Qualification](platform-driver-display-qualification.md)
+for acquisition and the row/matrix supervisors.
+
+Commercial long-duration playback, physical reference output, repeated Export,
+and concurrent recovery use the separately sealed 72-hour profile described in
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
+Short performance or accelerated frame-loop probes cannot satisfy it.
+
 The committed `mondrian-standard-quality-v1` numeric corpus is a separate
 objective stimulus contract pinned to the Standard package digest. It covers 22
 quality categories and drives the production CPU OCIO sRGB, Rec.709, Display

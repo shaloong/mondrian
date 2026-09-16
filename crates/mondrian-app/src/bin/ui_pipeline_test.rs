@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mondrian_platform::prepare_graphics_process()?;
     // Simple: just confirm we can get red/blue on screen with our real pipeline
     let el = winit::event_loop::EventLoop::new()?;
     let w = Arc::new(

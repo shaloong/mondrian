@@ -6,11 +6,12 @@ authors.workspace    = true
 license.workspace    = true
 
 [features]
-validation = ["mondrian-renderer/validation"]
+validation = ["mondrian-renderer/validation", "mondrian-media/validation"]
 
 [dependencies]
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
+mondrian-broadcast = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
@@ -23,11 +24,20 @@ async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
+anyhow      = { workspace = true }
 tracing     = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 parking_lot = { workspace = true }
 sha2       = { workspace = true }
+sha1       = { workspace = true }
+base64     = { workspace = true }
+roxmltree  = { workspace = true }
 tempfile   = { workspace = true }
+image      = { workspace = true }
+exr        = "1.74.2"
+tiff       = "0.11.3"
+half       = "2.7"
+bytemuck   = { workspace = true }
 
 [dev-dependencies]

@@ -18,7 +18,9 @@ use mondrian_core::types::{
     KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, ProjectColorEnvironment, ProjectSettings, TimeScale, TimelineTime, TimelineTimeRange,
+    Color, GalleryColorStatistics, GalleryStillId, GalleryStillRaster, GradeDefinitionId,
+    GradeGraph, GradeVersionId, ProjectColorEnvironment, ProjectSettings, TimeScale, TimelineTime,
+    TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
@@ -26,8 +28,8 @@ use mondrian_timeline::{
     clip::Clip,
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement, RangeEditKind,
-    TrackRelativePlacement,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, DynamicHdrAuthorEdit,
+    EffectRelativePlacement, GradeScope, RangeEditKind, TrackRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +148,8 @@ pub const EXPORT_NAMESPACE: &str = "ui.export";
 pub const EXPORT_EDIT_DRAFT: &str = "edit_draft";
 /// External action name for admitting an immutable Timeline Export Snapshot.
 pub const EXPORT_ENQUEUE: &str = "enqueue";
+/// Freeze and enqueue the current application-owned export draft on dispatch.
+pub const EXPORT_ENQUEUE_DRAFT: &str = "enqueue_draft";
 /// External action name for requesting cancellation of one Export attempt.
 pub const EXPORT_CANCEL: &str = "cancel";
 /// External action name for clearing bounded terminal Export evidence.
@@ -166,6 +170,29 @@ pub const VISUAL_EFFECT_REMOVE: &str = "remove";
 pub const VISUAL_EFFECT_REORDER: &str = "reorder";
 /// External action name for writing one stable-address visual Effect parameter.
 pub const VISUAL_EFFECT_SET_PARAMETER_VALUE: &str = "set_parameter_value";
+
+/// External custom-action namespace for Sequence grading hierarchy.
+pub const GRADE_NAMESPACE: &str = "ui.grade";
+pub const GRADE_CREATE_DEFINITION: &str = "create_definition";
+pub const GRADE_ASSIGN: &str = "assign";
+pub const GRADE_CREATE_GROUP: &str = "create_group";
+pub const GRADE_ADD_VERSION: &str = "add_version";
+pub const GRADE_ACTIVATE_VERSION: &str = "activate_version";
+pub const GRADE_REPLACE_ACTIVE_GRAPH: &str = "replace_active_graph";
+pub const GRADE_ADD_EFFECT: &str = "add_effect";
+
+/// External custom-action namespace for Sequence Dynamic HDR authoring.
+pub const DYNAMIC_HDR_NAMESPACE: &str = "ui.dynamic_hdr";
+/// External action name for one atomic Dynamic HDR author edit.
+pub const DYNAMIC_HDR_APPLY_EDIT: &str = "apply_edit";
+
+/// External custom-action namespace for the Project color Gallery.
+pub const GALLERY_NAMESPACE: &str = "ui.gallery";
+pub const GALLERY_CAPTURE_STILL: &str = "capture_still";
+pub const GALLERY_RENAME_STILL: &str = "rename_still";
+pub const GALLERY_REMOVE_STILL: &str = "remove_still";
+pub const GALLERY_SET_COMPARISON: &str = "set_comparison";
+pub const GALLERY_APPLY_SHOT_MATCH: &str = "apply_shot_match";
 
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
@@ -243,6 +270,12 @@ pub enum ProductAction {
     Export(ExportProductAction),
     /// An operation owned by Clip-local visual Effect authoring or selection.
     VisualEffect(VisualEffectProductAction),
+    /// An operation owned by Sequence grading hierarchy authoring.
+    Grade(GradeProductAction),
+    /// An operation owned by the Sequence Dynamic HDR Program Interface.
+    DynamicHdr(DynamicHdrAuthorEdit),
+    /// An operation owned by the Project Gallery and Viewer comparison session.
+    Gallery(GalleryProductAction),
     /// An operation owned by Clip-local visual Mask authoring or selection.
     VisualMask(VisualMaskProductAction),
 }
@@ -319,6 +352,8 @@ pub enum ExportProductAction {
     EditDraft(Box<ExportDraftEdit>),
     /// Admit one immutable Timeline Export request.
     Enqueue(Box<TimelineExportRequest>),
+    /// Freeze current draft state once, at the user's enqueue action boundary.
+    EnqueueDraft,
     /// Request cancellation for one retained Export attempt.
     Cancel(JobId),
     /// Remove all retained terminal Export evidence.
@@ -340,6 +375,28 @@ pub enum VisualEffectProductAction {
     Reorder(VisualEffectReorderPayload),
     /// Write one parameter value through its stable author instance address.
     SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
+}
+
+/// Closed Sequence grading hierarchy operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradeProductAction {
+    CreateDefinition(GradeCreateDefinitionPayload),
+    Assign(GradeAssignPayload),
+    CreateGroup(GradeCreateGroupPayload),
+    AddVersion(GradeAddVersionPayload),
+    ActivateVersion(GradeActivateVersionPayload),
+    ReplaceActiveGraph(Box<GradeReplaceActiveGraphPayload>),
+    AddEffect(GradeAddEffectPayload),
+}
+
+/// Closed Project Gallery and Shot Match operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GalleryProductAction {
+    CaptureStill(Box<GalleryCaptureStillPayload>),
+    RenameStill(GalleryRenameStillPayload),
+    RemoveStill(GalleryStillTargetPayload),
+    SetComparison(GallerySetComparisonPayload),
+    ApplyShotMatch(Box<GalleryApplyShotMatchPayload>),
 }
 
 /// Closed authoring operations owned by one Timeline Clip.
@@ -499,6 +556,9 @@ fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
         SEQUENCE_NAMESPACE => Some("sequence_action"),
         EXPORT_NAMESPACE => Some("export_action"),
         VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
+        GRADE_NAMESPACE => Some("grade_action"),
+        DYNAMIC_HDR_NAMESPACE => Some("dynamic_hdr_action"),
+        GALLERY_NAMESPACE => Some("gallery_action"),
         VISUAL_MASK_NAMESPACE => Some("visual_mask_action"),
         _ => None,
     }
@@ -783,6 +843,10 @@ impl ProductAction {
                 EXPORT_ENQUEUE => Ok(Some(Self::Export(ExportProductAction::Enqueue(Box::new(
                     decode_payload(namespace, name, payload)?,
                 ))))),
+                EXPORT_ENQUEUE_DRAFT => {
+                    decode_payload::<()>(namespace, name, payload)?;
+                    Ok(Some(Self::Export(ExportProductAction::EnqueueDraft)))
+                }
                 EXPORT_CANCEL => {
                     let target: ExportCancelWirePayload = decode_payload(namespace, name, payload)?;
                     Ok(Some(Self::Export(ExportProductAction::Cancel(
@@ -822,6 +886,60 @@ impl ProductAction {
                 ))),
                 _ => Ok(None),
             },
+            GRADE_NAMESPACE => match name.as_str() {
+                GRADE_CREATE_DEFINITION => Ok(Some(Self::Grade(
+                    GradeProductAction::CreateDefinition(decode_payload(namespace, name, payload)?),
+                ))),
+                GRADE_ASSIGN => Ok(Some(Self::Grade(GradeProductAction::Assign(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_CREATE_GROUP => Ok(Some(Self::Grade(GradeProductAction::CreateGroup(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_ADD_VERSION => Ok(Some(Self::Grade(GradeProductAction::AddVersion(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_ACTIVATE_VERSION => Ok(Some(Self::Grade(
+                    GradeProductAction::ActivateVersion(decode_payload(namespace, name, payload)?),
+                ))),
+                GRADE_REPLACE_ACTIVE_GRAPH => {
+                    Ok(Some(Self::Grade(GradeProductAction::ReplaceActiveGraph(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                GRADE_ADD_EFFECT => Ok(Some(Self::Grade(GradeProductAction::AddEffect(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                _ => Ok(None),
+            },
+            DYNAMIC_HDR_NAMESPACE => match name.as_str() {
+                DYNAMIC_HDR_APPLY_EDIT => Ok(Some(Self::DynamicHdr(decode_payload(
+                    namespace, name, payload,
+                )?))),
+                _ => Ok(None),
+            },
+            GALLERY_NAMESPACE => match name.as_str() {
+                GALLERY_CAPTURE_STILL => {
+                    Ok(Some(Self::Gallery(GalleryProductAction::CaptureStill(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                GALLERY_RENAME_STILL => Ok(Some(Self::Gallery(GalleryProductAction::RenameStill(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GALLERY_REMOVE_STILL => Ok(Some(Self::Gallery(GalleryProductAction::RemoveStill(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GALLERY_SET_COMPARISON => Ok(Some(Self::Gallery(
+                    GalleryProductAction::SetComparison(decode_payload(namespace, name, payload)?),
+                ))),
+                GALLERY_APPLY_SHOT_MATCH => {
+                    Ok(Some(Self::Gallery(GalleryProductAction::ApplyShotMatch(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                _ => Ok(None),
+            },
             VISUAL_MASK_NAMESPACE => match name.as_str() {
                 VISUAL_MASK_ADD_TO_CLIP => Ok(Some(Self::VisualMask(
                     VisualMaskProductAction::AddToClip(decode_payload(namespace, name, payload)?),
@@ -853,6 +971,21 @@ impl ProductAction {
                     VisualMaskProductAction::SetParameterValue(Box::new(decode_payload(
                         namespace, name, payload,
                     )?)),
+                ))),
+                VISUAL_MASK_START_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::StartTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_MASK_CANCEL_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::CancelTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_MASK_RECOMPUTE_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::RecomputeTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
                 ))),
                 _ => Ok(None),
             },
@@ -1155,6 +1288,11 @@ impl ProductAction {
             Self::Export(ExportProductAction::Enqueue(request)) => {
                 (EXPORT_NAMESPACE, EXPORT_ENQUEUE, serde_json::json!(request))
             }
+            Self::Export(ExportProductAction::EnqueueDraft) => (
+                EXPORT_NAMESPACE,
+                EXPORT_ENQUEUE_DRAFT,
+                serde_json::Value::Null,
+            ),
             Self::Export(ExportProductAction::Cancel(job_id)) => (
                 EXPORT_NAMESPACE,
                 EXPORT_CANCEL,
@@ -1193,6 +1331,69 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::CreateDefinition(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_CREATE_DEFINITION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::Assign(payload)) => {
+                (GRADE_NAMESPACE, GRADE_ASSIGN, serde_json::json!(payload))
+            }
+            Self::Grade(GradeProductAction::CreateGroup(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_CREATE_GROUP,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::AddVersion(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ADD_VERSION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::ActivateVersion(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ACTIVATE_VERSION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::ReplaceActiveGraph(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_REPLACE_ACTIVE_GRAPH,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::AddEffect(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ADD_EFFECT,
+                serde_json::json!(payload),
+            ),
+            Self::DynamicHdr(edit) => (
+                DYNAMIC_HDR_NAMESPACE,
+                DYNAMIC_HDR_APPLY_EDIT,
+                serde_json::json!(edit),
+            ),
+            Self::Gallery(GalleryProductAction::CaptureStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_CAPTURE_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::RenameStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_RENAME_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::RemoveStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_REMOVE_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::SetComparison(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_SET_COMPARISON,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::ApplyShotMatch(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_APPLY_SHOT_MATCH,
                 serde_json::json!(payload),
             ),
             Self::VisualMask(VisualMaskProductAction::AddToClip(payload)) => (
@@ -1238,6 +1439,21 @@ impl ProductAction {
             Self::VisualMask(VisualMaskProductAction::SetParameterValue(payload)) => (
                 VISUAL_MASK_NAMESPACE,
                 VISUAL_MASK_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::StartTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_START_TRACKING,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::CancelTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_CANCEL_TRACKING,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::RecomputeTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_RECOMPUTE_TRACKING,
                 serde_json::json!(payload),
             ),
         };
@@ -1780,6 +1996,14 @@ pub enum ExportDraftEdit {
     Range(TimelineExportRange),
     /// Replace the user-entered output path without syntactic correction.
     OutputPath(String),
+    /// Import one explicit canonical ANC JSON file into the immutable draft.
+    ImportAncillary(PathBuf),
+    /// Remove the current ANC attachment from future submissions.
+    ClearAncillary,
+    /// Import one explicit regulatory PSE provider and QC profile selection.
+    ImportRegulatoryPse(PathBuf),
+    /// Remove the regulatory PSE selection from future submissions.
+    ClearRegulatoryPse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1844,6 +2068,125 @@ pub struct VisualEffectSetParameterValuePayload {
     pub parameter: AnimationParameterAddress,
     /// Value to write statically or as a key at the current Clip-local author time.
     pub value: PropertyValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeCreateDefinitionPayload {
+    pub name: String,
+    pub assign_to: Option<GradeScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAssignPayload {
+    pub scope: GradeScope,
+    pub definition_id: Option<GradeDefinitionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeCreateGroupPayload {
+    pub name: String,
+    pub clip_id: Option<ClipId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAddVersionPayload {
+    pub definition_id: GradeDefinitionId,
+    pub name: String,
+    pub activate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeActivateVersionPayload {
+    pub definition_id: GradeDefinitionId,
+    pub version_id: GradeVersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeReplaceActiveGraphPayload {
+    pub definition_id: GradeDefinitionId,
+    pub graph: GradeGraph,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAddEffectPayload {
+    pub definition_id: GradeDefinitionId,
+    pub effect_type: EffectType,
+}
+
+/// Frozen Viewer raster and working-linear statistics for a new still.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCaptureStillPayload {
+    pub name: String,
+    pub presentation_fingerprint: [u8; 32],
+    pub raster: GalleryStillRaster,
+    pub statistics: GalleryColorStatistics,
+}
+
+/// Stable Gallery still target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryStillTargetPayload {
+    pub still_id: GalleryStillId,
+}
+
+/// Rename one frozen still without changing its identity or capture evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryRenameStillPayload {
+    pub still_id: GalleryStillId,
+    pub name: String,
+}
+
+/// Viewer-only Gallery comparison layout.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GalleryComparisonLayout {
+    /// Reference occupies the left part of the Viewer.
+    WipeVertical { position: f32 },
+    /// Reference occupies the upper part of the Viewer.
+    WipeHorizontal { position: f32 },
+    /// Fixed side-by-side split at the Viewer center.
+    SplitVertical,
+    /// Fixed top/bottom split at the Viewer center.
+    SplitHorizontal,
+}
+
+impl GalleryComparisonLayout {
+    pub fn validate(self) -> bool {
+        match self {
+            Self::WipeVertical { position } | Self::WipeHorizontal { position } => {
+                position.is_finite() && (0.0..=1.0).contains(&position)
+            }
+            Self::SplitVertical | Self::SplitHorizontal => true,
+        }
+    }
+}
+
+/// Select or clear one Viewer Gallery comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GallerySetComparisonPayload {
+    pub still_id: Option<GalleryStillId>,
+    pub layout: GalleryComparisonLayout,
+}
+
+/// Create one deterministic Shot Match Grade Version from current target stats.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryApplyShotMatchPayload {
+    pub still_id: GalleryStillId,
+    pub definition_id: GradeDefinitionId,
+    pub target_statistics: GalleryColorStatistics,
+    pub version_name: String,
+    pub activate: bool,
 }
 
 /// Explicit author policy when real endpoint handles cannot satisfy a visual
@@ -2031,8 +2374,22 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
+            ProductAction::Grade(action) => self.allows_grade(action),
+            ProductAction::DynamicHdr(edit) => self.allows_dynamic_hdr(edit),
+            ProductAction::Gallery(action) => self.allows_gallery(action),
             ProductAction::VisualMask(action) => self.allows_visual_mask(action),
         }
+    }
+
+    fn allows_dynamic_hdr(&self, edit: &DynamicHdrAuthorEdit) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        let mut candidate = sequence.dynamic_hdr.clone();
+        matches!(
+            candidate.apply(edit.clone(), sequence.settings.frame_rate),
+            Ok(true)
+        )
     }
 
     fn allows_asset(&self, action: &AssetProductAction) -> bool {
@@ -2341,14 +2698,29 @@ impl<'a> ProductActionAvailability<'a> {
                 ExportDraftEdit::OutputPath(output_path) => {
                     self.state.export_draft.output_path != *output_path
                 }
+                ExportDraftEdit::ImportAncillary(path) => !path.as_os_str().is_empty(),
+                ExportDraftEdit::ClearAncillary => self.state.export_draft.ancillary.is_some(),
+                ExportDraftEdit::ImportRegulatoryPse(path) => !path.as_os_str().is_empty(),
+                ExportDraftEdit::ClearRegulatoryPse => {
+                    self.state.export_draft.regulatory_pse.is_some()
+                }
             },
             ExportProductAction::Enqueue(request) => {
+                let sequence = request.sequence_id.map_or_else(
+                    || self.state.active_sequence(),
+                    |sequence_id| self.state.sequence_by_id(sequence_id),
+                );
                 !request.output_path.as_os_str().is_empty()
-                    && request.sequence_id.map_or_else(
-                        || self.state.active_sequence().is_some(),
-                        |sequence_id| self.state.sequence_by_id(sequence_id).is_some(),
-                    )
+                    && sequence.is_some_and(|sequence| {
+                        mondrian_export::delivery::resolve_export_delivery(
+                            &request.preset,
+                            &sequence.settings,
+                            self.state.project_color_environment(),
+                        )
+                        .is_ok()
+                    })
             }
+            ExportProductAction::EnqueueDraft => self.state.can_enqueue_export_draft(),
             ExportProductAction::Cancel(job_id) => self.state.render_queue.can_cancel(*job_id),
             ExportProductAction::ClearTerminalHistory => {
                 self.state.render_queue.has_terminal_history()
@@ -2425,8 +2797,119 @@ impl<'a> ProductActionAvailability<'a> {
         }
     }
 
+    fn allows_grade(&self, action: &GradeProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        let scope_exists = |scope: GradeScope| match scope {
+            GradeScope::Clip(_) => {
+                super::grade_authoring::validate_grade_scope_write(sequence, scope).is_ok()
+            }
+            GradeScope::GroupPre(group_id) | GradeScope::GroupPost(group_id) => {
+                sequence.grade_groups.iter().any(|group| group.id == group_id)
+            }
+            GradeScope::Timeline => true,
+        };
+        let definition = |definition_id| sequence.grade_definition(definition_id);
+        match action {
+            GradeProductAction::CreateDefinition(payload) => {
+                !payload.name.trim().is_empty() && payload.assign_to.is_none_or(scope_exists)
+            }
+            GradeProductAction::Assign(payload) => {
+                scope_exists(payload.scope)
+                    && payload.definition_id.is_none_or(|id| definition(id).is_some())
+                    && grade_scope_assignment(sequence, payload.scope) != payload.definition_id
+            }
+            GradeProductAction::CreateGroup(payload) => {
+                !payload.name.trim().is_empty()
+                    && payload.clip_id.is_none_or(|clip_id| scope_exists(GradeScope::Clip(clip_id)))
+            }
+            GradeProductAction::AddVersion(payload) => definition(payload.definition_id)
+                .is_some_and(|definition| {
+                    !payload.name.trim().is_empty()
+                        && definition.versions.len() < mondrian_core::MAX_GRADE_VERSIONS
+                        && definition.active().is_some()
+                }),
+            GradeProductAction::ActivateVersion(payload) => definition(payload.definition_id)
+                .is_some_and(|definition| {
+                    definition.active_version != payload.version_id
+                        && definition
+                            .versions
+                            .iter()
+                            .any(|version| version.id == payload.version_id)
+                }),
+            GradeProductAction::ReplaceActiveGraph(payload) => definition(payload.definition_id)
+                .and_then(|definition| definition.active())
+                .is_some_and(|version| {
+                    version.graph != payload.graph && payload.graph.validate_author_state().is_ok()
+                }),
+            GradeProductAction::AddEffect(payload) => definition(payload.definition_id)
+                .and_then(|definition| definition.active())
+                .is_some_and(|version| {
+                    version.graph.nodes.len() < mondrian_core::MAX_GRADE_GRAPH_NODES
+                        && mondrian_effects::effect_definition(&payload.effect_type)
+                            .is_some_and(|effect| effect.supports_visual_evaluation())
+                }),
+        }
+    }
+
+    fn allows_gallery(&self, action: &GalleryProductAction) -> bool {
+        let Some(session) = self.state.authoring.as_ref() else {
+            return false;
+        };
+        let document = session.document();
+        let still = |still_id| document.gallery.stills.iter().find(|still| still.id == still_id);
+        match action {
+            GalleryProductAction::CaptureStill(payload) => {
+                document.gallery.stills.len() < mondrian_core::MAX_GALLERY_STILLS
+                    && self.state.active_sequence().is_some()
+                    && !payload.name.trim().is_empty()
+                    && payload.raster.validate().is_ok()
+                    && payload.statistics.validate().is_ok()
+            }
+            GalleryProductAction::RenameStill(payload) => {
+                still(payload.still_id).is_some_and(|still| {
+                    !payload.name.trim().is_empty() && still.name != payload.name.trim()
+                })
+            }
+            GalleryProductAction::RemoveStill(payload) => still(payload.still_id).is_some(),
+            GalleryProductAction::SetComparison(payload) => {
+                payload.layout.validate()
+                    && payload.still_id.is_none_or(|still_id| still(still_id).is_some())
+            }
+            GalleryProductAction::ApplyShotMatch(payload) => {
+                still(payload.still_id).is_some()
+                    && !payload.version_name.trim().is_empty()
+                    && payload.target_statistics.validate().is_ok()
+                    && self.state.active_sequence().is_some_and(|sequence| {
+                        sequence.grade_definition(payload.definition_id).is_some_and(|definition| {
+                            definition.versions.len() < mondrian_core::MAX_GRADE_VERSIONS
+                                && definition.active().is_some()
+                        })
+                    })
+            }
+        }
+    }
+
     fn allows_visual_mask(&self, action: &VisualMaskProductAction) -> bool {
         visual_mask_action_available(self.state, action)
+    }
+}
+
+fn grade_scope_assignment(sequence: &Sequence, scope: GradeScope) -> Option<GradeDefinitionId> {
+    match scope {
+        GradeScope::Clip(clip_id) => sequence.find_clip(clip_id).and_then(|clip| clip.grade),
+        GradeScope::GroupPre(group_id) => sequence
+            .grade_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.pre_clip_grade),
+        GradeScope::GroupPost(group_id) => sequence
+            .grade_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.post_clip_grade),
+        GradeScope::Timeline => sequence.timeline_grade,
     }
 }
 
@@ -3145,9 +3628,33 @@ mod tests {
                     range: TimelineExportRange::EntireSequence,
                     output_path: PathBuf::from("delivery.mp4"),
                     output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                    regulatory_pse: None,
+                    frozen_ancillary: None,
+                    broadcast_qc: Some(mondrian_broadcast::BroadcastQcProfile {
+                        id: "external-broadcast-profile".to_owned(),
+                        edition: "2026-01".to_owned(),
+                        source_sha256: [3; 32],
+                        signal_color_space: mondrian_core::ColorSpace::Rec709,
+                        observation_tap: mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+                        active_picture: mondrian_broadcast::QcActivePicture::full(1920, 1080),
+                        rules: vec![mondrian_broadcast::BroadcastQcRule::SignalExcursion {
+                            rule_id: "delivery-signal".to_owned(),
+                            tolerance_per_mille: 50,
+                            maximum_coverage_ppm: 10_000,
+                            severity: mondrian_broadcast::BroadcastQcSeverity::Fail,
+                        }],
+                        maximum_retained_findings: 1_024,
+                        require_regulatory_flash_analysis: true,
+                        require_encoded_artifact_revalidation: true,
+                    }),
                 },
             ))),
             ProductAction::Export(ExportProductAction::Cancel(job_id)),
+            ProductAction::Export(ExportProductAction::EnqueueDraft),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ImportAncillary(PathBuf::from("canonical.json"))))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ClearAncillary))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ImportRegulatoryPse(PathBuf::from("pse.json"))))),
+            ProductAction::Export(ExportProductAction::EditDraft(Box::new(ExportDraftEdit::ClearRegulatoryPse))),
             ProductAction::Export(ExportProductAction::ClearTerminalHistory),
         ];
 
@@ -3171,6 +3678,18 @@ mod tests {
         let actions = [
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
                 VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GamutCompression },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload {
+                    clip_id,
+                    effect_type: EffectType::HighlightRecovery,
+                },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::HdrGrading },
             )),
             ProductAction::VisualEffect(VisualEffectProductAction::Select(
                 VisualEffectTargetPayload { clip_id, effect_id },
@@ -3260,6 +3779,21 @@ mod tests {
                     value: PropertyValue::Float(0.75),
                 },
             ))),
+            ProductAction::VisualMask(VisualMaskProductAction::StartTracking(
+                VisualMaskStartTrackingPayload {
+                    clip_id,
+                    mask_id,
+                    model: mondrian_core::mask_data::MaskTrackingModel::PlanarHomography,
+                    direction: mondrian_core::mask_data::MaskTrackingDirection::Both,
+                    settings: mondrian_core::mask_data::MaskTrackingSettings::default(),
+                },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::CancelTracking(
+                VisualMaskTargetPayload { clip_id, mask_id },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::RecomputeTracking(
+                VisualMaskTargetPayload { clip_id, mask_id },
+            )),
         ];
 
         for expected in actions {
@@ -3992,6 +4526,9 @@ mod tests {
             range: TimelineExportRange::EntireSequence,
             output_path: PathBuf::from("delivery.mp4"),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            broadcast_qc: None,
+            regulatory_pse: None,
+            frozen_ancillary: None,
         };
         let valid_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
             valid_request.clone(),
@@ -4004,6 +4541,35 @@ mod tests {
             },
         )));
         assert!(!state.product_action_availability().allows(&stale_enqueue));
+        let imf_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            TimelineExportRequest {
+                preset: ExportPreset::imf_app_prores_rdd45_1080p25(),
+                sequence_id: Some(sequence_id),
+                range: TimelineExportRange::EntireSequence,
+                output_path: PathBuf::from("delivery.imf"),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
+            },
+        )));
+        assert!(state.product_action_availability().allows(&imf_enqueue));
+        let mut invalid_dcp = ExportPreset::smpte_dcp_2k_flat_24();
+        invalid_dcp.resolution =
+            Some(mondrian_export::preset::Resolution { width: 2_048, height: 1_080 });
+        let dcp_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            TimelineExportRequest {
+                preset: invalid_dcp,
+                sequence_id: Some(sequence_id),
+                range: TimelineExportRange::EntireSequence,
+                output_path: PathBuf::from("delivery.dcp"),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
+            },
+        )));
+        assert!(!state.product_action_availability().allows(&dcp_enqueue));
         assert!(
             !state.product_action_availability().allows(&ProductAction::Export(
                 ExportProductAction::Cancel(JobId::new())

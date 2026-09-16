@@ -18,6 +18,7 @@ pub(super) struct PreviewSeekIndexDiagnostics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PreviewSeekResolution {
     pub(super) used_index: bool,
+    /// Container decode-order seek coordinate; never a covering-frame PTS proof.
     pub(super) anchor_pts: Option<i64>,
 }
 
@@ -45,7 +46,13 @@ impl PreviewSeekIndex {
         if !packet.is_key() {
             return;
         }
-        let Some(pts) = packet.pts().or_else(|| packet.dts()) else {
+        // FFmpeg's stream index and `avformat_seek_file` operate in packet
+        // decode-timestamp order. A reordered keyframe may have a later PTS
+        // than its index/DTS anchor; retaining that presentation timestamp as
+        // a seek anchor can make a backward seek report success without
+        // moving the demux cursor. PTS is only a fallback for containers that
+        // omit DTS entirely.
+        let Some(pts) = packet.dts().or_else(|| packet.pts()) else {
             return;
         };
         let inserted = self.insert_keyframe_pts(pts);
@@ -76,23 +83,6 @@ impl PreviewSeekIndex {
         match self.keyframe_pts.binary_search(&target_pts) {
             Ok(index) => self.keyframe_pts.get(index + 1).copied(),
             Err(index) => self.keyframe_pts.get(index).copied(),
-        }
-    }
-
-    pub(super) fn nearest_keyframe(&self, target_pts: i64) -> Option<i64> {
-        let before = self.keyframe_at_or_before(target_pts);
-        let after = self.keyframe_after(target_pts);
-        match (before, after) {
-            (Some(before), Some(after)) => {
-                if target_pts.saturating_sub(before) <= after.saturating_sub(target_pts) {
-                    Some(before)
-                } else {
-                    Some(after)
-                }
-            }
-            (Some(before), None) => Some(before),
-            (None, Some(after)) => Some(after),
-            (None, None) => None,
         }
     }
 

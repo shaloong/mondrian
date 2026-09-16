@@ -8,19 +8,18 @@
 //! monitor, or calibration texture can be created.
 
 use crate::{
-    ColorFrameEncoding, GpuColorFrameTextureFormat, HeterogeneousGpuRecordingRequirements,
-    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuSourceLayer,
-    ViewerGpuTransitionInput, ViewerSourceRect, GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO,
+    product_gpu_working_bytes_per_pixel, GpuColorFrameTextureFormat,
+    HeterogeneousGpuRecordingRequirements, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
+    ViewerGpuSourceLayer, ViewerGpuTransitionInput, ViewerSourceRect,
 };
 use mondrian_effects::EffectColorDomain;
-use mondrian_media::DecodedVideoSurfaceFormat;
 
 /// Texture demand attributed to one Viewer execution stage family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewerGpuActiveTextureDemand {
     /// Conservative number of simultaneously live texture resources.
     pub textures: u64,
-    /// Conservative logical texture bytes, excluding driver allocation padding.
+    /// Conservative logical texture, candidate transfer and YUV uniform bytes, excluding driver allocation padding.
     pub bytes: u64,
 }
 
@@ -85,6 +84,8 @@ pub enum ViewerGpuActiveWorkingSetStage {
     ProgramScopes,
     /// Preview-only Program Output to local-monitor adaptation.
     MonitorAdaptation,
+    /// Fused false-color/zebra/gamut warning output.
+    SignalMonitoring,
     /// Display-calibration output and 3D LUT.
     DisplayCalibration,
     /// Outputs detached into live presentation leases from earlier candidates.
@@ -125,6 +126,8 @@ pub struct ViewerGpuActiveWorkingSetEstimate {
     pub program_scopes: ViewerGpuActiveTextureDemand,
     /// Preview-only monitor-adaptation texture.
     pub monitor_adaptation: ViewerGpuActiveTextureDemand,
+    /// Optional fused monitoring output texture.
+    pub signal_monitoring: ViewerGpuActiveTextureDemand,
     /// Display-calibration output and 3D LUT.
     pub display_calibration: ViewerGpuActiveTextureDemand,
     /// Exact final texture that becomes the move-only presentation lease.
@@ -233,12 +236,26 @@ pub enum ViewerGpuActiveWorkingSetEstimateError {
 /// `max_active_texture_bytes` and `max_active_textures` must remain stable for
 /// one machine/quality class so pressure cannot silently change frame
 /// semantics or precision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ViewerGpuExecutionResourceGrant {
     pub(crate) output_pool: crate::GpuColorFrameWgpuResourcePoolOptions,
     max_active_texture_bytes: u64,
     max_active_textures: u64,
 }
+
+/// Maximum duplicate idle textures retained for one exact contract by the
+/// professional realtime Viewer profile.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT: usize = 3;
+/// Demand-driven idle texture ceiling for the professional realtime Viewer.
+///
+/// This is not preallocated. It is large enough to retain an 8K Float32
+/// working set between frames and remains subject to product memory-pressure
+/// trimming.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Hard active texture-byte admission ceiling for the professional realtime Viewer.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Hard active texture-count admission ceiling for the professional realtime Viewer.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES: u64 = 160;
 
 impl ViewerGpuExecutionResourceGrant {
     /// Build an idle-pool grant while retaining compatibility with isolated
@@ -255,6 +272,32 @@ impl ViewerGpuExecutionResourceGrant {
             max_active_texture_bytes: u64::MAX,
             max_active_textures: u64::MAX,
         }
+    }
+
+    /// Return the shared product and qualification grant for professional
+    /// realtime 4K/8K Viewer execution.
+    pub const fn professional_realtime() -> Self {
+        Self::new(
+            PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT,
+            PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES,
+        )
+        .with_active_limits(
+            PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES,
+            PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES,
+        )
+    }
+
+    /// Replace only the pressure-sensitive idle retention limits.
+    pub const fn with_idle_limits(
+        mut self,
+        max_idle_per_contract: usize,
+        max_idle_bytes: u64,
+    ) -> Self {
+        self.output_pool = crate::GpuColorFrameWgpuResourcePoolOptions {
+            max_per_contract: max_idle_per_contract,
+            max_retained_bytes: max_idle_bytes,
+        };
+        self
     }
 
     /// Install pressure-stable active-texture limits on this owner grant.
@@ -370,7 +413,7 @@ pub fn estimate_viewer_gpu_active_working_set(
                         ViewerGpuActiveTextureDemand::checked_repeated_texture(
                             request.width,
                             request.height,
-                            16,
+                            working_bytes_per_pixel(),
                             3,
                             ViewerGpuActiveWorkingSetStage::Effects,
                         )?,
@@ -418,7 +461,7 @@ pub fn estimate_viewer_gpu_active_working_set(
                         ViewerGpuActiveTextureDemand::checked_repeated_texture(
                             request.width,
                             request.height,
-                            16,
+                            working_bytes_per_pixel(),
                             textures,
                             ViewerGpuActiveWorkingSetStage::Transitions,
                         )?,
@@ -442,7 +485,7 @@ pub fn estimate_viewer_gpu_active_working_set(
     estimate.working_composite = ViewerGpuActiveTextureDemand::checked_repeated_texture(
         request.width,
         request.height,
-        16,
+        working_bytes_per_pixel(),
         composite_textures,
         ViewerGpuActiveWorkingSetStage::WorkingComposite,
     )?;
@@ -463,6 +506,19 @@ pub fn estimate_viewer_gpu_active_working_set(
             ViewerGpuActiveWorkingSetStage::MonitorAdaptation,
         )?;
     }
+    if request.signal_monitoring.is_some() {
+        let format = if request.monitor_adaptation.requires_pass() {
+            GpuColorFrameTextureFormat::Rgba16Float
+        } else {
+            program_output_texture_format(request)
+        };
+        estimate.signal_monitoring = ViewerGpuActiveTextureDemand::checked_texture(
+            request.output_width,
+            request.output_height,
+            u64::from(format.bytes_per_pixel()),
+            ViewerGpuActiveWorkingSetStage::SignalMonitoring,
+        )?;
+    }
     estimate.display_calibration = estimate_display_calibration(request)?;
     estimate.presentation_output = estimate_presentation_output(request)?;
     estimate.total = total_estimate(&estimate)?;
@@ -481,16 +537,33 @@ fn estimate_source(
     match source {
         ViewerGpuSourceLayer::Media {
             frame,
+            is_data_texture,
             gpu_source,
             native_source,
+            cpu_yuv_source,
             heterogeneous_input,
             effect_plan,
             frame_seed,
             ..
         } => {
             let mut effect_extent = None::<(u32, u32, u64)>;
+            if *is_data_texture
+                && (frame.is_none()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                    || heterogeneous_input.is_some())
+            {
+                return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                    reason: "DataTexture media must provide exactly one typed CPU numeric payload",
+                });
+            }
             if let Some(address) = heterogeneous_input {
-                if frame.is_some() || gpu_source.is_some() || native_source.is_some() {
+                if frame.is_some()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                {
                     return Err(
                         ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput {
                             reason: "heterogeneous media source is not exclusive",
@@ -566,50 +639,120 @@ fn estimate_source(
                 return Ok(());
             }
 
-            if let Some(source) = native_source {
-                let width = source.native_frame.width;
-                let height = source.native_frame.height;
-                let native_bytes = native_surface_texture_bytes(
-                    width,
-                    height,
-                    source.native_frame.surface_format,
+            if let Some(source) = cpu_yuv_source {
+                let working_bytes = checked_texture_bytes(
+                    source.materialization_width,
+                    source.materialization_height,
+                    working_bytes_per_pixel(),
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
+                let transfer_bytes = crate::cpu_yuv::cpu_yuv_upload_byte_count(&source.frame)
+                    .map_err(
+                        |_| ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                        },
+                    )?;
+                let bytes = u64::try_from(source.frame.retained_bytes())
+                    .ok()
+                    .and_then(|bytes| bytes.checked_add(working_bytes))
+                    .and_then(|bytes| bytes.checked_add(transfer_bytes))
+                    .and_then(|bytes| {
+                        bytes.checked_add(crate::GpuNativeYuvPreparedPass::uniform_byte_count())
+                    })
+                    .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                        stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                    })?;
+                estimate.source_preparation.checked_add(
+                    ViewerGpuActiveTextureDemand {
+                        textures: match source.frame.chroma_plane_layout() {
+                            mondrian_media::CpuYuvChromaPlaneLayout::Interleaved => 3,
+                            mondrian_media::CpuYuvChromaPlaneLayout::Planar => 4,
+                        },
+                        bytes,
+                    },
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                )?;
+                observe_effect_extent(
+                    &mut effect_extent,
+                    source.materialization_width,
+                    source.materialization_height,
+                )?;
+            }
+
+            if let Some(source) = native_source {
+                let width = source.materialization_width;
+                let height = source.materialization_height;
+                let Some(_surface_descriptor) = source.native_frame.surface_format.descriptor()
+                else {
+                    return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                        reason: "native source has an unsupported decoded surface format",
+                    });
+                };
                 let encoded_rgb_bytes = checked_texture_bytes(
                     width,
                     height,
-                    8,
+                    working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 let working_bytes = checked_texture_bytes(
                     width,
                     height,
-                    16,
+                    working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                // The media Frame Store separately governs the already-created
-                // decoder surface. Renderer native-import validation limits
-                // the bridge allocation to this same visible-byte envelope,
-                // followed by visible RGBA16F and RGBA32F outputs.
-                let bytes = native_bytes
-                    .checked_mul(GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO)
-                    .and_then(|bytes| bytes.checked_add(encoded_rgb_bytes))
-                    .and_then(|bytes| bytes.checked_add(working_bytes))
-                    .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                // The media Frame Store governs the adopted decoder surface.
+                // Keep the conservative two-pass bound for backends that
+                // materialize encoded RGB before OCIO. Fused direct inputs
+                // need only the working output, but do not expand this grant.
+                let bytes = encoded_rgb_bytes.checked_add(working_bytes).ok_or(
+                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                    })?;
+                    },
+                )?;
+                // The CUDA bridge owns one padded storage allocation, separate
+                // from Media's retained decoder surface. Its exact fixed-capacity
+                // policy is checked against Vulkan requirements before allocation.
+                #[cfg(target_os = "linux")]
+                let bytes = if source.native_frame.handle_kind()
+                    == mondrian_media::DecodedGpuFrameHandleKind::CudaDeviceMemory
+                {
+                    let component_bytes = match source.native_frame.surface_format {
+                        mondrian_media::DecodedVideoSurfaceFormat::Nv12 => 1,
+                        mondrian_media::DecodedVideoSurfaceFormat::P010 => 2,
+                        _ => {
+                            return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                                reason: "unsupported CUDA bridge surface",
+                            })
+                        }
+                    };
+                    let (_, _, capacity) = crate::native_video::cuda_buffer_layout(
+                        source.native_frame.width,
+                        source.native_frame.height,
+                        component_bytes,
+                    )
+                    .ok_or(
+                        ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                            reason: "CUDA bridge allocation overflow",
+                        },
+                    )?;
+                    bytes.checked_add(capacity).ok_or(
+                        ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                        },
+                    )?
+                } else {
+                    bytes
+                };
                 estimate.source_preparation.checked_add(
-                    ViewerGpuActiveTextureDemand { textures: 3, bytes },
+                    ViewerGpuActiveTextureDemand { textures: 2, bytes },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 observe_effect_extent(&mut effect_extent, width, height)?;
             }
             if let Some(source) = gpu_source {
                 let descriptor = source.source.descriptor();
-                let source_bpp = match descriptor.encoding {
-                    ColorFrameEncoding::EncodedRgba8 => 4,
-                    ColorFrameEncoding::LinearFloat | ColorFrameEncoding::EncodedFloat => 16,
-                    ColorFrameEncoding::DeviceFloat => 16,
-                };
+                let source_bpp =
+                    u64::from(source.source.gpu_upload_texture_format().bytes_per_pixel());
                 estimate.source_preparation.checked_add(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
@@ -623,7 +766,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
                         descriptor.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -636,7 +779,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
                         descriptor.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -649,12 +792,21 @@ fn estimate_source(
                 });
             };
             if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+                let effect_textures = if *is_data_texture {
+                    // The typed numeric source must first cross the explicit
+                    // compositor bypass; conservatively retain both working
+                    // accumulator textures before the ordinary three-texture
+                    // external-domain round trip.
+                    5
+                } else {
+                    3
+                };
                 estimate.effects.checked_add(
                     ViewerGpuActiveTextureDemand::checked_repeated_texture(
                         effect_width,
                         effect_height,
-                        16,
-                        3,
+                        working_bytes_per_pixel(),
+                        effect_textures,
                         ViewerGpuActiveWorkingSetStage::Effects,
                     )?,
                     ViewerGpuActiveWorkingSetStage::Effects,
@@ -668,7 +820,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         request.width,
                         request.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -677,7 +829,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_repeated_texture(
                         request.width,
                         request.height,
-                        16,
+                        working_bytes_per_pixel(),
                         3,
                         ViewerGpuActiveWorkingSetStage::Effects,
                     )?,
@@ -725,7 +877,12 @@ fn observe_effect_extent(
     width: u32,
     height: u32,
 ) -> Result<(), ViewerGpuActiveWorkingSetEstimateError> {
-    let bytes = checked_texture_bytes(width, height, 16, ViewerGpuActiveWorkingSetStage::Effects)?;
+    let bytes = checked_texture_bytes(
+        width,
+        height,
+        working_bytes_per_pixel(),
+        ViewerGpuActiveWorkingSetStage::Effects,
+    )?;
     if current.is_none_or(|(_, _, current_bytes)| bytes > current_bytes) {
         *current = Some((width, height, bytes));
     }
@@ -757,7 +914,7 @@ fn estimate_spatial(
             ViewerGpuActiveTextureDemand::checked_texture(
                 selected_width,
                 selected_height,
-                16,
+                working_bytes_per_pixel(),
                 ViewerGpuActiveWorkingSetStage::Spatial,
             )?,
             ViewerGpuActiveWorkingSetStage::Spatial,
@@ -767,7 +924,7 @@ fn estimate_spatial(
         ViewerGpuActiveTextureDemand::checked_texture(
             request.output_width,
             selected_height,
-            16,
+            working_bytes_per_pixel(),
             ViewerGpuActiveWorkingSetStage::Spatial,
         )?,
         ViewerGpuActiveWorkingSetStage::Spatial,
@@ -776,12 +933,16 @@ fn estimate_spatial(
         ViewerGpuActiveTextureDemand::checked_texture(
             request.output_width,
             request.output_height,
-            16,
+            working_bytes_per_pixel(),
             ViewerGpuActiveWorkingSetStage::Spatial,
         )?,
         ViewerGpuActiveWorkingSetStage::Spatial,
     )?;
     Ok(demand)
+}
+
+const fn working_bytes_per_pixel() -> u64 {
+    product_gpu_working_bytes_per_pixel() as u64
 }
 
 fn should_prefilter(
@@ -853,7 +1014,7 @@ fn estimate_display_calibration(
 fn program_output_texture_format(
     request: &ViewerGpuExecutionRequest<'_>,
 ) -> GpuColorFrameTextureFormat {
-    if request.monitor_adaptation.requires_pass() {
+    if request.monitor_adaptation.requires_pass() || request.signal_monitoring.is_some() {
         GpuColorFrameTextureFormat::Rgba16Float
     } else {
         match request.output_precision {
@@ -868,19 +1029,22 @@ fn program_output_texture_format(
 fn estimate_presentation_output(
     request: &ViewerGpuExecutionRequest<'_>,
 ) -> Result<ViewerGpuActiveTextureDemand, ViewerGpuActiveWorkingSetEstimateError> {
-    let texture_format =
-        if request.display_calibration.is_some() || request.monitor_adaptation.requires_pass() {
-            // The calibrated output and the monitor-adaptation output both
-            // become RGBA16F presentation leases.
-            GpuColorFrameTextureFormat::Rgba16Float
-        } else {
-            match request.output_precision {
-                crate::ViewerGpuOutputPrecision::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
-                crate::ViewerGpuOutputPrecision::EncodedFloat16 => {
-                    GpuColorFrameTextureFormat::Rgba16Float
-                }
+    let texture_format = if request.display_calibration.is_some()
+        || request.monitor_adaptation.requires_pass()
+        || request.signal_monitoring.is_some()
+    {
+        // The calibrated output and the monitor-adaptation output both
+        // become RGBA16F presentation leases. Signal monitoring likewise
+        // preserves encoded excursions until its classification pass.
+        GpuColorFrameTextureFormat::Rgba16Float
+    } else {
+        match request.output_precision {
+            crate::ViewerGpuOutputPrecision::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
+            crate::ViewerGpuOutputPrecision::EncodedFloat16 => {
+                GpuColorFrameTextureFormat::Rgba16Float
             }
-        };
+        }
+    };
     ViewerGpuActiveTextureDemand::checked_texture(
         request.output_width,
         request.output_height,
@@ -902,6 +1066,7 @@ fn total_estimate(
         estimate.program_output,
         estimate.program_scopes,
         estimate.monitor_adaptation,
+        estimate.signal_monitoring,
         estimate.display_calibration,
         estimate.detached_presentations,
         estimate.presentation_continuity_reserve,
@@ -966,41 +1131,138 @@ fn checked_texture_bytes(
         .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage })
 }
 
-fn native_surface_texture_bytes(
-    width: u32,
-    height: u32,
-    format: DecodedVideoSurfaceFormat,
-) -> Result<u64, ViewerGpuActiveWorkingSetEstimateError> {
-    let stage = ViewerGpuActiveWorkingSetStage::SourcePreparation;
-    let pixels = u64::from(width)
-        .checked_mul(u64::from(height))
-        .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
-    match format {
-        DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::Yuv420p => pixels
-            .checked_mul(3)
-            .and_then(|bytes| bytes.checked_add(1))
-            .map(|bytes| bytes / 2)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::P010 | DecodedVideoSurfaceFormat::Yuv420p10le => pixels
-            .checked_mul(3)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Rgba8 | DecodedVideoSurfaceFormat::Bgra8 => pixels
-            .checked_mul(4)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Unknown | DecodedVideoSurfaceFormat::Other => {
-            Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
-                reason: "native source has an unsupported decoded surface format",
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_materialization_charges_output_extent_and_full_cuda_storage() {
+        use mondrian_media::{
+            DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoMatrix,
+            DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+            PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
+            PreviewNativeDecodedFrameResource,
+        };
+        #[derive(Debug)]
+        struct EstimateOnlyResource(DecodedGpuFrameHandleKind);
+        impl PreviewNativeDecodedFrameResource for EstimateOnlyResource {
+            fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+                self.0
+            }
+            fn handle_id(&self) -> std::num::NonZeroU64 {
+                std::num::NonZeroU64::new(1).expect("test identity")
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let fixture = tempfile::tempdir().expect("diagnostic fixture");
+        let path = fixture.path().join("diagnostic.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        bytes.extend_from_slice(&[128; 12]);
+        std::fs::write(&path, bytes).expect("tiny CPU fixture");
+        let mut decoder = mondrian_media::PreviewDecodeSessionContext::new();
+        let mut request = mondrian_media::PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            mondrian_media::PreviewDecodeAccessMode::PlaybackCursor,
+            mondrian_media::PreviewSourceColorContract::automatic(
+                ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv;
+        let mondrian_media::PreviewDecodeOutcome::CpuYuvFrame(decoded) =
+            decoder.decode_cancellable(request, || false).expect("CPU diagnostics")
+        else {
+            panic!("CPU YUV fixture");
+        };
+        decoder.clear();
+        let (_, effect_plan) = identity_effect();
+        for kind in [
+            DecodedGpuFrameHandleKind::VaapiSurface,
+            DecodedGpuFrameHandleKind::CudaDeviceMemory,
+        ] {
+            for (surface, depth, cuda_bytes) in [
+                (DecodedVideoSurfaceFormat::Nv12, 8, 12_451_840u64),
+                (DecodedVideoSurfaceFormat::P010, 10, 24_903_680),
+            ] {
+                // Pure admission data, never presented as a physical GPU fixture.
+                let native_frame = Arc::new(
+                    PreviewNativeDecodedFrame::new(
+                        3840,
+                        2160,
+                        PreviewNativeDecodedFrameHandle::new(EstimateOnlyResource(kind)),
+                        surface,
+                        DecodedVideoSampling {
+                            matrix: DecodedVideoMatrix::Bt709,
+                            range: DecodedVideoRange::Limited,
+                            chroma_location: DecodedVideoChromaLocation::Left,
+                            bit_depth: depth,
+                        },
+                        decoded.diagnostics,
+                    )
+                    .expect("native contract"),
+                );
+                let layers = [ViewerGpuExecutionLayer::Source(Box::new(
+                    ViewerGpuSourceLayer::Media {
+                        frame: None,
+                        is_data_texture: false,
+                        gpu_source: None,
+                        cpu_yuv_source: None,
+                        heterogeneous_input: None,
+                        native_source: Some(crate::ViewerGpuNativeSource {
+                            source_color_space: ColorSpace::Rec709,
+                            input_transform: crate::RenderInputTransform::to_working_gpu(
+                                WorkingColorSpace::LinearRec709,
+                                true,
+                                ColorEngine::mondrian_standard(),
+                            ),
+                            materialization_width: 1920,
+                            materialization_height: 1080,
+                            native_frame,
+                        }),
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_plan: Arc::clone(&effect_plan),
+                        frame_seed: 0,
+                    },
+                ))];
+                with_request(1920, 1080, &layers, |request| {
+                    let estimate =
+                        estimate_viewer_gpu_active_working_set(request).expect("estimate");
+                    let extra = if kind == DecodedGpuFrameHandleKind::CudaDeviceMemory {
+                        cuda_bytes
+                    } else {
+                        0
+                    };
+                    let expected = 1920 * 1080 * 16 * 2 + extra;
+                    assert_eq!(
+                        estimate.source_preparation,
+                        ViewerGpuActiveTextureDemand { textures: 2, bytes: expected }
+                    );
+                    let grant = ViewerGpuExecutionResourceGrant::new(0, 0)
+                        .with_active_limits(estimate.total().bytes, estimate.total().textures);
+                    assert!(grant.admit_active_working_set(estimate).is_ok());
+                    assert!(matches!(
+                        grant
+                            .with_active_limits(
+                                estimate.total().bytes - 1,
+                                estimate.total().textures
+                            )
+                            .admit_active_working_set(estimate),
+                        Err(ViewerGpuActiveWorkingSetAdmissionError::GrantExceeded { .. })
+                    ));
+                });
+            }
+        }
+    }
+
     use super::*;
     use crate::{
-        CpuColorFrame, RenderMonitorAdaptation, RenderOutputColorBoundary, TimelineSolidColorLayer,
-        ViewerGpuOutputPrecision,
+        CpuColorFrame, GpuSignalMonitorRequest, RenderMonitorAdaptation, RenderOutputColorBoundary,
+        TimelineSolidColorLayer, ViewerGpuOutputPrecision,
     };
     use mondrian_core::display_calibration::{DisplayCalibrationLut3d, IccProfileFingerprint};
     use mondrian_core::{
@@ -1057,6 +1319,7 @@ mod tests {
             output_precision: ViewerGpuOutputPrecision::Encoded8,
             display_calibration: None,
             program_scopes: None,
+            signal_monitoring: None,
         })
     }
 
@@ -1119,28 +1382,32 @@ mod tests {
             })
         };
         let layers = [
-            ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
+                is_data_texture: false,
                 gpu_source: None,
                 native_source: None,
+                cpu_yuv_source: None,
                 heterogeneous_input: None,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Arc::clone(&effect_plan),
                 frame_seed: 0,
-            }),
-            ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            })),
+            ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
+                is_data_texture: false,
                 gpu_source: None,
                 native_source: None,
+                cpu_yuv_source: None,
                 heterogeneous_input: None,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan,
                 frame_seed: 0,
-            }),
+            })),
         ];
 
         with_request(4, 4, &layers, |request| {
@@ -1158,7 +1425,7 @@ mod tests {
     fn cross_dissolve_accounts_for_both_endpoint_accumulators_and_output() {
         let (graph, effect_plan) = identity_effect();
         let source = |color, seed| {
-            ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::SolidColor {
+            ViewerGpuTransitionInput::Source(Box::new(ViewerGpuSourceLayer::SolidColor {
                 layer: TimelineSolidColorLayer {
                     color,
                     opacity: 1.0,
@@ -1168,7 +1435,7 @@ mod tests {
                     frame_seed: seed,
                 },
                 effect_plan: Arc::clone(&effect_plan),
-            })
+            }))
         };
         let layers = [ViewerGpuExecutionLayer::CrossDissolve(Box::new(
             crate::ViewerGpuCrossDissolveLayer {
@@ -1275,6 +1542,7 @@ mod tests {
                     output_precision,
                     display_calibration,
                     program_scopes: None,
+                    signal_monitoring: None,
                 })
                 .expect("Viewer working-set estimate")
             };
@@ -1282,6 +1550,36 @@ mod tests {
         let encoded = estimate_for(&identity_monitor, ViewerGpuOutputPrecision::Encoded8, None);
         assert_eq!(encoded.presentation_output, encoded.program_output);
         assert_eq!(encoded.presentation_output.bytes, 4 * 4 * 4);
+
+        let signal_monitoring = GpuSignalMonitorRequest::new(
+            mondrian_core::SignalComplianceContract::normalized_rgb(ColorSpace::Rec709)
+                .expect("signal contract"),
+            mondrian_core::SignalMonitoringSettings { gamut_alarm: true, ..Default::default() },
+            mondrian_core::ProgramScopesTap::ProgramOutput,
+        )
+        .expect("active signal monitoring");
+        let monitored = estimate_viewer_gpu_active_working_set(&ViewerGpuExecutionRequest {
+            sequence_id: SequenceId::new(),
+            timeline_frame: 0,
+            width: 4,
+            height: 4,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &[],
+            heterogeneous_inputs: Vec::new(),
+            program_output_boundary: &boundary,
+            monitor_adaptation: &identity_monitor,
+            source_rect: ViewerSourceRect::FULL,
+            output_width: 4,
+            output_height: 4,
+            output_precision: ViewerGpuOutputPrecision::Encoded8,
+            display_calibration: None,
+            program_scopes: None,
+            signal_monitoring: Some(signal_monitoring),
+        })
+        .expect("monitored Viewer working-set estimate");
+        assert_eq!(monitored.program_output.bytes, 4 * 4 * 8);
+        assert_eq!(monitored.signal_monitoring.bytes, 4 * 4 * 8);
+        assert_eq!(monitored.presentation_output, monitored.signal_monitoring);
 
         let adapted = estimate_for(&adapted_monitor, ViewerGpuOutputPrecision::Encoded8, None);
         assert_eq!(adapted.presentation_output, adapted.monitor_adaptation);

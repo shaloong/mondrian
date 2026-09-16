@@ -13,10 +13,31 @@ pub(super) fn decoded_surface_format_from_pixel(
     match pixel {
         ffmpeg::util::format::pixel::Pixel::NV12 => DecodedVideoSurfaceFormat::Nv12,
         ffmpeg::util::format::pixel::Pixel::P010LE => DecodedVideoSurfaceFormat::P010,
+        ffmpeg::util::format::pixel::Pixel::P012LE => DecodedVideoSurfaceFormat::P012,
+        ffmpeg::util::format::pixel::Pixel::P016LE => DecodedVideoSurfaceFormat::P016,
+        ffmpeg::util::format::pixel::Pixel::P210LE => DecodedVideoSurfaceFormat::P210,
+        ffmpeg::util::format::pixel::Pixel::P212LE => DecodedVideoSurfaceFormat::P212,
+        ffmpeg::util::format::pixel::Pixel::P216LE => DecodedVideoSurfaceFormat::P216,
+        ffmpeg::util::format::pixel::Pixel::P410LE => DecodedVideoSurfaceFormat::P410,
+        ffmpeg::util::format::pixel::Pixel::P412LE => DecodedVideoSurfaceFormat::P412,
+        ffmpeg::util::format::pixel::Pixel::P416LE => DecodedVideoSurfaceFormat::P416,
+        ffmpeg::util::format::pixel::Pixel::Y210LE => DecodedVideoSurfaceFormat::Y210,
+        ffmpeg::util::format::pixel::Pixel::Y212LE => DecodedVideoSurfaceFormat::Y212,
+        ffmpeg::util::format::pixel::Pixel::XV30LE => DecodedVideoSurfaceFormat::Xv30,
+        ffmpeg::util::format::pixel::Pixel::XV36LE => DecodedVideoSurfaceFormat::Xv36,
         ffmpeg::util::format::pixel::Pixel::YUV420P => DecodedVideoSurfaceFormat::Yuv420p,
         ffmpeg::util::format::pixel::Pixel::YUV420P10LE => DecodedVideoSurfaceFormat::Yuv420p10le,
+        ffmpeg::util::format::pixel::Pixel::YUV420P12LE => DecodedVideoSurfaceFormat::Yuv420p12le,
+        ffmpeg::util::format::pixel::Pixel::YUV422P => DecodedVideoSurfaceFormat::Yuv422p,
+        ffmpeg::util::format::pixel::Pixel::YUV422P10LE => DecodedVideoSurfaceFormat::Yuv422p10le,
+        ffmpeg::util::format::pixel::Pixel::YUV422P12LE => DecodedVideoSurfaceFormat::Yuv422p12le,
+        ffmpeg::util::format::pixel::Pixel::YUV444P => DecodedVideoSurfaceFormat::Yuv444p,
+        ffmpeg::util::format::pixel::Pixel::YUV444P10LE => DecodedVideoSurfaceFormat::Yuv444p10le,
+        ffmpeg::util::format::pixel::Pixel::YUV444P12LE => DecodedVideoSurfaceFormat::Yuv444p12le,
         ffmpeg::util::format::pixel::Pixel::RGBA => DecodedVideoSurfaceFormat::Rgba8,
         ffmpeg::util::format::pixel::Pixel::BGRA => DecodedVideoSurfaceFormat::Bgra8,
+        ffmpeg::util::format::pixel::Pixel::RGBAF16LE => DecodedVideoSurfaceFormat::Rgba16Float,
+        ffmpeg::util::format::pixel::Pixel::RGBAF32LE => DecodedVideoSurfaceFormat::Rgba32Float,
         _ => DecodedVideoSurfaceFormat::Other,
     }
 }
@@ -40,8 +61,27 @@ pub(super) fn decoded_video_sampling_from_frame_and_surface(
         },
         range: decoded_video_range_from_ffmpeg(frame.color_range()),
         chroma_location: decoded_chroma_location_from_ffmpeg(frame.chroma_location()),
-        bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
+        bit_depth: decoded_bit_depth_from_pixel(frame.format())
+            .or_else(|| surface_format.fixed_bit_depth())
+            .unwrap_or(0),
     }
+}
+
+fn decoded_bit_depth_from_pixel(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<u8> {
+    let descriptor = pixel.descriptor()?;
+    let component_count = usize::from(descriptor.nb_components()).min(4);
+    if component_count == 0 {
+        return None;
+    }
+    // SAFETY: FFmpeg owns this static descriptor and `component_count` is
+    // bounded to the four entries in AVPixFmtDescriptor::comp.
+    let depth = unsafe {
+        (&(*descriptor.as_ptr()).comp)[..component_count]
+            .iter()
+            .map(|component| component.depth)
+            .max()
+    }?;
+    u8::try_from(depth).ok().filter(|depth| *depth > 0)
 }
 
 fn decoded_chroma_location_from_ffmpeg(
@@ -113,6 +153,14 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
             DecodedVideoRange::Full,
         ));
     }
+    if source.is_data_texture() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "data-texture materialization requires RGB/GBR decoder samples, got {pixel_format:?}"
+            ),
+        });
+    }
 
     let decoded_matrix =
         decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
@@ -125,7 +173,7 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         asset_id: path.display().to_string(),
         reason: format!(
             "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
-            source.color_space
+            source.color_space()
         ),
     })?;
     if matrix == DecodedVideoMatrix::Rgb {

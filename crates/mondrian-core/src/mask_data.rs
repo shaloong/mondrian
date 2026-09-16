@@ -4,8 +4,8 @@
 //! in `mondrian-effects::mask_raster`.
 
 use crate::automation::{PropertyBag, PropertyValue};
-use crate::types::{KeyframeId, MaskId};
-use crate::{AuthoringList, TimelineTime};
+use crate::types::{KeyframeId, MaskId, TrackingId};
+use crate::{AuthoringList, MediaFileFingerprint, TimelineTime};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +79,169 @@ pub enum MaskShapeInterpolation {
     Hold,
     /// Interpolate every compatible geometric degree of freedom.
     Linear,
+}
+
+/// Motion model used to generate one Mask shape track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskTrackingModel {
+    /// Robust 2-D target translation. Geometry type and size are preserved.
+    #[default]
+    ObjectTranslation,
+    /// Eight-degree-of-freedom projective plane transform.
+    PlanarHomography,
+}
+
+/// Which side of the anchor frame one tracking request analyzes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskTrackingDirection {
+    /// Analyze from the anchor toward the Clip out-point.
+    #[default]
+    Forward,
+    /// Analyze from the anchor toward the Clip in-point.
+    Backward,
+    /// Analyze both sides and publish one ordered shape track.
+    Both,
+}
+
+/// Persisted, bounded settings required to deterministically recompute a track.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskTrackingSettings {
+    /// Longest decoded analysis-raster edge.
+    pub analysis_max_dimension: u32,
+    /// Maximum retained spatial features per frame pair.
+    pub max_features: u16,
+    /// Integer search radius in analysis pixels.
+    pub search_radius: u16,
+    /// Patch radius in analysis pixels.
+    pub patch_radius: u8,
+    /// Minimum accepted inlier ratio.
+    pub minimum_inlier_ratio: f32,
+}
+
+impl Default for MaskTrackingSettings {
+    fn default() -> Self {
+        Self {
+            analysis_max_dimension: 960,
+            max_features: 192,
+            search_radius: 24,
+            patch_radius: 4,
+            minimum_inlier_ratio: 0.45,
+        }
+    }
+}
+
+impl MaskTrackingSettings {
+    /// Validate persisted resource bounds and quality thresholds.
+    pub fn validate(self) -> crate::Result<()> {
+        if !(160..=2_048).contains(&self.analysis_max_dimension) {
+            return Err(tracking_validation_error(
+                "analysis_max_dimension must be within 160..=2048",
+            ));
+        }
+        if !(16..=1_024).contains(&self.max_features) {
+            return Err(tracking_validation_error(
+                "max_features must be within 16..=1024",
+            ));
+        }
+        if !(2..=128).contains(&self.search_radius) {
+            return Err(tracking_validation_error(
+                "search_radius must be within 2..=128",
+            ));
+        }
+        if !(2..=12).contains(&self.patch_radius) {
+            return Err(tracking_validation_error(
+                "patch_radius must be within 2..=12",
+            ));
+        }
+        if !self.minimum_inlier_ratio.is_finite()
+            || !(0.1..=1.0).contains(&self.minimum_inlier_ratio)
+        {
+            return Err(tracking_validation_error(
+                "minimum_inlier_ratio must be finite and within 0.1..=1.0",
+            ));
+        }
+        // Bound the cross-product, not only each knob. An individually valid
+        // feature/search/patch combination can otherwise create billions of
+        // normalized-correlation sample visits for every adjacent frame pair.
+        const MAX_PATCH_SAMPLE_VISITS_PER_PAIR: u64 = 128_000_000;
+        let search_width = u64::from(self.search_radius) * 2 + 1;
+        let search_candidates = search_width * search_width + 25;
+        let patch_width = u64::from(self.patch_radius) + 1;
+        let sample_visits =
+            u64::from(self.max_features) * search_candidates * patch_width * patch_width * 2;
+        if sample_visits > MAX_PATCH_SAMPLE_VISITS_PER_PAIR {
+            return Err(tracking_validation_error(format!(
+                "feature/search/patch combination exceeds the per-frame-pair analysis budget ({sample_visits}>{MAX_PATCH_SAMPLE_VISITS_PER_PAIR})"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Recomputable author intent and source evidence for generated Mask keys.
+///
+/// Decoded frames, image pyramids, feature tracks, and result caches remain
+/// runtime artifacts. Only this bounded recipe and the generated shape keys
+/// enter the Project document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskTrackingRecipe {
+    /// Stable identity of this analysis lineage.
+    pub id: TrackingId,
+    /// Requested motion model.
+    pub model: MaskTrackingModel,
+    /// Requested traversal direction.
+    pub direction: MaskTrackingDirection,
+    /// Exact Clip-local anchor time.
+    pub anchor_time: TimelineTime,
+    /// Inclusive Clip-local generated-key range start.
+    pub range_start: TimelineTime,
+    /// Inclusive Clip-local generated-key range end.
+    pub range_end: TimelineTime,
+    /// Bounded deterministic analysis settings.
+    pub settings: MaskTrackingSettings,
+    /// Source revision analyzed by the completed result.
+    pub source_fingerprint: MediaFileFingerprint,
+    /// Exact physical video stream analyzed by the completed result.
+    pub video_stream_index: u32,
+    /// Mean accepted inlier ratio across generated frame pairs.
+    pub mean_inlier_ratio: f32,
+    /// Worst accepted inlier ratio across generated frame pairs.
+    pub minimum_observed_inlier_ratio: f32,
+}
+
+impl MaskTrackingRecipe {
+    /// Validate ordering, resource bounds, source evidence, and quality evidence.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.range_start > self.anchor_time || self.anchor_time > self.range_end {
+            return Err(tracking_validation_error(
+                "tracking range must contain the anchor time",
+            ));
+        }
+        self.settings.validate()?;
+        if !self.source_fingerprint.authorizes_reuse() {
+            return Err(tracking_validation_error(
+                "tracking recipe requires a complete source fingerprint",
+            ));
+        }
+        for (name, value) in [
+            ("mean_inlier_ratio", self.mean_inlier_ratio),
+            (
+                "minimum_observed_inlier_ratio",
+                self.minimum_observed_inlier_ratio,
+            ),
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(tracking_validation_error(format!(
+                    "{name} must be finite and normalized"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One stable Clip-local Mask shape key.
@@ -200,6 +363,10 @@ pub struct MaskComponent {
     pub enabled: bool,
     pub locked: bool,
     pub shape_animation_enabled: bool,
+    /// Last completed recomputable tracking lineage, when shape keys were
+    /// generated by the tracking product path.
+    #[serde(default)]
+    pub tracking: Option<MaskTrackingRecipe>,
 }
 
 impl PartialEq for MaskComponent {
@@ -211,6 +378,7 @@ impl PartialEq for MaskComponent {
             && self.enabled == other.enabled
             && self.locked == other.locked
             && self.shape_animation_enabled == other.shape_animation_enabled
+            && self.tracking == other.tracking
     }
 }
 
@@ -315,6 +483,7 @@ impl MaskComponent {
             enabled: true,
             locked: false,
             shape_animation_enabled: false,
+            tracking: None,
         }
     }
 
@@ -373,6 +542,15 @@ impl MaskComponent {
         }
         for key in &self.shape_keyframes {
             validate_shape(self.id, &key.shape)?;
+        }
+        if let Some(recipe) = &self.tracking {
+            recipe.validate()?;
+            if !self.shape_animation_enabled {
+                return Err(mask_validation_error(
+                    self.id,
+                    "a tracked Mask must keep shape animation enabled",
+                ));
+            }
         }
 
         self.properties.validate()?;
@@ -438,6 +616,7 @@ impl MaskComponent {
         }]
         .into();
         self.shape_animation_enabled = false;
+        self.tracking = None;
         Ok(true)
     }
 
@@ -471,6 +650,7 @@ impl MaskComponent {
             }
             existing.shape = shape;
             existing.interpolation = interpolation;
+            candidate.tracking = None;
             let id = existing.id;
             candidate.validate_author_state()?;
             *self = candidate;
@@ -486,9 +666,80 @@ impl MaskComponent {
         let id = key.id;
         candidate.shape_keyframes.push(key);
         candidate.shape_keyframes.sort_by_key(|key| key.time);
+        candidate.tracking = None;
         candidate.validate_author_state()?;
         *self = candidate;
         Ok(Some(id))
+    }
+
+    /// Atomically replace one inclusive time range with generated tracking keys.
+    ///
+    /// Existing exact-time key identities are retained. Keys outside the
+    /// generated range remain untouched; the complete candidate is validated
+    /// before publication so cancellation or malformed analysis can never
+    /// leave a partially generated track.
+    pub fn apply_tracking_result(
+        &mut self,
+        recipe: MaskTrackingRecipe,
+        generated: Vec<(TimelineTime, MaskShape)>,
+    ) -> Result<bool, crate::MondrianError> {
+        recipe.validate()?;
+        if generated.is_empty() {
+            return Err(tracking_validation_error(
+                "tracking result must contain at least one generated shape",
+            ));
+        }
+        let mut generated = generated;
+        generated.sort_by_key(|(time, _)| *time);
+        if generated.first().map(|entry| entry.0) != Some(recipe.range_start)
+            || generated.last().map(|entry| entry.0) != Some(recipe.range_end)
+        {
+            return Err(tracking_validation_error(
+                "tracking result does not cover its declared inclusive range",
+            ));
+        }
+        if !generated.iter().any(|(time, _)| *time == recipe.anchor_time) {
+            return Err(tracking_validation_error(
+                "tracking result does not contain its anchor key",
+            ));
+        }
+        for pair in generated.windows(2) {
+            if pair[0].0 >= pair[1].0 {
+                return Err(tracking_validation_error(
+                    "tracking result times must be strictly increasing",
+                ));
+            }
+        }
+        let mut candidate = self.clone();
+        let retained_ids = candidate
+            .shape_keyframes
+            .iter()
+            .map(|key| (key.time, key.id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        candidate
+            .shape_keyframes
+            .retain(|key| key.time < recipe.range_start || key.time > recipe.range_end);
+        for (time, shape) in generated {
+            validate_shape(self.id, &shape)?;
+            candidate.shape_keyframes.push(MaskShapeKeyframe {
+                id: retained_ids.get(&time).copied().unwrap_or_else(KeyframeId::new),
+                time,
+                shape,
+                interpolation: MaskShapeInterpolation::Linear,
+            });
+        }
+        candidate.shape_keyframes.sort_by_key(|key| key.time);
+        if let Some(last) = candidate.shape_keyframes.last_mut() {
+            last.interpolation = MaskShapeInterpolation::Hold;
+        }
+        candidate.shape_animation_enabled = true;
+        candidate.tracking = Some(recipe);
+        candidate.validate_author_state()?;
+        if *self == candidate {
+            return Ok(false);
+        }
+        *self = candidate;
+        Ok(true)
     }
 
     /// Evaluate the mask properties at a given time.
@@ -760,10 +1011,41 @@ impl crate::AuthoringFootprint for MaskComponent {
             enabled: _,
             locked: _,
             shape_animation_enabled: _,
+            tracking,
         } = self;
         collector.collect(name)?;
         collector.collect(shape_keyframes)?;
-        collector.collect(properties)
+        collector.collect(properties)?;
+        collector.collect(tracking)
+    }
+}
+
+impl crate::AuthoringFootprint for MaskTrackingRecipe {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            id: _,
+            model: _,
+            direction: _,
+            anchor_time: _,
+            range_start: _,
+            range_end: _,
+            settings: _,
+            source_fingerprint: _,
+            video_stream_index: _,
+            mean_inlier_ratio: _,
+            minimum_observed_inlier_ratio: _,
+        } = self;
+        Ok(())
+    }
+}
+
+fn tracking_validation_error(reason: impl Into<String>) -> crate::MondrianError {
+    crate::MondrianError::WorkflowStepFailed {
+        step_id: "mask_tracking".to_owned(),
+        reason: reason.into(),
     }
 }
 
@@ -771,6 +1053,19 @@ impl crate::AuthoringFootprint for MaskComponent {
 mod tests {
     use super::*;
     use crate::automation::{InterpolationType, PropertyValue};
+
+    fn complete_fingerprint() -> MediaFileFingerprint {
+        MediaFileFingerprint {
+            len: Some(1024),
+            modified_secs: Some(7),
+            modified_nanos: Some(11),
+            object_identity: Some(crate::MediaFileObjectIdentity::Windows {
+                volume_serial_number: 13,
+                file_id: [17; 16],
+            }),
+            change_stamp: Some(crate::MediaFileChangeStamp::WindowsFileTime(19)),
+        }
+    }
 
     fn tt(hundredths: i64) -> TimelineTime {
         TimelineTime::new(hundredths, 100).expect("valid test time")
@@ -784,6 +1079,80 @@ mod tests {
         assert_eq!(result.feather, 5.0);
         let result2 = mc.evaluate_at(tt(100));
         assert_eq!(result2.feather, 5.0);
+    }
+
+    #[test]
+    fn tracking_result_is_atomic_preserves_exact_key_identity_and_round_trips() {
+        let mut mask = MaskComponent::new("Tracked".into(), MaskEvaluation::default());
+        let original_key_id = mask.shape_keyframes[0].id;
+        let recipe = MaskTrackingRecipe {
+            id: TrackingId::new(),
+            model: MaskTrackingModel::ObjectTranslation,
+            direction: MaskTrackingDirection::Forward,
+            anchor_time: TimelineTime::ZERO,
+            range_start: TimelineTime::ZERO,
+            range_end: tt(2),
+            settings: MaskTrackingSettings::default(),
+            source_fingerprint: complete_fingerprint(),
+            video_stream_index: 3,
+            mean_inlier_ratio: 0.8,
+            minimum_observed_inlier_ratio: 0.7,
+        };
+        let moved = MaskShape::Rectangle {
+            x: 0.15,
+            y: 0.1,
+            width: 0.8,
+            height: 0.8,
+            corner_radius: 0.0,
+        };
+        assert!(mask
+            .apply_tracking_result(
+                recipe.clone(),
+                vec![
+                    (TimelineTime::ZERO, MaskShape::default()),
+                    (tt(1), moved.clone()),
+                    (tt(2), moved),
+                ],
+            )
+            .expect("apply tracking"));
+        assert_eq!(mask.shape_keyframes[0].id, original_key_id);
+        assert_eq!(mask.tracking, Some(recipe));
+        let reopened: MaskComponent =
+            serde_json::from_str(&serde_json::to_string(&mask).expect("serialize tracked Mask"))
+                .expect("reopen tracked Mask");
+        assert_eq!(reopened, mask);
+
+        let before = mask.clone();
+        let mut invalid_recipe = mask.tracking.clone().expect("recipe");
+        invalid_recipe.range_end = tt(3);
+        assert!(mask
+            .apply_tracking_result(
+                invalid_recipe,
+                vec![(TimelineTime::ZERO, MaskShape::default())],
+            )
+            .is_err());
+        assert_eq!(mask, before, "failed publication must be all-or-nothing");
+    }
+
+    #[test]
+    fn tracking_settings_reject_pathological_cross_product_workloads() {
+        MaskTrackingSettings::default().validate().expect("default tracking budget");
+        MaskTrackingSettings {
+            max_features: 1_024,
+            search_radius: 128,
+            patch_radius: 12,
+            ..MaskTrackingSettings::default()
+        }
+        .validate()
+        .expect_err("individually bounded knobs must not combine into an unbounded workload");
+        MaskTrackingSettings {
+            max_features: 16,
+            search_radius: 128,
+            patch_radius: 2,
+            ..MaskTrackingSettings::default()
+        }
+        .validate()
+        .expect("large search remains available when the total workload is bounded");
     }
 
     #[test]

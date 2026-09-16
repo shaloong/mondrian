@@ -5,20 +5,20 @@
 //! registry; successful completion means commands were submitted and the GPU
 //! queue reached the recorded presentation output.
 
+use super::headless_execution_startup::{startup_panic_diagnostic, HeadlessExecutionStartFailure};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
 use std::sync::Arc;
-#[cfg(test)]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, PreviewViewerGpuExecutionDecision,
 };
 use crate::app::preview_execution::{
-    PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuHeterogeneousExecution,
-    PreviewGpuWorkingInput,
+    PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuFrameStaging,
+    PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
+#[cfg(any(test, feature = "validation"))]
+use crate::app::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence;
 use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationMember, ViewerGpuDeviceGenerationRetirement,
     ViewerGpuDeviceGenerationTerminal, ViewerGpuDeviceProgressObservation,
@@ -26,6 +26,7 @@ use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceProgressStartError, ViewerGpuDeviceProgressWake,
 };
 use crate::app::viewer_gpu_publication::{ViewerGpuPhysicalPublication, ViewerGpuPublicationSlots};
+use crate::app::viewer_gpu_startup::ViewerGpuStartupOwner;
 use crate::app::viewer_gpu_submission::{
     ViewerGpuCompletedSubmission, ViewerGpuRetiredSubmission, ViewerGpuSubmissionAdmissionError,
     ViewerGpuSubmissionId, ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll,
@@ -36,21 +37,31 @@ use crate::app::FramePresentationDisposition;
 use mondrian_renderer::profile::GpuTimestampSample;
 #[cfg(test)]
 use mondrian_renderer::NativeVideoImportGpuTimingDiagnostics;
+#[cfg(any(test, feature = "validation"))]
+use mondrian_renderer::ViewerGpuExecutionError;
 use mondrian_renderer::{
+    color::RenderColorStageDiagnostics,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
+    product_gpu_working_texture_device_features,
     profile::gpu_timestamp_query_device_features,
     profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
-    request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
-    GpuCompositorTextureBindingDiagnostics, GpuCompositorUniformArenaDiagnostics,
-    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
-    NativeVideoImportCandidateTimingReceipt, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, RenderColorStageDiagnostics,
+    request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
+    GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
+    GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
+    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
     ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
     ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessGpuStartupStage {
+    ProgressStarted,
+    RendererCreated,
+}
 const HEADLESS_NATIVE_IMPORT_GPU_TIMING_DEFAULT_OBSERVATION_CAPACITY: usize = 65_536;
 const HEADLESS_NATIVE_IMPORT_GPU_TIMING_MAX_OBSERVATION_CAPACITY: usize = 1_048_576;
 static NEXT_HEADLESS_NATIVE_IMPORT_GPU_TIMING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -78,7 +89,7 @@ impl HeadlessGpuCompletionDeadline {
             .ok_or(HeadlessViewerGpuError::DeadlineExceeded)
     }
 
-    const fn instant(self) -> Instant {
+    pub(crate) const fn instant(self) -> Instant {
         self.0
     }
 }
@@ -178,8 +189,12 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     /// Cumulative compositor texture-binding reuse evidence after this frame.
     pub compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
+    /// Cumulative bounded creative-LUT residency evidence after this frame.
+    pub compositor_creative_luts: Option<GpuCreativeLutCacheDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
     pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
+    /// Cumulative exact-contract texture-pool evidence after this record.
+    pub resource_pool_diagnostics: GpuColorFrameWgpuResourcePoolDiagnostics,
     /// Structured GPU color-stage evidence for a newly rendered output.
     pub stage_diagnostics: Option<RenderColorStageDiagnostics>,
     /// Explicit native/GPU-input fallback reasons for a newly rendered output.
@@ -192,6 +207,11 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub native_import_bridge_entries: usize,
     /// Decoder sources still retained after observing GPU completion.
     pub native_import_retained_sources: usize,
+    /// Other submitted owners still active after this exact completion.
+    ///
+    /// Native sources retained in this state belong to later pipelined work;
+    /// only residency observed with this value at zero is an orphan/leak.
+    pub remaining_submissions_after_completion: usize,
 }
 
 /// One completed Headless Viewer candidate plus optional typed heterogeneous
@@ -237,6 +257,43 @@ pub(crate) enum HeadlessViewerGpuCompletionPoll {
     RetiredAfterQuarantine(Box<HeadlessViewerGpuRetiredCandidate>),
 }
 
+/// Consuming barrier between Viewer GPU frame owners and Preview decoder teardown.
+///
+/// A native decoded frame can be retained by ticketless staging, a submitted
+/// Viewer owner, or the renderer's native-import backend. Preview decoder
+/// sessions must stay alive until all three domains have released those source
+/// handles while the GPU device generation is still resident.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HeadlessPreviewGpuDependencyBarrierEvidence {
+    pub(crate) staged_frames_before: usize,
+    pub(crate) staged_frames_after: usize,
+    pub(crate) physical_outputs_before: usize,
+    pub(crate) physical_outputs_after: usize,
+    pub(crate) submission_owners_before: usize,
+    pub(crate) submission_owners_after: usize,
+    pub(crate) native_sources_before: usize,
+    pub(crate) native_sources_after: usize,
+    pub(crate) completed_submissions: u64,
+    pub(crate) quarantines_started: u64,
+    pub(crate) submissions_retired_after_quarantine: u64,
+    pub(crate) native_retirement_failure_count: u64,
+    pub(crate) first_native_retirement_failure: Option<String>,
+    pub(crate) deadline_elapsed: bool,
+}
+
+impl HeadlessPreviewGpuDependencyBarrierEvidence {
+    /// Whether no GPU-side owner can retain a Preview decoder source.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.staged_frames_after == 0
+            && self.physical_outputs_after == 0
+            && self.submission_owners_after == 0
+            && self.native_sources_after == 0
+            && self.native_retirement_failure_count == 0
+            && self.first_native_retirement_failure.is_none()
+            && !self.deadline_elapsed
+    }
+}
+
 /// One force-retired Headless owner whose exact callback never arrived.
 pub(crate) struct HeadlessViewerGpuRetiredCandidate {
     pub(crate) submission_id: ViewerGpuSubmissionId,
@@ -265,7 +322,7 @@ pub(crate) struct HeadlessViewerGpuOutput {
 /// The exact GPU work for one Viewer frame is millisecond-scale; a bounded
 /// safety window must therefore be much shorter than any caller observation
 /// deadline. When the work-done callback is lost, this deadline starts the
-/// quarantine and the bounded release grace frees the capacity-one slot, so a
+/// quarantine and the bounded release grace frees the exact slot, so a
 /// single lost callback cannot stall the pipeline for the caller's full wait.
 pub(crate) const HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -280,6 +337,56 @@ pub(crate) struct HeadlessViewerGpuAdapterInfo {
     pub backend: String,
     pub driver: String,
     pub driver_info: String,
+    pub device_local_memory_bytes: Option<u64>,
+}
+
+/// Fixed-size inventory of move-only Headless GPU owners at a settled boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadlessViewerGpuEnduranceSnapshot {
+    submission_owners: usize,
+    physical_output_owners: usize,
+    staged_successor_owners: usize,
+    device_loss_count: u64,
+    fatal_error_count: u64,
+}
+
+impl HeadlessViewerGpuEnduranceSnapshot {
+    pub(crate) const fn submission_owners(self) -> usize {
+        self.submission_owners
+    }
+
+    pub(crate) const fn physical_output_owners(self) -> usize {
+        self.physical_output_owners
+    }
+
+    pub(crate) const fn staged_successor_owners(self) -> usize {
+        self.staged_successor_owners
+    }
+
+    pub(crate) const fn device_loss_count(self) -> u64 {
+        self.device_loss_count
+    }
+
+    pub(crate) const fn fatal_error_count(self) -> u64 {
+        self.fatal_error_count
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_fixture(
+        submission_owners: usize,
+        physical_output_owners: usize,
+        staged_successor_owners: usize,
+        device_loss_count: u64,
+        fatal_error_count: u64,
+    ) -> Self {
+        Self {
+            submission_owners,
+            physical_output_owners,
+            staged_successor_owners,
+            device_loss_count,
+            fatal_error_count,
+        }
+    }
 }
 
 /// Real no-Surface Adapter over the shared Viewer GPU Preview Runtime.
@@ -303,6 +410,10 @@ pub(crate) struct HeadlessViewerGpuAdapter {
         HeadlessViewerGpuOutput,
         ViewerGpuPresentationOutputLease,
     >,
+    #[cfg(any(test, feature = "validation"))]
+    staged_successors: PreviewGpuFrameStaging,
+    #[cfg(any(test, feature = "validation"))]
+    prewarmed_cold_activation_intent: Option<crate::app::preview_execution::PreviewPlaybackIntent>,
 }
 
 struct HeadlessViewerGpuSubmissionOwner {
@@ -420,24 +531,48 @@ type HeadlessViewerGpuOutputSlots = ViewerGpuPublicationSlots<
 >;
 
 struct HeadlessViewerGpuGenerationRetirement {
-    runtime: ViewerGpuExecutionRuntime,
+    // `Drop` explicitly retires every owner that can retain an FFmpeg AVFrame
+    // before the renderer runtime and its decoder-device root are released.
+    // Keep these fields before the device envelope as a second line of defense:
+    // Rust drops fields in declaration order after `Drop::drop` returns.
     lifecycle: ViewerGpuSubmissionLifecycle<
         HeadlessViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
     >,
-    _device: wgpu::Device,
-    _queue: wgpu::Queue,
-    _timestamp_ring: Option<GpuTimestampQueryRing>,
-    _physical_outputs: HeadlessViewerGpuOutputSlots,
-    _completed_submission: Option<
+    _completed_submissions: Vec<
         ViewerGpuCompletedSubmission<
             HeadlessViewerGpuSubmissionOwner,
             ViewerHeterogeneousGpuCompletedBatch,
         >,
     >,
-    _lost_submission_owner: Option<HeadlessViewerGpuSubmissionOwner>,
+    _lost_submission_owners: Vec<HeadlessViewerGpuSubmissionOwner>,
+    #[cfg(any(test, feature = "validation"))]
+    _staged_successors: PreviewGpuFrameStaging,
+    _physical_outputs: HeadlessViewerGpuOutputSlots,
+    _timestamp_ring: Option<GpuTimestampQueryRing>,
+    runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
+    _queue: wgpu::Queue,
+    _device: wgpu::Device,
     native_retirement_error_logged: bool,
-    native_device_removed_logged: bool,
+}
+
+impl Drop for HeadlessViewerGpuGenerationRetirement {
+    fn drop(&mut self) {
+        // A staged or submitted PreviewGpuFrame can be the last owner of an
+        // FFmpeg D3D12VA AVFrame. Release all such frames while `runtime` still
+        // owns the qualified FFmpeg/D3D12 device root. This order also applies
+        // to deadline and device-loss retirement, where completed owners are
+        // intentionally retained until the generation reaches its terminal
+        // receipt.
+        self.lifecycle = ViewerGpuSubmissionLifecycle::new();
+        self._completed_submissions.clear();
+        self._lost_submission_owners.clear();
+        #[cfg(any(test, feature = "validation"))]
+        {
+            self._staged_successors = PreviewGpuFrameStaging::default();
+        }
+        self._physical_outputs = HeadlessViewerGpuOutputSlots::default();
+    }
 }
 
 impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetirement {
@@ -445,19 +580,13 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
         "Headless Viewer GPU device generation"
     }
 
-    fn poll_retirement(&mut self, terminal: Option<&ViewerGpuDeviceGenerationTerminal>) -> bool {
-        let native_progress_proved = match self.runtime.retire_completed_native_import_sources() {
-            Ok(_) => true,
-            Err(error) if error.is_native_device_removed() => {
-                if !self.native_device_removed_logged {
-                    tracing::warn!(
-                        %error,
-                        "Headless Viewer GPU retirement accepted typed native device-removal proof"
-                    );
-                    self.native_device_removed_logged = true;
-                }
-                true
-            }
+    fn poll_retirement(
+        &mut self,
+        terminal: Option<&ViewerGpuDeviceGenerationTerminal>,
+    ) -> Option<crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt>
+    {
+        let renderer = match self.runtime.poll() {
+            Ok(receipt) => receipt,
             Err(error) => {
                 if !self.native_retirement_error_logged {
                     tracing::error!(
@@ -466,70 +595,219 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
                     );
                     self.native_retirement_error_logged = true;
                 }
-                false
+                None
             }
         };
-        let native_copy_ready =
-            native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
-        if self._completed_submission.is_none() && self._lost_submission_owner.is_none() {
-            match self.lifecycle.poll(Instant::now()) {
-                ViewerGpuSubmissionPoll::Completed(completed) => {
-                    self._completed_submission = Some(completed);
-                }
-                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
-                    tracing::warn!(
-                        submission_id = retired.submission_id.get(),
-                        reason = ?retired.reason,
-                        "Headless Viewer force-retired a quarantined GPU submission whose completion callback was lost"
-                    );
-                    self._lost_submission_owner = Some(retired.owner);
-                }
-                ViewerGpuSubmissionPoll::Idle
-                | ViewerGpuSubmissionPoll::Pending { .. }
-                | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
+        match self.lifecycle.poll(Instant::now()) {
+            ViewerGpuSubmissionPoll::Completed(completed) => {
+                self._completed_submissions.push(completed);
             }
+            ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                tracing::warn!(
+                    submission_id = retired.submission_id.get(),
+                    reason = ?retired.reason,
+                    "Headless Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                );
+                self._lost_submission_owners.push(retired.owner);
+            }
+            ViewerGpuSubmissionPoll::Idle
+            | ViewerGpuSubmissionPoll::Pending { .. }
+            | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
         }
 
-        if native_copy_ready
+        if renderer.is_some()
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
-            self._lost_submission_owner = self.lifecycle.retire_owner_after_wgpu_device_loss();
+            self._lost_submission_owners
+                .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
-        native_copy_ready && !self.lifecycle.is_occupied()
+        if self.lifecycle.is_occupied() {
+            return None;
+        }
+        renderer.map(|renderer| {
+            crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt {
+                renderer: Some(renderer),
+            }
+        })
     }
 }
 
 impl Drop for HeadlessViewerGpuAdapter {
     fn drop(&mut self) {
-        let Some(progress) = self.device_progress.take() else {
-            return;
+        if let Some((progress, retirement)) = self.take_generation_retirement() {
+            progress.retire_device_generation(retirement);
+        }
+    }
+}
+
+impl HeadlessViewerGpuAdapter {
+    /// Release every GPU-side owner of Preview decoder sources before the
+    /// Preview runtime destroys its FFmpeg hardware decode sessions.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn release_preview_decoder_dependencies_until(
+        &mut self,
+        deadline: Instant,
+    ) -> HeadlessPreviewGpuDependencyBarrierEvidence {
+        let staged_frames_before = self.staged_successors.len();
+        let physical_outputs_before = self.physical_outputs.active_count();
+        let submission_owners_before = self.submission_lifecycle.active_count();
+        let native_sources_before = self.runtime.native_import_retained_source_count();
+        self.staged_successors = PreviewGpuFrameStaging::default();
+        self.prewarmed_cold_activation_intent = None;
+        self.clear_physical_outputs();
+
+        let mut completed_submissions = 0_u64;
+        let mut quarantines_started = 0_u64;
+        let mut submissions_retired_after_quarantine = 0_u64;
+        let mut native_retirement_failure_count = 0_u64;
+        let mut first_native_retirement_failure = None;
+        let deadline_elapsed = loop {
+            let poll = self.poll_completion(Instant::now());
+            match &poll {
+                HeadlessViewerGpuCompletionPoll::Completed(_) => {
+                    completed_submissions = completed_submissions.saturating_add(1);
+                }
+                HeadlessViewerGpuCompletionPoll::QuarantineStarted { .. } => {
+                    quarantines_started = quarantines_started.saturating_add(1);
+                }
+                HeadlessViewerGpuCompletionPoll::RetiredAfterQuarantine(_) => {
+                    submissions_retired_after_quarantine =
+                        submissions_retired_after_quarantine.saturating_add(1);
+                }
+                HeadlessViewerGpuCompletionPoll::Idle
+                | HeadlessViewerGpuCompletionPoll::Pending { .. } => {}
+            }
+            // Drop completed/retired frame owners before asking the renderer
+            // to retire the corresponding native-import source residency.
+            drop(poll);
+            if let Err(error) = self.runtime.retire_completed_native_import_sources() {
+                native_retirement_failure_count = native_retirement_failure_count.saturating_add(1);
+                first_native_retirement_failure.get_or_insert_with(|| error.to_string());
+            }
+            if !self.submission_lifecycle.is_occupied()
+                && self.runtime.native_import_retained_source_count() == 0
+            {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         };
+
+        HeadlessPreviewGpuDependencyBarrierEvidence {
+            staged_frames_before,
+            staged_frames_after: self.staged_successors.len(),
+            physical_outputs_before,
+            physical_outputs_after: self.physical_outputs.active_count(),
+            submission_owners_before,
+            submission_owners_after: self.submission_lifecycle.active_count(),
+            native_sources_before,
+            native_sources_after: self.runtime.native_import_retained_source_count(),
+            completed_submissions,
+            quarantines_started,
+            submissions_retired_after_quarantine,
+            native_retirement_failure_count,
+            first_native_retirement_failure,
+            deadline_elapsed,
+        }
+    }
+
+    /// Keep the complete device generation resident when Preview teardown did
+    /// not prove that every hardware-decode worker returned.
+    ///
+    /// Dropping or asynchronously retiring this Adapter in that state could
+    /// unload D3D12 while a detached FFmpeg worker is still releasing decoder
+    /// textures. This process-level quarantine is deliberately non-qualifying;
+    /// the operating system reclaims it only when the failed validation process
+    /// exits.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn quarantine_after_unresolved_preview(
+        self,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        tracing::error!(
+            "retaining Headless Viewer GPU generation because Preview shutdown remained unresolved"
+        );
+        std::mem::forget(self);
+        ViewerGpuDeviceProgressShutdownEvidence {
+            worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
+            wake_callbacks: Default::default(),
+            native_wake_failures: 0,
+            wake_registration_rejections: 0,
+            worker_started: true,
+            worker_terminated: false,
+            worker_panicked: false,
+            timed_out: true,
+            retirement_requested: false,
+            retirement_handoff_accepted: false,
+            retirement_completed: false,
+            renderer_retirement: None,
+            generation_terminal_kind: None,
+        }
+    }
+
+    /// Retire all accepted GPU work against one caller-owned absolute deadline.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn shutdown_until(
+        mut self,
+        deadline: Instant,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let Some((progress, retirement)) = self.take_generation_retirement() else {
+            return ViewerGpuDeviceProgressShutdownEvidence {
+                worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
+                wake_callbacks: Default::default(),
+                native_wake_failures: 0,
+                wake_registration_rejections: 0,
+                worker_started: false,
+                worker_terminated: false,
+                worker_panicked: false,
+                timed_out: false,
+                retirement_requested: true,
+                retirement_handoff_accepted: false,
+                retirement_completed: false,
+                renderer_retirement: None,
+                generation_terminal_kind: None,
+            };
+        };
+        progress.retire_device_generation_until(retirement, deadline)
+    }
+
+    fn take_generation_retirement(
+        &mut self,
+    ) -> Option<(
+        ViewerGpuDeviceProgressOwner,
+        HeadlessViewerGpuGenerationRetirement,
+    )> {
+        let progress = self.device_progress.take()?;
         let Some(runtime) = self.runtime.take() else {
             tracing::error!(
                 "Headless Viewer GPU teardown lost its execution runtime; retaining progress authority indefinitely"
             );
             std::mem::forget(progress);
-            return;
+            return None;
         };
-        let retirement = HeadlessViewerGpuGenerationRetirement {
-            runtime,
-            lifecycle: std::mem::replace(
-                &mut self.submission_lifecycle,
-                ViewerGpuSubmissionLifecycle::new(),
-            ),
-            _device: self.device.clone(),
-            _queue: self.queue.clone(),
-            _timestamp_ring: self.timestamp_ring.take(),
-            _physical_outputs: std::mem::take(&mut self.physical_outputs),
-            _completed_submission: None,
-            _lost_submission_owner: None,
-            native_retirement_error_logged: false,
-            native_device_removed_logged: false,
-        };
-        progress.retire_device_generation(retirement);
+        Some((
+            progress,
+            HeadlessViewerGpuGenerationRetirement {
+                lifecycle: std::mem::replace(
+                    &mut self.submission_lifecycle,
+                    ViewerGpuSubmissionLifecycle::new(),
+                ),
+                _completed_submissions: Vec::new(),
+                _lost_submission_owners: Vec::new(),
+                #[cfg(any(test, feature = "validation"))]
+                _staged_successors: std::mem::take(&mut self.staged_successors),
+                _physical_outputs: std::mem::take(&mut self.physical_outputs),
+                _timestamp_ring: self.timestamp_ring.take(),
+                runtime: runtime.into_retirement(),
+                _queue: self.queue.clone(),
+                _device: self.device.clone(),
+                native_retirement_error_logged: false,
+            },
+        ))
     }
 }
 
@@ -555,6 +833,9 @@ impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
             ViewerGpuExecutionGpuStage::ProgramScopes => {
                 GpuTimestampStageMarker::AfterProgramScopes
             }
+            ViewerGpuExecutionGpuStage::SignalMonitoring => {
+                GpuTimestampStageMarker::AfterSignalMonitoring
+            }
             ViewerGpuExecutionGpuStage::MonitorAdaptation => {
                 GpuTimestampStageMarker::AfterMonitorAdaptation
             }
@@ -569,7 +850,7 @@ impl HeadlessViewerGpuAdapter {
     /// Create a high-performance headless device with the same native-video
     /// feature selection used by the production Window Adapter. Native-import
     /// GPU timing is explicitly disabled by default.
-    pub(crate) fn new() -> Result<Self, HeadlessViewerGpuError> {
+    pub(crate) fn new() -> Result<Self, HeadlessExecutionStartFailure> {
         Self::new_with_native_import_gpu_timing_policy(NativeVideoImportGpuTimingPolicy::Disabled)
     }
 
@@ -580,7 +861,7 @@ impl HeadlessViewerGpuAdapter {
     /// frozen workload instead of relying on this convenience constructor.
     pub(crate) fn new_with_native_import_gpu_timing_policy(
         policy: NativeVideoImportGpuTimingPolicy,
-    ) -> Result<Self, HeadlessViewerGpuError> {
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
         let observation_capacity = match policy {
             NativeVideoImportGpuTimingPolicy::Disabled => 0,
             NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
@@ -598,75 +879,278 @@ impl HeadlessViewerGpuAdapter {
     pub(crate) fn new_with_native_import_gpu_timing_policy_and_observation_capacity(
         policy: NativeVideoImportGpuTimingPolicy,
         observation_capacity: usize,
-    ) -> Result<Self, HeadlessViewerGpuError> {
-        validate_native_import_gpu_timing_observation_capacity(policy, observation_capacity)?;
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(request_adapter_with_native_video_preference(
-            &instance,
-            &wgpu::RequestAdapterOptions {
-                compatible_surface: None,
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                ..wgpu::RequestAdapterOptions::default()
-            },
-        ))
-        .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
-        let supported_features = adapter.features();
-        let raw_adapter_info = adapter.get_info();
-        let viewer_suffix_timing_features = gpu_timestamp_query_device_features(supported_features);
-        let native_import_timing_features = match policy {
-            NativeVideoImportGpuTimingPolicy::Disabled => wgpu::Features::empty(),
-            NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
-                gpu_timestamp_query_device_features(supported_features)
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        Self::construct(policy, observation_capacity, |_| Ok(()))
+    }
+
+    fn construct(
+        policy: NativeVideoImportGpuTimingPolicy,
+        observation_capacity: usize,
+        mut observe_stage: impl FnMut(HeadlessGpuStartupStage) -> anyhow::Result<()>,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        // The guard lives outside the catch boundary: unwinding never erases
+        // the worker inventory whose consuming receipt the caller still needs.
+        let mut startup = None;
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Self> {
+                validate_native_import_gpu_timing_observation_capacity(
+                    policy,
+                    observation_capacity,
+                )?;
+                let instance = wgpu::Instance::new(
+                    wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                );
+                let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+                    &instance,
+                    &wgpu::RequestAdapterOptions {
+                        compatible_surface: None,
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        force_fallback_adapter: false,
+                        ..wgpu::RequestAdapterOptions::default()
+                    },
+                ))
+                .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
+                let supported_features = adapter.features();
+                let raw_adapter_info = adapter.get_info();
+                let viewer_suffix_timing_features =
+                    gpu_timestamp_query_device_features(supported_features);
+                let working_texture_features =
+                    product_gpu_working_texture_device_features(&adapter)
+                        .map_err(HeadlessViewerGpuError::from)?;
+                let native_import_timing_features = match policy {
+                    NativeVideoImportGpuTimingPolicy::Disabled => wgpu::Features::empty(),
+                    NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
+                        gpu_timestamp_query_device_features(supported_features)
+                    }
+                };
+                let descriptor = wgpu::DeviceDescriptor {
+                    required_features: native_video_texture_device_features(supported_features)
+                        | ocio_lut_filtering_device_features(supported_features)
+                        | working_texture_features
+                        | viewer_suffix_timing_features
+                        | native_import_timing_features,
+                    ..wgpu::DeviceDescriptor::default()
+                };
+                let (device, queue) = pollster::block_on(
+                    mondrian_renderer::request_device_with_native_video_support(
+                        &adapter,
+                        &descriptor,
+                    ),
+                )
+                .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
+                let device_local_memory_bytes =
+                    mondrian_renderer::query_gpu_device_memory_capacity(&device)
+                        .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes);
+                // CPU-only fallible state must precede progress/Renderer worker creation.
+                let native_import_gpu_timing =
+                    HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
+                let adapter_info = HeadlessViewerGpuAdapterInfo {
+                    name: raw_adapter_info.name,
+                    vendor: raw_adapter_info.vendor,
+                    device: raw_adapter_info.device,
+                    device_type: format!("{:?}", raw_adapter_info.device_type),
+                    backend: format!("{:?}", raw_adapter_info.backend),
+                    driver: raw_adapter_info.driver,
+                    driver_info: raw_adapter_info.driver_info,
+                    device_local_memory_bytes,
+                };
+                // Retain partial ownership through every subsequent error and unwind.
+                startup = Some(ViewerGpuStartupOwner::new(
+                    &device,
+                    &queue,
+                    ViewerGpuDeviceProgressWake::default(),
+                )?);
+                observe_stage(HeadlessGpuStartupStage::ProgressStarted)?;
+                let timestamp_ring = GpuTimestampQueryRing::new(
+                    &device,
+                    &queue,
+                    HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
+                );
+                startup.as_mut().expect("created progress guard").install_runtime(
+                    ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
+                        &adapter, &device, &queue, policy,
+                    )
+                    .map_err(HeadlessViewerGpuError::from)?,
+                );
+                observe_stage(HeadlessGpuStartupStage::RendererCreated)?;
+                Ok(Self {
+                    device_progress: ViewerGpuDeviceGenerationMember::empty(),
+                    device,
+                    queue,
+                    runtime: ViewerGpuDeviceGenerationMember::empty(),
+                    timestamp_ring,
+                    adapter_info,
+                    native_import_gpu_timing,
+                    reported_orphaned_completion_count: 0,
+                    submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
+                    physical_outputs: ViewerGpuPublicationSlots::default(),
+                    #[cfg(any(test, feature = "validation"))]
+                    staged_successors: PreviewGpuFrameStaging::default(),
+                    #[cfg(any(test, feature = "validation"))]
+                    prewarmed_cold_activation_intent: None,
+                })
+            }))
+            .unwrap_or_else(|payload| Err(startup_panic_diagnostic(payload)));
+        let mut adapter = match result {
+            Ok(adapter) => adapter,
+            Err(diagnostic) => {
+                return Err(match startup {
+                    Some(owner) => HeadlessExecutionStartFailure::partial(diagnostic, owner),
+                    None => HeadlessExecutionStartFailure::before_progress(diagnostic),
+                })
             }
         };
-        let descriptor = wgpu::DeviceDescriptor {
-            required_features: native_video_texture_device_features(supported_features)
-                | ocio_lut_filtering_device_features(supported_features)
-                | viewer_suffix_timing_features
-                | native_import_timing_features,
-            ..wgpu::DeviceDescriptor::default()
-        };
-        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-            .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
-        // Install the one callback for this generation before constructing any
-        // runtime, timestamp, or queue-consuming Adapter component.
-        let device_progress =
-            ViewerGpuDeviceProgressOwner::new(&device, ViewerGpuDeviceProgressWake::default())?;
-        let runtime = ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
-            &adapter, &device, &queue, policy,
+        // Activation follows all fallible assembly. Only moves remain.
+        let (progress, runtime) = startup
+            .as_mut()
+            .and_then(ViewerGpuStartupOwner::activate)
+            .expect("completed Headless GPU startup");
+        adapter.device_progress = ViewerGpuDeviceGenerationMember::new(progress);
+        adapter.runtime = ViewerGpuDeviceGenerationMember::new(runtime);
+        Ok(adapter)
+    }
+
+    /// Retain one CPU-complete ticketless frame without consuming GPU
+    /// submission or presentation-output capacity.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn stage_successor(
+        &mut self,
+        frame: Box<PreviewGpuFrame>,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        debug_assert!(frame.is_successor_preparation());
+        self.prewarm_frame_inputs(&frame)?;
+        self.staged_successors.stage(frame);
+        Ok(())
+    }
+
+    /// Prepare reusable input resources for ticketless work without retaining
+    /// its frame-local execution payload.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn prewarm_frame_inputs(
+        &mut self,
+        frame: &PreviewGpuFrame,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        debug_assert!(frame.is_successor_preparation());
+        self.runtime.prepare_program_output_backend(
+            &self.device,
+            &self.queue,
+            frame.working_color_space,
+            &frame.program_output_boundary,
+            &frame.monitor_adaptation,
+            ViewerGpuOutputPrecision::minimum_for_display(
+                frame.monitor_adaptation.monitor_color_space(),
+                false,
+            ),
+            false,
         )?;
-        let timestamp_ring =
-            GpuTimestampQueryRing::new(&device, &queue, HEADLESS_GPU_TIMESTAMP_RING_CAPACITY);
-        let native_import_gpu_timing =
-            HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
-        let adapter_info = HeadlessViewerGpuAdapterInfo {
-            name: raw_adapter_info.name,
-            vendor: raw_adapter_info.vendor,
-            device: raw_adapter_info.device,
-            device_type: format!("{:?}", raw_adapter_info.device_type),
-            backend: format!("{:?}", raw_adapter_info.backend),
-            driver: raw_adapter_info.driver,
-            driver_info: raw_adapter_info.driver_info,
-        };
-        Ok(Self {
-            device_progress: ViewerGpuDeviceGenerationMember::new(device_progress),
-            device,
-            queue,
-            runtime: ViewerGpuDeviceGenerationMember::new(runtime),
-            timestamp_ring,
-            adapter_info,
-            native_import_gpu_timing,
-            reported_orphaned_completion_count: 0,
-            submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
-            physical_outputs: ViewerGpuPublicationSlots::default(),
-        })
+        let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+        self.runtime.prewarm_cpu_yuv_uploads(layers)?;
+        self.runtime.prepare_native_video_imports(layers)?;
+        Ok(())
+    }
+
+    /// Prepare and remember one exact bounded cold-activation contract.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn prewarm_cold_activation_inputs(
+        &mut self,
+        frame: &PreviewGpuFrame,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        self.prewarm_frame_inputs(frame)?;
+        self.prewarmed_cold_activation_intent = Some(frame.playback_intent());
+        Ok(())
+    }
+
+    /// Whether the exact cold-activation contract already reached renderer
+    /// backend-object residency for this device generation.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn has_prewarmed_cold_activation_inputs(
+        &self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.prewarmed_cold_activation_intent == Some(intent)
+    }
+
+    /// Take the staged frame only after it becomes the exact immediate
+    /// successor. A transport/quality rotation retires stale work through RAII.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn take_staged_successor_for_intent(
+        &mut self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        self.staged_successors.take_exact(intent)
+    }
+
+    /// Whether the bounded CPU staging slot already owns this exact intent.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn has_staged_successor_for_intent(
+        &self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.staged_successors.contains(intent)
+    }
+
+    /// Retire CPU-complete frames outside the current bounded horizon and
+    /// refresh physical upload preparation in that same owner-supplied order.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retain_staged_successor_intents(
+        &mut self,
+        intents: &[crate::app::preview_execution::PreviewPlaybackIntent],
+    ) -> Result<(), ViewerGpuExecutionError> {
+        self.staged_successors.retain_only(intents);
+        self.runtime.prewarm_cpu_yuv_upload_horizon(
+            self.staged_successors.ordered_frames(intents).map(|frame| {
+                let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+                layers.as_slice()
+            }),
+        )
+    }
+
+    /// Retire obsolete speculative native leases before current-frame admission.
+    pub(crate) fn retire_stale_staged_successors(
+        &mut self,
+        current: crate::app::preview_execution::PreviewPlaybackIntent,
+        playing: bool,
+    ) {
+        self.staged_successors.retain_current_generation(current, playing);
     }
 
     /// Adapter identity bound to this execution device.
     pub(crate) fn adapter_info(&self) -> &HeadlessViewerGpuAdapterInfo {
         &self.adapter_info
+    }
+
+    /// Immutable device-local capacity for this exact GPU generation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn device_local_memory_bytes(&self) -> Option<u64> {
+        self.adapter_info.device_local_memory_bytes
+    }
+
+    /// Snapshot exact GPU ownership without polling or changing publication state.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn endurance_snapshot(&self) -> HeadlessViewerGpuEnduranceSnapshot {
+        let terminal = self.device_progress.generation_terminal();
+        let terminal_kind = terminal.as_ref().map(|terminal| terminal.kind);
+        HeadlessViewerGpuEnduranceSnapshot {
+            submission_owners: self.submission_lifecycle.active_count(),
+            physical_output_owners: self.physical_outputs.active_count(),
+            staged_successor_owners: self.staged_successors.len(),
+            device_loss_count: terminal_kind.map_or(0, |kind| kind.device_loss_count()),
+            fatal_error_count: terminal_kind.map_or(0, |kind| kind.fatal_error_count()),
+        }
+    }
+
+    /// Retire renderer source records after their completed candidate owner was consumed.
+    ///
+    /// Completion polling must first return and drop the `PreviewGpuFrame` that
+    /// held the decoder source. This second pass waits only for the already
+    /// released platform owner, bounded by the same GPU completion deadline.
+    /// Native import admission remains open for subsequent frames.
+    pub(crate) fn retire_released_native_import_sources(
+        &mut self,
+        deadline: HeadlessGpuCompletionDeadline,
+    ) -> Result<usize, HeadlessViewerGpuError> {
+        self.runtime.retire_completed_native_import_sources()?;
+        Ok(self.runtime.wait_for_released_native_import_sources_until(deadline.instant())?)
     }
 
     /// Exact App session qualifying renderer-local native-import tokens.
@@ -714,12 +1198,22 @@ impl HeadlessViewerGpuAdapter {
     /// completion callbacks. The callback carries no completion authority;
     /// consumers still drain this Adapter's typed lifecycle.
     pub(crate) fn install_completion_waker(&mut self, waker: impl Fn() + Send + Sync + 'static) {
-        self.device_progress.install_waker(waker);
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(waker);
+        let progress_waker = Arc::clone(&waker);
+        self.device_progress.install_waker(move || progress_waker());
+        self.runtime.install_cpu_yuv_upload_waker(move || waker());
     }
 
     /// Native import support exposed to the preview scheduling Adapter.
     pub(crate) fn native_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
         self.runtime.native_import_support()
+    }
+
+    /// Renderer-qualified decoder root paired with this device generation.
+    pub(crate) fn native_decode_device_root(
+        &self,
+    ) -> Option<mondrian_media::RendererHwAccelDeviceContext> {
+        self.runtime.native_decode_device_root()
     }
 
     /// Apply the same immutable Preview grant used by the Window Viewer owner.
@@ -823,12 +1317,15 @@ impl HeadlessViewerGpuAdapter {
                 height: frame.height,
             });
         }
-        let progress_permit = self.device_progress.reserve_submission()?;
+        let progress_permit = self
+            .device_progress
+            .reserve_submission()
+            .map_err(map_headless_device_progress_reserve_error)?;
         let completion_signal = progress_permit.completion_signal();
         let reservation = self.submission_lifecycle.reserve().map_err(|error| match error {
             ViewerGpuSubmissionAdmissionError::Backpressured => {
                 HeadlessViewerGpuError::Backpressure(
-                    "the single Viewer GPU submission slot is occupied".to_owned(),
+                    "the bounded Viewer GPU submission capacity is full".to_owned(),
                 )
             }
             ViewerGpuSubmissionAdmissionError::IdentityExhausted => {
@@ -846,7 +1343,6 @@ impl HeadlessViewerGpuAdapter {
             height: frame.height,
         };
         let heterogeneous = frame.has_heterogeneous_gpu_execution();
-        self.runtime.clear_frame_resources();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
         });
@@ -858,8 +1354,8 @@ impl HeadlessViewerGpuAdapter {
         if self.timestamp_ring.is_some() {
             // `GpuTimestampQueryRing::begin_frame` performs the existing
             // non-blocking telemetry poll. Reservation has not committed an
-            // in-flight Viewer owner and the prior capacity-one owner was
-            // already retired, so this cannot become a second Viewer
+            // in-flight Viewer owner beyond the bounded submission capacity,
+            // so this cannot become an unindexed Viewer
             // completion driver. Native-prefix callbacks made ready by that
             // poll must be collected before either success or error is
             // propagated.
@@ -894,6 +1390,7 @@ impl HeadlessViewerGpuAdapter {
             ),
             display_calibration: None,
             program_scopes: None,
+            signal_monitoring: None,
         };
         let record_result =
             if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
@@ -929,21 +1426,46 @@ impl HeadlessViewerGpuAdapter {
                 return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
         };
-        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-            ring.finish_frame(&mut encoder, token)
-                .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
+            && let Err(error) = ring.finish_frame(&mut encoder, token)
+        {
+            drop(record);
+            drop(encoder);
+            self.runtime.clear_frame_resources();
+            return Err(HeadlessViewerGpuError::Timestamp(error.to_string()));
         }
         let native_import_gpu_timing_receipt = record.take_native_video_import_timing_receipt();
-        let presentation_lease = self
-            .runtime
-            .take_presentation_output(&mut record)
-            .map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
-        if let Some(terminal) = self.device_progress.generation_terminal() {
-            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-                ring.abandon_frame(token)
-                    .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+        let presentation_lease = match self.runtime.take_presentation_output(&mut record) {
+            Ok(lease) => lease,
+            Err(error) => {
+                drop(record);
+                drop(encoder);
+                self.runtime.clear_frame_resources();
+                return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
+        };
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            tracing::error!(
+                ?terminal,
+                resource_pool = ?self.runtime.resource_pool_diagnostics(),
+                active_working_set = ?self.runtime.active_working_set_diagnostics(),
+                native_import_retained_sources = self.runtime.native_import_retained_source_count(),
+                native_import_pool_residency = ?self.runtime.native_import_pool_residency(),
+                "Headless Viewer GPU generation became terminal during candidate recording"
+            );
+            let timestamp_error =
+                if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+                    ring.abandon_frame(token).err()
+                } else {
+                    None
+                };
             drop(presentation_lease);
+            drop(record);
+            drop(encoder);
+            self.runtime.clear_frame_resources();
+            if let Some(error) = timestamp_error {
+                return Err(HeadlessViewerGpuError::Timestamp(error.to_string()));
+            }
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
@@ -955,6 +1477,12 @@ impl HeadlessViewerGpuAdapter {
             self.native_import_gpu_timing.offline_completion_poll_observed = false;
         }
         let record_submit_us = elapsed_us(started);
+        tracing::debug!(
+            submission_id = submission_id.get(),
+            record_submit_us,
+            cpu_stage_timings = ?record.cpu_stage_timings,
+            "recorded Headless Viewer GPU submission"
+        );
         let completion_started = Instant::now();
         let (native_import_contract_pools, native_import_bridge_entries) =
             self.runtime.native_import_pool_residency();
@@ -977,13 +1505,16 @@ impl HeadlessViewerGpuAdapter {
                 compositor_texture_bindings: Some(
                     self.runtime.compositor_texture_binding_diagnostics(),
                 ),
+                compositor_creative_luts: Some(self.runtime.compositor_creative_lut_diagnostics()),
                 spatial_diagnostics: Some(record.spatial_diagnostics),
+                resource_pool_diagnostics: self.runtime.color_output_diagnostics().resource_pool,
                 stage_diagnostics: Some(record.stage_diagnostics),
                 fallback_reasons: record.fallback_reasons,
                 decode_execution: frame.decode_execution(),
                 native_import_contract_pools,
                 native_import_bridge_entries,
                 native_import_retained_sources,
+                remaining_submissions_after_completion: 0,
             },
             frame,
             queued_publication: None,
@@ -992,15 +1523,17 @@ impl HeadlessViewerGpuAdapter {
             started_at: started,
             completion_started_at: completion_started,
         };
+        let owner_prepare_us = elapsed_us(completion_started);
         let queue = &self.queue;
         // The completion deadline is a frame-level safety bound, not the
         // caller's overall observation deadline. A lost work-done callback
         // must quarantine the submission within this window and force-release
-        // the capacity-one slot shortly after, so the presentation pipeline
+        // its exact bounded slot shortly after, so the presentation pipeline
         // can continue; the caller's own (much longer) deadline then observes
         // the recovery instead of racing the slot release.
         let completion_deadline =
             deadline.instant().min(Instant::now() + HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE);
+        let callback_registration_started = Instant::now();
         reservation.commit(
             owner,
             completion_deadline,
@@ -1011,7 +1544,10 @@ impl HeadlessViewerGpuAdapter {
                 completion_signal.mark_observed();
             },
         );
+        let callback_registration_us = elapsed_us(callback_registration_started);
+        let progress_commit_started = Instant::now();
         progress_permit.commit(submission_id, submission);
+        let progress_commit_us = elapsed_us(progress_commit_started);
         if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
             && let Err(error) = ring.after_submit(token)
         {
@@ -1027,6 +1563,16 @@ impl HeadlessViewerGpuAdapter {
             // valid; disable this optional ring for later frames.
             self.timestamp_ring = None;
             tracing::warn!("{reason}");
+        }
+        if elapsed_us(completion_started) >= 5_000 {
+            tracing::debug!(
+                submission_id = submission_id.get(),
+                owner_prepare_us,
+                callback_registration_us,
+                progress_commit_us,
+                total_us = elapsed_us(completion_started),
+                "slow Headless post-submit ownership registration"
+            );
         }
         Ok(HeadlessViewerGpuSubmittedCandidate { submission_id, heterogeneous })
     }
@@ -1076,7 +1622,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Retain an ordinary ticketless successor without changing visible output.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retain_ordinary_successor(
         &mut self,
         submission_id: ViewerGpuSubmissionId,
@@ -1176,6 +1722,52 @@ impl HeadlessViewerGpuAdapter {
         Ok(disposition)
     }
 
+    /// Retain a callback-validated heterogeneous ticketless successor without
+    /// changing the visible output.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retain_completed_heterogeneous_successor(
+        &mut self,
+        completed: &mut HeadlessViewerGpuCompletedCandidate,
+        retain: impl FnOnce(&PreviewGpuFrame, &HeadlessViewerGpuOutput),
+    ) -> Result<(), HeadlessViewerGpuError> {
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
+        }
+        if completed.quarantine_reason.is_some()
+            || !completed.frame.is_successor_preparation()
+            || completed.frame.presentation_ticket().is_some()
+            || completed.queued_publication.is_some()
+            || completed.heterogeneous_completion.is_none()
+            || completed.successor_prepared
+        {
+            return Err(HeadlessViewerGpuError::InvalidPublicationOrder(
+                "heterogeneous successor retention requires one callback-validated ticketless candidate"
+                    .to_owned(),
+            ));
+        }
+        ensure_physical_publication_available(
+            &completed.presentation_lease,
+            completed.submission_id,
+        )?;
+        retain(&completed.frame, &completed.execution.output);
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
+        }
+        let Some(lease) = completed.presentation_lease.take() else {
+            return Err(HeadlessViewerGpuError::MissingPresentationOutput(
+                completed.submission_id.get(),
+            ));
+        };
+        completed.successor_prepared = true;
+        let _ = self.physical_outputs.publish_prepared(
+            completed.submission_id,
+            completed.frame.output_key.clone(),
+            completed.execution.output.clone(),
+            lease,
+        );
+        Ok(())
+    }
+
     /// Whether Preview's complete cloneable artifact has the exact live
     /// move-only physical owner.
     pub(crate) fn has_current_physical_output_artifact(
@@ -1192,13 +1784,23 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Whether the visible physical slot has this exact semantic key.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_current_physical_output_for_key(
         &self,
         output_key: &crate::app::preview_execution::PreviewOutputKey,
     ) -> bool {
         self.device_progress.generation_terminal().is_none()
             && self.physical_outputs.current_artifact_for_key(output_key).is_some()
+    }
+
+    /// Whether the off-screen prepared slot has this exact semantic key.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn has_prepared_physical_output_for_key(
+        &self,
+        output_key: &crate::app::preview_execution::PreviewOutputKey,
+    ) -> bool {
+        self.device_progress.generation_terminal().is_none()
+            && self.physical_outputs.prepared_artifact_for_key(output_key).is_some()
     }
 
     /// Clear all GPU publications after an accepted non-GPU presentation.
@@ -1214,6 +1816,20 @@ impl HeadlessViewerGpuAdapter {
     /// output and reject every later ordinary record.
     pub(crate) fn clear_prepared_physical_output(&mut self) -> bool {
         self.physical_outputs.take_prepared().is_some()
+    }
+
+    /// Retire a prepared physical output that is no longer proved by Preview's
+    /// active semantic generation.
+    pub(crate) fn retire_stale_prepared_physical_output(
+        &mut self,
+        expected_output_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+    ) -> Option<(
+        crate::app::preview_execution::PreviewOutputKey,
+        HeadlessViewerGpuOutput,
+    )> {
+        self.physical_outputs
+            .retire_prepared_unless(expected_output_key)
+            .map(ViewerGpuPhysicalPublication::into_key_and_artifact)
     }
 
     /// Clear only the physical publication produced by one exact submission.
@@ -1245,20 +1861,22 @@ impl HeadlessViewerGpuAdapter {
         &mut self,
         reason: String,
     ) -> (
-        Option<ViewerGpuSubmissionId>,
+        Vec<ViewerGpuSubmissionId>,
         [Option<(
             crate::app::preview_execution::PreviewOutputKey,
             HeadlessViewerGpuOutput,
         )>; 2],
     ) {
-        let active_submission = self.submission_lifecycle.current_submission_id();
-        if active_submission.is_some() {
-            let _ = self.submission_lifecycle.quarantine_after_device_failure(reason);
-        }
+        let active_submissions = self
+            .submission_lifecycle
+            .quarantine_all_after_device_failure(reason)
+            .into_iter()
+            .map(|quarantine| quarantine.submission_id)
+            .collect();
         let revoked_outputs = self.physical_outputs.drain().map(|publication| {
             publication.map(ViewerGpuPhysicalPublication::into_key_and_artifact)
         });
-        (active_submission, revoked_outputs)
+        (active_submissions, revoked_outputs)
     }
 
     /// Whether the exact ordinary submission already ran queue-ordered
@@ -1269,14 +1887,25 @@ impl HeadlessViewerGpuAdapter {
             .is_some_and(|owner| owner.queued_publication.is_some())
     }
 
-    /// Whether one exact in-flight submission already populated the successor slot.
-    pub(crate) fn has_prepared_successor_submission(
+    /// Whether one exact in-flight submission is the ticketless successor.
+    pub(crate) fn has_successor_preparation_submission(
         &self,
         submission_id: ViewerGpuSubmissionId,
     ) -> bool {
         self.submission_lifecycle
             .owner(submission_id)
-            .is_some_and(|owner| owner.successor_prepared)
+            .is_some_and(|owner| owner.frame.is_successor_preparation())
+    }
+
+    /// Whether an exact successor intent already owns a submitted GPU slot.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn has_successor_submission_for_intent(
+        &self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.submission_lifecycle.any_owner(|owner| {
+            owner.frame.is_successor_preparation() && owner.frame.playback_intent() == intent
+        })
     }
 
     /// Presentation ticket carried by the retained candidate.
@@ -1330,8 +1959,9 @@ impl HeadlessViewerGpuAdapter {
         if self.submission_lifecycle.owner(submission_id).is_none() {
             return (None, None);
         }
-        let quarantine =
-            self.submission_lifecycle.quarantine_after_authority_revocation(reason.into());
+        let quarantine = self
+            .submission_lifecycle
+            .quarantine_submission_after_authority_revocation(submission_id, reason.into());
         let revoked_current_physical_output =
             self.take_physical_output_for_submission(submission_id);
         (quarantine, revoked_current_physical_output)
@@ -1351,6 +1981,11 @@ impl HeadlessViewerGpuAdapter {
     /// Whether a submitted owner still occupies the renderer frame slot.
     pub(crate) fn has_submission_in_flight(&self) -> bool {
         self.submission_lifecycle.is_occupied()
+    }
+
+    /// Whether both bounded submitted-owner slots are occupied.
+    pub(crate) fn submission_capacity_is_full(&self) -> bool {
+        self.submission_lifecycle.is_at_capacity()
     }
 
     /// Typed terminal state of this concrete device generation.
@@ -1373,7 +2008,7 @@ impl HeadlessViewerGpuAdapter {
         let mut progress_observed = false;
         let mut observation_time = now;
         let mut device_failure = None;
-        let mut callback_barrier_observed = false;
+        let mut callback_barrier = None;
         while let Some(observation) = self.device_progress.try_observe() {
             progress_observed = true;
             match observation {
@@ -1383,11 +2018,12 @@ impl HeadlessViewerGpuAdapter {
                 } => {
                     // This observation carries no completion authority. An
                     // older wait may arrive after its callback opened the next
-                    // capacity-one slot, so only let the exact active identity
+                    // bounded slots, so only let the exact active identity
                     // influence this lifecycle observation.
-                    if self.submission_lifecycle.current_submission_id() == Some(submission_id) {
+                    if self.submission_lifecycle.contains(submission_id) {
                         observation_time = observation_time.max(observed_at);
-                        callback_barrier_observed = true;
+                        callback_barrier = Some((submission_id, observed_at));
+                        break;
                     }
                 }
                 ViewerGpuDeviceProgressObservation::RendererCleanupSatisfied { .. } => {
@@ -1414,11 +2050,11 @@ impl HeadlessViewerGpuAdapter {
         if progress_observed {
             self.collect_native_import_gpu_timings_after_device_poll();
         }
-        let initial = if callback_barrier_observed {
+        let initial = if let Some((submission_id, observed_at)) = callback_barrier {
             match self.submission_lifecycle.poll(observation_time) {
                 ViewerGpuSubmissionPoll::Pending { .. } => self
                     .submission_lifecycle
-                    .retire_after_fence_barrier(observation_time)
+                    .retire_submission_after_fence_barrier(submission_id, observed_at)
                     .unwrap_or_else(|| {
                         self.submission_lifecycle.poll_deadline_only(observation_time)
                     }),
@@ -1448,8 +2084,11 @@ impl HeadlessViewerGpuAdapter {
                     headless_viewer_gpu_generation_failure_context(failed_submission_id),
                     submission_id.get()
                 );
-                if let Some(quarantine) =
-                    self.submission_lifecycle.quarantine_after_device_failure(generation_reason)
+                if let Some(quarantine) = self
+                    .submission_lifecycle
+                    .quarantine_all_after_device_failure(generation_reason)
+                    .into_iter()
+                    .next()
                 {
                     let revoked_current_physical_output =
                         self.take_physical_output_for_submission(quarantine.submission_id);
@@ -1576,6 +2215,8 @@ impl HeadlessViewerGpuAdapter {
         owner.execution.native_import_bridge_entries = native_import_bridge_entries;
         owner.execution.native_import_retained_sources =
             self.runtime.native_import_retained_source_count();
+        owner.execution.remaining_submissions_after_completion =
+            self.submission_lifecycle.active_count();
         let heterogeneous_completion = (!completion.is_empty()).then_some(completion);
         let quarantine_reason = quarantine_reason.or(retirement_reason);
         let revoked_current_physical_output = if quarantine_reason.is_some() {
@@ -1681,6 +2322,8 @@ pub(crate) enum HeadlessViewerGpuError {
     #[error("headless GPU device creation failed: {0}")]
     Device(String),
     #[error(transparent)]
+    WorkingFloatAdapter(#[from] mondrian_renderer::GpuWorkingFloatAdapterAdmissionError),
+    #[error(transparent)]
     DeviceProgressStart(#[from] ViewerGpuDeviceProgressStartError),
     #[error(transparent)]
     DeviceProgressReserve(#[from] ViewerGpuDeviceProgressReserveError),
@@ -1694,6 +2337,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Backpressure(String),
     #[error("headless Viewer GPU recording failed: {0}")]
     Record(String),
+    #[error(transparent)]
+    NativeImportRetirement(#[from] GpuNativeDecodedFrameImportError),
     #[error("headless Viewer GPU execution exceeded its caller's monotonic deadline")]
     DeadlineExceeded,
     #[error("headless Viewer GPU submission identity space is exhausted")]
@@ -1721,6 +2366,17 @@ pub(crate) enum HeadlessViewerGpuError {
     InvalidPublicationOrder(String),
     #[error("headless Viewer GPU timestamp query failed: {0}")]
     Timestamp(String),
+}
+
+fn map_headless_device_progress_reserve_error(
+    error: ViewerGpuDeviceProgressReserveError,
+) -> HeadlessViewerGpuError {
+    match error {
+        ViewerGpuDeviceProgressReserveError::Backpressured => HeadlessViewerGpuError::Backpressure(
+            "the bounded Viewer GPU device-progress capacity is full".to_owned(),
+        ),
+        error => HeadlessViewerGpuError::DeviceProgressReserve(error),
+    }
 }
 
 fn ensure_headless_gpu_deadline(
@@ -1786,6 +2442,162 @@ fn duration_us(started: Instant, completed: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    fn complete_preview_gpu_dependency_barrier(
+    ) -> super::HeadlessPreviewGpuDependencyBarrierEvidence {
+        super::HeadlessPreviewGpuDependencyBarrierEvidence {
+            staged_frames_before: 2,
+            staged_frames_after: 0,
+            physical_outputs_before: 1,
+            physical_outputs_after: 0,
+            submission_owners_before: 1,
+            submission_owners_after: 0,
+            native_sources_before: 1,
+            native_sources_after: 0,
+            completed_submissions: 1,
+            quarantines_started: 0,
+            submissions_retired_after_quarantine: 0,
+            native_retirement_failure_count: 0,
+            first_native_retirement_failure: None,
+            deadline_elapsed: false,
+        }
+    }
+
+    #[test]
+    fn preview_gpu_dependency_barrier_fails_closed_on_each_residual_domain() {
+        let complete = complete_preview_gpu_dependency_barrier();
+        assert!(complete.is_complete());
+
+        let mut submission_residual = complete.clone();
+        submission_residual.submission_owners_after = 1;
+        assert!(!submission_residual.is_complete());
+
+        let mut staged_residual = complete.clone();
+        staged_residual.staged_frames_after = 1;
+        assert!(!staged_residual.is_complete());
+
+        let mut physical_output_residual = complete.clone();
+        physical_output_residual.physical_outputs_after = 1;
+        assert!(!physical_output_residual.is_complete());
+
+        let mut native_source_residual = complete.clone();
+        native_source_residual.native_sources_after = 1;
+        assert!(!native_source_residual.is_complete());
+
+        let mut native_retirement_failure = complete.clone();
+        native_retirement_failure.native_retirement_failure_count = 1;
+        native_retirement_failure.first_native_retirement_failure =
+            Some("copy fence observation failed".to_owned());
+        assert!(!native_retirement_failure.is_complete());
+
+        let mut inconsistent_failure_count = complete.clone();
+        inconsistent_failure_count.native_retirement_failure_count = 1;
+        assert!(!inconsistent_failure_count.is_complete());
+
+        let mut inconsistent_failure_detail = complete.clone();
+        inconsistent_failure_detail.first_native_retirement_failure =
+            Some("unpaired failure detail".to_owned());
+        assert!(!inconsistent_failure_detail.is_complete());
+
+        let mut deadline_elapsed = complete;
+        deadline_elapsed.deadline_elapsed = true;
+        assert!(!deadline_elapsed.is_complete());
+    }
+
+    #[test]
+    fn headless_startup_invalid_policy_never_creates_a_progress_owner() {
+        let failure = match super::HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(super::NativeVideoImportGpuTimingPolicy::Disabled, 1) {
+            Err(failure) => failure,
+            Ok(_) => panic!("invalid observation policy accepted"),
+        };
+        assert!(failure.diagnostic().is::<super::HeadlessViewerGpuError>());
+        let (_, receipt) = failure.shutdown_until(std::time::Instant::now());
+        assert_eq!(
+            receipt.gpu,
+            crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::NotStarted
+        );
+        assert!(receipt.all_created_resources_released());
+    }
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn headless_startup_constructor_failures_retain_exact_created_renderer_inventory() {
+        use crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence;
+        for stage in [
+            super::HeadlessGpuStartupStage::ProgressStarted,
+            super::HeadlessGpuStartupStage::RendererCreated,
+        ] {
+            for panic in [false, true] {
+                let result = super::HeadlessViewerGpuAdapter::construct(
+                    super::NativeVideoImportGpuTimingPolicy::Disabled,
+                    0,
+                    |observed| {
+                        if observed == stage {
+                            assert!(!panic, "injected Headless constructor panic");
+                            anyhow::bail!("injected Headless constructor error");
+                        }
+                        Ok(())
+                    },
+                );
+                let failure = match result {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("fault not reached"),
+                };
+                let (error, receipt) = failure
+                    .shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+                assert!(format!("{error:#}").contains("injected Headless constructor"));
+                assert!(receipt.preview.is_none());
+                assert!(receipt.all_created_resources_released(), "{receipt:?}");
+                let HeadlessStartupGpuShutdownEvidence::Partial(partial) = receipt.gpu else {
+                    panic!("not a partial generation")
+                };
+                let renderer_created = stage == super::HeadlessGpuStartupStage::RendererCreated;
+                assert_eq!(partial.renderer_created, renderer_created);
+                assert_eq!(
+                    partial.progress.renderer_retirement.is_some(),
+                    renderer_created
+                );
+                assert_eq!(
+                    partial.progress.qualifies_normal_runtime(),
+                    renderer_created
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn real_gpu_retirement_carries_joined_renderer_receipt() {
+        let adapter = super::HeadlessViewerGpuAdapter::new().expect("real GPU adapter");
+        let evidence =
+            adapter.shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert!(evidence.worker_started);
+        assert!(evidence.worker_terminated);
+        assert!(!evidence.worker_panicked);
+        assert!(!evidence.timed_out);
+        assert!(evidence.retirement_requested);
+        assert!(evidence.retirement_handoff_accepted);
+        assert!(evidence.retirement_completed);
+        assert!(evidence.generation_terminal_kind.is_none());
+        let renderer = evidence.renderer_retirement.expect("actual created Renderer receipt");
+        assert_eq!(
+            renderer.cpu_yuv_upload,
+            mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned
+        );
+        assert!(renderer.is_healthy());
+    }
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn real_gpu_preview_dependency_barrier_precedes_generation_retirement() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut adapter =
+            super::HeadlessViewerGpuAdapter::new().expect("real Headless GPU adapter");
+        let barrier = adapter.release_preview_decoder_dependencies_until(deadline);
+        assert!(barrier.is_complete(), "{barrier:?}");
+        let retirement = adapter.shutdown_until(deadline);
+        assert!(retirement.qualifies_normal_runtime(), "{retirement:?}");
+    }
+
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1823,6 +2635,16 @@ mod tests {
             .expect("completion safety deadline");
 
         assert!(completion_deadline.instant() > frame_presentation_deadline);
+    }
+
+    #[test]
+    fn bounded_device_progress_saturation_is_retriable_headless_backpressure() {
+        assert!(matches!(
+            map_headless_device_progress_reserve_error(
+                ViewerGpuDeviceProgressReserveError::Backpressured,
+            ),
+            HeadlessViewerGpuError::Backpressure(_)
+        ));
     }
 
     #[test]

@@ -5,15 +5,22 @@
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "validation")]
+use std::sync::Mutex;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+#[cfg(feature = "validation")]
+use std::{cell::RefCell, rc::Rc};
 
+#[cfg(feature = "validation")]
+use crate::app::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use crate::app::preview_execution::{
-    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
+    PreviewGpuFrame, PreviewGpuFrameStaging, PreviewGpuFrameState,
+    PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
@@ -21,10 +28,14 @@ use crate::app::preview_gpu_output_blocker::{
 use crate::app::preview_runtime::{PreviewColorRejection, PreviewVisualGpuCompletionDisposition};
 use crate::app::preview_work_notification::{PreviewWorkRevision, PreviewWorkWatch};
 use crate::app::ui_actions::app_shell_quit_action;
+#[cfg(feature = "validation")]
+use crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
 use crate::app::viewer_gpu_device_progress::{
-    ViewerGpuDeviceGenerationMember, ViewerGpuDeviceGenerationRetirement,
-    ViewerGpuDeviceGenerationTerminal, ViewerGpuDeviceProgressObservation,
-    ViewerGpuDeviceProgressOwner, ViewerGpuDeviceProgressReserveError, ViewerGpuDeviceProgressWake,
+    ViewerGpuDeviceGenerationId, ViewerGpuDeviceGenerationMember,
+    ViewerGpuDeviceGenerationRetirement, ViewerGpuDeviceGenerationTerminal,
+    ViewerGpuDeviceProgressObservation, ViewerGpuDeviceProgressOwner,
+    ViewerGpuDeviceProgressReserveError, ViewerGpuDeviceProgressShutdownEvidence,
+    ViewerGpuDeviceProgressWake,
 };
 use crate::app::viewer_gpu_output_health::{
     classify_viewer_gpu_output_health,
@@ -44,10 +55,19 @@ use crate::app::viewer_gpu_submission::{
     ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll, ViewerGpuSubmissionQuarantine,
     ViewerGpuSubmissionQuarantineReason,
 };
+use crate::app::AppEnduranceShutdownEvidence;
 use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
+use crate::app_ui::background_runtime::AppUiBackgroundRuntimeOwner;
+#[cfg(feature = "validation")]
+pub use crate::app_ui::event_loop_owner::{
+    AppUiEventLoopConstructionFailure, AppUiEventLoopConstructionFailureKind,
+    AppUiEventLoopShutdownEvidence, AppUiEventLoopShutdownReceipt,
+    AppUiEventLoopShutdownReceiptError,
+};
+use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
-    AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
+    AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands, ViewerGpuPreparation,
 };
 use crate::app_ui::product_logging::init_product_tracing;
 #[cfg(test)]
@@ -55,7 +75,8 @@ use crate::app_ui::product_logging::DEFAULT_APP_UI_LOG_FILTER;
 #[cfg(not(test))]
 use crate::app_ui::product_logging::FORCED_PROCESS_EXIT_CODE;
 use crate::app_ui::rendering::{
-    AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
+    AppUiBackendEvent, AppUiFrameMetrics, AppUiFramePressure, AppUiFrameRenderer,
+    AppUiRenderDiagnosticReporter,
 };
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
@@ -63,19 +84,30 @@ use crate::app_ui::runtime::{
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
+#[cfg(feature = "validation")]
+use crate::app_ui::window_outer_receipt::AppUiWindowNativeReturnEvidence;
+#[cfg(feature = "validation")]
+use crate::app_ui::window_outer_receipt::AppUiWindowOuterShutdownEvidence;
+#[cfg(feature = "validation")]
+pub use crate::app_ui::window_outer_receipt::{
+    AppUiWindowClosedEvidence, AppUiWindowClosedOutcome, AppUiWindowClosedReceipt,
+    AppUiWindowClosedReceiptError, AppUiWindowRunReceipt, AppUiWindowRunReceiptError,
+};
 use mondrian_core::types::ColorSpace;
-use mondrian_core::WaveformMode;
+use mondrian_core::{ProgramScopeScale, ProgramScopesTap, SignalComplianceContract, WaveformMode};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_platform::SystemPlatformService;
 #[cfg(test)]
-use mondrian_renderer::RenderOutputColorBoundary;
+use mondrian_renderer::color::ProgramOutputBoundary;
 use mondrian_renderer::{
+    color::{
+        ProgramOutputRole, RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
+        RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, GpuProgramScopesRequest,
-    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
-    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
+    product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
+    GpuProgramScopesRequest, GpuSignalMonitorRequest, RenderMonitorAdaptation,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
     ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
@@ -87,7 +119,10 @@ use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey, ExternalTextureTransfer};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
-use mondrian_ui_widgets::ViewerExternalTexturePresentation;
+use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation};
+use sha2::{Digest, Sha256};
+
+const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -167,8 +202,8 @@ enum ViewerHeterogeneousCompletionPoll {
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
 const VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV: &str = "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT";
+const VIEWER_QUALIFICATION_RUN_ID_ENV: &str = "MONDRIAN_VIEWER_QUALIFICATION_RUN_ID";
 const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
 const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
@@ -177,6 +212,493 @@ const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
 const APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US: u64 = 50_000;
 const APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY: Duration = Duration::from_millis(16);
 const VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "validation")]
+const MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES: usize = 24;
+static NEXT_APP_UI_SURFACE_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-local identity of one concrete Window/Surface generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AppUiSurfaceGenerationId(u64);
+
+impl AppUiSurfaceGenerationId {
+    fn next() -> Result<Self, AppUiSurfaceGenerationError> {
+        NEXT_APP_UI_SURFACE_GENERATION_ID
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map(Self)
+            .map_err(|_| AppUiSurfaceGenerationError::IdentityExhausted)
+    }
+
+    const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AppUiSurfaceGenerationError {
+    #[error("app UI Surface generation identity space is exhausted")]
+    IdentityExhausted,
+}
+
+/// Owner-derived facts for one real Window/Surface and wgpu Device recovery.
+///
+/// Construction remains inside this Module because only the Window event-loop
+/// owner can observe physical presentation and consume the retiring device.
+#[cfg(feature = "validation")]
+pub(crate) struct SurfaceDeviceReopenFacts {
+    cycle_index: u32,
+    operation_id: String,
+    sequence_binding_sha256: String,
+    surface_generation_before: u64,
+    surface_generation_after: u64,
+    device_generation_before: u64,
+    device_generation_after: u64,
+    shutdown_receipt_json: String,
+    shutdown_receipt_sha256: String,
+    reopened_contract_json: String,
+    reopened_contract_sha256: String,
+}
+
+#[cfg(feature = "validation")]
+impl SurfaceDeviceReopenFacts {
+    pub(crate) const fn cycle_index(&self) -> u32 {
+        self.cycle_index
+    }
+
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(crate) fn sequence_binding_sha256(&self) -> &str {
+        &self.sequence_binding_sha256
+    }
+
+    pub(crate) const fn surface_generation_before(&self) -> u64 {
+        self.surface_generation_before
+    }
+
+    pub(crate) const fn surface_generation_after(&self) -> u64 {
+        self.surface_generation_after
+    }
+
+    pub(crate) const fn device_generation_before(&self) -> u64 {
+        self.device_generation_before
+    }
+
+    pub(crate) const fn device_generation_after(&self) -> u64 {
+        self.device_generation_after
+    }
+
+    pub(crate) fn shutdown_receipt_sha256(&self) -> &str {
+        &self.shutdown_receipt_sha256
+    }
+
+    pub(crate) fn shutdown_receipt_json(&self) -> &str {
+        &self.shutdown_receipt_json
+    }
+
+    pub(crate) fn reopened_contract_sha256(&self) -> &str {
+        &self.reopened_contract_sha256
+    }
+
+    pub(crate) fn reopened_contract_json(&self) -> &str {
+        &self.reopened_contract_json
+    }
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone)]
+struct AppUiSurfaceDeviceReopenRequest {
+    cycle_index: u32,
+    operation_id: String,
+}
+
+#[cfg(feature = "validation")]
+struct AppUiSurfaceDeviceReopenValidation {
+    generation_history: Rc<RefCell<super::window_generation_history::WindowGenerationHistory>>,
+    state: AppUiSurfaceDeviceReopenValidationState,
+    result: Arc<Mutex<Option<Result<EnduranceRecoveryOperationReceipt, String>>>>,
+    deadline: Instant,
+    recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+    recovery_pump_return:
+        Rc<RefCell<Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>>>,
+}
+
+#[cfg(feature = "validation")]
+impl Drop for AppUiSurfaceDeviceReopenValidation {
+    fn drop(&mut self) {
+        *self.recovery_pump_return.borrow_mut() = self.recovery_pump.take();
+    }
+}
+
+#[cfg(feature = "validation")]
+enum AppUiValidationWindowShutdown {
+    PendingHostActive {
+        host: AppUiServiceShutdownEvidence,
+        gpu: AppUiActiveWindowGpuShutdownEvidence,
+    },
+    PendingActive {
+        runtime: crate::app_ui::background_runtime::AppUiBackgroundRuntimeShutdownEvidence,
+        host: AppUiServiceShutdownEvidence,
+        gpu: AppUiActiveWindowGpuShutdownEvidence,
+    },
+    PendingActivePublicationFailure {
+        runtime: crate::app_ui::background_runtime::AppUiBackgroundRuntimeShutdownEvidence,
+        host: AppUiServiceShutdownEvidence,
+        gpu: AppUiActiveWindowGpuShutdownEvidence,
+    },
+    IncompleteHostFallback {
+        host: AppUiServiceShutdownEvidence,
+    },
+    Complete(AppUiWindowOuterShutdownEvidence),
+}
+
+#[cfg(feature = "validation")]
+struct AppUiValidationReturnedState {
+    app_state: AppState,
+    shutdown: AppUiValidationWindowShutdown,
+}
+
+#[cfg(feature = "validation")]
+type AppUiValidationReturnSlot = Rc<RefCell<Option<AppUiValidationReturnedState>>>;
+
+#[derive(Debug, thiserror::Error)]
+enum AppUiProductShutdownError {
+    #[error("Window App owner did not close cleanly: {evidence:?}")]
+    IncompleteApp {
+        evidence: Box<AppEnduranceShutdownEvidence>,
+    },
+}
+
+struct AppUiHostSessionOwner {
+    host: Option<AppUiHost>,
+    #[cfg(feature = "validation")]
+    validation_return: Option<AppUiValidationReturnSlot>,
+    #[cfg(feature = "validation")]
+    validation_shutdown_deadline: Option<Instant>,
+}
+
+impl AppUiHostSessionOwner {
+    fn new(
+        host: AppUiHost,
+        #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
+        #[cfg(feature = "validation")] validation_shutdown_deadline: Option<Instant>,
+    ) -> Self {
+        Self {
+            host: Some(host),
+            #[cfg(feature = "validation")]
+            validation_return,
+            #[cfg(feature = "validation")]
+            validation_shutdown_deadline,
+        }
+    }
+
+    fn shutdown_until(
+        &mut self,
+        deadline: Instant,
+        gpu_shutdown: AppUiActiveWindowGpuShutdownEvidence,
+    ) -> Result<AppUiServiceShutdownEvidence, String> {
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = self.validation_return.as_ref()
+            && return_slot.borrow().is_some()
+        {
+            return Err(
+                "validation Window return slot was already occupied before Host shutdown"
+                    .to_owned(),
+            );
+        }
+        let host = self
+            .host
+            .take()
+            .ok_or_else(|| "Window Host was already consumed before shutdown".to_owned())?;
+        let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = self.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown: AppUiValidationWindowShutdown::PendingHostActive {
+                    host: ui_shutdown,
+                    gpu: gpu_shutdown,
+                },
+            });
+            return Ok(ui_shutdown);
+        }
+        let _ = gpu_shutdown;
+        let app_shutdown = app_state.shutdown_for_endurance(deadline);
+        if !app_shutdown.all_resources_released() {
+            return Err(AppUiProductShutdownError::IncompleteApp {
+                evidence: Box::new(app_shutdown),
+            }
+            .to_string());
+        }
+        Ok(ui_shutdown)
+    }
+}
+
+impl std::ops::Deref for AppUiHostSessionOwner {
+    type Target = AppUiHost;
+
+    fn deref(&self) -> &Self::Target {
+        let Some(host) = self.host.as_ref() else {
+            unreachable!("App UI host session was accessed after consuming return")
+        };
+        host
+    }
+}
+
+impl std::ops::DerefMut for AppUiHostSessionOwner {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let Some(host) = self.host.as_mut() else {
+            unreachable!("App UI host session was accessed after consuming return")
+        };
+        host
+    }
+}
+
+impl Drop for AppUiHostSessionOwner {
+    fn drop(&mut self) {
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = self.validation_return.take() {
+            let Some(host) = self.host.take() else {
+                tracing::error!("validation Window lost its App UI host before state return");
+                return;
+            };
+            let Some(deadline) = self.validation_shutdown_deadline.take() else {
+                tracing::error!(
+                    "validation Window Host fallback had no caller-owned shutdown deadline; retaining Host authority"
+                );
+                std::mem::forget(host);
+                return;
+            };
+            let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
+            let mut returned = return_slot.borrow_mut();
+            if returned.is_some() {
+                tracing::error!(
+                    "validation Window attempted to return AppState more than once; retaining duplicate authority"
+                );
+                std::mem::forget(app_state);
+                return;
+            }
+            *returned = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown: AppUiValidationWindowShutdown::IncompleteHostFallback {
+                    host: ui_shutdown,
+                },
+            });
+        }
+    }
+}
+
+#[cfg(feature = "validation")]
+fn record_validation_active_runtime_shutdown(
+    return_slot: &AppUiValidationReturnSlot,
+    runtime: crate::app_ui::background_runtime::AppUiBackgroundRuntimeShutdownEvidence,
+) -> Result<(), String> {
+    let mut returned = return_slot.borrow_mut();
+    let state = returned.as_mut().ok_or_else(|| {
+        "validation Window returned no App owner before Runtime shutdown".to_owned()
+    })?;
+    let (host, gpu) = match &state.shutdown {
+        AppUiValidationWindowShutdown::PendingHostActive { host, gpu } => (*host, gpu.clone()),
+        AppUiValidationWindowShutdown::PendingActive { .. }
+        | AppUiValidationWindowShutdown::PendingActivePublicationFailure { .. } => {
+            return Err("validation Window Runtime shutdown was recorded twice".to_owned());
+        }
+        AppUiValidationWindowShutdown::IncompleteHostFallback { .. } => {
+            return Err(
+                "validation Window used fallback Host shutdown before Runtime closure".to_owned(),
+            );
+        }
+        AppUiValidationWindowShutdown::Complete(_) => {
+            return Err("validation Window shutdown evidence was completed twice".to_owned());
+        }
+    };
+    state.shutdown = AppUiValidationWindowShutdown::PendingActive { runtime, host, gpu };
+    Ok(())
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiSurfacePictureContract {
+    sequence_id: String,
+    frame: i64,
+    width: u32,
+    height: u32,
+    output_target: AppUiViewerGpuOutputTarget,
+    output_color_space: ColorSpace,
+    monitor_color_space: ColorSpace,
+    tone_map: bool,
+    display_view: Option<AppUiViewerGpuOutputDisplayView>,
+    frame_residency: AppUiViewerGpuOutputFrameResidency,
+    display_contract_sha256: String,
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+enum AppUiSurfaceDeviceReopenValidationState {
+    AwaitingOriginalPicture(AppUiSurfaceDeviceReopenRequest),
+    AwaitingReopenedPicture(Box<AppUiSurfaceDeviceReopenAwaitingPicture>),
+    Complete,
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+struct AppUiSurfaceDeviceReopenAwaitingPicture {
+    request: AppUiSurfaceDeviceReopenRequest,
+    sequence_binding_sha256: String,
+    original_picture: AppUiSurfacePictureContract,
+    surface_generation_before: u64,
+    surface_generation_after: u64,
+    device_generation_before: u64,
+    device_generation_after: u64,
+    shutdown_receipt_json: String,
+    shutdown_receipt_sha256: String,
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug, serde::Serialize)]
+struct AppUiViewerGpuShutdownContract {
+    schema_version: u32,
+    surface_generation: u64,
+    device_generation: u64,
+    worker_shutdown: crate::app::owned_worker_lifecycle::OwnedWorkerShutdown,
+    wake_callbacks: crate::app::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_wake_failures: u64,
+    wake_registration_rejections: u64,
+    worker_started: bool,
+    worker_terminated: bool,
+    worker_panicked: bool,
+    timed_out: bool,
+    retirement_requested: bool,
+    retirement_handoff_accepted: bool,
+    retirement_completed: bool,
+    renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
+    generation_terminal_kind: Option<&'static str>,
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug, serde::Serialize)]
+struct AppUiReopenedSurfaceContract<'a> {
+    schema_version: u32,
+    surface_generation: u64,
+    device_generation: u64,
+    actual_surface_presented: bool,
+    original_picture_sha256: &'a str,
+    reopened_picture_json: &'a str,
+    reopened_picture_sha256: &'a str,
+}
+
+#[cfg(feature = "validation")]
+fn canonical_json_and_sha256(
+    value: &impl serde::Serialize,
+) -> Result<(String, String), serde_json::Error> {
+    let canonical_json = serde_json::to_string(value)?;
+    let sha256 = Sha256::digest(canonical_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok((canonical_json, sha256))
+}
+
+#[cfg(feature = "validation")]
+fn exact_presented_surface_picture(
+    host: &AppUiHost,
+    session: &AppUiWindowSession,
+    frame_result: crate::app_ui::rendering::AppUiFrameResult,
+) -> Option<AppUiSurfacePictureContract> {
+    let crate::app_ui::rendering::AppUiFrameResult::Presented { diagnostics, metrics, .. } =
+        frame_result
+    else {
+        return None;
+    };
+    // UI-shell glyph/raster diagnostics are not evidence about the Viewer
+    // picture. The qualification boundary is the external texture batch and
+    // its concrete registration/presentation path.
+    if diagnostics.external_texture_failures != 0
+        || metrics.external_texture_batches == 0
+        || metrics.external_texture_failures != 0
+        || session.viewer_gpu_presentation.published_output().is_none()
+        || !matches!(
+            session.viewer_gpu_output_telemetry.health_summary().status,
+            AppUiViewerGpuOutputHealthStatus::Ready | AppUiViewerGpuOutputHealthStatus::Degraded
+        )
+    {
+        return None;
+    }
+    let context = session.viewer_gpu_output_telemetry.last_frame_context.as_ref()?;
+    let state = host.app_state();
+    let sequence = state.active_sequence()?;
+    if context.sequence_id != sequence.id.to_string()
+        || context.frame != state.current_frame()
+        || context.output_target != AppUiViewerGpuOutputTarget::Display
+        || context.preview_candidate_state != AppUiViewerGpuOutputPreviewCandidateState::Ready
+        || !context.frame_residency.execution_observed
+    {
+        return None;
+    }
+    let display_contract_sha256 = session
+        .display_snapshot
+        .as_ref()?
+        .contract_identity()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(AppUiSurfacePictureContract {
+        sequence_id: context.sequence_id.clone(),
+        frame: context.frame,
+        width: context.width,
+        height: context.height,
+        output_target: context.output_target,
+        output_color_space: context.output_color_space,
+        monitor_color_space: context.monitor_color_space,
+        tone_map: context.tone_map,
+        display_view: context.display_view.clone(),
+        frame_residency: context.frame_residency.clone(),
+        display_contract_sha256,
+    })
+}
+
+#[cfg(feature = "validation")]
+fn seal_clean_viewer_gpu_shutdown(
+    evidence: ViewerGpuDeviceProgressShutdownEvidence,
+    surface_generation: u64,
+    device_generation: u64,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    if surface_generation == 0
+        || device_generation == 0
+        || !evidence.qualifies_normal_runtime()
+        || evidence.wake_callbacks.registrations_accepted == 0
+    {
+        return Err(
+            format!("Viewer GPU device generation did not retire cleanly: {evidence:?}").into(),
+        );
+    }
+    canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
+        schema_version: 4,
+        surface_generation,
+        device_generation,
+        worker_shutdown: evidence.worker_shutdown,
+        wake_callbacks: evidence.wake_callbacks,
+        native_wake_failures: evidence.native_wake_failures,
+        wake_registration_rejections: evidence.wake_registration_rejections,
+        worker_started: evidence.worker_started,
+        worker_terminated: evidence.worker_terminated,
+        worker_panicked: evidence.worker_panicked,
+        timed_out: evidence.timed_out,
+        retirement_requested: evidence.retirement_requested,
+        retirement_handoff_accepted: evidence.retirement_handoff_accepted,
+        retirement_completed: evidence.retirement_completed,
+        renderer_retirement: evidence.renderer_retirement,
+        generation_terminal_kind: evidence.generation_terminal_kind.map(|kind| match kind {
+            ViewerGpuDeviceGenerationTerminalKind::DeviceLost => "device_lost",
+            ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => "device_destroyed",
+            ViewerGpuDeviceGenerationTerminalKind::ProgressFailure => "progress_failure",
+        }),
+    })
+    .map_err(Into::into)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiWindowRole {
@@ -246,6 +768,7 @@ struct AppUiViewerGpuOutputTelemetry {
     last_compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     last_compositor_texture_bindings:
         Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
+    last_compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
     last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
@@ -259,6 +782,28 @@ struct AppUiViewerGpuOutputTelemetry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 struct AppUiViewerGpuOutputDiagnostics {
+    /// Supervisor-provided nonce shared by one non-spliceable Viewer run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qualification_run_id: Option<String>,
+    /// Process instance generated once at product startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_instance_id: Option<String>,
+    /// OS process ID retained for acquisition correlation, not as identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_id: Option<u32>,
+    /// Strictly increasing record number inside the process instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qualification_record_sequence: Option<u64>,
+    /// SHA-256 of the currently executing product image when qualification
+    /// diagnostics are enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_image_sha256: Option<String>,
+    /// Exact active wgpu Adapter identity driving the Viewer surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renderer_adapter: Option<AppUiRendererAdapterDiagnostics>,
+    /// Exact active Window display target used by the native probes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_target: Option<AppUiDisplayTarget>,
     invocations: u64,
     non_workspace_skips: u64,
     current_skips: u64,
@@ -272,6 +817,16 @@ struct AppUiViewerGpuOutputDiagnostics {
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
     display_contract_refreshes: u64,
+    /// Actual UI presentation path observed on the reported frame.
+    ui_surface_carrier_active: bool,
+    /// Whether the cached carrier attachments were rebuilt on this frame.
+    ui_surface_carrier_target_rebuilt: bool,
+    /// External-texture batches actually submitted to the UI composition pass.
+    presented_external_texture_batches: usize,
+    /// Target-transfer Viewer batches actually submitted.
+    presented_surface_code_value_batches: usize,
+    /// ICC/device-code Viewer batches actually submitted.
+    presented_device_code_value_batches: usize,
     prepare_attempts_timed: u64,
     accumulated_prepare_duration_us: u64,
     max_prepare_duration_us: u64,
@@ -298,6 +853,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compositor_texture_bindings: Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
@@ -313,6 +870,42 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display_snapshot: Option<DisplaySnapshotDiagnostics>,
+    /// Canonical display contract source value retained for qualification
+    /// replay; `display_snapshot.contract_sha256` is derived from this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_output_contract: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    /// Complete sampled ICC processor/LUT identity used by the Viewer frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_calibration_identity_sha256: Option<String>,
+    /// ICC rendering intent used to build the sampled calibration LUT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiRendererAdapterDiagnostics {
+    name: String,
+    vendor_id: String,
+    device_id: String,
+    device_type: String,
+    driver: String,
+    driver_info: String,
+    backend: String,
+}
+
+impl AppUiRendererAdapterDiagnostics {
+    fn from_adapter(adapter: &wgpu::Adapter) -> Self {
+        let info = adapter.get_info();
+        Self {
+            name: info.name,
+            vendor_id: format!("{:04x}", info.vendor),
+            device_id: format!("{:04x}", info.device),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver,
+            driver_info: info.driver_info,
+            backend: format!("{:?}", info.backend),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -333,6 +926,8 @@ struct DisplaySnapshotDiagnostics {
     blocker_count: u64,
     blocker_codes: Vec<String>,
     warning_count: u64,
+    /// Complete 256-bit Display Output Contract identity.
+    contract_sha256: String,
     contract_diagnostic_key: u64,
 }
 
@@ -355,6 +950,13 @@ impl DisplaySnapshotDiagnostics {
             blocker_count: snapshot.blockers.len() as u64,
             blocker_codes: snapshot.blockers.iter().map(|b| b.code().to_owned()).collect(),
             warning_count: snapshot.warnings.len() as u64,
+            contract_sha256: snapshot
+                .contract_identity()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(""),
             contract_diagnostic_key: snapshot.contract_identity().diagnostic_key(),
         }
     }
@@ -383,6 +985,7 @@ struct AppUiViewerGpuOutputFrameContext {
 enum AppUiViewerGpuOutputTarget {
     Display,
     Export,
+    ReferenceOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -474,7 +1077,7 @@ struct AppUiSurfaceFormatColorSpacesDiagnostic {
 enum AppUiDisplayIssueReason {
     HdrOutputRequiresHdrSurface,
     OutputColorSpaceRequiresSurfaceColorSpace,
-    ReconfigureBlockedByPayload,
+    ReconfigurationRequired,
     UnsupportedPresentationIntent,
     UnsupportedSurfaceContract,
     /// OS-level ICC profile, EDR, or HDR behavior is not supported on this
@@ -522,6 +1125,13 @@ impl AppUiViewerGpuOutputTelemetry {
         }
         let health = self.health_summary();
         AppUiViewerGpuOutputDiagnostics {
+            qualification_run_id: None,
+            process_instance_id: None,
+            process_id: None,
+            qualification_record_sequence: None,
+            runtime_image_sha256: None,
+            renderer_adapter: None,
+            display_target: None,
             invocations: self.invocations,
             non_workspace_skips: self.non_workspace_skips,
             current_skips: self.current_skips,
@@ -538,6 +1148,11 @@ impl AppUiViewerGpuOutputTelemetry {
             display_presentation_unsupported_contracts: self
                 .display_presentation_unsupported_contracts,
             display_contract_refreshes: self.display_contract_refreshes,
+            ui_surface_carrier_active: false,
+            ui_surface_carrier_target_rebuilt: false,
+            presented_external_texture_batches: 0,
+            presented_surface_code_value_batches: 0,
+            presented_device_code_value_batches: 0,
             prepare_attempts_timed: self.prepare_attempts_timed,
             accumulated_prepare_duration_us: self.accumulated_prepare_duration_us,
             max_prepare_duration_us: self.max_prepare_duration_us,
@@ -573,6 +1188,7 @@ impl AppUiViewerGpuOutputTelemetry {
             spatial_runtime: self.last_spatial_runtime,
             compositor_uniform_arena: self.last_compositor_uniform_arena,
             compositor_texture_bindings: self.last_compositor_texture_bindings,
+            compositor_creative_luts: self.last_compositor_creative_luts,
             runtime_report,
             health,
             health_counts: self.health_counts,
@@ -587,6 +1203,9 @@ impl AppUiViewerGpuOutputTelemetry {
             display_issue_summary,
             last_outcome: self.last_outcome,
             display_snapshot: None,
+            display_output_contract: None,
+            display_calibration_identity_sha256: None,
+            display_calibration_rendering_intent: None,
         }
     }
 
@@ -596,6 +1215,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_spatial_runtime = None;
         self.last_compositor_uniform_arena = None;
         self.last_compositor_texture_bindings = None;
+        self.last_compositor_creative_luts = None;
         self.last_frame_context = None;
         self.last_preview_candidate_id = None;
         self.last_preview_candidate_state = None;
@@ -675,6 +1295,13 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_compositor_texture_bindings = Some(diagnostics);
     }
 
+    fn record_compositor_creative_luts(
+        &mut self,
+        diagnostics: mondrian_renderer::GpuCreativeLutCacheDiagnostics,
+    ) {
+        self.last_compositor_creative_luts = Some(diagnostics);
+    }
+
     fn record_non_workspace_skip(&mut self) {
         self.non_workspace_skips = self.non_workspace_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::NonWorkspace);
@@ -732,11 +1359,9 @@ impl AppUiViewerGpuOutputTelemetry {
             AppUiDisplayPresentationReadinessStatus::Current => {
                 self.last_display_issue_refresh_generation = None;
             }
-            AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload => {
+            AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired => {
                 self.display_presentation_reconfigure_candidates =
                     self.display_presentation_reconfigure_candidates.saturating_add(1);
-                self.display_presentation_payload_blockers =
-                    self.display_presentation_payload_blockers.saturating_add(1);
                 self.last_display_issue_refresh_generation =
                     Some(self.display_contract_refresh_generation);
             }
@@ -816,13 +1441,13 @@ impl AppUiViewerGpuOutputFrameContext {
             width: frame.width,
             height: frame.height,
             external_texture_key,
-            output_target: AppUiViewerGpuOutputTarget::from(frame.program_output_boundary.target),
-            output_color_space: frame.program_output_boundary.output_color_space,
+            output_target: AppUiViewerGpuOutputTarget::from(frame.program_output_boundary.target()),
+            output_color_space: frame.program_output_boundary.output_color_space(),
             monitor_color_space: frame.monitor_adaptation.monitor_color_space(),
-            tone_map: frame.program_output_boundary.tone_map,
+            tone_map: frame.program_output_boundary.tone_map(),
             preview_candidate_id: Some(frame.candidate_id()),
             preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
-            display_view: frame.program_output_boundary.display_view.as_ref().map(|display_view| {
+            display_view: frame.program_output_boundary.ocio_display_view().map(|display_view| {
                 AppUiViewerGpuOutputDisplayView {
                     display: display_view.display.clone(),
                     view: display_view.view.clone(),
@@ -833,11 +1458,12 @@ impl AppUiViewerGpuOutputFrameContext {
     }
 }
 
-impl From<RenderOutputColorBoundaryTarget> for AppUiViewerGpuOutputTarget {
-    fn from(target: RenderOutputColorBoundaryTarget) -> Self {
+impl From<ProgramOutputRole> for AppUiViewerGpuOutputTarget {
+    fn from(target: ProgramOutputRole) -> Self {
         match target {
-            RenderOutputColorBoundaryTarget::Display => Self::Display,
-            RenderOutputColorBoundaryTarget::Export => Self::Export,
+            ProgramOutputRole::Display => Self::Display,
+            ProgramOutputRole::Export => Self::Export,
+            ProgramOutputRole::ReferenceOutput => Self::ReferenceOutput,
         }
     }
 }
@@ -899,8 +1525,8 @@ impl AppUiDisplayIssueSummary {
     ) -> Option<Self> {
         let reason = match readiness.status {
             AppUiDisplayPresentationReadinessStatus::Current => return None,
-            AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload => {
-                AppUiDisplayIssueReason::ReconfigureBlockedByPayload
+            AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired => {
+                AppUiDisplayIssueReason::ReconfigurationRequired
             }
             AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent => {
                 AppUiDisplayIssueReason::UnsupportedPresentationIntent
@@ -1154,8 +1780,10 @@ impl AppUiEventLoopTelemetry {
 
 struct AppUiWindowSession {
     // Move-only generation members are transferred to the non-UI progress
-    // domain by `Drop`; the Window thread never joins or cancels GPU work.
+    // domain by explicit shutdown. `Drop` is fallback-only; the Window thread
+    // never directly joins or cancels GPU work.
     viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
+    surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
@@ -1163,6 +1791,7 @@ struct AppUiWindowSession {
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
+    renderer_adapter: AppUiRendererAdapterDiagnostics,
     color_engine: mondrian_core::ColorEngine,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
@@ -1174,9 +1803,14 @@ struct AppUiWindowSession {
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
     >,
+    /// Bounded CPU-complete ticketless horizon. It owns no GPU submission or
+    /// presentation lease; an exact entry may either become the immediate
+    /// successor or acquire the current Frame Demand after a clock jump.
+    staged_viewer_gpu_successors: PreviewGpuFrameStaging,
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
     program_scopes_refresh_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
@@ -1186,6 +1820,7 @@ struct AppUiWindowSession {
     current_bounds: std::cell::Cell<Rect>,
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
+    event_loop_failure: Option<String>,
     event_loop_telemetry: AppUiEventLoopTelemetry,
     playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling,
 }
@@ -1194,6 +1829,11 @@ fn synchronize_playback_thread_scheduling(host: &AppUiHost, session: &mut AppUiW
     if let Err(error) = session.playback_thread_scheduling.synchronize(host.is_playback_active()) {
         tracing::warn!(%error, "native playback thread scheduling unavailable");
     }
+}
+
+#[cfg(feature = "validation")]
+const fn validation_window_advances_playback(surface_reopen_active: bool) -> bool {
+    !surface_reopen_active
 }
 
 fn poll_window_background_tasks(
@@ -1231,6 +1871,7 @@ struct WindowViewerGpuSubmissionOwner {
     stage_diagnostics: RenderColorStageDiagnostics,
     program_scopes: Option<mondrian_renderer::GpuProgramScopesRecord>,
     program_scopes_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1291,7 +1932,7 @@ impl WindowViewerGpuPresentationState {
 }
 
 struct WindowViewerGpuGenerationRetirement {
-    runtime: ViewerGpuExecutionRuntime,
+    runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
     lifecycle: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
@@ -1300,15 +1941,22 @@ struct WindowViewerGpuGenerationRetirement {
     _renderer_device: wgpu::Device,
     _renderer_queue: wgpu::Queue,
     _deferred_cleanup: WindowViewerGpuDeferredCleanup,
-    _completed_submission: Option<
+    _completed_submissions: Vec<
         ViewerGpuCompletedSubmission<
             WindowViewerGpuSubmissionOwner,
             ViewerHeterogeneousGpuCompletedBatch,
         >,
     >,
-    _lost_submission_owner: Option<WindowViewerGpuSubmissionOwner>,
+    _lost_submission_owners: Vec<WindowViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
-    native_device_removed_logged: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WindowViewerGpuGenerationRetirementTakeError {
+    #[error("Window Viewer GPU generation has no live progress owner")]
+    MissingProgressOwner,
+    #[error("Window Viewer GPU generation lost its execution runtime")]
+    MissingExecutionRuntime,
 }
 
 impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement {
@@ -1316,19 +1964,13 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
         "Window Viewer GPU device generation"
     }
 
-    fn poll_retirement(&mut self, terminal: Option<&ViewerGpuDeviceGenerationTerminal>) -> bool {
-        let native_progress_proved = match self.runtime.retire_completed_native_import_sources() {
-            Ok(_) => true,
-            Err(error) if error.is_native_device_removed() => {
-                if !self.native_device_removed_logged {
-                    tracing::warn!(
-                        %error,
-                        "Window Viewer GPU retirement accepted typed native device-removal proof"
-                    );
-                    self.native_device_removed_logged = true;
-                }
-                true
-            }
+    fn poll_retirement(
+        &mut self,
+        terminal: Option<&ViewerGpuDeviceGenerationTerminal>,
+    ) -> Option<crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt>
+    {
+        let renderer = match self.runtime.poll() {
+            Ok(receipt) => receipt,
             Err(error) => {
                 if !self.native_retirement_error_logged {
                     tracing::error!(
@@ -1337,177 +1979,1911 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                     );
                     self.native_retirement_error_logged = true;
                 }
-                false
+                None
             }
         };
-        let native_copy_ready =
-            native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
-        if self._completed_submission.is_none() && self._lost_submission_owner.is_none() {
-            match self.lifecycle.poll(Instant::now()) {
-                ViewerGpuSubmissionPoll::Completed(completed) => {
-                    self._completed_submission = Some(completed);
-                }
-                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
-                    // A lost completion callback cannot hold the single
-                    // submission slot forever; retire the owner with its
-                    // quarantine reason so the pipeline can continue.
-                    tracing::warn!(
-                        submission_id = retired.submission_id.get(),
-                        reason = ?retired.reason,
-                        "Window Viewer force-retired a quarantined GPU submission whose completion callback was lost"
-                    );
-                    self._lost_submission_owner = Some(retired.owner);
-                }
-                ViewerGpuSubmissionPoll::Idle
-                | ViewerGpuSubmissionPoll::Pending { .. }
-                | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
+        match self.lifecycle.poll(Instant::now()) {
+            ViewerGpuSubmissionPoll::Completed(completed) => {
+                self._completed_submissions.push(completed);
             }
+            ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                tracing::warn!(
+                    submission_id = retired.submission_id.get(),
+                    reason = ?retired.reason,
+                    "Window Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                );
+                self._lost_submission_owners.push(retired.owner);
+            }
+            ViewerGpuSubmissionPoll::Idle
+            | ViewerGpuSubmissionPoll::Pending { .. }
+            | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
         }
 
         // Actual wgpu loss is safe terminal evidence for wgpu work only. The
         // independent D3D decoder-copy fence above must still be ready before
         // the media/lifecycle owner can move out of the callback slot.
-        if native_copy_ready
+        if renderer.is_some()
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
-            self._lost_submission_owner = self.lifecycle.retire_owner_after_wgpu_device_loss();
+            self._lost_submission_owners
+                .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
-        native_copy_ready && !self.lifecycle.is_occupied()
+        if self.lifecycle.is_occupied() {
+            return None;
+        }
+        renderer.map(|renderer| {
+            crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt {
+                renderer: Some(renderer),
+            }
+        })
     }
 }
 
 impl Drop for AppUiWindowSession {
     fn drop(&mut self) {
-        let Some(progress) = self.viewer_gpu_device_progress.take() else {
+        if self.viewer_gpu_device_progress.generation_id().is_none() {
             // A replacement shell has not yet received the shared generation;
-            // its freshly-created, idle runtime may drop normally.
+            // it has no execution runtime or upload worker to retire.
             return;
-        };
-        let Some(runtime) = self.viewer_gpu_execution.take() else {
-            tracing::error!(
-                "Window Viewer GPU teardown lost its execution runtime; retaining progress authority indefinitely"
-            );
-            std::mem::forget(progress);
-            return;
-        };
-        let lifecycle = std::mem::replace(
-            &mut self.viewer_gpu_submissions,
-            ViewerGpuSubmissionLifecycle::new(),
+        }
+        match self.take_viewer_gpu_generation_retirement() {
+            Ok((progress, retirement)) => progress.retire_device_generation(retirement),
+            Err(error) => tracing::error!(%error),
+        }
+    }
+}
+
+/// Independent publication and device-generation closure facts for an active
+/// Window session. Publication cleanup failure never suppresses the raw GPU
+/// worker/Renderer receipt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppUiActiveWindowGpuShutdownEvidence {
+    surface_generation: u64,
+    device_generation: Option<u64>,
+    publication_cleanup: Result<(), String>,
+    retirement: AppUiWindowGpuRetirementEvidence,
+}
+
+impl AppUiActiveWindowGpuShutdownEvidence {
+    pub(super) fn qualifies_normal_runtime(&self) -> bool {
+        self.surface_generation != 0
+            && self.device_generation.is_some_and(|generation| generation != 0)
+            && self.publication_cleanup.is_ok()
+            && matches!(
+                &self.retirement,
+                AppUiWindowGpuRetirementEvidence::Retired(evidence)
+                    if evidence.qualifies_created_inventory(true)
+                        && evidence.wake_callbacks.registrations_accepted > 0
+            )
+    }
+
+    fn qualification_failure(&self) -> Option<String> {
+        (!self.qualifies_normal_runtime())
+            .then(|| format!("Window Viewer GPU generation did not close cleanly: {self:?}"))
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    pub(super) const fn generation_identity(&self) -> Option<(u64, u64)> {
+        match self.device_generation {
+            Some(device_generation) if self.surface_generation != 0 && device_generation != 0 => {
+                Some((self.surface_generation, device_generation))
+            }
+            Some(_) | None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AppUiWindowGpuRetirementEvidence {
+    Retired(ViewerGpuDeviceProgressShutdownEvidence),
+    OwnershipFault(AppUiWindowGpuOwnershipFault),
+    ShutdownPanicked(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AppUiWindowGpuOwnershipFault {
+    MissingProgressOwner,
+    MissingExecutionRuntime,
+}
+
+#[cfg(feature = "validation")]
+struct AppUiSurfaceDeviceReopenTransition {
+    surface_generation_before: u64,
+    surface_generation_after: u64,
+    device_generation_before: u64,
+    device_generation_after: u64,
+    shutdown_receipt_json: String,
+    shutdown_receipt_sha256: String,
+}
+
+fn request_app_ui_device(
+    adapter: &wgpu::Adapter,
+) -> Result<(wgpu::Device, wgpu::Queue), mondrian_core::MondrianError> {
+    let working_texture_features =
+        product_gpu_working_texture_device_features(adapter).map_err(|error| {
+            mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() }
+        })?;
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: native_video_texture_device_features(adapter.features())
+            | ocio_lut_filtering_device_features(adapter.features())
+            | working_texture_features,
+        ..wgpu::DeviceDescriptor::default()
+    };
+    pollster::block_on(mondrian_renderer::request_device_with_native_video_support(
+        adapter,
+        &descriptor,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AppUiPreActiveWindowStartupStage {
+    HostOwned,
+    WindowCreated,
+    SurfaceCreated,
+    AdapterSelected,
+    DeviceQueueCreated,
+    ViewerGpuProgressStarted,
+    PreviewWakerInstalled,
+    WindowPrepared,
+    WindowActivated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AppUiPreActiveViewerGpuShutdownEvidence {
+    NotStarted,
+    Shutdown(Option<crate::app::viewer_gpu_startup::ViewerGpuStartupShutdownEvidence>),
+    ShutdownPanicked(String),
+}
+
+impl AppUiPreActiveViewerGpuShutdownEvidence {
+    fn all_created_resources_released(&self) -> bool {
+        match self {
+            Self::NotStarted => true,
+            Self::Shutdown(Some(evidence)) => evidence.all_created_resources_released(),
+            Self::Shutdown(None) | Self::ShutdownPanicked(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct AppUiPreActiveWindowShutdownEvidence {
+    last_stage: AppUiPreActiveWindowStartupStage,
+    rust_native_authority_released_on_event_loop_thread: bool,
+    viewer_gpu: AppUiPreActiveViewerGpuShutdownEvidence,
+}
+
+impl AppUiPreActiveWindowShutdownEvidence {
+    pub(super) fn all_created_resources_released(&self) -> bool {
+        self.rust_native_authority_released_on_event_loop_thread
+            && self.viewer_gpu.all_created_resources_released()
+    }
+}
+
+struct AppUiPreActiveWindowStartupFailure {
+    primary: String,
+    shutdown: Box<AppUiPreActiveWindowShutdownEvidence>,
+}
+
+struct AppUiInitialWindowCandidate {
+    preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
+    preview_work_watch: PreviewWorkWatch,
+    preview_work_event_pending: Arc<AtomicBool>,
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    session: AppUiWindowSession,
+    session_bounds: Rect,
+}
+
+fn prepare_initial_window_candidate(
+    event_loop: &winit::event_loop::EventLoop<AppUiUserEvent>,
+    host: &AppUiHost,
+    deadline: Instant,
+) -> Result<AppUiInitialWindowCandidate, AppUiPreActiveWindowStartupFailure> {
+    // The initial native carrier must match the already-owned Host mode.
+    // An opened Project must not allocate and immediately replace a Startup surface.
+    let role = window_role_for_mode(host.mode());
+    catch_pre_active_window_construction(deadline, |last_stage, viewer_gpu_startup| {
+        let preview_work_event_proxy = event_loop.create_proxy();
+        let startup_window = Arc::new(
+            event_loop
+                .create_window(window_attributes_for_role(role))
+                .map_err(|error| format!("could not create startup Window: {error}"))?,
         );
-        let retirement = WindowViewerGpuGenerationRetirement {
-            runtime,
-            lifecycle,
-            _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
-            _renderer_device: self.renderer_device.clone(),
-            _renderer_queue: self.renderer_queue.clone(),
-            _deferred_cleanup: std::mem::take(&mut self.viewer_gpu_deferred_cleanup),
-            _completed_submission: None,
-            _lost_submission_owner: None,
-            native_retirement_error_logged: false,
-            native_device_removed_logged: false,
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowCreated;
+
+        let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let instance = wgpu::Instance::new(instance_desc);
+        let startup_surface = instance
+            .create_surface(startup_window.clone())
+            .map_err(|error| format!("could not create startup Surface: {error}"))?;
+        *last_stage = AppUiPreActiveWindowStartupStage::SurfaceCreated;
+
+        let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+            &instance,
+            &wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&startup_surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            },
+        ))
+        .map_err(|_| "No suitable GPU adapter".to_owned())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::AdapterSelected;
+
+        let adapter_info = adapter.get_info();
+        crate::app_ui::about_dialog::SYSTEM_INFO
+            .set(crate::app_ui::about_dialog::AboutSystemInfo {
+                pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
+                rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
+                os: if cfg!(windows) {
+                    "Windows"
+                } else {
+                    std::env::consts::OS
+                }
+                .to_owned(),
+                arch: std::env::consts::ARCH.to_owned(),
+                os_version: String::new(),
+                wgpu_backend: format!("{:?}", adapter_info.backend),
+                gpu_name: adapter_info.name,
+            })
+            .ok();
+
+        let (device, queue) = request_app_ui_device(&adapter)
+            .map_err(|error| format!("could not create startup Device/Queue: {error}"))?;
+        *last_stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+
+        #[cfg(target_os = "linux")]
+        host.observe_viewer_gpu_device_local_bytes(
+            mondrian_renderer::query_gpu_device_memory_capacity(&device)
+                .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes),
+        );
+
+        *viewer_gpu_startup = Some(
+            crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
+                &device,
+                &queue,
+                ViewerGpuDeviceProgressWake::default(),
+            )
+            .map_err(|error| format!("could not start Viewer GPU progress: {error}"))?,
+        );
+        *last_stage = AppUiPreActiveWindowStartupStage::ViewerGpuProgressStarted;
+        let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
+        viewer_gpu_startup
+            .as_ref()
+            .ok_or("startup GPU owner missing")?
+            .install_native_waker(move || {
+                viewer_gpu_completion_event_proxy
+                    .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                    .is_ok()
+            });
+
+        let preview_work_watch = host.preview_work_watch();
+        let preview_work_event_pending = Arc::new(AtomicBool::new(false));
+        let worker_event_pending = Arc::clone(&preview_work_event_pending);
+        let worker_event_proxy = preview_work_event_proxy.clone();
+        if let Err(failure) = preview_work_watch.install_waker(move || {
+            queue_preview_work_event(&worker_event_pending, || {
+                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+            });
+        }) {
+            let (reason, callback) = failure.into_parts();
+            drop(callback);
+            return Err(reason.to_string());
+        }
+        *last_stage = AppUiPreActiveWindowStartupStage::PreviewWakerInstalled;
+
+        let startup = viewer_gpu_startup
+            .as_mut()
+            .ok_or_else(|| "Viewer GPU startup owner was lost before preparation".to_owned())?;
+        let prepared_session = AppUiPreparedWindowSession::prepare(
+            role,
+            startup_window,
+            startup_surface,
+            &adapter,
+            &device,
+            &queue,
+            host,
+            Some(startup),
+        )
+        .map_err(|error| error.to_string())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowPrepared;
+        let activated_session =
+            prepared_session.activate(Some(startup)).map_err(|error| error.to_string())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowActivated;
+        let (session, session_bounds) = activated_session.into_parts();
+
+        Ok::<_, String>(AppUiInitialWindowCandidate {
+            preview_work_event_proxy,
+            preview_work_watch,
+            preview_work_event_pending,
+            instance,
+            adapter,
+            device,
+            queue,
+            session,
+            session_bounds,
+        })
+    })
+}
+
+fn catch_pre_active_window_construction<T>(
+    deadline: Instant,
+    build: impl FnOnce(
+        &mut AppUiPreActiveWindowStartupStage,
+        &mut Option<crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    ) -> Result<T, String>,
+) -> Result<T, AppUiPreActiveWindowStartupFailure> {
+    let mut last_stage = AppUiPreActiveWindowStartupStage::HostOwned;
+    let mut viewer_gpu_startup = None;
+    let build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build(&mut last_stage, &mut viewer_gpu_startup)
+    }));
+    match build {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(primary)) => Err(close_pre_active_native_construction(
+            primary,
+            last_stage,
+            viewer_gpu_startup,
+            deadline,
+        )),
+        Err(payload) => Err(close_pre_active_native_construction(
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "pre-active Window construction",
+            )
+            .to_string(),
+            last_stage,
+            viewer_gpu_startup,
+            deadline,
+        )),
+    }
+}
+
+fn close_pre_active_native_construction(
+    primary: String,
+    last_stage: AppUiPreActiveWindowStartupStage,
+    viewer_gpu_startup: Option<crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    deadline: Instant,
+) -> AppUiPreActiveWindowStartupFailure {
+    let viewer_gpu = match viewer_gpu_startup {
+        None => AppUiPreActiveViewerGpuShutdownEvidence::NotStarted,
+        Some(startup) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            startup.shutdown_until(deadline)
+        })) {
+            Ok(evidence) => AppUiPreActiveViewerGpuShutdownEvidence::Shutdown(evidence),
+            Err(payload) => AppUiPreActiveViewerGpuShutdownEvidence::ShutdownPanicked(
+                crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                    payload,
+                    "pre-active Viewer GPU shutdown",
+                )
+                .to_string(),
+            ),
+        },
+    };
+    AppUiPreActiveWindowStartupFailure {
+        primary,
+        shutdown: Box::new(AppUiPreActiveWindowShutdownEvidence {
+            last_stage,
+            // The construction closure has returned or unwound before this
+            // evidence is built, so its Window/Surface/Adapter/Device owners
+            // have been consumed on the event-loop thread. This is not a claim
+            // that the OS compositor or native driver reported termination.
+            rust_native_authority_released_on_event_loop_thread: true,
+            viewer_gpu,
+        }),
+    }
+}
+
+#[cfg(feature = "validation")]
+#[allow(clippy::too_many_arguments)]
+fn reopen_window_surface_and_device(
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &mut wgpu::Device,
+    queue: &mut wgpu::Queue,
+    host: &mut AppUiHost,
+    session: &mut AppUiWindowSession,
+    event_proxy: &winit::event_loop::EventLoopProxy<AppUiUserEvent>,
+    deadline: Instant,
+    history: &RefCell<super::window_generation_history::WindowGenerationHistory>,
+) -> Result<AppUiSurfaceDeviceReopenTransition, Box<dyn std::error::Error>> {
+    let surface_generation_before = session.surface_generation_id.get();
+    let device_generation_before = session
+        .viewer_gpu_device_progress
+        .generation_id()
+        .ok_or("Window Viewer GPU device generation is missing")?
+        .get();
+
+    use super::window_generation_history::WindowGenerationEvent;
+    history.borrow_mut().push(WindowGenerationEvent::Began {
+        surface_generation: surface_generation_before,
+        device_generation: device_generation_before,
+    });
+    // Keep the partial owner outside the caught construction scope, exactly as
+    // initial Window startup does. Errors and panics retain the same raw receipt.
+    let candidate = catch_pre_active_window_construction(deadline, |stage, startup_owner| {
+        let next_window = Arc::new(
+            elwt.create_window(window_attributes_for_role(session.role))
+                .map_err(|error| error.to_string())?,
+        );
+        *stage = AppUiPreActiveWindowStartupStage::WindowCreated;
+        let next_surface = instance
+            .create_surface(next_window.clone())
+            .map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::SurfaceCreated;
+        let (next_device, next_queue) =
+            request_app_ui_device(adapter).map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+        #[cfg(target_os = "linux")]
+        host.observe_viewer_gpu_device_local_bytes(
+            mondrian_renderer::query_gpu_device_memory_capacity(&next_device)
+                .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes),
+        );
+        *startup_owner = Some(
+            crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
+                &next_device,
+                &next_queue,
+                ViewerGpuDeviceProgressWake::default(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        *stage = AppUiPreActiveWindowStartupStage::ViewerGpuProgressStarted;
+        let startup = startup_owner.as_mut().ok_or("candidate GPU startup owner missing")?;
+        let completion_proxy = event_proxy.clone();
+        startup.install_native_waker(move || {
+            completion_proxy
+                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                .is_ok()
+        });
+        let prepared = AppUiPreparedWindowSession::prepare(
+            session.role,
+            next_window,
+            next_surface,
+            adapter,
+            &next_device,
+            &next_queue,
+            host,
+            Some(startup),
+        )
+        .map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::WindowPrepared;
+        let after_surface = prepared.surface_generation_id().get();
+        let after_device = startup.generation_id().get();
+        if after_surface == surface_generation_before || after_device == device_generation_before {
+            return Err("Surface/device recovery reused a consumed generation identity".to_owned());
+        }
+        let activated = prepared.activate(Some(startup)).map_err(|error| error.to_string())?;
+        *stage = AppUiPreActiveWindowStartupStage::WindowActivated;
+        Ok((
+            activated,
+            next_device,
+            next_queue,
+            after_surface,
+            after_device,
+        ))
+    });
+    let (activated, next_device, next_queue, surface_generation_after, device_generation_after) =
+        match candidate {
+            Ok(candidate) => candidate,
+            Err(failure) => {
+                history
+                    .borrow_mut()
+                    .push(WindowGenerationEvent::CandidateFailed { shutdown: *failure.shutdown });
+                return Err(failure.primary.into());
+            }
         };
-        progress.retire_device_generation(retirement);
+    let (mut retired_session, bounds) = activated.into_parts();
+    // After this swap the outer session owns the candidate even if retirement
+    // or publication fails. Always close the old owner before inspecting facts.
+    let (shutdown_receipt_json, shutdown_receipt_sha256) = with_window_candidate_installed(
+        session,
+        &mut retired_session,
+        |active_session, retired_session| {
+            history.borrow_mut().push(WindowGenerationEvent::Activated {
+                surface_generation: surface_generation_after,
+                device_generation: device_generation_after,
+            });
+            let shutdown = catch_window_viewer_gpu_shutdown(retired_session, host, deadline);
+            history
+                .borrow_mut()
+                .push(WindowGenerationEvent::Retired { shutdown: shutdown.clone() });
+            if let Some(error) = shutdown.qualification_failure() {
+                return Err::<_, Box<dyn std::error::Error>>(error.into());
+            }
+            let AppUiWindowGpuRetirementEvidence::Retired(raw) = shutdown.retirement else {
+                return Err("old Window generation has no raw GPU retirement".into());
+            };
+            let sealed = seal_clean_viewer_gpu_shutdown(
+                raw,
+                surface_generation_before,
+                device_generation_before,
+            )?;
+            retired_session.window.set_visible(false);
+            host.renew_still_frame_demand_after_output_retirement()?;
+            publish_active_window_session(host, active_session, bounds);
+            Ok::<_, Box<dyn std::error::Error>>(sealed)
+        },
+    )?;
+    session.window.set_visible(true);
+    session.window.request_redraw();
+    *device = next_device;
+    *queue = next_queue;
+    drop(retired_session);
+    Ok(AppUiSurfaceDeviceReopenTransition {
+        surface_generation_before,
+        surface_generation_after,
+        device_generation_before,
+        device_generation_after,
+        shutdown_receipt_json,
+        shutdown_receipt_sha256,
+    })
+}
+
+#[cfg(feature = "validation")]
+fn publish_surface_reopen_validation_failure(
+    validation: &AppUiSurfaceDeviceReopenValidation,
+    error: impl Into<String>,
+) {
+    let error = error.into();
+    match validation.result.lock() {
+        Ok(mut result) if result.is_none() => *result = Some(Err(error)),
+        Ok(_) => {}
+        Err(_) => tracing::error!("Surface/device reopen result lock poisoned"),
+    }
+}
+
+#[cfg(feature = "validation")]
+#[allow(clippy::too_many_arguments)]
+fn advance_surface_device_reopen_validation(
+    validation: &mut AppUiSurfaceDeviceReopenValidation,
+    frame_result: crate::app_ui::rendering::AppUiFrameResult,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &mut wgpu::Device,
+    queue: &mut wgpu::Queue,
+    host: &mut AppUiHost,
+    session: &mut AppUiWindowSession,
+    event_proxy: &winit::event_loop::EventLoopProxy<AppUiUserEvent>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if Instant::now() >= validation.deadline {
+        return Err("Surface/device reopen validation deadline elapsed".into());
+    }
+    let Some(picture) = exact_presented_surface_picture(host, session, frame_result) else {
+        return Ok(false);
+    };
+    let phase = std::mem::replace(
+        &mut validation.state,
+        AppUiSurfaceDeviceReopenValidationState::Complete,
+    );
+    match phase {
+        AppUiSurfaceDeviceReopenValidationState::AwaitingOriginalPicture(request) => {
+            let sequence_binding_sha256 = {
+                let app = host.app_state();
+                crate::app::endurance_playback::current_sequence_binding_sha256(&app)
+                    .ok_or("Surface/device reopen requires one active Sequence")?
+            };
+            let transition = reopen_window_surface_and_device(
+                elwt,
+                instance,
+                adapter,
+                device,
+                queue,
+                host,
+                session,
+                event_proxy,
+                validation.deadline,
+                &validation.generation_history,
+            )?;
+            validation.state = AppUiSurfaceDeviceReopenValidationState::AwaitingReopenedPicture(
+                Box::new(AppUiSurfaceDeviceReopenAwaitingPicture {
+                    request,
+                    sequence_binding_sha256,
+                    original_picture: picture,
+                    surface_generation_before: transition.surface_generation_before,
+                    surface_generation_after: transition.surface_generation_after,
+                    device_generation_before: transition.device_generation_before,
+                    device_generation_after: transition.device_generation_after,
+                    shutdown_receipt_json: transition.shutdown_receipt_json,
+                    shutdown_receipt_sha256: transition.shutdown_receipt_sha256,
+                }),
+            );
+            Ok(false)
+        }
+        AppUiSurfaceDeviceReopenValidationState::AwaitingReopenedPicture(awaiting) => {
+            let AppUiSurfaceDeviceReopenAwaitingPicture {
+                request,
+                sequence_binding_sha256,
+                original_picture,
+                surface_generation_before,
+                surface_generation_after,
+                device_generation_before,
+                device_generation_after,
+                shutdown_receipt_json,
+                shutdown_receipt_sha256,
+            } = *awaiting;
+            let current_binding = {
+                let app = host.app_state();
+                crate::app::endurance_playback::current_sequence_binding_sha256(&app)
+                    .ok_or("reopened Surface lost its active Sequence binding")?
+            };
+            let current_surface_generation = session.surface_generation_id.get();
+            let current_device_generation = session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .ok_or("reopened Surface lost its device generation owner")?
+                .get();
+            if current_binding != sequence_binding_sha256
+                || picture != original_picture
+                || current_surface_generation != surface_generation_after
+                || current_device_generation != device_generation_after
+            {
+                return Err(
+                    "reopened Surface did not present the exact original Timeline picture contract"
+                        .into(),
+                );
+            }
+            let (_, original_picture_sha256) = canonical_json_and_sha256(&original_picture)?;
+            let (reopened_picture_json, reopened_picture_sha256) =
+                canonical_json_and_sha256(&picture)?;
+            if original_picture_sha256 != reopened_picture_sha256 {
+                return Err(
+                    "reopened Surface picture digest differs from the original presentation".into(),
+                );
+            }
+            let (reopened_contract_json, reopened_contract_sha256) =
+                canonical_json_and_sha256(&AppUiReopenedSurfaceContract {
+                    schema_version: 2,
+                    surface_generation: surface_generation_after,
+                    device_generation: device_generation_after,
+                    actual_surface_presented: true,
+                    original_picture_sha256: &original_picture_sha256,
+                    reopened_picture_json: &reopened_picture_json,
+                    reopened_picture_sha256: &reopened_picture_sha256,
+                })?;
+            let receipt = EnduranceRecoveryOperationReceipt::from_surface_device_reopen_facts(
+                SurfaceDeviceReopenFacts {
+                    cycle_index: request.cycle_index,
+                    operation_id: request.operation_id,
+                    sequence_binding_sha256,
+                    surface_generation_before,
+                    surface_generation_after,
+                    device_generation_before,
+                    device_generation_after,
+                    shutdown_receipt_json,
+                    shutdown_receipt_sha256,
+                    reopened_contract_json,
+                    reopened_contract_sha256,
+                },
+            )?;
+            let mut result = validation
+                .result
+                .lock()
+                .map_err(|_| "Surface/device reopen result lock poisoned")?;
+            if result.is_some() {
+                return Err("Surface/device reopen validation produced duplicate evidence".into());
+            }
+            *result = Some(Ok(receipt));
+            validation.state = AppUiSurfaceDeviceReopenValidationState::Complete;
+            Ok(true)
+        }
+        AppUiSurfaceDeviceReopenValidationState::Complete => {
+            Err("Surface/device reopen validation advanced after completion".into())
+        }
     }
 }
 
 /// Run the app UI Mondrian editor window.
 pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "validation")]
+    return run_app_ui_with_initial_state(AppState::new(), None, None);
+    #[cfg(not(feature = "validation"))]
+    run_app_ui_with_initial_state(AppState::new())
+}
+
+/// Process-local reusable desktop event-loop owner for endurance validation.
+///
+/// Winit permits only one event-loop owner per process on the supported
+/// desktop platforms. Each validation run is an orthogonal Window/GPU session;
+/// no Window or device owner crosses a return from `run_on_demand`.
+#[cfg(feature = "validation")]
+pub(crate) struct AppUiReusableEventLoop {
+    event_loop: winit::event_loop::EventLoop<AppUiUserEvent>,
+}
+
+#[cfg(feature = "validation")]
+impl AppUiReusableEventLoop {
+    pub(crate) fn new() -> Result<Self, AppUiEventLoopConstructionFailure> {
+        Ok(Self {
+            event_loop: winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event()
+                .build()
+                .map_err(AppUiEventLoopConstructionFailure::from)?,
+        })
+    }
+
+    fn event_loop_mut(&mut self) -> &mut winit::event_loop::EventLoop<AppUiUserEvent> {
+        &mut self.event_loop
+    }
+
+    pub(crate) fn shutdown(self) -> AppUiEventLoopShutdownEvidence {
+        let Self { event_loop } = self;
+        drop(event_loop);
+        AppUiEventLoopShutdownEvidence::after_owner_drop()
+    }
+
+    pub(crate) fn reopen_surface_device_with_pump(
+        &mut self,
+        initial_state: AppState,
+        recovery_pump: crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump,
+        cycle_index: u32,
+        operation_id: String,
+        timeout: Duration,
+    ) -> AppUiSurfaceDeviceReopenRun {
+        run_app_ui_surface_device_reopen_validation_returning_state_inner(
+            self.event_loop_mut(),
+            initial_state,
+            Some(recovery_pump),
+            cycle_index,
+            operation_id,
+            timeout,
+        )
+    }
+}
+
+#[cfg(feature = "validation")]
+/// Run one real Window/Surface and Device reopen over an already-open Project.
+///
+/// The event loop exits only after the fresh generation presents the exact
+/// original Timeline picture or after a fail-closed timeout/error.
+pub fn run_app_ui_surface_device_reopen_validation(
+    initial_state: AppState,
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
+    run_app_ui_surface_device_reopen_validation_batch(
+        initial_state,
+        vec![AppUiSurfaceDeviceReopenValidationRequest { cycle_index, operation_id, timeout }],
+    )
+}
+
+/// One operation in a same-process Surface/Device validation batch.
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppUiSurfaceDeviceReopenValidationRequest {
+    /// Recovery-cycle identity bound into the sealed receipt.
+    pub cycle_index: u32,
+    /// Unique operation identity bound into the sealed receipt.
+    pub operation_id: String,
+    /// Absolute wall-clock budget for this Window session.
+    pub timeout: Duration,
+}
+
+#[cfg(feature = "validation")]
+struct AppUiPreparedSurfaceDeviceReopenValidationRequest {
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+}
+
+/// Mutually exclusive terminal class for a Surface/Device validation batch.
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppUiSurfaceDeviceReopenValidationFailureKind {
+    /// No operation was supplied.
+    EmptyBatch,
+    /// The bounded operation count was exceeded.
+    TooManyOperations,
+    /// A cycle/operation identity was invalid or replayed within the batch.
+    InvalidOrReplayedIdentity,
+    /// At least one operation supplied a zero timeout.
+    ZeroTimeout,
+    /// At least one absolute operation deadline could not be represented.
+    DeadlineOverflow,
+    /// No process-local event-loop owner could be constructed.
+    EventLoopConstruction(AppUiEventLoopConstructionFailureKind),
+    /// A per-operation absolute deadline could not be frozen before Window entry.
+    OperationDeadlineOverflow,
+    /// One Window operation failed after the event loop existed.
+    WindowOperation,
+    /// Operations succeeded but consuming App shutdown was incomplete.
+    AppShutdownIncomplete,
+}
+
+/// Successful batch outcome retaining every final owner handback receipt.
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+pub struct AppUiSurfaceDeviceReopenValidationBatch {
+    submitted_request_count: usize,
+    receipts: Vec<AppUiWindowRunReceipt>,
+    event_loop_shutdown: AppUiEventLoopShutdownEvidence,
+    app_shutdown: AppEnduranceShutdownEvidence,
+}
+
+#[cfg(feature = "validation")]
+impl AppUiSurfaceDeviceReopenValidationBatch {
+    /// Number of operations admitted to this batch request.
+    pub const fn submitted_request_count(&self) -> usize {
+        self.submitted_request_count
+    }
+
+    /// Successful per-Window receipts in request order.
+    pub fn receipts(&self) -> &[AppUiWindowRunReceipt] {
+        &self.receipts
+    }
+
+    /// Event-loop Rust-owner handback evidence.
+    pub const fn event_loop_shutdown(&self) -> AppUiEventLoopShutdownEvidence {
+        self.event_loop_shutdown
+    }
+
+    /// Seal the EventLoop Rust-owner handback for durable batch evidence.
+    pub fn event_loop_shutdown_receipt(
+        &self,
+    ) -> Result<AppUiEventLoopShutdownReceipt, AppUiEventLoopShutdownReceiptError> {
+        AppUiEventLoopShutdownReceipt::seal(self.event_loop_shutdown)
+    }
+
+    /// Exact final consuming App shutdown evidence.
+    pub const fn app_shutdown(&self) -> &AppEnduranceShutdownEvidence {
+        &self.app_shutdown
+    }
+
+    /// Whether EventLoop and App ownership both returned cleanly.
+    pub fn all_returned_authority_released(&self) -> bool {
+        self.event_loop_shutdown.rust_owner_released() && self.app_shutdown.all_resources_released()
+    }
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+enum AppUiSurfaceDeviceReopenRequestFailureKind {
+    EmptyBatch,
+    TooManyOperations,
+    InvalidOrReplayedIdentity,
+    ZeroTimeout,
+    DeadlineOverflow,
+}
+
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+enum AppUiSurfaceDeviceReopenPrimaryFailure {
+    Request {
+        kind: AppUiSurfaceDeviceReopenRequestFailureKind,
+        diagnostic: String,
+    },
+    EventLoopConstruction {
+        failure: AppUiEventLoopConstructionFailure,
+    },
+    OperationAdmission {
+        cycle_index: u32,
+        operation_id: String,
+        diagnostic: String,
+        event_loop_shutdown: AppUiEventLoopShutdownEvidence,
+    },
+    WindowOperation {
+        cycle_index: u32,
+        operation_id: String,
+        diagnostic: String,
+        window_shutdown: Option<Box<AppUiWindowClosedEvidence>>,
+        event_loop_shutdown: AppUiEventLoopShutdownEvidence,
+    },
+    AppShutdownIncomplete {
+        diagnostic: String,
+        event_loop_shutdown: AppUiEventLoopShutdownEvidence,
+    },
+}
+
+#[cfg(feature = "validation")]
+impl AppUiSurfaceDeviceReopenPrimaryFailure {
+    fn request(
+        kind: AppUiSurfaceDeviceReopenRequestFailureKind,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self::Request { kind, diagnostic: diagnostic.into() }
+    }
+}
+
+/// Typed terminal failure retaining completed work and every available owner receipt.
+#[cfg(feature = "validation")]
+#[derive(Debug)]
+pub struct AppUiSurfaceDeviceReopenValidationError {
+    primary: Box<AppUiSurfaceDeviceReopenPrimaryFailure>,
+    submitted_request_count: usize,
+    completed_receipts: Vec<AppUiWindowRunReceipt>,
+    app_shutdown: Box<AppEnduranceShutdownEvidence>,
+    cleanup_diagnostic: Option<String>,
+}
+
+#[cfg(feature = "validation")]
+impl AppUiSurfaceDeviceReopenValidationError {
+    /// Number of operations supplied before request preflight.
+    pub const fn submitted_request_count(&self) -> usize {
+        self.submitted_request_count
+    }
+
+    /// Stable primary failure class; App cleanup never replaces it.
+    pub fn kind(&self) -> AppUiSurfaceDeviceReopenValidationFailureKind {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::Request { kind, .. } => match kind {
+                AppUiSurfaceDeviceReopenRequestFailureKind::EmptyBatch => {
+                    AppUiSurfaceDeviceReopenValidationFailureKind::EmptyBatch
+                }
+                AppUiSurfaceDeviceReopenRequestFailureKind::TooManyOperations => {
+                    AppUiSurfaceDeviceReopenValidationFailureKind::TooManyOperations
+                }
+                AppUiSurfaceDeviceReopenRequestFailureKind::InvalidOrReplayedIdentity => {
+                    AppUiSurfaceDeviceReopenValidationFailureKind::InvalidOrReplayedIdentity
+                }
+                AppUiSurfaceDeviceReopenRequestFailureKind::ZeroTimeout => {
+                    AppUiSurfaceDeviceReopenValidationFailureKind::ZeroTimeout
+                }
+                AppUiSurfaceDeviceReopenRequestFailureKind::DeadlineOverflow => {
+                    AppUiSurfaceDeviceReopenValidationFailureKind::DeadlineOverflow
+                }
+            },
+            AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { failure } => {
+                AppUiSurfaceDeviceReopenValidationFailureKind::EventLoopConstruction(failure.kind())
+            }
+            AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission { .. } => {
+                AppUiSurfaceDeviceReopenValidationFailureKind::OperationDeadlineOverflow
+            }
+            AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation { .. } => {
+                AppUiSurfaceDeviceReopenValidationFailureKind::WindowOperation
+            }
+            AppUiSurfaceDeviceReopenPrimaryFailure::AppShutdownIncomplete { .. } => {
+                AppUiSurfaceDeviceReopenValidationFailureKind::AppShutdownIncomplete
+            }
+        }
+    }
+
+    /// Receipts completed before the terminal failure.
+    pub fn completed_receipts(&self) -> &[AppUiWindowRunReceipt] {
+        &self.completed_receipts
+    }
+
+    /// Failed Window cycle identity, when a Window operation started.
+    pub fn failed_cycle_index(&self) -> Option<u32> {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission { cycle_index, .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation { cycle_index, .. } => {
+                Some(*cycle_index)
+            }
+            _ => None,
+        }
+    }
+
+    /// Failed Window operation identity, when a Window operation started.
+    pub fn failed_operation_id(&self) -> Option<&str> {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission { operation_id, .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation { operation_id, .. } => {
+                Some(operation_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Original primary diagnostic before any App cleanup annotation.
+    pub fn primary_diagnostic(&self) -> &str {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::Request { diagnostic, .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission { diagnostic, .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation { diagnostic, .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::AppShutdownIncomplete {
+                diagnostic, ..
+            } => diagnostic,
+            AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { failure } => {
+                failure.diagnostic()
+            }
+        }
+    }
+
+    /// Additional App cleanup diagnostic, if cleanup failed after a primary error.
+    pub fn cleanup_diagnostic(&self) -> Option<&str> {
+        self.cleanup_diagnostic.as_deref()
+    }
+
+    /// Whether exact outer Window shutdown evidence was returned.
+    pub fn window_shutdown(&self) -> Option<&AppUiWindowClosedEvidence> {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation { window_shutdown, .. } => {
+                window_shutdown.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Event-loop shutdown evidence, present only after successful construction.
+    pub fn event_loop_shutdown(&self) -> Option<AppUiEventLoopShutdownEvidence> {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation {
+                event_loop_shutdown, ..
+            }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission {
+                event_loop_shutdown,
+                ..
+            }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::AppShutdownIncomplete {
+                event_loop_shutdown,
+                ..
+            } => Some(*event_loop_shutdown),
+            AppUiSurfaceDeviceReopenPrimaryFailure::Request { .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { .. } => None,
+        }
+    }
+
+    /// Seal EventLoop handback evidence when construction succeeded.
+    pub fn event_loop_shutdown_receipt(
+        &self,
+    ) -> Result<Option<AppUiEventLoopShutdownReceipt>, AppUiEventLoopShutdownReceiptError> {
+        self.event_loop_shutdown().map(AppUiEventLoopShutdownReceipt::seal).transpose()
+    }
+
+    /// Seal exact outer Window closure evidence when a Window run returned it.
+    pub fn window_shutdown_receipt(
+        &self,
+    ) -> Result<Option<AppUiWindowClosedReceipt>, AppUiWindowClosedReceiptError> {
+        self.window_shutdown().map(AppUiWindowClosedEvidence::seal_receipt).transpose()
+    }
+
+    /// Exact final consuming App shutdown evidence.
+    pub fn app_shutdown(&self) -> &AppEnduranceShutdownEvidence {
+        &self.app_shutdown
+    }
+
+    /// Whether all authority applicable to this failure class returned cleanly.
+    pub fn all_returned_authority_released(&self) -> bool {
+        let primary_released = match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::Request { .. }
+            | AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { .. } => true,
+            AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission {
+                event_loop_shutdown,
+                ..
+            } => event_loop_shutdown.rust_owner_released(),
+            AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation {
+                window_shutdown,
+                event_loop_shutdown,
+                ..
+            } => {
+                event_loop_shutdown.rust_owner_released()
+                    && window_shutdown
+                        .as_deref()
+                        .is_some_and(AppUiWindowClosedEvidence::all_owned_authority_released)
+            }
+            AppUiSurfaceDeviceReopenPrimaryFailure::AppShutdownIncomplete {
+                event_loop_shutdown,
+                ..
+            } => event_loop_shutdown.rust_owner_released(),
+        };
+        primary_released
+            && self.app_shutdown.all_resources_released()
+            && self.cleanup_diagnostic.is_none()
+    }
+}
+
+#[cfg(feature = "validation")]
+impl std::fmt::Display for AppUiSurfaceDeviceReopenValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.primary.as_ref() {
+            AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { failure } => {
+                write!(
+                    formatter,
+                    "could not create the Surface validation event loop: {failure}"
+                )?;
+            }
+            _ => formatter.write_str(self.primary_diagnostic())?,
+        }
+        if let Some(cleanup) = &self.cleanup_diagnostic {
+            write!(formatter, "; consuming App cleanup also failed: {cleanup}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "validation")]
+impl std::error::Error for AppUiSurfaceDeviceReopenValidationError {}
+
+/// Run orthogonal Surface/Device reopen sessions on one process-local event loop.
+///
+/// The same App owner crosses every operation, while each Window, Surface,
+/// Device, Queue, and callback session is destroyed before the next on-demand
+/// event-loop run. The App is consumed by a bounded endurance shutdown before
+/// this function returns.
+#[cfg(feature = "validation")]
+pub fn run_app_ui_surface_device_reopen_validation_batch(
+    initial_state: AppState,
+    requests: Vec<AppUiSurfaceDeviceReopenValidationRequest>,
+) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
+    run_app_ui_surface_device_reopen_validation_batch_with_factory(
+        initial_state,
+        requests,
+        AppUiReusableEventLoop::new,
+    )
+}
+
+#[cfg(feature = "validation")]
+fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
+    initial_state: AppState,
+    requests: Vec<AppUiSurfaceDeviceReopenValidationRequest>,
+    event_loop_factory: impl FnOnce()
+        -> Result<AppUiReusableEventLoop, AppUiEventLoopConstructionFailure>,
+) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
+    let mut state = initial_state;
+    let submitted_request_count = requests.len();
+    if requests.is_empty() {
+        return finish_surface_device_validation(
+            state,
+            Vec::new(),
+            submitted_request_count,
+            Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
+                AppUiSurfaceDeviceReopenRequestFailureKind::EmptyBatch,
+                "Surface/device validation batch must not be empty",
+            )),
+        );
+    }
+    if requests.len() > MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES {
+        return finish_surface_device_validation(
+            state,
+            Vec::new(),
+            submitted_request_count,
+            Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
+                AppUiSurfaceDeviceReopenRequestFailureKind::TooManyOperations,
+                format!(
+                    "Surface/device validation batch exceeds {} operations",
+                    MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES
+                ),
+            )),
+        );
+    }
+    let unique_cycles = requests
+        .iter()
+        .map(|request| request.cycle_index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let unique_operations = requests
+        .iter()
+        .map(|request| request.operation_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_cycles.len() != requests.len()
+        || unique_operations.len() != requests.len()
+        || requests
+            .iter()
+            .any(|request| !valid_surface_validation_operation_id(&request.operation_id))
+    {
+        return finish_surface_device_validation(
+            state,
+            Vec::new(),
+            submitted_request_count,
+            Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
+                AppUiSurfaceDeviceReopenRequestFailureKind::InvalidOrReplayedIdentity,
+                "Surface/device validation batch identities are invalid or replayed",
+            )),
+        );
+    }
+    if requests.iter().any(|request| request.timeout.is_zero()) {
+        return finish_surface_device_validation(
+            state,
+            Vec::new(),
+            submitted_request_count,
+            Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
+                AppUiSurfaceDeviceReopenRequestFailureKind::ZeroTimeout,
+                "Surface/device reopen validation timeout must be nonzero",
+            )),
+        );
+    }
+    let deadline_probe = Instant::now();
+    if requests
+        .iter()
+        .any(|request| deadline_probe.checked_add(request.timeout).is_none())
+    {
+        return finish_surface_device_validation(
+            state,
+            Vec::new(),
+            submitted_request_count,
+            Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
+                AppUiSurfaceDeviceReopenRequestFailureKind::DeadlineOverflow,
+                "Surface/device reopen validation deadline overflow",
+            )),
+        );
+    }
+    let mut prepared_requests = Vec::with_capacity(requests.len());
+    for request in requests {
+        prepared_requests.push(AppUiPreparedSurfaceDeviceReopenValidationRequest {
+            cycle_index: request.cycle_index,
+            operation_id: request.operation_id,
+            timeout: request.timeout,
+        });
+    }
+    let mut event_loop = match event_loop_factory() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            return finish_surface_device_validation(
+                state,
+                Vec::new(),
+                submitted_request_count,
+                Err(
+                    AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction {
+                        failure: error,
+                    },
+                ),
+            );
+        }
+    };
+    let mut receipts = Vec::with_capacity(prepared_requests.len());
+    for request in prepared_requests {
+        let failed_cycle_index = request.cycle_index;
+        let failed_operation_id = request.operation_id.clone();
+        let Some(deadline) = Instant::now().checked_add(request.timeout) else {
+            let event_loop_shutdown = event_loop.shutdown();
+            return finish_surface_device_validation(
+                state,
+                receipts,
+                submitted_request_count,
+                Err(AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission {
+                    cycle_index: failed_cycle_index,
+                    operation_id: failed_operation_id,
+                    diagnostic: "Surface/device reopen operation deadline overflow".to_owned(),
+                    event_loop_shutdown,
+                }),
+            );
+        };
+        let run = run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
+            event_loop.event_loop_mut(),
+            state,
+            None,
+            request.cycle_index,
+            request.operation_id,
+            deadline,
+        );
+        state = run.app_state;
+        match run.result {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => {
+                let event_loop_shutdown = event_loop.shutdown();
+                return finish_surface_device_validation(
+                    state,
+                    receipts,
+                    submitted_request_count,
+                    Err(AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation {
+                        cycle_index: failed_cycle_index,
+                        operation_id: failed_operation_id,
+                        diagnostic: error,
+                        window_shutdown: run.shutdown.map(Box::new),
+                        event_loop_shutdown,
+                    }),
+                );
+            }
+        }
+    }
+    let event_loop_shutdown = event_loop.shutdown();
+    finish_surface_device_validation(
+        state,
+        receipts,
+        submitted_request_count,
+        Ok(event_loop_shutdown),
+    )
+}
+
+#[cfg(feature = "validation")]
+fn valid_surface_validation_operation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(feature = "validation")]
+fn finish_surface_device_validation(
+    app_state: AppState,
+    completed_receipts: Vec<AppUiWindowRunReceipt>,
+    submitted_request_count: usize,
+    result: Result<AppUiEventLoopShutdownEvidence, AppUiSurfaceDeviceReopenPrimaryFailure>,
+) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
+    let (shutdown_deadline, deadline_failure) =
+        match Instant::now().checked_add(Duration::from_secs(30)) {
+            Some(deadline) => (deadline, None),
+            None => (
+                Instant::now(),
+                Some("Surface/device validation App shutdown deadline overflow".to_owned()),
+            ),
+        };
+    let shutdown = app_state.shutdown_for_endurance(shutdown_deadline);
+    let cleanup_failure = deadline_failure.or_else(|| {
+        (!shutdown.all_resources_released())
+            .then(|| format!("Surface/device validation App shutdown was incomplete: {shutdown:?}"))
+    });
+    match result {
+        Ok(event_loop_shutdown) if cleanup_failure.is_none() => {
+            Ok(AppUiSurfaceDeviceReopenValidationBatch {
+                submitted_request_count,
+                receipts: completed_receipts,
+                event_loop_shutdown,
+                app_shutdown: shutdown,
+            })
+        }
+        Ok(event_loop_shutdown) => Err(AppUiSurfaceDeviceReopenValidationError {
+            primary: Box::new(
+                AppUiSurfaceDeviceReopenPrimaryFailure::AppShutdownIncomplete {
+                    diagnostic: cleanup_failure
+                        .clone()
+                        .expect("incomplete App shutdown has a diagnostic"),
+                    event_loop_shutdown,
+                },
+            ),
+            submitted_request_count,
+            completed_receipts,
+            app_shutdown: Box::new(shutdown),
+            cleanup_diagnostic: None,
+        }),
+        Err(primary) => Err(AppUiSurfaceDeviceReopenValidationError {
+            primary: Box::new(primary),
+            submitted_request_count,
+            completed_receipts,
+            app_shutdown: Box::new(shutdown),
+            cleanup_diagnostic: cleanup_failure,
+        }),
+    }
+}
+
+#[cfg(feature = "validation")]
+pub(crate) struct AppUiSurfaceDeviceReopenRun {
+    pub(crate) app_state: AppState,
+    pub(crate) result: Result<AppUiWindowRunReceipt, String>,
+    pub(crate) shutdown: Option<AppUiWindowClosedEvidence>,
+    pub(crate) recovery_pump:
+        Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+}
+
+#[cfg(all(feature = "validation", test))]
+pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
+    initial_state: AppState,
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+) -> AppUiSurfaceDeviceReopenRun {
+    if timeout.is_zero() {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            shutdown: None,
+            recovery_pump: None,
+        };
+    }
+    if Instant::now().checked_add(timeout).is_none() {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            shutdown: None,
+            recovery_pump: None,
+        };
+    }
+    let mut event_loop = match AppUiReusableEventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            return AppUiSurfaceDeviceReopenRun {
+                app_state: initial_state,
+                result: Err(format!(
+                    "could not create the Surface validation event loop: {error}"
+                )),
+                shutdown: None,
+                recovery_pump: None,
+            };
+        }
+    };
+    run_app_ui_surface_device_reopen_validation_returning_state_inner(
+        event_loop.event_loop_mut(),
+        initial_state,
+        None,
+        cycle_index,
+        operation_id,
+        timeout,
+    )
+}
+
+#[cfg(feature = "validation")]
+fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
+    event_loop: &mut winit::event_loop::EventLoop<AppUiUserEvent>,
+    initial_state: AppState,
+    recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+) -> AppUiSurfaceDeviceReopenRun {
+    if timeout.is_zero() {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            shutdown: None,
+            recovery_pump,
+        };
+    }
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            shutdown: None,
+            recovery_pump,
+        };
+    };
+    run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
+        event_loop,
+        initial_state,
+        recovery_pump,
+        cycle_index,
+        operation_id,
+        deadline,
+    )
+}
+
+#[cfg(feature = "validation")]
+fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
+    event_loop: &mut winit::event_loop::EventLoop<AppUiUserEvent>,
+    initial_state: AppState,
+    recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+    cycle_index: u32,
+    operation_id: String,
+    deadline: Instant,
+) -> AppUiSurfaceDeviceReopenRun {
+    let result = Arc::new(Mutex::new(None));
+    let returned_state: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+    let recovery_pump_return = Rc::new(RefCell::new(None));
+    let generation_history = Rc::new(RefCell::new(
+        super::window_generation_history::WindowGenerationHistory::default(),
+    ));
+    let validation = AppUiSurfaceDeviceReopenValidation {
+        generation_history: Rc::clone(&generation_history),
+        state: AppUiSurfaceDeviceReopenValidationState::AwaitingOriginalPicture(
+            AppUiSurfaceDeviceReopenRequest { cycle_index, operation_id },
+        ),
+        result: Arc::clone(&result),
+        deadline,
+        recovery_pump,
+        recovery_pump_return: Rc::clone(&recovery_pump_return),
+    };
+    let ui_result = run_app_ui_with_initial_state_on_event_loop(
+        event_loop,
+        initial_state,
+        Some(validation),
+        Some(Rc::clone(&returned_state)),
+    );
+    let returned = returned_state.borrow_mut().take();
+    let recovery_pump = recovery_pump_return.borrow_mut().take();
+    let AppUiValidationReturnedState { app_state, shutdown } = returned
+        .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
+    let native = AppUiWindowNativeReturnEvidence::after_window_function_return();
+    let (shutdown, outer_failure) = match shutdown {
+        AppUiValidationWindowShutdown::PendingActive { runtime, host, gpu } => (
+            Some(AppUiWindowOuterShutdownEvidence::active_exited(
+                runtime, host, gpu, native,
+            )),
+            None,
+        ),
+        AppUiValidationWindowShutdown::PendingActivePublicationFailure { runtime, host, gpu } => (
+            Some(AppUiWindowOuterShutdownEvidence::active_publication_failed(
+                runtime, host, gpu, native,
+            )),
+            None,
+        ),
+        AppUiValidationWindowShutdown::Complete(evidence) => (Some(evidence), None),
+        AppUiValidationWindowShutdown::PendingHostActive { .. } => (
+            None,
+            Some("Window validation returned before Runtime shutdown evidence".to_owned()),
+        ),
+        AppUiValidationWindowShutdown::IncompleteHostFallback { host } => (
+            None,
+            Some(format!(
+                "Window validation used incomplete Host fallback shutdown: {host:?}"
+            )),
+        ),
+    };
+    if let Some(gpu) = shutdown.as_ref().and_then(AppUiWindowOuterShutdownEvidence::final_gpu) {
+        generation_history.borrow_mut().push(
+            super::window_generation_history::WindowGenerationEvent::Final {
+                shutdown: gpu.clone(),
+            },
+        );
+    }
+    let generation_history = generation_history.borrow().clone();
+    let outer_failure = outer_failure.or_else(|| {
+        shutdown.as_ref().and_then(|evidence| {
+            (!evidence.all_owned_authority_released())
+                .then(|| format!("Window validation owner shutdown did not qualify: {evidence:?}"))
+        })
+    });
+    let published = match result.lock() {
+        Ok(mut receipt) => receipt.take(),
+        Err(_) => Some(Err("Surface/device reopen result lock poisoned".to_owned())),
+    };
+    let operation_result = merge_window_operation_result(
+        published,
+        ui_result.map_err(|error| error.to_string()),
+        outer_failure,
+    );
+    let operation_result = operation_result.and_then(|recovery| {
+        let evidence = shutdown
+            .clone()
+            .ok_or_else(|| "Window validation returned no complete outer evidence".to_owned())?;
+        AppUiWindowRunReceipt::seal_active(recovery, evidence, generation_history.clone())
+            .map_err(|error| format!("could not seal Window run receipt: {error}"))
+    });
+    AppUiSurfaceDeviceReopenRun {
+        app_state,
+        result: operation_result,
+        shutdown: shutdown
+            .map(|evidence| AppUiWindowClosedEvidence::new(evidence, generation_history)),
+        recovery_pump,
+    }
+}
+
+/// Preserve a published operation failure independently of loop and cleanup failures.
+#[cfg(feature = "validation")]
+fn merge_window_operation_result<T>(
+    published: Option<Result<T, String>>,
+    window: Result<(), String>,
+    cleanup: Option<String>,
+) -> Result<T, String> {
+    let result = match (published, window) {
+        (Some(Err(primary)), Err(window)) => {
+            Err(format!("{primary}; Window execution also failed: {window}"))
+        }
+        (_, Err(window)) => Err(window),
+        (Some(result), Ok(())) => result,
+        (None, Ok(())) => {
+            Err("Surface/device reopen validation exited without a receipt".to_owned())
+        }
+    };
+    match (result, cleanup) {
+        (Err(primary), Some(cleanup)) => Err(format!(
+            "{primary}; Window owner cleanup also failed: {cleanup}"
+        )),
+        (Ok(_), Some(cleanup)) => Err(cleanup),
+        (result, None) => result,
+    }
+}
+
+fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        (Some(failure), None) | (None, Some(failure)) => Some(failure),
+        (None, None) => None,
+    }
+}
+
+fn with_window_candidate_installed<T, R>(
+    active: &mut T,
+    candidate: &mut T,
+    operation: impl FnOnce(&T, &mut T) -> R,
+) -> R {
+    std::mem::swap(active, candidate);
+    operation(active, candidate)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AppUiEventLoopFailure {
+    #[error("App UI event loop failed: {0}")]
+    Execution(String),
+    #[error("{0}")]
+    Panicked(String),
+    #[error("{primary}; Window callback also failed: {callback}")]
+    Multiple {
+        primary: Box<AppUiEventLoopFailure>,
+        callback: String,
+    },
+}
+
+fn catch_app_ui_event_loop(
+    run: impl FnOnce() -> Result<(), winit::error::EventLoopError>,
+) -> Result<(), AppUiEventLoopFailure> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(AppUiEventLoopFailure::Execution(error.to_string())),
+        Err(payload) => Err(AppUiEventLoopFailure::Panicked(
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "App UI event loop",
+            )
+            .to_string(),
+        )),
+    }
+}
+
+fn merge_app_ui_event_loop_failure(
+    event_loop_result: Result<(), AppUiEventLoopFailure>,
+    callback_failure: Option<String>,
+) -> Result<(), AppUiEventLoopFailure> {
+    match (event_loop_result, callback_failure) {
+        (Ok(()), Some(callback)) => Err(AppUiEventLoopFailure::Execution(callback)),
+        (Err(primary), Some(callback)) => {
+            Err(AppUiEventLoopFailure::Multiple { primary: Box::new(primary), callback })
+        }
+        (result, None) => result,
+    }
+}
+
+fn catch_window_viewer_gpu_shutdown(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    deadline: Instant,
+) -> AppUiActiveWindowGpuShutdownEvidence {
+    let surface_generation = session.surface_generation_id.get();
+    let device_generation = session
+        .viewer_gpu_device_progress
+        .generation_id()
+        .map(ViewerGpuDeviceGenerationId::get);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.shutdown_viewer_gpu_until(host, deadline)
+    })) {
+        Ok(evidence) => evidence,
+        Err(payload) => {
+            let diagnostic = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "Window Viewer GPU shutdown",
+            );
+            AppUiActiveWindowGpuShutdownEvidence {
+                surface_generation,
+                device_generation,
+                publication_cleanup: Ok(()),
+                retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
+                    diagnostic.to_string(),
+                ),
+            }
+        }
+    }
+}
+
+fn run_app_ui_with_initial_state(
+    initial_state: AppState,
+    #[cfg(feature = "validation")] surface_reopen_validation: Option<
+        AppUiSurfaceDeviceReopenValidation,
+    >,
+    #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut event_loop =
+        winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event().build()?;
+    run_app_ui_with_initial_state_on_event_loop(
+        &mut event_loop,
+        initial_state,
+        #[cfg(feature = "validation")]
+        surface_reopen_validation,
+        #[cfg(feature = "validation")]
+        validation_return,
+    )
+}
+
+fn run_app_ui_with_initial_state_on_event_loop(
+    event_loop: &mut winit::event_loop::EventLoop<AppUiUserEvent>,
+    initial_state: AppState,
+    #[cfg(feature = "validation")] mut surface_reopen_validation: Option<
+        AppUiSurfaceDeviceReopenValidation,
+    >,
+    #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let platform = SystemPlatformService;
     let tracing_guard = init_product_tracing(&platform);
-    let background_runtime = build_app_ui_background_runtime()?;
+    #[cfg(feature = "validation")]
+    let validation_shutdown_deadline =
+        surface_reopen_validation.as_ref().map(|validation| validation.deadline);
+    let product_startup_deadline =
+        || Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now);
+    #[cfg(feature = "validation")]
+    let host_startup_deadline =
+        validation_shutdown_deadline.unwrap_or_else(product_startup_deadline);
+    #[cfg(not(feature = "validation"))]
+    let host_startup_deadline = product_startup_deadline();
+    #[cfg(feature = "validation")]
+    let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            let closed = failure.shutdown_until(host_startup_deadline);
+            let runtime_shutdown = closed.shutdown;
+            let runtime_cleanup_released = runtime_shutdown.all_created_resources_released();
+            if let Some(return_slot) = validation_return.as_ref() {
+                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                    app_state: initial_state,
+                    shutdown: AppUiValidationWindowShutdown::Complete(
+                        AppUiWindowOuterShutdownEvidence::runtime_startup_failed(
+                            runtime_shutdown.clone(),
+                        ),
+                    ),
+                });
+            }
+            return Err(format!(
+                "{}; Window background runtime startup cleanup_all_created_resources_released={}; cleanup={:?}",
+                closed.diagnostic,
+                runtime_cleanup_released,
+                runtime_shutdown
+            )
+            .into());
+        }
+    };
+    #[cfg(not(feature = "validation"))]
+    let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            let closed = failure.shutdown_until(host_startup_deadline);
+            return Err(format!(
+                "{}; Window background runtime startup cleanup_all_created_resources_released={}; cleanup={:?}",
+                closed.diagnostic,
+                closed.shutdown.all_created_resources_released(),
+                closed.shutdown
+            )
+            .into());
+        }
+    };
     let background_runtime_guard = background_runtime.enter();
+    let host = match AppUiHost::try_new(initial_state) {
+        Ok(host) => host,
+        Err(failure) => {
+            let primary = failure.diagnostic().clone();
+            let closed = failure.shutdown_until(host_startup_deadline);
+            let cleanup_released = closed.shutdown.all_created_resources_released();
+            drop(background_runtime_guard);
+            let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+            let runtime_cleanup_released = runtime_shutdown.all_created_resources_released();
+            #[cfg(feature = "validation")]
+            if let Some(return_slot) = validation_return.as_ref() {
+                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                    app_state: closed.app_state,
+                    shutdown: AppUiValidationWindowShutdown::Complete(
+                        AppUiWindowOuterShutdownEvidence::host_startup_failed(
+                            runtime_shutdown.clone(),
+                            closed.shutdown.clone(),
+                        ),
+                    ),
+                });
+            }
+            #[cfg(not(feature = "validation"))]
+            drop(closed.app_state);
+            return Err(format!(
+                "{primary}; Window Host startup cleanup_all_created_resources_released={cleanup_released}; cleanup={:?}; Window background runtime cleanup_all_created_resources_released={runtime_cleanup_released}; cleanup={runtime_shutdown:?}",
+                closed.shutdown,
+            )
+            .into());
+        }
+    };
+    let mut host = host;
 
     tracing::info!("Mondrian app UI starting");
 
-    use winit::event_loop::EventLoop;
-    let event_loop = EventLoop::<AppUiUserEvent>::with_user_event().build()?;
-    let preview_work_event_proxy = event_loop.create_proxy();
-    let startup_window =
-        Arc::new(event_loop.create_window(window_attributes_for_role(AppUiWindowRole::Startup))?);
-
-    let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-    let instance = wgpu::Instance::new(instance_desc);
-    let startup_surface = instance.create_surface(startup_window.clone())?;
-
-    let adapter = pollster::block_on(request_adapter_with_native_video_preference(
-        &instance,
-        &wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&startup_surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        },
-    ))
-    .map_err(|_| "No suitable GPU adapter")?;
-
-    // Populate system info for the About dialog.
-    let adapter_info = adapter.get_info();
-    crate::app_ui::about_dialog::SYSTEM_INFO
-        .set(crate::app_ui::about_dialog::AboutSystemInfo {
-            pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
-            rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
-            os: if cfg!(windows) {
-                "Windows"
-            } else {
-                std::env::consts::OS
+    let initial_candidate = match prepare_initial_window_candidate(
+        event_loop,
+        &host,
+        host_startup_deadline,
+    ) {
+        Ok(candidate) => candidate,
+        Err(failure) => {
+            let native_cleanup_released = failure.shutdown.all_created_resources_released();
+            let native_cleanup = *failure.shutdown;
+            let primary = failure.primary;
+            let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
+            let ui_failure = (!ui_shutdown.all_resources_released())
+                .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+            drop(background_runtime_guard);
+            let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+            let runtime_failure = runtime_shutdown.qualification_failure();
+            #[cfg(feature = "validation")]
+            if let Some(return_slot) = validation_return.as_ref() {
+                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                    app_state,
+                    shutdown: AppUiValidationWindowShutdown::Complete(
+                        AppUiWindowOuterShutdownEvidence::pre_active_failed(
+                            runtime_shutdown,
+                            ui_shutdown,
+                            native_cleanup.clone(),
+                        ),
+                    ),
+                });
             }
-            .to_owned(),
-            arch: std::env::consts::ARCH.to_owned(),
-            os_version: String::new(),
-            wgpu_backend: format!("{:?}", adapter_info.backend),
-            gpu_name: adapter_info.name,
-        })
-        .ok();
-
-    let device_descriptor = wgpu::DeviceDescriptor {
-        required_features: native_video_texture_device_features(adapter.features())
-            | ocio_lut_filtering_device_features(adapter.features()),
-        ..wgpu::DeviceDescriptor::default()
+            #[cfg(not(feature = "validation"))]
+            drop(app_state);
+            let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
+            let native_context = format!(
+                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
+            );
+            return match cleanup_failure {
+                Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
+                None => Err(format!("{primary}; {native_context}").into()),
+            };
+        }
     };
-    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor))?;
-    // Install the sole lost callback immediately after device creation, before
-    // any runtime, renderer, or queue consumer can expose this generation.
-    let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
-    let viewer_gpu_progress_wake = ViewerGpuDeviceProgressWake::new(move || {
-        let _ = viewer_gpu_completion_event_proxy
-            .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
-    });
-    let viewer_gpu_device_progress =
-        ViewerGpuDeviceProgressOwner::new(&device, viewer_gpu_progress_wake)?;
-
-    let mut host = AppUiHost::new(AppState::new());
-    let preview_work_watch = host.preview_work_watch();
-    let preview_work_event_pending = Arc::new(AtomicBool::new(false));
-    let worker_event_pending = Arc::clone(&preview_work_event_pending);
-    let worker_event_proxy = preview_work_event_proxy.clone();
-    preview_work_watch.install_waker(move || {
-        queue_preview_work_event(&worker_event_pending, || {
-            worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
-        });
-    });
-    let mut session = AppUiWindowSession::from_window_and_surface(
-        AppUiWindowRole::Startup,
-        startup_window,
-        startup_surface,
-        &adapter,
-        &device,
-        &queue,
-        &mut host,
-        Some(viewer_gpu_device_progress),
-    )?;
-    let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+    let AppUiInitialWindowCandidate {
+        preview_work_event_proxy,
+        preview_work_watch,
+        preview_work_event_pending,
+        instance,
+        adapter,
+        device: initial_device,
+        queue: initial_queue,
+        mut session,
+        session_bounds,
+    } = initial_candidate;
+    #[cfg(feature = "validation")]
+    let (mut device, mut queue) = (initial_device, initial_queue);
+    #[cfg(not(feature = "validation"))]
+    let (device, queue) = (initial_device, initial_queue);
     let pending_actions = PendingUiActions::default();
-    tracing::info!(
-        "UI initialized — {}x{}",
-        session.config.width,
-        session.config.height
-    );
-    session.window.set_visible(true);
-    session.window.request_redraw();
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_active_window_session(&mut host, &session, session_bounds);
+        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+        tracing::info!(
+            surface_generation = session.surface_generation_id.get(),
+            device_generation = session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            "UI initialized — {}x{}",
+            session.config.width,
+            session.config.height
+        );
+        session.window.set_visible(true);
+        session.window.request_redraw();
+    })) {
+        let primary = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+            payload,
+            "initial Window Host publication",
+        )
+        .to_string();
+        let gpu_shutdown =
+            catch_window_viewer_gpu_shutdown(&mut session, &host, host_startup_deadline);
+        let gpu_failure = gpu_shutdown.qualification_failure();
+        let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+        drop(background_runtime_guard);
+        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+        let runtime_failure = runtime_shutdown.qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = validation_return.as_ref() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
+                    runtime: runtime_shutdown,
+                    host: ui_shutdown,
+                    gpu: gpu_shutdown,
+                },
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            drop(app_state);
+            drop(gpu_shutdown);
+        }
+        let cleanup_failure = merge_window_cleanup_failures(
+            merge_window_cleanup_failures(gpu_failure, ui_failure),
+            runtime_failure,
+        );
+        return match cleanup_failure {
+            Some(cleanup) => Err(format!(
+                "{primary}; initial Window publication cleanup also failed: {cleanup}"
+            )
+            .into()),
+            None => Err(primary.into()),
+        };
+    }
 
-    event_loop.run(move |event, elwt| {
+    let mut host = AppUiHostSessionOwner::new(
+        host,
+        #[cfg(feature = "validation")]
+        validation_return.clone(),
+        #[cfg(feature = "validation")]
+        validation_shutdown_deadline,
+    );
+
+    use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+    let event_loop_result = catch_app_ui_event_loop(|| {
+        #[allow(deprecated)]
+        event_loop.run_on_demand(|event, elwt| {
         use winit::event::ElementState;
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
@@ -1714,13 +4090,11 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             session.last_cursor,
                             &session.router,
                         );
-                        let size = session.window.inner_size();
                         let frame_result = session.frame_renderer.render_draw_commands(
                             &device,
                             &queue,
                             &session.surface,
                             &session.config,
-                            (size.width, size.height),
                             encoder.finish(),
                         );
                         if let Some(diagnostics) =
@@ -1756,7 +4130,50 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &session.display_output_contract.display_target,
                             session.viewer_gpu_execution.color_output_diagnostics().into(),
                             session.display_snapshot.as_ref(),
+                            session.display_calibration.as_deref(),
+                            Some(session.display_management_policy.icc_rendering_intent()),
+                            Some(&session.renderer_adapter),
+                            frame_result.metrics(),
                         );
+                        #[cfg(feature = "validation")]
+                        if let Some(validation) = surface_reopen_validation.as_mut() {
+                            let surface_generation_before = session.surface_generation_id;
+                            match advance_surface_device_reopen_validation(
+                                validation,
+                                frame_result,
+                                elwt,
+                                &instance,
+                                &adapter,
+                                &mut device,
+                                &mut queue,
+                                &mut host,
+                                &mut session,
+                                &preview_work_event_proxy,
+                            ) {
+                                Ok(true) => {
+                                    elwt.exit();
+                                    return;
+                                }
+                                Ok(false)
+                                    if session.surface_generation_id
+                                        != surface_generation_before =>
+                                {
+                                    // The fresh generation already requested
+                                    // its own redraw. Do not mutate it using
+                                    // the retiring frame's result.
+                                    return;
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    publish_surface_reopen_validation_failure(
+                                        validation,
+                                        error.to_string(),
+                                    );
+                                    elwt.exit();
+                                    return;
+                                }
+                            }
+                        }
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
                         }
@@ -1811,7 +4228,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &adapter,
                             &device,
                             &mut session,
-                            &host,
+                            &mut host,
                         );
                     }
 
@@ -1993,17 +4410,73 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Event::AboutToWait => {
-                synchronize_playback_thread_scheduling(&host, &mut session);
+                #[cfg(feature = "validation")]
+                if let Some(validation) = surface_reopen_validation.as_mut() {
+                    if Instant::now() >= validation.deadline {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            "Surface/device reopen validation deadline elapsed",
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    let pump_result = validation
+                        .recovery_pump
+                        .as_mut()
+                        .map_or(Ok(()), |pump| {
+                            host.with_validation_app_state_mut(|app| pump.pump_window(app))
+                        });
+                    if let Err(detail) = pump_result {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            format!("Surface recovery companion pump failed: {detail}"),
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    if Instant::now() >= validation.deadline {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            "Surface/device reopen validation deadline elapsed during companion pumping",
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    if let Some(pump) = validation.recovery_pump.as_ref() {
+                        elwt.set_control_flow(control_flow_wake_no_later_than(
+                            elwt.control_flow(),
+                            pump.next_pump_at(),
+                        ));
+                    }
+                }
                 session
                     .ui_runtime
                     .drive_timers(&session.window, &mut session.router, elwt);
-                let playback_now = Instant::now();
                 let playback_clock_started = Instant::now();
-                let playback_changed = host.advance_playback_clock(
-                    playback_now,
-                    session.current_bounds.get(),
-                );
-                synchronize_playback_thread_scheduling(&host, &mut session);
+                #[cfg(feature = "validation")]
+                let playback_changed = if !validation_window_advances_playback(
+                    surface_reopen_validation.is_some(),
+                ) {
+                    false
+                } else {
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    let changed = host.advance_playback_clock(
+                        Instant::now(),
+                        session.current_bounds.get(),
+                    );
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    changed
+                };
+                #[cfg(not(feature = "validation"))]
+                let playback_changed = {
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    let changed = host.advance_playback_clock(
+                        Instant::now(),
+                        session.current_bounds.get(),
+                    );
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    changed
+                };
                 session.event_loop_telemetry.record_stage_duration(
                     AppUiEventLoopStage::AdvancePlaybackClock,
                     playback_clock_started.elapsed(),
@@ -2086,20 +4559,68 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     elwt.control_flow(),
                     host.next_execution_resource_observation_deadline(),
                 ));
+                #[cfg(feature = "validation")]
+                if let Some(validation) = surface_reopen_validation.as_ref() {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(
+                        elwt.control_flow(),
+                        validation.deadline,
+                    ));
+                }
             }
-            _ => {}
-        }
-    })?;
+                _ => {}
+            }
+        })
+    });
+    let event_loop_result =
+        merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
+    let product_shutdown_deadline = || {
+        Instant::now()
+            .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
+            .unwrap_or_else(Instant::now)
+    };
+    #[cfg(feature = "validation")]
+    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(product_shutdown_deadline);
+    #[cfg(not(feature = "validation"))]
+    let shutdown_deadline = product_shutdown_deadline();
+    let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
+    let gpu_failure = gpu_shutdown.qualification_failure();
+    let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
+        Ok(evidence) if evidence.all_resources_released() => None,
+        Ok(evidence) => Some(format!(
+            "Window UI services did not close cleanly: {evidence:?}"
+        )),
+        Err(error) => Some(error),
+    };
 
-    // Dropping a Tokio runtime waits indefinitely for blocking tasks. Once the
-    // native event loop has exited there is no UI left to observe those tasks,
-    // so bound shutdown instead of leaving a headless Mondrian process behind.
     drop(background_runtime_guard);
-    background_runtime.shutdown_timeout(Duration::from_millis(250));
+    let runtime_shutdown = background_runtime.shutdown_until(shutdown_deadline);
+    let runtime_failure = runtime_shutdown.qualification_failure();
+    #[cfg(feature = "validation")]
+    let outer_record_failure = validation_return.as_ref().and_then(|return_slot| {
+        record_validation_active_runtime_shutdown(return_slot, runtime_shutdown)
+            .err()
+            .map(|error| format!("Window outer shutdown evidence was incomplete: {error}"))
+    });
+    #[cfg(not(feature = "validation"))]
+    let outer_record_failure: Option<String> = None;
     tracing::info!("Mondrian app UI stopped");
     drop(tracing_guard);
 
-    Ok(())
+    let cleanup_failure = merge_window_cleanup_failures(
+        merge_window_cleanup_failures(
+            merge_window_cleanup_failures(gpu_failure, ui_failure),
+            runtime_failure,
+        ),
+        outer_record_failure,
+    );
+    match (event_loop_result, cleanup_failure) {
+        (Err(primary), Some(cleanup)) => {
+            Err(format!("{primary}; Window cleanup also failed: {cleanup}").into())
+        }
+        (Err(primary), None) => Err(primary.into()),
+        (Ok(()), Some(cleanup)) => Err(cleanup.into()),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 #[cfg(not(test))]
@@ -2148,30 +4669,71 @@ fn terminate_process_without_cleanup() -> ! {
     std::process::abort()
 }
 
-fn build_app_ui_background_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(APP_UI_BACKGROUND_WORKERS)
-        .thread_name("mondrian-bg")
-        .enable_all()
-        .build()
-}
-
 fn app_ui_display_output_contract(
     window: &winit::window::Window,
     surface: &wgpu::Surface<'static>,
     adapter: &wgpu::Adapter,
+    intent: AppUiSurfacePresentationIntent,
 ) -> Result<AppUiDisplayOutputContract, AppUiSurfaceColorContractError> {
     let capabilities = surface.get_capabilities(adapter);
-    let surface_color = choose_app_ui_surface_format(&capabilities)?;
+    let display_target = app_ui_display_target_for_window(window);
+    let display_hdr_info = surface.display_hdr_info(adapter);
+    let qualified_intent = match intent {
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space)
+            if output_color_space.is_hdr()
+                && !super::display_probe_impl::active_display_hdr_presentation_ready(
+                    display_target.position,
+                    display_target.physical_size,
+                    display_target.native_display_id,
+                    display_hdr_info.clone(),
+                ) =>
+        {
+            tracing::warn!(
+                ?intent,
+                display_target = ?display_target,
+                "HDR format/color-space enumeration is not backed by an active HDR compositor and monitor; retaining fail-closed SDR UI carrier"
+            );
+            AppUiSurfacePresentationIntent::SdrSrgb
+        }
+        _ => intent,
+    };
+    let surface_color = choose_app_ui_surface_color_contract(&capabilities, qualified_intent).or_else(
+        |requested_error| {
+            tracing::warn!(
+                ?intent,
+                "requested display surface contract is unavailable; retaining fail-closed SDR UI carrier: {requested_error}"
+            );
+            choose_app_ui_surface_format(&capabilities)
+        },
+    )?;
     Ok(AppUiDisplayOutputContract {
         surface_color,
-        display_target: app_ui_display_target_for_window(window),
-        display_hdr_info: surface.display_hdr_info(adapter),
+        display_target,
+        display_hdr_info,
         available_formats: capabilities.formats.clone(),
         format_color_spaces: app_ui_surface_format_color_spaces(&capabilities),
         present_modes: capabilities.present_modes,
         alpha_modes: capabilities.alpha_modes,
     })
+}
+
+fn app_ui_surface_presentation_intent_for_role(
+    role: AppUiWindowRole,
+    host: &AppUiHost,
+) -> AppUiSurfacePresentationIntent {
+    if role == AppUiWindowRole::Startup {
+        return AppUiSurfacePresentationIntent::SdrSrgb;
+    }
+    let (engine, policy) = host.resolved_display_color_management();
+    match policy.resolve_output_color_space(&engine, host.active_program_output_color_space()) {
+        Ok(output_color_space) => AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+        Err(error) => {
+            tracing::warn!(
+                "display policy cannot resolve a monitor target; retaining fail-closed SDR UI carrier: {error}"
+            );
+            AppUiSurfacePresentationIntent::SdrSrgb
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2224,6 +4786,8 @@ struct AppUiDisplayTarget {
     name: Option<String>,
     position: (i32, i32),
     physical_size: (u32, u32),
+    native_display_id: Option<u64>,
+    native_display_path_id: Option<String>,
     scale_factor_ppm: u32,
     refresh_rate_millihertz: Option<u32>,
 }
@@ -2245,7 +4809,7 @@ impl AppUiDisplayOutputContract {
             choose_app_ui_surface_color_contract(&self.surface_capabilities_snapshot(), intent);
         match desired {
             Ok(desired_surface) => AppUiDisplayPresentationReadinessDiagnostics {
-                status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+                status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
                 output_color_space,
                 current_surface_format: app_ui_surface_format_diagnostic(self.surface_color.format),
                 current_surface_color_space: app_ui_surface_color_space_diagnostic(
@@ -2265,17 +4829,14 @@ impl AppUiDisplayOutputContract {
                     desired_surface.encoding,
                 )),
                 desired_surface_hdr_mode: Some(desired_surface.hdr_mode),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
             },
-            Err(err) if err.required_color_space.is_none() => {
-                self.display_presentation_readiness_unsupported(
+            Err(err) if err.required_color_space.is_none() => self
+                .display_presentation_readiness_unsupported(
                     output_color_space,
                     AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent,
                     None,
-                )
-            }
+                ),
             Err(err) => self.display_presentation_readiness_unsupported(
                 output_color_space,
                 AppUiDisplayPresentationReadinessStatus::UnsupportedSurfaceContract,
@@ -2287,12 +4848,12 @@ impl AppUiDisplayOutputContract {
     #[cfg(test)]
     fn presentation_readiness_for_boundary(
         &self,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if boundary.target != RenderOutputColorBoundaryTarget::Display {
-            return self.display_presentation_readiness_current(boundary.output_color_space);
+        if boundary.target() != ProgramOutputRole::Display {
+            return self.display_presentation_readiness_current(boundary.output_color_space());
         }
-        self.presentation_readiness_for_color_space(boundary.output_color_space)
+        self.presentation_readiness_for_color_space(boundary.output_color_space())
     }
 
     fn display_presentation_readiness_current(
@@ -2355,12 +4916,12 @@ impl AppUiDisplayOutputContract {
     #[cfg(test)]
     fn boundary_blocker(
         &self,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
     ) -> Option<AppUiDisplayBoundaryBlocker> {
-        if boundary.target != RenderOutputColorBoundaryTarget::Display {
+        if boundary.target() != ProgramOutputRole::Display {
             return None;
         }
-        self.boundary_blocker_for_color_space(boundary.output_color_space)
+        self.boundary_blocker_for_color_space(boundary.output_color_space())
     }
 
     fn boundary_blocker_for_color_space(
@@ -2496,13 +5057,16 @@ enum AppUiSurfaceEncodingDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayPresentationReadinessStatus {
     Current,
-    ReconfigureBlockedByPayload,
+    ReconfigurationRequired,
     UnsupportedPresentationIntent,
     UnsupportedSurfaceContract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayPresentationPayloadBlocker {
+    /// Legacy diagnostic retained so persisted qualification evidence remains
+    /// readable; the production carrier no longer emits this blocker.
+    #[allow(dead_code)]
     UiExternalTextureCompositingRequiresSdrSrgb,
 }
 
@@ -2975,16 +5539,6 @@ fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurface
     }
 }
 
-fn surface_color_space_to_color_space(cs: wgpu::SurfaceColorSpace) -> ColorSpace {
-    match cs {
-        wgpu::SurfaceColorSpace::Srgb => ColorSpace::Srgb,
-        wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DisplayP3,
-        wgpu::SurfaceColorSpace::Bt2100Pq => ColorSpace::Rec2100Pq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => ColorSpace::Rec2100Hlg,
-        _ => ColorSpace::Rec709,
-    }
-}
-
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
     matches!(
         format,
@@ -3029,6 +5583,8 @@ fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisp
             name: None,
             position: (0, 0),
             physical_size: (0, 0),
+            native_display_id: None,
+            native_display_path_id: None,
             scale_factor_ppm: 0,
             refresh_rate_millihertz: None,
         };
@@ -3041,9 +5597,54 @@ fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisp
         name: monitor.name(),
         position: (position.x, position.y),
         physical_size: (size.width, size.height),
+        native_display_id: app_ui_monitor_native_display_id(&monitor),
+        native_display_path_id: app_ui_monitor_native_display_path_id(&monitor),
         scale_factor_ppm,
         refresh_rate_millihertz: monitor.refresh_rate_millihertz(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn app_ui_monitor_native_display_id(monitor: &winit::monitor::MonitorHandle) -> Option<u64> {
+    use winit::platform::macos::MonitorHandleExtMacOS as _;
+    Some(u64::from(monitor.native_id()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_ui_monitor_native_display_id(_monitor: &winit::monitor::MonitorHandle) -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::windows::MonitorHandleExtWindows as _;
+    let value = monitor.native_id();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+#[cfg(target_os = "macos")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::macos::MonitorHandleExtMacOS as _;
+    Some(monitor.native_id().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::x11::MonitorHandleExtX11 as _;
+    Some(monitor.native_id().to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn app_ui_monitor_native_display_path_id(
+    _monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    None
 }
 
 fn log_backend_event(event: AppUiBackendEvent) {
@@ -3159,13 +5760,43 @@ fn viewer_gpu_output_diagnostics(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_calibration: Option<&mondrian_core::display_calibration::DisplayCalibrationLut3d>,
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+    renderer_adapter: Option<&AppUiRendererAdapterDiagnostics>,
+    frame_metrics: AppUiFrameMetrics,
 ) -> AppUiViewerGpuOutputDiagnostics {
     let mut diagnostics = telemetry.diagnostics(runtime_report);
+    if viewer_gpu_output_diagnostics_output_path().is_some() {
+        diagnostics.qualification_run_id = viewer_qualification_run_id();
+        diagnostics.process_instance_id = Some(viewer_process_instance_id().to_owned());
+        diagnostics.process_id = Some(std::process::id());
+        diagnostics.qualification_record_sequence = Some(next_viewer_qualification_record());
+        diagnostics.runtime_image_sha256 = viewer_runtime_image_sha256();
+    }
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
     if let Some(issue) = diagnostics.display_issue_summary.as_mut() {
         issue.display_target = Some(display_target.clone());
     }
     diagnostics.display_snapshot = display_snapshot.map(DisplaySnapshotDiagnostics::from_snapshot);
+    diagnostics.display_output_contract = display_snapshot.cloned();
+    diagnostics.display_calibration_identity_sha256 = display_calibration.map(|calibration| {
+        calibration
+            .identity()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    });
+    diagnostics.display_calibration_rendering_intent =
+        display_calibration.map(|_| display_calibration_rendering_intent.unwrap_or_default());
+    diagnostics.renderer_adapter = renderer_adapter.cloned();
+    diagnostics.display_target = Some(display_target.clone());
+    diagnostics.ui_surface_carrier_active = frame_metrics.surface_carrier_active;
+    diagnostics.ui_surface_carrier_target_rebuilt = frame_metrics.surface_carrier_target_rebuilt;
+    diagnostics.presented_external_texture_batches = frame_metrics.external_texture_batches;
+    diagnostics.presented_surface_code_value_batches = frame_metrics.surface_code_value_batches;
+    diagnostics.presented_device_code_value_batches = frame_metrics.device_code_value_batches;
     diagnostics
 }
 
@@ -3175,6 +5806,10 @@ fn trace_viewer_gpu_output_telemetry(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_calibration: Option<&mondrian_core::display_calibration::DisplayCalibrationLut3d>,
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+    renderer_adapter: Option<&AppUiRendererAdapterDiagnostics>,
+    frame_metrics: AppUiFrameMetrics,
 ) {
     let diagnostics = viewer_gpu_output_diagnostics(
         host,
@@ -3182,6 +5817,10 @@ fn trace_viewer_gpu_output_telemetry(
         display_target,
         runtime_report,
         display_snapshot,
+        display_calibration,
+        display_calibration_rendering_intent,
+        renderer_adapter,
+        frame_metrics,
     );
     tracing::trace!(
         invocations = diagnostics.invocations,
@@ -3199,6 +5838,26 @@ fn trace_viewer_gpu_output_telemetry(
         display_presentation_payload_blockers = diagnostics.display_presentation_payload_blockers,
         display_presentation_unsupported_contracts =
             diagnostics.display_presentation_unsupported_contracts,
+        ui_surface_carrier_active = diagnostics.ui_surface_carrier_active,
+        ui_surface_carrier_target_rebuilt = diagnostics.ui_surface_carrier_target_rebuilt,
+        presented_external_texture_batches = diagnostics.presented_external_texture_batches,
+        presented_surface_code_value_batches = diagnostics.presented_surface_code_value_batches,
+        presented_device_code_value_batches = diagnostics.presented_device_code_value_batches,
+        creative_lut_cache_hits = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.cache_hits),
+        creative_lut_cache_misses = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.cache_misses),
+        creative_lut_texture_uploads = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.texture_uploads),
+        creative_lut_resident_entries = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.resident_entries),
+        creative_lut_resident_texture_bytes = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.resident_texture_bytes),
         record_failures = diagnostics.record_failures,
         missing_output_textures = diagnostics.missing_output_textures,
         registered_frames = diagnostics.registered_frames,
@@ -3269,6 +5928,44 @@ fn write_viewer_gpu_output_diagnostics_to_path(
 
 fn viewer_gpu_output_diagnostics_output_path() -> Option<PathBuf> {
     std::env::var_os(VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV).map(PathBuf::from)
+}
+
+fn viewer_qualification_run_id() -> Option<String> {
+    std::env::var(VIEWER_QUALIFICATION_RUN_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn viewer_process_instance_id() -> &'static str {
+    static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
+    PROCESS_INSTANCE_ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).as_str()
+}
+
+fn next_viewer_qualification_record() -> u64 {
+    static RECORD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    RECORD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn viewer_runtime_image_sha256() -> Option<String> {
+    static RUNTIME_IMAGE_SHA256: OnceLock<Option<String>> = OnceLock::new();
+    RUNTIME_IMAGE_SHA256
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            let mut file = File::open("/proc/self/exe").ok()?;
+            #[cfg(not(target_os = "linux"))]
+            let mut file = File::open(std::env::current_exe().ok()?).ok()?;
+            let mut buffer = [0_u8; 128 * 1024];
+            let mut hasher = Sha256::new();
+            loop {
+                let read = file.read(&mut buffer).ok()?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Some(format!("{:x}", hasher.finalize()))
+        })
+        .clone()
 }
 
 fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
@@ -3479,7 +6176,7 @@ fn poll_viewer_heterogeneous_completion(
                 // Callback retirement can open the next slot before this
                 // non-authoritative observation is drained. Never let the old
                 // physical identity affect a replacement lifecycle.
-                if session.viewer_gpu_submissions.current_submission_id() == Some(submission_id) {
+                if session.viewer_gpu_submissions.contains(submission_id) {
                     observation_time = observation_time.max(observed_at);
                     callback_barrier_observed = true;
                 }
@@ -3543,13 +6240,13 @@ fn poll_viewer_heterogeneous_completion(
                 "device generation terminal {failure_context} while submission {} remained active: {error}",
                 submission_id.get()
             );
-            if let Some(quarantine) = session
+            let quarantines = session
                 .viewer_gpu_submissions
-                .quarantine_after_device_failure(generation_reason)
-            {
+                .quarantine_all_after_device_failure(generation_reason);
+            if let Some(first) = quarantines.first() {
                 let fallback_reason = format!(
                     "Viewer GPU device generation failed while driving submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
-                    quarantine.submission_id.get()
+                    first.submission_id.get()
                 );
                 host.record_preview_gpu_output_blocker(
                     &PreviewGpuOutputBlocker::CpuFallbackRequested {
@@ -3557,12 +6254,14 @@ fn poll_viewer_heterogeneous_completion(
                     },
                 );
                 host.request_viewer_cpu_fallback(fallback_reason);
-                begin_window_viewer_gpu_quarantine(
-                    session,
-                    host,
-                    quarantine,
-                    WindowViewerGpuDeferredCleanup::Reset,
-                );
+                for quarantine in quarantines {
+                    begin_window_viewer_gpu_quarantine(
+                        session,
+                        host,
+                        quarantine,
+                        WindowViewerGpuDeferredCleanup::Reset,
+                    );
+                }
                 unregister_program_scopes_textures(session);
                 if !retire_window_published_gpu_output(session, host) {
                     host.clear_external_viewer_frame();
@@ -3710,10 +6409,19 @@ fn complete_window_viewer_gpu_submission(
         retire_window_viewer_gpu_registration(session, host, &mut owner);
         return;
     };
-    match host.finalize_heterogeneous_viewer_gpu(terminal, &completion) {
+    match host.finalize_heterogeneous_viewer_gpu(
+        terminal,
+        &completion,
+        owner.frame.is_successor_preparation(),
+    ) {
         Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
             if let Some(scopes) = owner.program_scopes.as_ref() {
-                if let Err(error) = register_program_scopes_textures(session, device, scopes) {
+                if let Err(error) = register_program_scopes_textures(
+                    session,
+                    device,
+                    scopes,
+                    owner.program_scopes_analysis_identity,
+                ) {
                     unregister_program_scopes_textures(session);
                     session.program_scopes_refresh_requested = true;
                     tracing::warn!(%error, "heterogeneous GPU scope registration failed");
@@ -3724,6 +6432,14 @@ fn complete_window_viewer_gpu_submission(
             }
             let _ =
                 publish_completed_window_viewer_gpu_owner(session, host, submission_id, &mut owner);
+        }
+        Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor) => {
+            let _ = retain_completed_window_viewer_gpu_successor(
+                session,
+                host,
+                submission_id,
+                &mut owner,
+            );
         }
         Ok(
             PreviewVisualGpuCompletionDisposition::Release
@@ -3738,6 +6454,70 @@ fn complete_window_viewer_gpu_submission(
             tracing::warn!("heterogeneous Viewer completion evidence rejected: {error}");
         }
     }
+}
+
+fn retain_completed_window_viewer_gpu_successor(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    submission_id: ViewerGpuSubmissionId,
+    owner: &mut WindowViewerGpuSubmissionOwner,
+) -> bool {
+    if !owner.frame.is_successor_preparation()
+        || owner.frame.presentation_ticket().is_some()
+        || !owner.texture_registered
+    {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed heterogeneous successor has an invalid publication contract"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    }
+    let Some(output_lease) = owner.output_lease.take() else {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed heterogeneous successor has no physical output lease"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    };
+    let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+        owner.texture_key.as_str().to_owned(),
+        owner.presentation,
+    ) else {
+        retire_window_viewer_gpu_registration(session, host, owner);
+        drop(output_lease);
+        return false;
+    };
+    host.register_prepared_viewer_gpu_successor(&owner.frame, visible_output);
+    if session.viewer_gpu_device_progress.generation_terminal().is_some() {
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &owner.frame.output_key,
+            owner.texture_key.as_str(),
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        drop(output_lease);
+        return false;
+    }
+    owner.texture_registered = false;
+    if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
+        submission_id,
+        owner.frame.output_key.clone(),
+        owner.texture_key.clone(),
+        output_lease,
+    ) {
+        session.frame_renderer.unregister_external_texture(previous.artifact());
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            previous.output_key(),
+            previous.artifact().as_str(),
+        );
+        drop(previous);
+    }
+    session
+        .viewer_gpu_output_telemetry
+        .record_registered_frame(owner.stage_diagnostics);
+    let _ = host.observe_prepared_viewer_gpu_preroll();
+    true
 }
 
 fn drive_viewer_heterogeneous_completion(
@@ -3759,6 +6539,15 @@ fn fail_viewer_gpu_frame(host: &AppUiHost, frame: &mut PreviewGpuFrame) {
     }
 }
 
+fn report_successful_viewer_gpu_fallbacks(
+    reasons: &[String],
+    mut record_diagnostic: impl FnMut(&str),
+) {
+    for reason in reasons {
+        record_diagnostic(reason);
+    }
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -3766,11 +6555,20 @@ fn prepare_viewer_gpu_preview(
     host: &AppUiHost,
 ) {
     let prepare_started = Instant::now();
+    let mut renderer_record_us = None;
+    let mut renderer_cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings> = None;
     macro_rules! finish_prepare {
         () => {{
-            session
-                .viewer_gpu_output_telemetry
-                .record_prepare_duration(prepare_started.elapsed());
+            let prepare_duration = prepare_started.elapsed();
+            session.viewer_gpu_output_telemetry.record_prepare_duration(prepare_duration);
+            if prepare_duration.as_micros() >= u128::from(APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US) {
+                tracing::warn!(
+                    prepare_duration_us = prepare_duration.as_micros(),
+                    ?renderer_record_us,
+                    ?renderer_cpu_stage_timings,
+                    "slow Window Viewer GPU preparation stage breakdown"
+                );
+            }
             return;
         }};
     }
@@ -3791,26 +6589,53 @@ fn prepare_viewer_gpu_preview(
         host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
-    if session.viewer_gpu_submissions.is_occupied() {
+    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
+        clear_viewer_spatial_presentation(session, host);
+        session.viewer_gpu_output_telemetry.record_unavailable_skip();
+        finish_prepare!();
+    };
+    if let Err(error) =
+        synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation)
+    {
+        tracing::error!(%error, "Window spatial output retirement could not bind a new still ticket");
+        finish_prepare!();
+    }
+    let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
+    if session.viewer_gpu_submissions.is_at_capacity() {
+        stage_window_viewer_gpu_lookahead(session, host);
         session
             .viewer_gpu_output_telemetry
             .record_prepare_duration(prepare_started.elapsed());
         return;
     }
-    if !host.preflight_pending_viewer_gpu_presentation() {
-        session
-            .viewer_gpu_output_telemetry
-            .record_prepare_duration(prepare_started.elapsed());
-        return;
+    let expected_prepared_output = host.exact_prepared_viewer_gpu_output_key();
+    if let Some(stale) = session
+        .viewer_gpu_presentation
+        .publications
+        .retire_prepared_unless(expected_prepared_output.as_ref())
+    {
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            stale.output_key(),
+            stale.artifact().as_str(),
+        );
+        session.frame_renderer.unregister_external_texture(stale.artifact());
+        drop(stale);
     }
-    host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+    let Some(preparation) = host.viewer_gpu_preparation() else {
+        finish_prepare!();
+    };
+    if !submission_in_flight {
+        host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+    }
 
     // Native import copies decoder surfaces into renderer-owned textures. The
     // source must live through that GPU copy, but retaining it until the next
     // decoded frame creates a circular wait when the decoder pool is bounded.
     // Advance copy-fence retirement on every prepare tick, including Loading
     // ticks for a following seek.
-    if let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources() {
+    if !submission_in_flight
+        && let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources()
+    {
         let fallback_reason = format!("native video source retirement failed: {error}");
         unregister_program_scopes_textures(session);
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
@@ -3833,24 +6658,20 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
     let program_scopes_requested = host.is_panel_active(PanelKind::Scopes);
+    let scopes_settings = host.video_scopes_settings();
+    let program_scopes_analysis_identity =
+        program_scopes_requested.then_some(scopes_settings.analysis_identity());
     if !program_scopes_requested {
         unregister_program_scopes_textures(session);
         session.program_scopes_refresh_requested = false;
     }
-    if host.should_defer_gpu_preview_prepare_for_interaction() {
-        session.viewer_gpu_output_telemetry.record_preview_candidate_state(
-            AppUiViewerGpuOutputPreviewCandidateState::Loading,
-            None,
-        );
-        session.viewer_gpu_output_telemetry.record_loading_skip();
-        finish_prepare!();
+    if session.program_scopes_registered
+        && session.program_scopes_analysis_identity != program_scopes_analysis_identity
+    {
+        unregister_program_scopes_textures(session);
+        host.clear_external_viewer_frame();
+        session.program_scopes_refresh_requested = true;
     }
-    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
-        clear_viewer_spatial_presentation(session, host);
-        session.viewer_gpu_output_telemetry.record_unavailable_skip();
-        finish_prepare!();
-    };
-    synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation);
     if program_scopes_requested
         && !session.program_scopes_registered
         && !session.program_scopes_refresh_requested
@@ -3861,7 +6682,30 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         session.program_scopes_refresh_requested = true;
     }
-    let mut frame = match host.gpu_preview_frame_for_current_state() {
+    let current_candidate = match preparation {
+        ViewerGpuPreparation::Current => {
+            let staged_current = session
+                .staged_viewer_gpu_successors
+                .take_exact(host.viewer_gpu_current_intent())
+                .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
+            staged_current.map_or_else(
+                || host.gpu_preview_frame_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+        ViewerGpuPreparation::Successor => {
+            let staged = host
+                .viewer_gpu_successor_intent()
+                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
+            let candidate = staged.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            );
+            stage_window_viewer_gpu_lookahead(session, host);
+            candidate
+        }
+    };
+    let mut frame = match current_candidate {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(candidate) => {
             let physical_slot_is_exact =
@@ -3872,6 +6716,10 @@ fn prepare_viewer_gpu_preview(
                         .promote_prepared_exact(&output_key);
                     let exact_output_available = promotion.exact_output_available();
                     if let Some(previous) = promotion.into_retired() {
+                        let _ = host.clear_external_viewer_frame_for_artifact(
+                            previous.output_key(),
+                            previous.artifact().as_str(),
+                        );
                         session.frame_renderer.unregister_external_texture(previous.artifact());
                         drop(previous);
                     }
@@ -3889,7 +6737,10 @@ fn prepare_viewer_gpu_preview(
             if physical_is_exact
                 && session.viewer_gpu_device_progress.generation_terminal().is_none()
             {
-                let _ = host.present_current_viewer_output(candidate);
+                let _ = host.present_current_viewer_output(
+                    candidate,
+                    crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
+                );
             } else {
                 let _ = retire_window_published_gpu_output(session, host);
                 host.clear_external_viewer_frame();
@@ -3905,13 +6756,25 @@ fn prepare_viewer_gpu_preview(
             if program_scopes_requested {
                 finish_prepare!();
             }
-            match host.gpu_preview_successor_for_current_state() {
-                PreviewGpuFrameState::Ready(frame) => frame,
+            let staged = host
+                .viewer_gpu_successor_intent()
+                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
+            match staged.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            ) {
+                PreviewGpuFrameState::Ready(frame) => {
+                    stage_window_viewer_gpu_lookahead(session, host);
+                    frame
+                }
                 PreviewGpuFrameState::Prepared
                 | PreviewGpuFrameState::Current(_)
                 | PreviewGpuFrameState::Transparent(_)
                 | PreviewGpuFrameState::Loading
-                | PreviewGpuFrameState::Unavailable(_) => finish_prepare!(),
+                | PreviewGpuFrameState::Unavailable(_) => {
+                    stage_window_viewer_gpu_lookahead(session, host);
+                    finish_prepare!()
+                }
             }
         }
         PreviewGpuFrameState::Prepared => {
@@ -3963,10 +6826,6 @@ fn prepare_viewer_gpu_preview(
     if !frame.is_successor_preparation()
         && !host.preflight_viewer_gpu_presentation(frame.presentation_ticket())
     {
-        finish_prepare!();
-    }
-    if frame.is_successor_preparation() && frame.has_heterogeneous_gpu_execution() {
-        fail_viewer_gpu_frame(host, &mut frame);
         finish_prepare!();
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
@@ -4083,7 +6942,7 @@ fn prepare_viewer_gpu_preview(
             frame = frame.frame,
             width = frame.width,
             height = frame.height,
-            program_output_color_space = ?frame.program_output_boundary.output_color_space,
+            program_output_color_space = ?frame.program_output_boundary.output_color_space(),
             monitor_color_space = ?frame.monitor_adaptation.monitor_color_space(),
             display_target = ?session.display_output_contract.display_target,
             surface_format = ?session.display_output_contract.surface_color.format,
@@ -4143,8 +7002,6 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         finish_prepare!();
     };
-    session.viewer_gpu_execution.clear_frame_resources();
-
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
@@ -4181,6 +7038,7 @@ fn prepare_viewer_gpu_preview(
         display_calibration.is_some(),
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
+    let renderer_record_started = Instant::now();
     let mut record = match session.viewer_gpu_execution.record(
         device,
         queue,
@@ -4207,7 +7065,9 @@ fn prepare_viewer_gpu_preview(
             display_calibration,
             program_scopes: viewer_program_scopes_request(
                 program_scopes_requested,
-                frame.program_output_boundary.output_color_space,
+                frame.program_output_boundary.output_color_space(),
+                frame.monitor_adaptation.monitor_color_space(),
+                scopes_settings,
             )
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -4215,6 +7075,20 @@ fn prepare_viewer_gpu_preview(
                     frame = frame.frame,
                     %error,
                     "active scopes panel rejected the Program Output signal"
+                );
+                None
+            }),
+            signal_monitoring: viewer_signal_monitor_request(
+                frame.program_output_boundary.output_color_space(),
+                frame.monitor_adaptation.monitor_color_space(),
+                scopes_settings,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    sequence_id = %frame.sequence_id,
+                    frame = frame.frame,
+                    %error,
+                    "Viewer signal-monitoring controls rejected the selected signal"
                 );
                 None
             }),
@@ -4236,43 +7110,28 @@ fn prepare_viewer_gpu_preview(
             }
             fail_viewer_gpu_frame(host, &mut frame);
             match &error {
-                ViewerGpuExecutionError::WorkingComposite(composite_error) => {
+                error if error.working_composite_blocker().is_some() => {
                     host.record_preview_gpu_compositing(
                         mondrian_renderer::GpuCompositingDiagnostics {
                             cpu_fallback_composites: 1,
                             cpu_composited_pixels: u64::from(frame.width)
                                 .saturating_mul(u64::from(frame.height)),
-                            first_blocker: match composite_error.as_ref() {
-                                mondrian_renderer::RenderGpuCompositeGraphRecordError::Composite(
-                                    mondrian_renderer::GpuCompositeError::Blocked { reason },
-                                ) => {
-                                    Some(*reason)
-                                }
-                                _ => Some(
-                                    mondrian_renderer::GpuCompositingBlockerReason::GpuUnavailable,
-                                ),
-                            },
+                            first_blocker: error.working_composite_blocker(),
                             ..mondrian_renderer::GpuCompositingDiagnostics::default()
                         },
                     );
                 }
-                ViewerGpuExecutionError::ProgramOutputBoundary(boundary_error) => {
+                error if error.is_program_output_failure() => {
                     session.viewer_gpu_output_telemetry.record_record_failure();
                     host.record_preview_cpu_output_fallback(frame.width, frame.height);
-                    if let RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
-                        RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
-                            breakdown,
-                            ..
-                        },
-                    ) = boundary_error.as_ref()
-                    {
+                    if let Some(breakdown) = error.program_output_blocker_breakdown() {
                         host.record_preview_gpu_output_blocker_breakdown(
-                            PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(*breakdown),
+                            PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(breakdown),
                         );
                     } else {
                         host.record_preview_gpu_output_blocker(
                             &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                                reason: format!("{boundary_error:?}"),
+                                reason: error.to_string(),
                             },
                         );
                     }
@@ -4296,6 +7155,9 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
     };
+    renderer_record_us =
+        Some(renderer_record_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    renderer_cpu_stage_timings = Some(record.cpu_stage_timings);
     host.record_preview_gpu_compositing(record.compositing_diagnostics);
     let uniform_arena = session.viewer_gpu_execution.compositor_uniform_arena_diagnostics();
     session
@@ -4305,6 +7167,10 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_compositor_texture_bindings(texture_bindings);
+    let creative_luts = session.viewer_gpu_execution.compositor_creative_lut_diagnostics();
+    session
+        .viewer_gpu_output_telemetry
+        .record_compositor_creative_luts(creative_luts);
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
@@ -4314,12 +7180,11 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_execution.native_import_support(),
         ),
     );
-    for reason in &record.fallback_reasons {
+    report_successful_viewer_gpu_fallbacks(&record.fallback_reasons, |reason| {
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
-            reason: reason.clone(),
+            reason: reason.to_owned(),
         });
-        host.request_viewer_cpu_fallback(reason.clone());
-    }
+    });
     let heterogeneous_recorded = record.heterogeneous_continuation_count() != 0;
     let stage_diagnostics = record.stage_diagnostics;
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
@@ -4329,6 +7194,7 @@ fn prepare_viewer_gpu_preview(
         );
         drop(record);
         drop(encoder);
+        session.viewer_gpu_execution.clear_frame_resources();
         drop(progress_permit);
         fail_viewer_gpu_frame(host, &mut frame);
         unregister_program_scopes_textures(session);
@@ -4368,6 +7234,7 @@ fn prepare_viewer_gpu_preview(
                 stage_diagnostics: record.stage_diagnostics,
                 program_scopes: record.program_scopes.take(),
                 program_scopes_requested,
+                program_scopes_analysis_identity,
             };
             reservation.commit(
                 owner,
@@ -4381,9 +7248,10 @@ fn prepare_viewer_gpu_preview(
             );
             progress_permit.commit(submission_id, submission_index);
             if let Some(quarantine) =
-                session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
-                    "submitted Viewer output lease transfer failed: {error}"
-                ))
+                session.viewer_gpu_submissions.quarantine_submission_after_authority_revocation(
+                    submission_id,
+                    format!("submitted Viewer output lease transfer failed: {error}"),
+                )
             {
                 begin_window_viewer_gpu_quarantine(
                     session,
@@ -4422,6 +7290,7 @@ fn prepare_viewer_gpu_preview(
         stage_diagnostics,
         program_scopes: record.program_scopes.take(),
         program_scopes_requested,
+        program_scopes_analysis_identity,
     };
     reservation.commit(
         owner,
@@ -4449,7 +7318,11 @@ fn prepare_viewer_gpu_preview(
                             .map(|owner| owner.texture_key.clone())
                             .ok_or_else(|| "submitted Window owner is missing".to_owned())?,
                         lease.texture_view(),
-                        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                        if session.display_calibration.is_some() {
+                            ExternalTextureTransfer::DeviceCodeValuesOpaque
+                        } else {
+                            ExternalTextureTransfer::SurfaceCodeValuesOpaque
+                        },
                     )
                     .map_err(|error| error.to_string())
             })
@@ -4460,9 +7333,10 @@ fn prepare_viewer_gpu_preview(
             reason: error.clone(),
         });
         if let Some(quarantine) =
-            session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
-                "Window texture registration failed: {error}"
-            ))
+            session.viewer_gpu_submissions.quarantine_submission_after_authority_revocation(
+                submission_id,
+                format!("Window texture registration failed: {error}"),
+            )
         {
             begin_window_viewer_gpu_quarantine(
                 session,
@@ -4483,7 +7357,7 @@ fn prepare_viewer_gpu_preview(
         });
         if let Some(quarantine) = session
             .viewer_gpu_submissions
-            .quarantine_after_authority_revocation(reason.to_owned())
+            .quarantine_submission_after_authority_revocation(submission_id, reason.to_owned())
         {
             begin_window_viewer_gpu_quarantine(
                 session,
@@ -4499,9 +7373,52 @@ fn prepare_viewer_gpu_preview(
     }
     register_ordinary_window_program_scopes(session, device, submission_id);
     publish_ordinary_window_viewer_gpu_submission(session, host, submission_id);
-    session
-        .viewer_gpu_output_telemetry
-        .record_prepare_duration(prepare_started.elapsed());
+    finish_prepare!();
+}
+
+/// Warm a bounded CPU-side horizon beyond the immediate successor.
+///
+/// The staged frame is deliberately not registered with Preview semantics and
+/// owns no physical Viewer output. Transport rotation drops it through RAII.
+fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    const FIRST_LOOKAHEAD_OFFSET: usize = 2;
+    const LAST_LOOKAHEAD_OFFSET: usize = 4;
+    let expected = std::iter::once(host.viewer_gpu_successor_intent())
+        .chain(
+            (FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET)
+                .map(|offset| host.viewer_gpu_lookahead_intent(offset)),
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+    session.staged_viewer_gpu_successors.retain_only(&expected);
+
+    for offset in FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET {
+        let Some(intent) = host.viewer_gpu_lookahead_intent(offset) else {
+            continue;
+        };
+        if session.staged_viewer_gpu_successors.contains(intent) {
+            continue;
+        }
+        if let PreviewGpuFrameState::Ready(frame) =
+            host.gpu_preview_lookahead_for_current_state(offset)
+            && frame.is_successor_preparation()
+            && frame.playback_intent() == intent
+        {
+            session.staged_viewer_gpu_successors.stage(frame);
+        }
+        // Preserve current-frame priority: each event-loop turn may fill only
+        // the nearest missing speculative coordinate. Later turns extend the
+        // same bounded horizon without a three-request burst.
+        break;
+    }
+    if let Err(error) = session.viewer_gpu_execution.prewarm_cpu_yuv_upload_horizon(
+        session.staged_viewer_gpu_successors.ordered_frames(&expected).map(|frame| {
+            let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+            layers.as_slice()
+        }),
+    ) {
+        tracing::warn!(%error, "failed to refresh compact CPU YUV Viewer upload horizon");
+    }
 }
 
 fn register_ordinary_window_program_scopes(
@@ -4514,7 +7431,11 @@ fn register_ordinary_window_program_scopes(
         .owner_mut(submission_id)
         .and_then(|owner| owner.program_scopes.take());
     if let Some(scopes) = scopes {
-        if let Err(error) = register_program_scopes_textures(session, device, &scopes) {
+        let identity = session
+            .viewer_gpu_submissions
+            .owner(submission_id)
+            .and_then(|owner| owner.program_scopes_analysis_identity);
+        if let Err(error) = register_program_scopes_textures(session, device, &scopes, identity) {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = true;
             tracing::warn!(%error, "ordinary GPU Program Output scope registration failed");
@@ -4608,6 +7529,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
                 .viewer_gpu_output_telemetry
                 .record_registered_frame(owner.stage_diagnostics);
         }
+        let _ = host.observe_prepared_viewer_gpu_preroll();
         return;
     }
     let disposition = {
@@ -4700,24 +7622,65 @@ fn publish_ordinary_window_viewer_gpu_submission(
 fn viewer_program_scopes_request(
     active: bool,
     program_output_color_space: ColorSpace,
+    monitor_output_color_space: ColorSpace,
+    settings: VideoScopesSettings,
 ) -> Result<Option<GpuProgramScopesRequest>, mondrian_core::ProgramColorScopeError> {
     active
         .then(|| {
-            GpuProgramScopesRequest::new(program_output_color_space, WaveformMode::Luma, 256, 512)
+            let signal_color_space = match settings.tap {
+                ProgramScopesTap::ProgramOutput => program_output_color_space,
+                ProgramScopesTap::MonitorOutput => monitor_output_color_space,
+            };
+            GpuProgramScopesRequest::with_controls(
+                signal_color_space,
+                settings.waveform_mode,
+                settings.scale,
+                settings.tap,
+                256,
+                512,
+            )
         })
         .transpose()
+}
+
+fn viewer_signal_monitor_request(
+    program_output_color_space: ColorSpace,
+    monitor_output_color_space: ColorSpace,
+    settings: VideoScopesSettings,
+) -> Result<Option<GpuSignalMonitorRequest>, mondrian_renderer::GpuSignalMonitorError> {
+    if !settings.monitoring.is_active() {
+        return Ok(None);
+    }
+    let signal_color_space = match settings.tap {
+        ProgramScopesTap::ProgramOutput => program_output_color_space,
+        ProgramScopesTap::MonitorOutput => monitor_output_color_space,
+    };
+    GpuSignalMonitorRequest::new(
+        SignalComplianceContract::normalized_rgb(signal_color_space)?,
+        settings.monitoring,
+        settings.tap,
+    )
+    .map(Some)
 }
 
 fn synchronize_viewer_spatial_presentation(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
     presentation: ViewerExternalTexturePresentation,
-) {
+) -> Result<(), mondrian_playback::PlaybackError> {
     if session.viewer_gpu_presentation.presentation() == Some(presentation) {
-        return;
+        return Ok(());
     }
+    let replaced_carrier = session.viewer_gpu_presentation.presentation().is_some();
     clear_viewer_spatial_presentation(session, host);
+    if replaced_carrier {
+        // Geometry is part of the physical output identity. Retire it before
+        // renewing the Engine's still demand, including an already consumed
+        // ticket; timed playback demands keep their original deadlines.
+        host.renew_still_frame_demand_after_output_retirement()?;
+    }
     session.viewer_gpu_presentation.set_presentation(presentation);
+    Ok(())
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {
@@ -4742,12 +7705,18 @@ fn cancel_viewer_gpu_submission(
     host: &AppUiHost,
     deferred_cleanup: WindowViewerGpuDeferredCleanup,
 ) -> bool {
-    let Some(quarantine) = session.viewer_gpu_submissions.quarantine_after_authority_revocation(
-        format!("Window Viewer cleanup requested: {deferred_cleanup:?}"),
-    ) else {
+    let quarantines =
+        session
+            .viewer_gpu_submissions
+            .quarantine_all_after_authority_revocation(format!(
+                "Window Viewer cleanup requested: {deferred_cleanup:?}"
+            ));
+    if quarantines.is_empty() {
         return false;
-    };
-    begin_window_viewer_gpu_quarantine(session, host, quarantine, deferred_cleanup);
+    }
+    for quarantine in quarantines {
+        begin_window_viewer_gpu_quarantine(session, host, quarantine, deferred_cleanup);
+    }
     true
 }
 
@@ -4755,6 +7724,7 @@ fn register_program_scopes_textures(
     session: &mut AppUiWindowSession,
     device: &wgpu::Device,
     scopes: &mondrian_renderer::GpuProgramScopesRecord,
+    analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 ) -> Result<(), String> {
     // Claim all stable keys before the first fallible insertion so callers can
     // roll back a partially registered texture set transactionally.
@@ -4781,10 +7751,12 @@ fn register_program_scopes_textures(
             .map_err(|error| error.to_string())?;
     }
     session.program_scopes_refresh_requested = false;
+    session.program_scopes_analysis_identity = analysis_identity;
     Ok(())
 }
 
 fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
+    session.program_scopes_analysis_identity = None;
     if !session.program_scopes_registered {
         return;
     }
@@ -4969,20 +7941,22 @@ fn refresh_display_output_contract(
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
-    host: &AppUiHost,
+    host: &mut AppUiHost,
 ) {
     let previous = session.display_output_contract.clone();
-    let next = match app_ui_display_output_contract(&session.window, &session.surface, adapter) {
-        Ok(contract) => contract,
-        Err(err) => {
-            tracing::warn!(
-                ?reason,
-                "app UI display output contract refresh failed: {err}"
-            );
-            invalidate_display_dependent_gpu_preview(session, host);
-            return;
-        }
-    };
+    let intent = app_ui_surface_presentation_intent_for_role(session.role, host);
+    let next =
+        match app_ui_display_output_contract(&session.window, &session.surface, adapter, intent) {
+            Ok(contract) => contract,
+            Err(err) => {
+                tracing::warn!(
+                    ?reason,
+                    "app UI display output contract refresh failed: {err}"
+                );
+                invalidate_display_dependent_gpu_preview(session, host);
+                return;
+            }
+        };
 
     let contract_requires_invalidation =
         display_output_contract_requires_gpu_preview_invalidation(&previous, &next);
@@ -4996,6 +7970,27 @@ fn refresh_display_output_contract(
 
     let renderer_rebuilt = contract_requires_invalidation
         && display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let replacement_renderer = if renderer_rebuilt {
+        match AppUiFrameRenderer::new_for_surface(
+            device,
+            next.surface_color.format,
+            next.surface_color.color_space,
+        ) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                tracing::error!(
+                    ?reason,
+                    surface_format = ?next.surface_color.format,
+                    surface_color_space = ?next.surface_color.color_space,
+                    "refusing invalid UI surface presentation carrier: {error}"
+                );
+                invalidate_display_dependent_gpu_preview(session, host);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let (color_engine, display_management_policy) = host.resolved_display_color_management();
 
     let reason_str = format!("{reason:?}");
@@ -5003,10 +7998,13 @@ fn refresh_display_output_contract(
     let new_display_name = next.display_target.name.clone();
 
     let display_resolution = super::display_probe_impl::resolve_display_snapshot(
-        next.display_target.name.clone(),
-        next.display_target.position,
-        next.display_target.physical_size,
-        next.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+        super::display_probe_impl::DisplaySnapshotTarget {
+            name: next.display_target.name.clone(),
+            position: next.display_target.position,
+            physical_size: next.display_target.physical_size,
+            native_display_id: next.display_target.native_display_id,
+            scale_factor: next.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+        },
         next.surface_color.format,
         next.surface_color.color_space,
         &format!("{:?}", next.surface_color.hdr_mode),
@@ -5014,7 +8012,7 @@ fn refresh_display_output_contract(
         next.display_hdr_info.clone(),
         &color_engine,
         &display_management_policy,
-        surface_color_space_to_color_space(next.surface_color.color_space),
+        host.active_program_output_color_space(),
         &reason_str,
     );
     let snapshot = display_resolution.snapshot;
@@ -5062,9 +8060,12 @@ fn refresh_display_output_contract(
     }
     if renderer_rebuilt {
         session.surface.configure(device, &session.config);
-        session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
+        if let Some(renderer) = replacement_renderer {
+            session.frame_renderer = renderer;
+        }
         host.set_native_decoded_frame_import_support(
             session.viewer_gpu_execution.native_import_support(),
+            session.viewer_gpu_execution.native_decode_device_root(),
         );
     }
 
@@ -5102,24 +8103,44 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     host.mark_dirty();
 }
 
-impl AppUiWindowSession {
-    fn from_window_and_surface(
+/// A fully prepared native Window/Surface/Renderer candidate that has not
+/// changed Host-visible display or Viewer publication state.
+struct AppUiPreparedWindowSession {
+    session: AppUiWindowSession,
+    bounds: Rect,
+}
+
+struct AppUiActivatedWindowSession {
+    session: AppUiWindowSession,
+    bounds: Rect,
+}
+
+impl AppUiPreparedWindowSession {
+    #[cfg(feature = "validation")]
+    fn surface_generation_id(&self) -> AppUiSurfaceGenerationId {
+        self.session.surface_generation_id
+    }
+
+    fn prepare(
         role: AppUiWindowRole,
         window: Arc<winit::window::Window>,
         surface: wgpu::Surface<'static>,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        host: &mut AppUiHost,
-        viewer_gpu_device_progress: Option<ViewerGpuDeviceProgressOwner>,
+        host: &AppUiHost,
+        viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let surface_generation_id = AppUiSurfaceGenerationId::next()?;
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
 
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(adapter, size.width, size.height)
             .ok_or("Failed surface config")?;
-        let display_output_contract = app_ui_display_output_contract(&window, &surface, adapter)?;
+        let intent = app_ui_surface_presentation_intent_for_role(role, host);
+        let display_output_contract =
+            app_ui_display_output_contract(&window, &surface, adapter, intent)?;
         let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
         config.color_space = surface_color_contract.color_space;
@@ -5141,14 +8162,16 @@ impl AppUiWindowSession {
         );
 
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-        TreeWalker::layout(host.active_root_mut(), bounds);
-
         let (color_engine, display_management_policy) = host.resolved_display_color_management();
         let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
-            display_output_contract.display_target.name.clone(),
-            display_output_contract.display_target.position,
-            display_output_contract.display_target.physical_size,
-            display_output_contract.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+            super::display_probe_impl::DisplaySnapshotTarget {
+                name: display_output_contract.display_target.name.clone(),
+                position: display_output_contract.display_target.position,
+                physical_size: display_output_contract.display_target.physical_size,
+                native_display_id: display_output_contract.display_target.native_display_id,
+                scale_factor: display_output_contract.display_target.scale_factor_ppm as f64
+                    / 1_000_000.0,
+            },
             display_output_contract.surface_color.format,
             display_output_contract.surface_color.color_space,
             &format!("{:?}", display_output_contract.surface_color.hdr_mode),
@@ -5156,24 +8179,88 @@ impl AppUiWindowSession {
             display_output_contract.display_hdr_info.clone(),
             &color_engine,
             &display_management_policy,
-            surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
+            host.active_program_output_color_space(),
             "Startup",
         );
         let initial_snapshot = initial_display_resolution.snapshot;
-        host.set_display_output_snapshot(Some(&initial_snapshot));
+        let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
+        let frame_renderer =
+            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
+        if let Some(startup) = viewer_gpu_startup {
+            let mut viewer_runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
+            match host.active_program_color_context() {
+                Ok(color_context) => {
+                    match crate::app::preview_cpu_execution::output_boundary_from_color_context(
+                        &color_context,
+                    ) {
+                        Ok(program_output_boundary) => {
+                            match display_management_policy.resolve_output_color_space(
+                                &color_engine,
+                                program_output_boundary.output_color_space(),
+                            ) {
+                                Ok(monitor_color_space) => match RenderMonitorAdaptation::new(
+                                    program_output_boundary.output_color_space(),
+                                    monitor_color_space,
+                                    color_engine.clone(),
+                                ) {
+                                    Ok(monitor_adaptation) => {
+                                        let output_precision =
+                                            ViewerGpuOutputPrecision::minimum_for_display(
+                                                monitor_color_space,
+                                                initial_display_resolution.calibration.is_some(),
+                                            );
+                                        if let Err(error) = viewer_runtime
+                                            .prepare_program_output_backend(
+                                                device,
+                                                queue,
+                                                color_context.working_color_space(),
+                                                &program_output_boundary,
+                                                &monitor_adaptation,
+                                                output_precision,
+                                                host.preferences()
+                                                    .video_scopes
+                                                    .monitoring
+                                                    .is_active(),
+                                            )
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                "Viewer Program Output startup prewarm was unavailable"
+                                            );
+                                        }
+                                    }
+                                    Err(error) => tracing::warn!(
+                                        %error,
+                                        "Viewer monitor adaptation startup prewarm was unavailable"
+                                    ),
+                                },
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "Viewer monitor contract startup prewarm was unavailable"
+                                ),
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "Viewer Program Output contract startup prewarm was unavailable"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Viewer Program color context startup prewarm was unavailable"
+                ),
+            }
+            startup.install_runtime(viewer_runtime);
+            startup
+                .runtime()
+                .expect("installed Window runtime")
+                .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
+        }
 
-        let frame_renderer = AppUiFrameRenderer::new(device, config.format);
-        let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
-        let viewer_gpu_device_progress = match viewer_gpu_device_progress {
-            Some(progress) => ViewerGpuDeviceGenerationMember::new(progress),
-            None => ViewerGpuDeviceGenerationMember::empty(),
-        };
-        let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
-        host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
-        host.clear_viewer_cpu_fallback();
-
-        Ok(Self {
-            viewer_gpu_device_progress,
+        let session = AppUiWindowSession {
+            viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
+            surface_generation_id,
             role,
             window,
             surface,
@@ -5181,17 +8268,20 @@ impl AppUiWindowSession {
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
             display_calibration: initial_display_resolution.calibration,
+            renderer_adapter,
             color_engine,
             display_management_policy,
             frame_renderer,
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
-            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::new(viewer_gpu_execution),
+            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
-            viewer_gpu_submissions,
+            viewer_gpu_submissions: ViewerGpuSubmissionLifecycle::new(),
+            staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
             program_scopes_refresh_requested: false,
+            program_scopes_analysis_identity: None,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
@@ -5204,9 +8294,132 @@ impl AppUiWindowSession {
             current_bounds: std::cell::Cell::new(bounds),
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
+            event_loop_failure: None,
             event_loop_telemetry: AppUiEventLoopTelemetry::default(),
             playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
-        })
+        };
+        Ok(Self { session, bounds })
+    }
+
+    fn activate(
+        mut self,
+        viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    ) -> Result<AppUiActivatedWindowSession, Box<dyn std::error::Error>> {
+        if let Some(startup) = viewer_gpu_startup {
+            let (progress, runtime) = startup
+                .activate()
+                .ok_or("prepared Window GPU generation was incomplete at publication")?;
+            self.session.viewer_gpu_device_progress =
+                ViewerGpuDeviceGenerationMember::new(progress);
+            self.session.viewer_gpu_execution = ViewerGpuDeviceGenerationMember::new(runtime);
+        }
+        Ok(AppUiActivatedWindowSession { session: self.session, bounds: self.bounds })
+    }
+}
+
+impl AppUiActivatedWindowSession {
+    fn into_parts(self) -> (AppUiWindowSession, Rect) {
+        (self.session, self.bounds)
+    }
+}
+
+fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSession, bounds: Rect) {
+    // These are the only Host-visible candidate mutations. Callers first place
+    // an activated GPU generation in an outer active-session owner so a panic
+    // here cannot strand it in a temporary candidate Drop.
+    TreeWalker::layout(host.active_root_mut(), bounds);
+    host.set_display_output_snapshot(session.display_snapshot.as_ref());
+    host.clear_viewer_cpu_fallback();
+    if session.viewer_gpu_device_progress.generation_id().is_some() {
+        host.set_native_decoded_frame_import_support(
+            session.viewer_gpu_execution.native_import_support(),
+            session.viewer_gpu_execution.native_decode_device_root(),
+        );
+    }
+}
+
+impl AppUiWindowSession {
+    fn shutdown_viewer_gpu_until(
+        &mut self,
+        host: &AppUiHost,
+        deadline: Instant,
+    ) -> AppUiActiveWindowGpuShutdownEvidence {
+        let surface_generation = self.surface_generation_id.get();
+        let device_generation = self
+            .viewer_gpu_device_progress
+            .generation_id()
+            .map(ViewerGpuDeviceGenerationId::get);
+        let publication_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            clear_viewer_spatial_presentation(self, host);
+        }))
+        .map_err(|payload| {
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "Window Viewer GPU publication cleanup",
+            )
+            .to_string()
+        });
+        let retirement = match self.take_viewer_gpu_generation_retirement() {
+            Ok((progress, retirement)) => AppUiWindowGpuRetirementEvidence::Retired(
+                progress.retire_device_generation_until(retirement, deadline),
+            ),
+            Err(WindowViewerGpuGenerationRetirementTakeError::MissingProgressOwner) => {
+                AppUiWindowGpuRetirementEvidence::OwnershipFault(
+                    AppUiWindowGpuOwnershipFault::MissingProgressOwner,
+                )
+            }
+            Err(WindowViewerGpuGenerationRetirementTakeError::MissingExecutionRuntime) => {
+                AppUiWindowGpuRetirementEvidence::OwnershipFault(
+                    AppUiWindowGpuOwnershipFault::MissingExecutionRuntime,
+                )
+            }
+        };
+        AppUiActiveWindowGpuShutdownEvidence {
+            surface_generation,
+            device_generation,
+            publication_cleanup,
+            retirement,
+        }
+    }
+
+    fn take_viewer_gpu_generation_retirement(
+        &mut self,
+    ) -> Result<
+        (
+            ViewerGpuDeviceProgressOwner,
+            WindowViewerGpuGenerationRetirement,
+        ),
+        WindowViewerGpuGenerationRetirementTakeError,
+    > {
+        let progress = self
+            .viewer_gpu_device_progress
+            .take()
+            .ok_or(WindowViewerGpuGenerationRetirementTakeError::MissingProgressOwner)?;
+        let Some(runtime) = self.viewer_gpu_execution.take() else {
+            // Keep the progress authority in the session so the typed owning
+            // fault remains observable. The final fallback Drop may detach it,
+            // but this extraction seam never silently leaks or loses it.
+            self.viewer_gpu_device_progress = ViewerGpuDeviceGenerationMember::new(progress);
+            return Err(WindowViewerGpuGenerationRetirementTakeError::MissingExecutionRuntime);
+        };
+        let lifecycle = std::mem::replace(
+            &mut self.viewer_gpu_submissions,
+            ViewerGpuSubmissionLifecycle::new(),
+        );
+        Ok((
+            progress,
+            WindowViewerGpuGenerationRetirement {
+                runtime: runtime.into_retirement(),
+                lifecycle,
+                _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
+                _renderer_device: self.renderer_device.clone(),
+                _renderer_queue: self.renderer_queue.clone(),
+                _deferred_cleanup: std::mem::take(&mut self.viewer_gpu_deferred_cleanup),
+                _completed_submissions: Vec::new(),
+                _lost_submission_owners: Vec::new(),
+                native_retirement_error_logged: false,
+            },
+        ))
     }
 }
 
@@ -5236,6 +8449,7 @@ fn drain_actions_and_sync_window_session(
     let stage_started = Instant::now();
     let previous_color_engine = session.color_engine.clone();
     let previous_display_policy = session.display_management_policy.clone();
+    let previous_program_output = host.active_program_output_color_space();
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
     rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
@@ -5250,7 +8464,8 @@ fn drain_actions_and_sync_window_session(
                 &previous_display_policy,
                 &next_color_engine,
                 &next_display_policy,
-            ) {
+            ) || previous_program_output != host.active_program_output_color_space()
+            {
                 refresh_display_output_contract(
                     DisplayOutputContractRefreshReason::DisplayPolicyChanged,
                     adapter,
@@ -5303,7 +8518,11 @@ fn sync_window_session_role(
     if let Err(err) =
         replace_window_session(target_role, elwt, instance, adapter, device, host, session)
     {
-        tracing::error!("failed to replace app UI native window: {err}");
+        let failure = format!("failed to replace app UI native window: {err}");
+        tracing::error!("{failure}");
+        if session.event_loop_failure.is_none() {
+            session.event_loop_failure = Some(failure);
+        }
         elwt.exit();
     }
 }
@@ -5318,18 +8537,20 @@ fn replace_window_session(
     session: &mut AppUiWindowSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let old_role = session.role;
-    // Native-window replacement does not replace the wgpu device generation.
-    // Revoke publication authority now, but keep every submitted media/GPU
-    // owner resident until its exact callback arrives.
-    clear_viewer_spatial_presentation(session, host);
-    session.window.set_visible(false);
-
+    let old_surface_generation = session.surface_generation_id;
     let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
     let surface = instance.create_surface(window.clone())?;
     let queue = session.renderer_queue.clone();
-    let mut next_session = AppUiWindowSession::from_window_and_surface(
+    let prepared = AppUiPreparedWindowSession::prepare(
         role, window, surface, adapter, device, &queue, host, None,
     )?;
+    let activated = prepared.activate(None)?;
+    let (mut next_session, bounds) = activated.into_parts();
+    // Native-window replacement does not replace the wgpu device generation.
+    // The complete candidate is prepared before the active Window is hidden or
+    // its publication authority is revoked.
+    clear_viewer_spatial_presentation(session, host);
+    session.window.set_visible(false);
     handoff_window_viewer_gpu_device_generation(
         &mut session.viewer_gpu_device_progress,
         &mut next_session.viewer_gpu_device_progress,
@@ -5340,10 +8561,29 @@ fn replace_window_session(
         &mut session.viewer_gpu_deferred_cleanup,
         &mut next_session.viewer_gpu_deferred_cleanup,
     );
-    tracing::info!(?old_role, ?role, "app UI native window replaced");
-    next_session.window.set_visible(true);
-    next_session.window.request_redraw();
-    *session = next_session;
+    with_window_candidate_installed(
+        session,
+        &mut next_session,
+        |active_session, _retired_session| {
+            host.renew_still_frame_demand_after_output_retirement()?;
+            publish_active_window_session(host, active_session, bounds);
+            Ok::<_, mondrian_playback::PlaybackError>(())
+        },
+    )?;
+    tracing::info!(
+        ?old_role,
+        ?role,
+        surface_generation_before = old_surface_generation.get(),
+        surface_generation_after = session.surface_generation_id.get(),
+        device_generation = session
+            .viewer_gpu_device_progress
+            .generation_id()
+            .map(ViewerGpuDeviceGenerationId::get),
+        "app UI native window replaced"
+    );
+    session.window.set_visible(true);
+    session.window.request_redraw();
+    drop(next_session);
     Ok(())
 }
 
@@ -5614,6 +8854,270 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pre_active_construction_error_releases_scope_before_building_evidence() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&dropped);
+        let failure = super::catch_pre_active_window_construction(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |stage, _viewer_gpu_startup| {
+                *stage = super::AppUiPreActiveWindowStartupStage::SurfaceCreated;
+                let _probe = DropProbe(observed);
+                Err::<(), _>("injected native construction error".to_owned())
+            },
+        )
+        .expect_err("injected error should fail construction");
+
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(failure.primary, "injected native construction error");
+        assert_eq!(
+            failure.shutdown.last_stage,
+            super::AppUiPreActiveWindowStartupStage::SurfaceCreated
+        );
+        assert!(failure.shutdown.rust_native_authority_released_on_event_loop_thread);
+        assert!(matches!(
+            failure.shutdown.viewer_gpu,
+            super::AppUiPreActiveViewerGpuShutdownEvidence::NotStarted
+        ));
+        assert!(failure.shutdown.all_created_resources_released());
+    }
+
+    #[test]
+    fn pre_active_construction_panic_preserves_stage_and_primary_diagnostic() {
+        let failure = super::catch_pre_active_window_construction(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |stage, _viewer_gpu_startup| -> Result<(), String> {
+                *stage = super::AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+                panic!("injected native construction panic")
+            },
+        )
+        .expect_err("injected panic should fail construction");
+
+        assert!(failure.primary.contains("injected native construction panic"));
+        assert_eq!(
+            failure.shutdown.last_stage,
+            super::AppUiPreActiveWindowStartupStage::DeviceQueueCreated
+        );
+        assert!(failure.shutdown.all_created_resources_released());
+    }
+
+    #[test]
+    fn caught_event_loop_panic_returns_borrowed_owner_to_the_outer_transaction() {
+        let mut owner_marker = 0_u8;
+        let result = catch_app_ui_event_loop(|| {
+            owner_marker = 1;
+            panic!("injected event-loop callback panic")
+        });
+
+        assert!(matches!(result, Err(AppUiEventLoopFailure::Panicked(_))));
+        owner_marker = 2;
+        assert_eq!(owner_marker, 2);
+    }
+
+    #[test]
+    fn callback_failure_cannot_become_a_normal_event_loop_exit() {
+        let result = merge_app_ui_event_loop_failure(
+            Ok(()),
+            Some("injected role replacement failure".to_owned()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppUiEventLoopFailure::Execution(failure))
+                if failure == "injected role replacement failure"
+        ));
+    }
+
+    #[test]
+    fn event_loop_and_callback_failures_are_both_retained() {
+        let result = merge_app_ui_event_loop_failure(
+            Err(AppUiEventLoopFailure::Panicked(
+                "event-loop panic".to_owned(),
+            )),
+            Some("role replacement failure".to_owned()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppUiEventLoopFailure::Multiple { primary, callback })
+                if matches!(*primary, AppUiEventLoopFailure::Panicked(ref panic)
+                    if panic == "event-loop panic")
+                    && callback == "role replacement failure"
+        ));
+    }
+
+    #[test]
+    fn candidate_owner_is_installed_before_fallible_host_publication() {
+        let mut active = "old-generation";
+        let mut candidate = "candidate-generation";
+
+        let publication = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_window_candidate_installed(&mut active, &mut candidate, |installed, retired| {
+                assert_eq!(*installed, "candidate-generation");
+                assert_eq!(*retired, "old-generation");
+                panic!("injected Host publication panic");
+            });
+        }));
+
+        assert!(publication.is_err());
+        assert_eq!(active, "candidate-generation");
+        assert_eq!(candidate, "old-generation");
+    }
+
+    #[test]
+    fn candidate_owner_remains_installed_when_retirement_fails() {
+        let mut active = "old-generation";
+        let mut candidate = "candidate-generation";
+
+        let transition =
+            with_window_candidate_installed(&mut active, &mut candidate, |installed, retired| {
+                assert_eq!(*installed, "candidate-generation");
+                assert_eq!(*retired, "old-generation");
+                Err::<(), _>("injected retirement failure")
+            });
+
+        assert_eq!(transition, Err("injected retirement failure"));
+        assert_eq!(active, "candidate-generation");
+        assert_eq!(candidate, "old-generation");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_consumes_app_owner_with_product_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let mut owner = AppUiHostSessionOwner::new(host, None, None);
+        let deadline = Instant::now() + APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT;
+        let result = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(
+            result.as_ref().is_ok_and(|ui| ui.all_resources_released()),
+            "{result:?}"
+        );
+        assert!(owner.host.is_none());
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_reports_expired_app_owner_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let mut owner = AppUiHostSessionOwner::new(host, None, None);
+        let result = owner.shutdown_until(Instant::now(), clean_final_window_gpu_shutdown());
+        assert!(
+            result.is_err(),
+            "ordinary Window accepted an unclosed App owner: {result:?}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    fn clean_final_window_gpu_shutdown() -> AppUiActiveWindowGpuShutdownEvidence {
+        AppUiActiveWindowGpuShutdownEvidence {
+            surface_generation: 2,
+            device_generation: Some(4),
+            publication_cleanup: Ok(()),
+            retirement: AppUiWindowGpuRetirementEvidence::Retired(
+                ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_shutdown:
+                        crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+                    wake_callbacks: serde_json::from_value(
+                        serde_json::from_str::<serde_json::Value>(include_str!(
+                            "../../../../tests/validation/fixtures/window-owner-closure.json"
+                        ))
+                        .expect("owner fixture")["host_shutdown"]["preview"]["work_callbacks"]
+                            .clone(),
+                    )
+                    .expect("callback fixture"),
+                    native_wake_failures: 0,
+                    wake_registration_rejections: 0,
+                    worker_started: true,
+                    worker_terminated: true,
+                    worker_panicked: false,
+                    timed_out: false,
+                    retirement_requested: true,
+                    retirement_handoff_accepted: true,
+                    retirement_completed: true,
+                    renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                        cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
+                        native_device_removed: false,
+                    }),
+                    generation_terminal_kind: None,
+                },
+            ),
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn final_window_gpu_qualification_requires_active_publication_and_raw_retirement() {
+        let clean = clean_final_window_gpu_shutdown();
+        assert!(clean.qualifies_normal_runtime());
+        assert!(clean.qualification_failure().is_none());
+
+        let mut unregistered = clean_final_window_gpu_shutdown();
+        if let AppUiWindowGpuRetirementEvidence::Retired(evidence) = &mut unregistered.retirement {
+            evidence.wake_callbacks =
+                crate::app::preview_work_notification::preview_work_notification_channel()
+                    .1
+                    .shutdown_until(Instant::now() + Duration::from_secs(1));
+            assert!(evidence.qualifies_created_inventory(true));
+        }
+        assert!(!unregistered.qualifies_normal_runtime());
+
+        let mut dirty_publication = clean;
+        dirty_publication.publication_cleanup = Err("publication panic".to_owned());
+        assert!(!dirty_publication.qualifies_normal_runtime());
+        assert!(dirty_publication
+            .qualification_failure()
+            .is_some_and(|failure| failure.contains("publication panic")));
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn window_result_preserves_operation_loop_and_cleanup_failures() {
+        let result = super::merge_window_operation_result::<u32>(
+            Some(Err("original operation".to_owned())),
+            Ok(()),
+            Some("thumbnail timeout".to_owned()),
+        )
+        .expect_err("cleanup cannot replace operation failure");
+        assert!(result.starts_with("original operation"));
+        assert!(result.contains("thumbnail timeout"));
+        let result = super::merge_window_operation_result::<u32>(
+            Some(Err("original operation".to_owned())),
+            Err("event loop".to_owned()),
+            Some("catalog timeout".to_owned()),
+        )
+        .expect_err("all failures retained");
+        assert!(result.starts_with("original operation"));
+        assert!(result.contains("event loop"));
+        assert!(result.contains("catalog timeout"));
+        assert_eq!(
+            super::merge_window_operation_result(Some(Ok(7)), Ok(()), None),
+            Ok(7)
+        );
+        assert!(super::merge_window_operation_result::<u32>(None, Ok(()), None).is_err());
+        assert!(super::merge_window_operation_result(
+            Some(Ok(7)),
+            Ok(()),
+            Some("missing receipt".to_owned())
+        )
+        .is_err());
+        assert_eq!(
+            super::merge_window_cleanup_failures(
+                Some("GPU timeout".to_owned()),
+                Some("UI timeout".to_owned())
+            ),
+            Some("GPU timeout; UI timeout".to_owned())
+        );
+    }
     use super::*;
     use crate::app::preview_work_notification::preview_work_notification_channel;
     use crate::app::viewer_gpu_output_residency::{
@@ -5632,6 +9136,18 @@ mod tests {
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
     use std::sync::Mutex;
+
+    #[test]
+    fn qualification_diagnostics_bind_full_contract_and_runtime_image() {
+        let snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        let diagnostics = DisplaySnapshotDiagnostics::from_snapshot(&snapshot);
+        assert_eq!(diagnostics.contract_sha256.len(), 64);
+        assert!(diagnostics.contract_sha256.chars().all(|value| value.is_ascii_hexdigit()));
+
+        let runtime_image = viewer_runtime_image_sha256().expect("test runtime image must hash");
+        assert_eq!(runtime_image.len(), 64);
+        assert!(runtime_image.chars().all(|value| value.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn delayed_viewer_callback_survives_native_window_replacement() {
@@ -5695,12 +9211,14 @@ mod tests {
         let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let callback_pending = Arc::clone(&pending);
         let callback_queued = Arc::clone(&queued);
-        watch.install_waker(move || {
-            queue_preview_work_event(&callback_pending, || {
-                callback_queued.fetch_add(1, Ordering::AcqRel);
-                true
-            });
-        });
+        watch
+            .install_waker(move || {
+                queue_preview_work_event(&callback_pending, || {
+                    callback_queued.fetch_add(1, Ordering::AcqRel);
+                    true
+                });
+            })
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
 
         for _ in 0..128 {
             notifier.result_became_pollable();
@@ -5717,12 +9235,14 @@ mod tests {
         let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let callback_pending = Arc::clone(&pending);
         let callback_queued = Arc::clone(&queued);
-        watch.install_waker(move || {
-            queue_preview_work_event(&callback_pending, || {
-                callback_queued.fetch_add(1, Ordering::AcqRel);
-                true
-            });
-        });
+        watch
+            .install_waker(move || {
+                queue_preview_work_event(&callback_pending, || {
+                    callback_queued.fetch_add(1, Ordering::AcqRel);
+                    true
+                });
+            })
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
         let drain_target_revision = watch.revision();
 
         // The publisher observes an already queued event and intentionally
@@ -5814,14 +9334,70 @@ mod tests {
     #[test]
     fn hidden_scopes_create_no_viewer_gpu_request() {
         assert_eq!(
-            viewer_program_scopes_request(false, ColorSpace::Rec709),
+            viewer_program_scopes_request(
+                false,
+                ColorSpace::Rec709,
+                ColorSpace::DisplayP3,
+                VideoScopesSettings::default(),
+            ),
             Ok(None)
         );
-        let visible = viewer_program_scopes_request(true, ColorSpace::Rec709)
-            .expect("supported Program Output")
-            .expect("visible request");
+        let visible = viewer_program_scopes_request(
+            true,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            VideoScopesSettings::default(),
+        )
+        .expect("supported Program Output")
+        .expect("visible request");
         assert_eq!(visible.signal_color_space(), ColorSpace::Rec709);
         assert_eq!(visible.waveform_mode(), WaveformMode::Luma);
+
+        let monitor_settings = VideoScopesSettings {
+            waveform_mode: WaveformMode::RgbParade,
+            scale: ProgramScopeScale::Nits1000,
+            tap: ProgramScopesTap::MonitorOutput,
+            ..VideoScopesSettings::default()
+        };
+        let monitor = viewer_program_scopes_request(
+            true,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            monitor_settings,
+        )
+        .expect("supported Monitor Output")
+        .expect("visible monitor request");
+        assert_eq!(monitor.signal_color_space(), ColorSpace::DisplayP3);
+        assert_eq!(monitor.waveform_mode(), WaveformMode::RgbParade);
+        assert_eq!(monitor.scale(), ProgramScopeScale::Nits1000);
+        assert_eq!(monitor.tap(), ProgramScopesTap::MonitorOutput);
+    }
+
+    #[test]
+    fn viewer_monitoring_is_independent_from_scope_panel_visibility() {
+        assert!(viewer_signal_monitor_request(
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            VideoScopesSettings::default(),
+        )
+        .expect("inactive settings")
+        .is_none());
+        let settings = VideoScopesSettings {
+            tap: ProgramScopesTap::MonitorOutput,
+            monitoring: mondrian_core::SignalMonitoringSettings {
+                false_color: true,
+                zebra: true,
+                gamut_alarm: true,
+                ..Default::default()
+            },
+            ..VideoScopesSettings::default()
+        };
+        let request =
+            viewer_signal_monitor_request(ColorSpace::Rec709, ColorSpace::DisplayP3, settings)
+                .expect("supported monitoring signal")
+                .expect("active request");
+        assert_eq!(request.tap, ProgramScopesTap::MonitorOutput);
+        assert_eq!(request.compliance.signal_color_space, ColorSpace::DisplayP3);
     }
 
     #[test]
@@ -6144,6 +9720,8 @@ mod tests {
                 name: Some("test-display".to_owned()),
                 position: (0, 0),
                 physical_size: (3840, 2160),
+                native_display_id: None,
+                native_display_path_id: None,
                 scale_factor_ppm: 1_000_000,
                 refresh_rate_millihertz: Some(60_000),
             },
@@ -6167,7 +9745,7 @@ mod tests {
     #[test]
     fn display_output_contract_blocks_hdr_boundary_on_sdr_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6208,7 +9786,7 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_sdr_boundary_on_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6220,7 +9798,7 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_srgb_boundary_on_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Srgb,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6232,7 +9810,7 @@ mod tests {
     #[test]
     fn display_presentation_readiness_is_current_for_matching_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6260,7 +9838,7 @@ mod tests {
     fn display_output_contract_blocks_display_p3_boundary_on_srgb_surface() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6285,10 +9863,10 @@ mod tests {
     }
 
     #[test]
-    fn display_presentation_readiness_reports_supported_p3_reconfigure_payload_blocker() {
+    fn display_presentation_readiness_reports_supported_p3_reconfiguration_required() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6297,7 +9875,7 @@ mod tests {
         assert_eq!(
             contract.presentation_readiness_for_boundary(&boundary),
             AppUiDisplayPresentationReadinessDiagnostics {
-                status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+                status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
                 output_color_space: ColorSpace::DisplayP3,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6307,9 +9885,7 @@ mod tests {
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
                 desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
             }
         );
     }
@@ -6319,7 +9895,7 @@ mod tests {
         let mut contract = test_display_output_contract();
         contract.surface_color.color_space = wgpu::SurfaceColorSpace::DisplayP3;
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6335,7 +9911,7 @@ mod tests {
         contract.surface_color.encoding = AppUiSurfaceEncoding::Pq;
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
         contract.format_color_spaces[0].bt2100_pq = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6352,7 +9928,7 @@ mod tests {
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6383,7 +9959,7 @@ mod tests {
         contract.format_color_spaces[0].display_p3 = true;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2020,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6412,7 +9988,7 @@ mod tests {
     #[test]
     fn display_output_contract_blocks_log_boundary_without_surface_contract() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::SonySLog3SGamut3Cine,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6436,7 +10012,7 @@ mod tests {
     #[test]
     fn display_presentation_readiness_reports_unsupported_log_presentation_intent() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::SonySLog3SGamut3Cine,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6705,7 +10281,7 @@ mod tests {
     fn viewer_gpu_output_telemetry_records_display_presentation_readiness() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6715,9 +10291,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
 
         telemetry.record_display_presentation_readiness(readiness);
@@ -6726,10 +10300,9 @@ mod tests {
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()),
             AppUiViewerGpuOutputDiagnostics {
                 display_presentation_reconfigure_candidates: 1,
-                display_presentation_payload_blockers: 1,
                 last_display_presentation_readiness: Some(readiness),
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
-                    reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
+                    reason: AppUiDisplayIssueReason::ReconfigurationRequired,
                     output_color_space: ColorSpace::DisplayP3,
                     preceding_display_contract_refresh: None,
                     display_target: None,
@@ -6741,14 +10314,10 @@ mod tests {
                     selected_surface_encoding: None,
                     surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
-                    desired_surface_color_space: Some(
-                        AppUiSurfaceColorSpaceDiagnostic::DisplayP3,
-                    ),
+                    desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3,),
                     desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                     desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                    payload_blocker: Some(
-                        AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                    ),
+                    payload_blocker: None,
                     supported_surface_color_space_count: None,
                     target_surface_color_space_supported: Some(true),
                 }),
@@ -6802,10 +10371,10 @@ mod tests {
     }
 
     #[test]
-    fn viewer_gpu_output_diagnostics_summarize_presentation_payload_blocker() {
+    fn viewer_gpu_output_diagnostics_summarize_reconfiguration_required() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6815,9 +10384,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
         telemetry.record_display_presentation_readiness(readiness);
 
@@ -6826,7 +10393,7 @@ mod tests {
                 .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
                 .display_issue_summary,
             Some(AppUiDisplayIssueSummary {
-                reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
+                reason: AppUiDisplayIssueReason::ReconfigurationRequired,
                 output_color_space: ColorSpace::DisplayP3,
                 preceding_display_contract_refresh: None,
                 display_target: None,
@@ -6841,9 +10408,7 @@ mod tests {
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
                 desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
                 supported_surface_color_space_count: None,
                 target_surface_color_space_supported: Some(true),
             })
@@ -6872,6 +10437,8 @@ mod tests {
             name: Some("Reference Monitor".to_owned()),
             position: (1920, 0),
             physical_size: (3840, 2160),
+            native_display_id: None,
+            native_display_path_id: None,
             scale_factor_ppm: 1_000_000,
             refresh_rate_millihertz: Some(60_000),
         };
@@ -6882,6 +10449,10 @@ mod tests {
             &display_target,
             RenderGpuOutputRuntimeDiagnosticsReport::default(),
             None,
+            None,
+            None,
+            None,
+            AppUiFrameMetrics::default(),
         );
 
         assert_eq!(
@@ -7008,9 +10579,9 @@ mod tests {
             gpu_color_stages: 1,
             readback_stages: 1,
             gpu_blockers: 1,
-            gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+            gpu_blocker_breakdown: mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
                 render_pipeline_not_prepared: 1,
-                ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default()
             },
             stage_pixels: 30,
             ..RenderColorStageDiagnostics::default()
@@ -7033,10 +10604,11 @@ mod tests {
                 gpu_color_stages: 2,
                 readback_stages: 1,
                 gpu_blockers: 1,
-                gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                    render_pipeline_not_prepared: 1,
-                    ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                },
+                gpu_blocker_breakdown:
+                    mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                        render_pipeline_not_prepared: 1,
+                        ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default()
+                    },
                 stage_pixels: 50,
                 ..RenderColorStageDiagnostics::default()
             }
@@ -7052,10 +10624,12 @@ mod tests {
                     gpu_color_stages: 2,
                     readback_stages: 1,
                     gpu_blockers: 1,
-                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                        render_pipeline_not_prepared: 1,
-                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                    },
+                    gpu_blocker_breakdown:
+                        mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                            render_pipeline_not_prepared: 1,
+                            ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default(
+                            )
+                        },
                     stage_pixels: 50,
                 },
                 last_stage_report: Some(RenderGpuOutputStageDiagnosticsReport {
@@ -7064,10 +10638,12 @@ mod tests {
                     gpu_color_stages: 1,
                     readback_stages: 1,
                     gpu_blockers: 1,
-                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                        render_pipeline_not_prepared: 1,
-                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                    },
+                    gpu_blocker_breakdown:
+                        mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                            render_pipeline_not_prepared: 1,
+                            ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default(
+                            )
+                        },
                     stage_pixels: 30,
                 }),
                 stage_total_stages: 5,
@@ -7122,14 +10698,26 @@ mod tests {
     }
 
     #[test]
+    fn successful_viewer_gpu_fallback_evidence_does_not_replace_the_completed_frame() {
+        let reasons = vec!["native import used the admitted CPU working source".to_owned()];
+        let mut diagnostics = Vec::new();
+
+        report_successful_viewer_gpu_fallbacks(&reasons, |reason| {
+            diagnostics.push(reason.to_owned());
+        });
+
+        assert_eq!(diagnostics, reasons);
+    }
+
+    #[test]
     fn viewer_gpu_output_diagnostics_include_uniform_arena_evidence() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let arena = mondrian_renderer::GpuCompositorUniformArenaDiagnostics {
             buffer_creations: 1,
             uniform_writes: 7,
             high_watermark_slots: 3,
+            high_watermark_pages: 1,
             frame_resets: 2,
-            exhaustions: 0,
         };
         telemetry.record_compositor_uniform_arena(arena);
 
@@ -7143,6 +10731,33 @@ mod tests {
         assert!(telemetry
             .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
             .compositor_uniform_arena
+            .is_none());
+    }
+
+    #[test]
+    fn viewer_gpu_output_diagnostics_include_creative_lut_residency_evidence() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let creative_luts = mondrian_renderer::GpuCreativeLutCacheDiagnostics {
+            cache_hits: 5,
+            cache_misses: 2,
+            texture_uploads: 2,
+            evictions: 1,
+            oversized_bypasses: 1,
+            resident_entries: 1,
+            resident_texture_bytes: 32_768,
+        };
+        telemetry.record_compositor_creative_luts(creative_luts);
+
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        assert_eq!(diagnostics.compositor_creative_luts, Some(creative_luts));
+        assert!(serde_json::to_string(&diagnostics)
+            .expect("serialize Viewer diagnostics")
+            .contains("\"compositor_creative_luts\""));
+
+        telemetry.record_invocation();
+        assert!(telemetry
+            .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+            .compositor_creative_luts
             .is_none());
     }
 
@@ -7407,7 +11022,7 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         telemetry.record_invocation();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -7417,9 +11032,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
         telemetry.record_display_presentation_readiness(readiness);
         telemetry.record_registered_frame(RenderColorStageDiagnostics {
@@ -7549,6 +11162,29 @@ mod tests {
         });
         let mut diagnostics =
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        diagnostics.qualification_run_id = Some("qualification-run".to_owned());
+        diagnostics.process_instance_id = Some("process-instance".to_owned());
+        diagnostics.process_id = Some(42);
+        diagnostics.qualification_record_sequence = Some(7);
+        diagnostics.runtime_image_sha256 = Some("a".repeat(64));
+        diagnostics.renderer_adapter = Some(AppUiRendererAdapterDiagnostics {
+            name: "Qualification GPU".to_owned(),
+            vendor_id: "10de".to_owned(),
+            device_id: "2684".to_owned(),
+            device_type: "DiscreteGpu".to_owned(),
+            driver: "qualified-driver".to_owned(),
+            driver_info: "qualified-driver-info".to_owned(),
+            backend: "Dx12".to_owned(),
+        });
+        let display_output_contract =
+            mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        diagnostics.display_snapshot = Some(DisplaySnapshotDiagnostics::from_snapshot(
+            &display_output_contract,
+        ));
+        diagnostics.display_output_contract = Some(display_output_contract);
+        diagnostics.display_calibration_identity_sha256 = Some("b".repeat(64));
+        diagnostics.display_calibration_rendering_intent =
+            Some(mondrian_core::IccRenderingIntent::RelativeColorimetric);
         diagnostics.last_color_rejection = Some(PreviewColorRejection {
             asset_id: mondrian_core::types::AssetId::new(),
             path: PathBuf::from("E:/media/missing-color-tags.mov"),
@@ -7612,6 +11248,25 @@ mod tests {
         assert_eq!(json["health_counts"]["ready"], 1);
         assert_eq!(json["health_counts"]["degraded"], 0);
         assert_eq!(json["health_counts"]["failed"], 0);
+        assert_eq!(json["qualification_run_id"], "qualification-run");
+        assert_eq!(json["process_instance_id"], "process-instance");
+        assert_eq!(json["process_id"], 42);
+        assert_eq!(json["qualification_record_sequence"], 7);
+        assert_eq!(json["runtime_image_sha256"], "a".repeat(64));
+        assert_eq!(json["renderer_adapter"]["backend"], "Dx12");
+        assert_eq!(
+            json["display_snapshot"]["contract_sha256"].as_str().map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            json["display_output_contract"]["surface_color_space"],
+            "Srgb"
+        );
+        assert_eq!(json["display_calibration_identity_sha256"], "b".repeat(64));
+        assert_eq!(
+            json["display_calibration_rendering_intent"],
+            "RelativeColorimetric"
+        );
         assert_eq!(json["stage_gpu_color_stages"], 1);
         assert_eq!(json["accumulated_stage_report"]["gpu_color_stages"], 1);
         assert_eq!(json["accumulated_stage_report"]["upload_stages"], 1);
@@ -7788,13 +11443,6 @@ mod tests {
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("wgpu_core=warn"));
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("wgpu_hal=warn"));
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("naga=warn"));
-    }
-
-    #[test]
-    fn background_runtime_uses_product_worker_count() {
-        assert_eq!(APP_UI_BACKGROUND_WORKERS, 4);
-        let runtime = build_app_ui_background_runtime().expect("runtime should build");
-        runtime.block_on(async {});
     }
 
     #[test]
@@ -8129,5 +11777,175 @@ mod tests {
             window_corner_preference_for_role(AppUiWindowRole::Workspace),
             WindowCornerPreference::Round
         );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn rejected_surface_validation_returns_its_unconsumed_app_owner() {
+        let run = run_app_ui_surface_device_reopen_validation_returning_state(
+            AppState::new(),
+            0,
+            "invalid-timeout".to_owned(),
+            Duration::ZERO,
+        );
+
+        assert!(run.result.is_err());
+        let shutdown = run.app_state.shutdown_for_endurance(
+            Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("test shutdown deadline"),
+        );
+        assert!(shutdown.all_resources_released(), "{shutdown:#?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_reopen_window_does_not_advance_settled_playback() {
+        assert!(!validation_window_advances_playback(true));
+        assert!(validation_window_advances_playback(false));
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_validation_batch_rejects_unbounded_work_before_event_loop_creation() {
+        let requests = (0..=MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES)
+            .map(|cycle| AppUiSurfaceDeviceReopenValidationRequest {
+                cycle_index: u32::try_from(cycle).expect("bounded test cycle"),
+                operation_id: format!("surface.c{cycle}"),
+                timeout: Duration::from_secs(1),
+            })
+            .collect();
+        let error = run_app_ui_surface_device_reopen_validation_batch(AppState::new(), requests)
+            .expect_err("unbounded batch must fail");
+
+        assert_eq!(
+            error.kind(),
+            AppUiSurfaceDeviceReopenValidationFailureKind::TooManyOperations
+        );
+        assert!(error.to_string().contains("exceeds 24 operations"));
+        assert_eq!(
+            error.submitted_request_count(),
+            MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES + 1
+        );
+        assert!(error.completed_receipts().is_empty());
+        assert!(error.window_shutdown().is_none());
+        assert!(error.event_loop_shutdown().is_none());
+        assert!(error.all_returned_authority_released(), "{error:#?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_validation_request_failures_do_not_construct_an_event_loop() {
+        let cases = [
+            (
+                Vec::new(),
+                AppUiSurfaceDeviceReopenValidationFailureKind::EmptyBatch,
+            ),
+            (
+                vec![AppUiSurfaceDeviceReopenValidationRequest {
+                    cycle_index: 1,
+                    operation_id: "surface.c1".to_owned(),
+                    timeout: Duration::ZERO,
+                }],
+                AppUiSurfaceDeviceReopenValidationFailureKind::ZeroTimeout,
+            ),
+            (
+                vec![
+                    AppUiSurfaceDeviceReopenValidationRequest {
+                        cycle_index: 1,
+                        operation_id: "surface.same".to_owned(),
+                        timeout: Duration::from_secs(1),
+                    },
+                    AppUiSurfaceDeviceReopenValidationRequest {
+                        cycle_index: 2,
+                        operation_id: "surface.same".to_owned(),
+                        timeout: Duration::from_secs(1),
+                    },
+                ],
+                AppUiSurfaceDeviceReopenValidationFailureKind::InvalidOrReplayedIdentity,
+            ),
+            (
+                vec![AppUiSurfaceDeviceReopenValidationRequest {
+                    cycle_index: 1,
+                    operation_id: "surface.c1".to_owned(),
+                    timeout: Duration::MAX,
+                }],
+                AppUiSurfaceDeviceReopenValidationFailureKind::DeadlineOverflow,
+            ),
+        ];
+
+        for (requests, expected_kind) in cases {
+            let submitted_request_count = requests.len();
+            let factory_called = std::cell::Cell::new(false);
+            let error = run_app_ui_surface_device_reopen_validation_batch_with_factory(
+                AppState::new(),
+                requests,
+                || {
+                    factory_called.set(true);
+                    unreachable!("invalid request must fail before EventLoop construction")
+                },
+            )
+            .expect_err("invalid request must fail");
+
+            assert_eq!(error.kind(), expected_kind);
+            assert_eq!(error.submitted_request_count(), submitted_request_count);
+            assert!(!factory_called.get());
+            assert!(error.completed_receipts().is_empty());
+            assert!(error.window_shutdown().is_none());
+            assert!(error.event_loop_shutdown().is_none());
+            assert!(error
+                .window_shutdown_receipt()
+                .expect("absent Window receipt should be valid")
+                .is_none());
+            assert!(error
+                .event_loop_shutdown_receipt()
+                .expect("absent EventLoop receipt should be valid")
+                .is_none());
+            assert!(error.all_returned_authority_released(), "{error:#?}");
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_validation_event_loop_construction_failure_returns_typed_app_ownership() {
+        let request = AppUiSurfaceDeviceReopenValidationRequest {
+            cycle_index: 7,
+            operation_id: "surface.c7".to_owned(),
+            timeout: Duration::from_secs(1),
+        };
+        let error = run_app_ui_surface_device_reopen_validation_batch_with_factory(
+            AppState::new(),
+            vec![request],
+            || {
+                Err(AppUiEventLoopConstructionFailure::synthetic(
+                    AppUiEventLoopConstructionFailureKind::OperatingSystem,
+                    "injected EventLoop construction failure",
+                ))
+            },
+        )
+        .expect_err("injected EventLoop construction must fail");
+
+        assert_eq!(
+            error.kind(),
+            AppUiSurfaceDeviceReopenValidationFailureKind::EventLoopConstruction(
+                AppUiEventLoopConstructionFailureKind::OperatingSystem
+            )
+        );
+        assert!(error.to_string().contains("injected EventLoop construction failure"));
+        assert_eq!(error.submitted_request_count(), 1);
+        assert!(error.completed_receipts().is_empty());
+        assert_eq!(error.failed_cycle_index(), None);
+        assert_eq!(error.failed_operation_id(), None);
+        assert!(error.window_shutdown().is_none());
+        assert!(error.event_loop_shutdown().is_none());
+        assert!(error
+            .window_shutdown_receipt()
+            .expect("construction failure has no Window receipt")
+            .is_none());
+        assert!(error
+            .event_loop_shutdown_receipt()
+            .expect("construction failure has no EventLoop shutdown receipt")
+            .is_none());
+        assert!(error.all_returned_authority_released(), "{error:#?}");
     }
 }

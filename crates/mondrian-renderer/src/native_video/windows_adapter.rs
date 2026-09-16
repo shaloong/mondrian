@@ -16,11 +16,6 @@ impl NativeVideoAdapterLuid {
     pub fn as_u64(self) -> u64 {
         self.0
     }
-
-    #[cfg(test)]
-    pub(super) fn from_raw_for_test(value: u64) -> Self {
-        Self(value)
-    }
 }
 
 /// Error resolving the active wgpu DX12 adapter for native-video decode.

@@ -55,7 +55,10 @@ impl ViewerPreviewSource for WindowPreviewSnapshot<'_> {
 
 impl ViewerPreviewSource for WindowPreviewAdapter {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
-        match self.presentation(state.preview_frame_execution_request(std::time::Instant::now())) {
+        match self.presentation(
+            state.preview_frame_execution_request(std::time::Instant::now()),
+            crate::app::preview_runtime::PreviewPresentationCarrier::CpuRaster,
+        ) {
             PreviewPresentationState::Ready(candidate) => {
                 { viewer_frame_content(candidate.into_value()) }
                     .map(ViewerPreviewState::Ready)

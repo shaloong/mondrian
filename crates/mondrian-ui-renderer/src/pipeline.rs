@@ -21,6 +21,7 @@ fn ui_primitive_state() -> wgpu::PrimitiveState {
 pub struct UiPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
     pub encoded_code_value_pipeline: wgpu::RenderPipeline,
+    pub device_code_value_pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -44,7 +45,7 @@ impl UiPipeline {
             label: Some("ui_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -113,10 +114,13 @@ impl UiPipeline {
         let render_pipeline = create_pipeline("ui_pipeline", "main");
         let encoded_code_value_pipeline =
             create_pipeline("ui_encoded_code_value_pipeline", "main_encoded_code_values");
+        let device_code_value_pipeline =
+            create_pipeline("ui_device_code_value_pipeline", "main_device_code_values");
 
         Self {
             render_pipeline,
             encoded_code_value_pipeline,
+            device_code_value_pipeline,
             bind_group_layout,
             texture_bind_group_layout,
         }

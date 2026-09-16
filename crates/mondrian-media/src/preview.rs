@@ -22,6 +22,7 @@ use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::path::PathBuf;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,7 @@ mod cancellation;
 mod decode_contract;
 mod decode_session;
 mod decoded_frame;
+mod decoded_surface_window;
 mod demux_process;
 mod demux_protocol;
 mod demux_protocol_ffi;
@@ -36,17 +38,20 @@ mod demux_source;
 mod demux_worker;
 mod execution_progress;
 mod external_decode;
+mod field_processing;
 mod frame_contract;
 mod frame_materialization;
+pub(crate) use frame_materialization::resize_float_rgba;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
 mod seek_index;
 
 pub use decode_contract::{
-    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeKey,
-    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
-    PreviewNativeSurfaceHint, PreviewRepresentationQuality,
+    CameraRawDecodeIntent, PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence,
+    PreviewDecodeContractError, PreviewDecodeKey, PreviewDecodePayloadRequirement,
+    PreviewDecodeRepresentation, PreviewDecodeSource, PreviewNativeSurfaceHint,
+    PreviewRepresentationQuality,
 };
 pub use demux_worker::run_preview_demux_worker;
 pub use seek_index::{
@@ -117,7 +122,7 @@ use frame_materialization::materialize_decoded_frame;
 use frame_materialization::materialize_decoded_frame_with_session_output_lease;
 #[cfg(test)]
 use frame_materialization::{
-    convert_decoded_to_rgba, decoded_native_surface_format_from_software_format, resize_float_rgba,
+    convert_decoded_to_rgba, decoded_native_surface_format_from_software_format,
     PreviewNativeFrameMaterializationError,
 };
 #[cfg(test)]
@@ -158,6 +163,19 @@ const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 // residency authority. A byte limit prevents eight large CPU frames from
 // bypassing the App-owned Preview Frame Store budget.
 const PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET: usize = 96 * 1024 * 1024;
+// Prefetch is allowed to advance the one resident Playback decoder while an
+// older current-frame request is queued. Retain the same eight-frame bounded
+// temporal prefix as startup preroll so that scheduling overlap never turns
+// back into a long-GOP seek. At 256 MiB the window can hold eight 4K 4:2:2
+// 10-bit software surfaces while remaining independently byte bounded.
+const PREVIEW_PLAYBACK_DECODE_WINDOW_CAPACITY: usize = 8;
+const PREVIEW_PLAYBACK_DECODE_WINDOW_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+// Reverse playback must replay a forward-decoded GOP tail instead of seeking
+// to the same keyframe for every descending frame. The window shares the same
+// conservative memory envelope as the output ring and independently caps
+// retained decoder references so hardware surface pools cannot be exhausted.
+const PREVIEW_REVERSE_DECODE_WINDOW_CAPACITY: usize = 4;
+const PREVIEW_REVERSE_DECODE_WINDOW_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 // Native preview frames may outlive one codec call in the bounded App
 // completion transport (8 queued plus at most 2 worker-held results), Preview
 // Frame Store (8), renderer import (4), and exact selector/transient ownership
@@ -198,6 +216,10 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
     InProcessFfmpegCpuFloat,
+    /// In-process DNG/CinemaDNG Adapter returned developed scene-linear RGBA32F.
+    InProcessCameraRawDng,
+    /// In-process FFmpeg decoder retained compact CPU YUV planes for GPU materialization.
+    InProcessFfmpegCpuYuv,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
     InProcessFfmpegNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
@@ -285,6 +307,65 @@ pub enum PreviewScrubAdaptiveClass {
 pub struct PreviewDecodeAdaptiveHints {
     /// Scrub pressure selected by the app scheduler for interactive requests.
     pub scrub_class: PreviewScrubAdaptiveClass,
+    /// Ordered traversal direction for session-local playback reuse.
+    ///
+    /// This is an execution hint only: source-time selection remains exact and
+    /// independent of traversal direction.
+    pub playback_direction: PreviewPlaybackDirection,
+}
+
+/// Ordered playback traversal supplied to the media Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewPlaybackDirection {
+    /// Increasing source time.
+    #[default]
+    Forward,
+    /// Decreasing source time, enabling bounded decoded-GOP replay.
+    Reverse,
+}
+
+/// Source-field processing frozen into one physical decode identity.
+///
+/// Interlaced pictures are converted to progressive full-height samples at
+/// field cadence before resize, color conversion, Effects, or composition.
+/// `Automatic` is deliberately not equivalent to progressive: the decoder must
+/// inspect frame evidence and either select a proved path or fail closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum PreviewSourceFieldProcessing {
+    /// Stream metadata was inconclusive; decoded-frame evidence owns admission.
+    #[default]
+    Automatic,
+    /// The source is proved progressive and needs no field processing.
+    Progressive,
+    /// FFmpeg BWDIF v1 produces one progressive full-height sample per field.
+    MotionAdaptiveFieldRate {
+        /// Display-time field dominance supplied by probe or author override.
+        dominance: mondrian_core::PictureFieldDominance,
+    },
+}
+
+impl PreviewSourceFieldProcessing {
+    /// Resolve the decode identity from the Core picture-scan contract.
+    pub const fn from_picture_scan(scan: mondrian_core::PictureScan) -> Self {
+        match scan {
+            mondrian_core::PictureScan::Unknown => Self::Automatic,
+            mondrian_core::PictureScan::Progressive => Self::Progressive,
+            mondrian_core::PictureScan::Interlaced { dominance } => {
+                Self::MotionAdaptiveFieldRate { dominance }
+            }
+        }
+    }
+
+    /// Whether this contract explicitly requires the BWDIF Adapter.
+    pub const fn requires_deinterlace(self) -> bool {
+        matches!(self, Self::MotionAdaptiveFieldRate { .. })
+    }
+
+    /// Whether decoded-frame inspection or BWDIF requires the qualified CPU path.
+    pub const fn requires_cpu_decode(self) -> bool {
+        !matches!(self, Self::Progressive)
+    }
 }
 
 /// Caller preference for preview hardware decode / native frame residency.
@@ -312,8 +393,12 @@ impl PreviewHardwareDecodeRequest {
     }
 }
 
-fn preview_hardware_extra_frames(request: PreviewHardwareDecodeRequest) -> i32 {
-    if request.prefers_gpu_residency() {
+fn preview_hardware_extra_frames(
+    request: PreviewHardwareDecodeRequest,
+    backend: HwAccelBackend,
+) -> i32 {
+    // Safe NVDEC output owns independent CUDA allocations, not decoder surfaces.
+    if backend != HwAccelBackend::Cuda && request.prefers_gpu_residency() {
         PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
     } else {
         0
@@ -389,7 +474,7 @@ pub enum PreviewNativeDecodeFallback {
 impl PreviewHardwareDecodeBlocker {
     fn from_probe(probe: &HwAccelProbe) -> Self {
         if probe.hardware_decode_active
-            && probe.zero_copy_active
+            && probe.frame_residency == DecodedFrameResidency::GpuTexture
             && probe.gpu_frame_handle_kind.is_some()
         {
             return Self::None;
@@ -443,6 +528,11 @@ pub struct PreviewDecodeRequest<'a> {
     pub max_width: Option<u32>,
     /// Optional maximum output height.
     pub max_height: Option<u32>,
+    /// Exact decoded-payload representation promised by the request identity.
+    ///
+    /// Session reuse and materialization must preserve this value; a compact
+    /// YUV request cannot silently return an RGBA payload under the same key.
+    pub representation: PreviewDecodeRepresentation,
     /// Access pattern that drives decoder residency and seek policy.
     pub access_mode: PreviewDecodeAccessMode,
     /// Optional complete bounded file-revision evidence resolved by the caller.
@@ -459,13 +549,30 @@ pub struct PreviewDecodeRequest<'a> {
     pub hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     /// Resolved source color and range contract required by CPU YUV conversion.
     pub source_color: PreviewSourceColorContract,
+    /// Exact source scan/deinterlace policy; part of cache and Session identity.
+    pub field_processing: PreviewSourceFieldProcessing,
+    /// Probe-admitted Camera RAW development identity.
+    pub camera_raw: Option<CameraRawDecodeIntent>,
+    /// Admitted single-image source; independent of the consumer's access mode.
+    /// This selects the bounded CPU-still slot while keeping Playback deadlines.
+    pub still_image: bool,
 }
 
-/// App-resolved source color facts required before media can convert YUV to RGB.
+/// Semantic interpretation of decoded RGB samples at the Media/Renderer seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewSourceSampleIdentity {
+    /// Picture samples retain one explicit source color identity.
+    ColorManaged(ColorSpace),
+    /// Numeric RGB(A) channels are technical data and must bypass OCIO.
+    DataTexture,
+}
+
+/// App-resolved source sample and range facts required before Media materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PreviewSourceColorContract {
-    /// Effective input/source color space after interpretation policy.
-    pub color_space: ColorSpace,
+    /// Whether decoded channels are color-managed picture samples or numeric data.
+    pub identity: PreviewSourceSampleIdentity,
     /// Authority-aware encoded quantization-range interpretation.
     pub range: DecodedVideoRangeContract,
     /// Explicit policy/authored fallback used only when a decoded YUV frame
@@ -477,12 +584,48 @@ pub struct PreviewSourceColorContract {
 impl PreviewSourceColorContract {
     /// Build a source color contract from resolved input color and range authority.
     pub const fn new(color_space: ColorSpace, range: DecodedVideoRangeContract) -> Self {
-        Self { color_space, range, yuv_matrix_fallback: None }
+        Self {
+            identity: PreviewSourceSampleIdentity::ColorManaged(color_space),
+            range,
+            yuv_matrix_fallback: None,
+        }
+    }
+
+    /// Build a numeric data-texture contract that carries no color identity.
+    pub const fn data_texture(range: DecodedVideoRangeContract) -> Self {
+        Self {
+            identity: PreviewSourceSampleIdentity::DataTexture,
+            range,
+            yuv_matrix_fallback: None,
+        }
+    }
+
+    /// Return the effective source color identity for color-managed picture samples.
+    pub const fn color_space(self) -> Option<ColorSpace> {
+        match self.identity {
+            PreviewSourceSampleIdentity::ColorManaged(color_space) => Some(color_space),
+            PreviewSourceSampleIdentity::DataTexture => None,
+        }
+    }
+
+    /// Whether decoded channels are an explicit numeric data texture.
+    pub const fn is_data_texture(self) -> bool {
+        matches!(self.identity, PreviewSourceSampleIdentity::DataTexture)
+    }
+
+    /// Whether color-managed samples carry a scene-linear identity.
+    pub fn is_scene_linear(self) -> bool {
+        match self.identity {
+            PreviewSourceSampleIdentity::ColorManaged(color_space) => color_space.is_scene_linear(),
+            PreviewSourceSampleIdentity::DataTexture => false,
+        }
     }
 
     /// Bind an explicit missing-matrix policy into decode and cache identity.
     pub const fn with_yuv_matrix_fallback(mut self, matrix: DecodedVideoMatrix) -> Self {
-        self.yuv_matrix_fallback = Some(matrix);
+        if !self.is_data_texture() {
+            self.yuv_matrix_fallback = Some(matrix);
+        }
         self
     }
 
@@ -524,12 +667,16 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_sample: key.source_sample(),
             max_width,
             max_height,
+            representation: key.representation(),
             access_mode,
             fingerprint: Some(key.source().fingerprint()),
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color: key.source_color(),
+            field_processing: key.field_processing(),
+            camera_raw: key.camera_raw(),
+            still_image: key.source().is_still_image(),
         }
     }
 
@@ -546,13 +693,26 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_sample,
             max_width: None,
             max_height: None,
+            representation: PreviewDecodeRepresentation::NativeCpu,
             access_mode,
             fingerprint: None,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color,
+            field_processing: PreviewSourceFieldProcessing::Automatic,
+            camera_raw: None,
+            still_image: false,
         }
+    }
+
+    /// Bind a resolved source scan/deinterlace contract.
+    pub const fn with_field_processing(
+        mut self,
+        field_processing: PreviewSourceFieldProcessing,
+    ) -> Self {
+        self.field_processing = field_processing;
+        self
     }
 
     /// Select one exact physical video stream instead of FFmpeg's best-stream heuristic.
@@ -573,6 +733,12 @@ impl<'a> PreviewDecodeRequest<'a> {
     /// Complete revisions are execution preconditions, not cache hints.
     pub fn with_fingerprint(mut self, fingerprint: MediaFileFingerprint) -> Self {
         self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Select a probe-admitted Camera RAW development path.
+    pub const fn with_camera_raw(mut self, camera_raw: CameraRawDecodeIntent) -> Self {
+        self.camera_raw = Some(camera_raw);
         self
     }
 
@@ -704,6 +870,21 @@ impl PreviewDecodeAccessPolicy {
         frames_decoded >= self.forward_decode_budget_frames
     }
 
+    /// Preserve the caller's exact source sample as temporal selection
+    /// authority for every access mode.
+    ///
+    /// Scrub may seek from or present a nearby keyframe, but a container index
+    /// can include negative decode-preroll keyframes that are not themselves
+    /// presentable frames. Rewriting the target to such an anchor makes the
+    /// selector scan for an impossible output until its budget is exhausted.
+    fn decode_target_pts(self, requested_pts: i64) -> i64 {
+        match self.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor
+            | PreviewDecodeAccessMode::ScrubCursor
+            | PreviewDecodeAccessMode::RandomAccessStillFrame => requested_pts,
+        }
+    }
+
     fn adapt_for_request(
         mut self,
         seek_index: &PreviewSeekIndex,
@@ -787,7 +968,8 @@ pub enum PreviewTemporalExtentSource {
 /// identity without depending on the complete decoder implementation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDecodeTemporalSelection {
-    /// Requested stream-local PTS after exact source-target lowering.
+    /// Requested decode-selection PTS after exact source-target lowering.
+    /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     pub requested_pts: i64,
     /// First PTS of the selected presentation interval.
     pub selected_pts: i64,
@@ -855,9 +1037,10 @@ impl DecodedTemporalExtent {
         if successor_duration <= 0 {
             return self;
         }
-        if self.duration_pts.is_some_and(|duration| duration <= successor_duration) {
-            return self;
-        }
+        // The next decoded presentation timestamp is the authoritative
+        // exclusive boundary for the predecessor. Container/packet duration
+        // may be shorter (VFR cadence gaps) or longer (overlap); in both cases
+        // a video presentation holds the predecessor until its successor.
         Self {
             start_pts: self.start_pts,
             duration_pts: Some(successor_duration),
@@ -991,7 +1174,6 @@ impl PreviewDecodeCpuBudget {
         let decoder_threads_per_worker = (usable_threads / preview_worker_count)
             .max(1)
             .min(max_decoder_threads_per_worker);
-
         Self {
             available_parallelism,
             reserved_interactive_threads,
@@ -1023,6 +1205,8 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
+            Self::InProcessCameraRawDng => "InProcessCameraRawDng",
+            Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
@@ -1101,13 +1285,14 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the decoder had to seek before producing this frame.
     #[serde(default)]
     pub seek_performed: bool,
-    /// Requested stream timestamp before any interactive approximation.
+    /// Requested decode-selection timestamp before any interactive approximation.
+    /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     #[serde(default)]
     pub requested_pts: Option<i64>,
-    /// Stream timestamp actually selected for presentation.
+    /// Decode-selection timestamp actually selected for presentation.
     #[serde(default)]
     pub selected_pts: Option<i64>,
-    /// Positive stream-tick duration of the selected frame's proven presentation interval.
+    /// Positive selection-tick duration of the selected frame's proven presentation interval.
     #[serde(default)]
     pub selected_duration_pts: Option<i64>,
     /// Evidence source that established the selected frame's presentation interval.
@@ -1194,7 +1379,9 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the current seek used a known keyframe anchor from the session-local index.
     #[serde(default)]
     pub seek_index_used: bool,
-    /// Keyframe PTS used to bound the current seek, when available.
+    /// Actual keyframe seek timestamp in stream ticks, when available.
+    /// Despite the retained field name this is the container's DTS/index
+    /// coordinate (PTS only when DTS is absent), not presentation coverage.
     #[serde(default)]
     pub seek_index_anchor_pts: Option<i64>,
     /// Decoded frames consumed by this request before selecting the output frame.
@@ -1325,7 +1512,6 @@ impl PreviewDecodeDiagnostics {
         let native_handle = self.gpu_frame_handle_kind.filter(|_| {
             self.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
                 && self.hardware_decode_active
-                && self.zero_copy_active
                 && self.decoded_frame_residency == DecodedFrameResidency::GpuTexture
         });
         if let Some(handle_kind) = native_handle {
@@ -1481,6 +1667,8 @@ pub enum PreviewDecodeOutcome {
     Frame(RgbaFrame),
     /// Decode completed with a CPU scene-linear RGBA f32 preview frame.
     FloatFrame(FloatRgbaFrame),
+    /// Decode completed with compact CPU YUV planes for direct GPU materialization.
+    CpuYuvFrame(CpuYuvFrame),
     /// Decode completed with a GPU-resident native frame.
     NativeGpuFrame(PreviewNativeDecodedFrame),
     /// The caller marked this request obsolete before a frame was returned.
@@ -1489,7 +1677,8 @@ pub enum PreviewDecodeOutcome {
 
 pub use decode_session::{
     clear_thread_local_preview_decode_session, PreviewDecodeSessionContext,
-    PreviewDecodeSessionContextBootstrap, PreviewDecodeWorkerResources,
+    PreviewDecodeSessionContextBootstrap, PreviewDecodeSessionFamily,
+    PreviewDecodeSessionResidencyConfig, PreviewDecodeWorkerResources,
 };
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
@@ -1557,13 +1746,16 @@ fn preview_trace(message: String) {
 }
 
 fn preview_decode_threading_config(
+    codec_id: ffmpeg::codec::Id,
     access_mode: PreviewDecodeAccessMode,
     decode_pixels: u64,
 ) -> PreviewDecodeThreadingConfig {
     let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
-        .unwrap_or_else(|| default_threading_kind_for_software_decode(access_mode, decode_pixels));
+        .unwrap_or_else(|| {
+            default_threading_kind_for_software_decode(codec_id, access_mode, decode_pixels)
+        });
     let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
@@ -1573,23 +1765,25 @@ fn preview_decode_threading_config(
     PreviewDecodeThreadingConfig { kind, count }
 }
 
-/// Default software-decode threading kind for one access mode and frame size.
+/// Default software-decode threading kind.
 ///
-/// Slice-level threading parallelizes each UHD frame across its slice rows,
-/// while frame threading pipelines frames but keeps each 4K frame's entropy
-/// decode sequential. Measured on software H.264 High 4:2:2 10-bit
-/// 3840x2160@60000/1001: slice threading sustains the 16.7 ms frame budget
-/// (60/60 exact presentations, decode p95 ~25 ms), frame threading falls
-/// behind (53-55/60, decode p95 clamped at 40 ms). Lower resolutions keep
-/// frame threading so slice-coordination overhead is not imposed where the
-/// frame pipeline already wins; an explicit
-/// `MONDRIAN_PREVIEW_DECODE_THREADING` override always wins.
+/// Frame threading pipelines coded pictures and therefore provides stable
+/// throughput independently of how many slices the bitstream author placed in
+/// each picture. A declared slice-thread count is not evidence that a camera
+/// stream contains enough independent slices to use it. Real H.264 High 4:2:2
+/// 10-bit 3840x2160@60000/1001 playback measured about 9.4 ms steady work per
+/// frame with frame threading versus 15-25 ms and load-sensitive underruns
+/// with slice threading. An explicit `MONDRIAN_PREVIEW_DECODE_THREADING`
+/// override remains available for codec/source qualification.
+/// ProRes instead parallelizes slices within the requested intra picture:
+/// frame threading unnecessarily retains future pictures across seek/EOF and
+/// increases residency without improving measured native decode throughput.
 fn default_threading_kind_for_software_decode(
-    access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
+    codec_id: ffmpeg::codec::Id,
+    _access_mode: PreviewDecodeAccessMode,
+    _decode_pixels: u64,
 ) -> PreviewDecodeThreadingKind {
-    const UHD_PIXELS: u64 = 3_840 * 2_160;
-    if access_mode == PreviewDecodeAccessMode::PlaybackCursor && decode_pixels >= UHD_PIXELS {
+    if codec_id == ffmpeg::codec::Id::PRORES {
         PreviewDecodeThreadingKind::Slice
     } else {
         PreviewDecodeThreadingKind::Frame
@@ -1611,9 +1805,21 @@ fn preview_decode_threading_config_for_codec(
     codec_id: ffmpeg::codec::Id,
     access_mode: PreviewDecodeAccessMode,
     decode_pixels: u64,
+    worker_thread_limit: Option<usize>,
 ) -> PreviewDecodeThreadingConfig {
-    let requested = preview_decode_threading_config(access_mode, decode_pixels);
+    let requested = preview_decode_threading_config(codec_id, access_mode, decode_pixels);
+    let requested = cap_preview_decode_threading_config(requested, worker_thread_limit);
     apply_preview_codec_threading_policy(codec_id, requested)
+}
+
+fn cap_preview_decode_threading_config(
+    requested: PreviewDecodeThreadingConfig,
+    worker_thread_limit: Option<usize>,
+) -> PreviewDecodeThreadingConfig {
+    PreviewDecodeThreadingConfig {
+        kind: requested.kind,
+        count: requested.count.min(worker_thread_limit.unwrap_or(usize::MAX).max(1)),
+    }
 }
 
 fn apply_preview_codec_threading_policy(
@@ -1653,6 +1859,45 @@ pub(super) fn source_sample_to_stream_pts(
     stream_start_pts.checked_add(relative).ok_or_else(|| {
         format!(
             "source target PTS overflow: target={source_sample:?} stream_time_base={}/{} start_pts={stream_start_pts}",
+            stream_tb.numerator(),
+            stream_tb.denominator()
+        )
+    })
+}
+
+pub(super) fn source_sample_to_selection_pts(
+    source_sample: SourceSampleTarget,
+    stream_tb: ffmpeg::Rational,
+    stream_start_pts: i64,
+    selection_scale: i64,
+) -> std::result::Result<i64, String> {
+    if selection_scale <= 0 {
+        return Err(format!(
+            "invalid decoded selection scale {selection_scale} for source target {source_sample:?}"
+        ));
+    }
+    let selection_den = i64::from(stream_tb.denominator())
+        .checked_mul(selection_scale)
+        .ok_or_else(|| {
+            format!(
+                "decoded selection time-base overflow: stream_time_base={}/{} scale={selection_scale}",
+                stream_tb.numerator(),
+                stream_tb.denominator()
+            )
+        })?;
+    let relative = source_sample_to_time_base_ticks(
+        source_sample,
+        i64::from(stream_tb.numerator()),
+        selection_den,
+    )?;
+    let selection_start = stream_start_pts.checked_mul(selection_scale).ok_or_else(|| {
+        format!(
+            "decoded selection start PTS overflow: start_pts={stream_start_pts} scale={selection_scale}"
+        )
+    })?;
+    selection_start.checked_add(relative).ok_or_else(|| {
+        format!(
+            "decoded selection target PTS overflow: target={source_sample:?} stream_time_base={}/{} start_pts={stream_start_pts} scale={selection_scale}",
             stream_tb.numerator(),
             stream_tb.denominator()
         )
@@ -1773,3 +2018,6 @@ fn receive_decoded_video_frame(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "linux")]
+pub use native_frame::FfmpegCudaFrameView;

@@ -19,7 +19,7 @@ library/index.db
   "document_layout": "single-project-json",
   "project_entry": "project.json",
   "library_entry": "library/index.db",
-  "library_schema_version": 5
+  "library_schema_version": 6
 }
 ```
 
@@ -44,14 +44,18 @@ could otherwise select one by name. Project JSON and Library entries are
 written with ZIP64 size fields from the start; readers must therefore support
 ZIP64 even when a particular Project remains below 4 GiB.
 
-The current independent versions are archive v1, document schema v25, and
-library schema v5. Document schema v25 is the sole accepted Alpha author
+The current independent versions are archive v1, document schema v26, and
+library schema v6. Document schema v26 is the sole accepted Alpha author
 contract. It requires closed Project/Sequence/Clip structures, including one
 mandatory tagged `source_time_map`; its constant variant contains
 `source_origin`, exact signed `scale`, and mandatory `sampling_boundary`, and
 derives the terminal source boundary from Clip duration. Positive/negative
 maps require covering/strict-predecessor respectively; a zero-rate hold retains
-the boundary of its captured picture. Future retiming extends this closed
+the boundary of its captured picture. A media Clip may additionally persist a
+bounded `editorial_source` inside `MediaInterpretation`: optional reel name,
+exact SMPTE source reference, and foreign item identity. These are conform and
+round-trip metadata, never Asset or placement identity. Future retiming extends
+this closed
 algebra rather than adding parallel mutable range fields. Older and future
 document versions and unknown author fields fail closed because no
 compatibility migration is promised yet.

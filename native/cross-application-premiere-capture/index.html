@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+<title>Mondrian Color Capture</title>
+<h1>Premiere 色彩采集</h1>
+<p>打开本次冻结的测试项目后，选择采集请求。采集使用 Premiere 自身的导出器；完成后仍需独立校验像素和色彩设置。</p>
+<label>采集请求 JSON <input id="request" type="file" accept=".json"></label>
+<button id="capture" disabled>采集固定帧</button>
+<pre id="result" role="status"></pre>
+<script src="capture.js"></script></html>

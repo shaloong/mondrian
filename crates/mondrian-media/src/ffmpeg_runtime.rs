@@ -25,6 +25,8 @@ const REQUIRED_LINKED_DECODERS: &[(&std::ffi::CStr, &str)] = &[
     (c"pcm_f32le", "PCM F32LE"),
     (c"png", "PNG"),
     (c"exr", "OpenEXR"),
+    (c"dpx", "DPX"),
+    (c"tiff", "TIFF"),
 ];
 
 const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
@@ -33,16 +35,24 @@ const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
     "libaom-av1",
     "prores_ks",
     "dnxhd",
+    "rawvideo",
+    "v210",
+    "r210",
     "gif",
     "aac",
     "pcm_s16le",
     "pcm_s24le",
     "pcm_s32le",
     "pcm_f32le",
+    "png",
+    "exr",
+    "dpx",
+    "tiff",
 ];
 
-const REQUIRED_COMMAND_FILTERS: &[&str] = &["scale", "setparams", "pan", "anullsrc"];
-const REQUIRED_COMMAND_MUXERS: &[&str] = &["mp4", "mov", "matroska", "webm", "mxf", "gif"];
+const REQUIRED_COMMAND_FILTERS: &[&str] = &["scale", "setparams", "bwdif", "pan", "anullsrc"];
+const REQUIRED_COMMAND_MUXERS: &[&str] =
+    &["mp4", "mov", "matroska", "webm", "mxf", "gif", "image2"];
 
 /// Initialize FFmpeg once with Mondrian's product log policy.
 pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
@@ -74,12 +84,20 @@ pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
 /// production proxy, audio-source, export, and post-encode validation paths.
 pub fn verify_ffmpeg_runtime() -> Result<()> {
     let runtime_path = Path::new("<packaged-runtime>");
+    #[cfg(feature = "validation")]
+    match crate::qualified_ffmpeg::verify_installed_process_toolchain() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            return Err(crate::FfmpegCommandError::from(error).into());
+        }
+    }
     ensure_ffmpeg_initialized(runtime_path)?;
     verify_required_decoders(runtime_path)?;
     verify_packaged_command_tools(runtime_path)
 }
 
-fn verify_required_decoders(path: &Path) -> Result<()> {
+pub(crate) fn verify_required_decoders(path: &Path) -> Result<()> {
     let missing = REQUIRED_LINKED_DECODERS
         .iter()
         .copied()
@@ -98,6 +116,53 @@ fn verify_required_decoders(path: &Path) -> Result<()> {
             missing.join(", ")
         ),
     ))
+}
+
+#[cfg(all(feature = "validation", windows))]
+pub(crate) fn verify_qualified_command_capabilities(
+    path: &Path,
+    encoders: &str,
+    filters: &str,
+    muxers: &str,
+    mut encoder_help: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    verify_listing(path, "encoders", encoders, REQUIRED_COMMAND_ENCODERS)?;
+    verify_listing(path, "filters", filters, REQUIRED_COMMAND_FILTERS)?;
+    verify_listing(path, "muxers", muxers, REQUIRED_COMMAND_MUXERS)?;
+    for (encoder, required) in [
+        (
+            "dnxhd",
+            &[
+                "dnxhr_lb",
+                "dnxhr_sq",
+                "dnxhr_hq",
+                "dnxhr_hqx",
+                "dnxhr_444",
+                "yuv422p10le",
+                "gbrp10le",
+            ][..],
+        ),
+        ("libx264", &["avcintra-class", "yuv422p10le"][..]),
+        ("v210", &["yuv422p10le"][..]),
+        ("r210", &["gbrp10le"][..]),
+    ] {
+        let help = encoder_help(encoder)?;
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|token| !help.contains(token))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(runtime_error(
+                path,
+                format!(
+                    "qualified FFmpeg encoder {encoder} is missing professional contract tokens: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_packaged_command_tools(path: &Path) -> Result<()> {
@@ -133,7 +198,48 @@ fn verify_packaged_command_tools(path: &Path) -> Result<()> {
         path,
         Command::new(&ffmpeg).args(["-hide_banner", "-muxers"]),
     )?;
-    verify_listing(path, "muxers", &muxers, REQUIRED_COMMAND_MUXERS)
+    verify_listing(path, "muxers", &muxers, REQUIRED_COMMAND_MUXERS)?;
+    verify_professional_encoder_contracts(path, &ffmpeg)
+}
+
+fn verify_professional_encoder_contracts(path: &Path, ffmpeg: &Path) -> Result<()> {
+    for (encoder, required) in [
+        (
+            "dnxhd",
+            &[
+                "dnxhr_lb",
+                "dnxhr_sq",
+                "dnxhr_hq",
+                "dnxhr_hqx",
+                "dnxhr_444",
+                "yuv422p10le",
+                "gbrp10le",
+            ][..],
+        ),
+        ("libx264", &["avcintra-class", "yuv422p10le"][..]),
+        ("v210", &["yuv422p10le"][..]),
+        ("r210", &["gbrp10le"][..]),
+    ] {
+        let help = command_output(
+            path,
+            Command::new(ffmpeg).args(["-hide_banner", "-h", &format!("encoder={encoder}")]),
+        )?;
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|token| !help.contains(token))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(runtime_error(
+                path,
+                format!(
+                    "packaged FFmpeg encoder {encoder} is missing professional contract tokens: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_packaged_tool(path: &Path, tool: FfmpegTool) -> Result<std::path::PathBuf> {

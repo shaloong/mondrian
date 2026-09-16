@@ -1,12 +1,18 @@
 //! Timeline export orchestration shared by all UI frontends.
 
+mod ancillary;
+pub use ancillary::ImportedAncillaryProgram;
+mod regulatory_pse;
+pub use regulatory_pse::ImportedRegulatoryPseConfiguration;
+
 use super::*;
 use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::delivery::resolve_export_delivery;
-use mondrian_export::prepare_timeline_export_dependencies;
+use mondrian_export::prepare_timeline_export_dependencies_with_audio_selection;
 use mondrian_export::preset::{
-    AudioCodecConfig, BuiltinExportPreset, Container, ExportConfig, ExportMediaDependency,
-    ExportOutputPolicy, ExportPreset, TimelineExportRange, TimelineExportSnapshot,
+    BuiltinExportPreset, Container, ExportAudioProgramSelection, ExportConfig,
+    ExportMediaDependency, ExportOutputPolicy, ExportPreset, ImageSequenceFormat,
+    TimelineExportRange, TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
@@ -23,10 +29,19 @@ pub struct TimelineExportRequest {
     pub sequence_id: Option<SequenceId>,
     /// Timeline range to render.
     pub range: TimelineExportRange,
-    /// Output media file path.
+    /// Output media-file path or image-sequence directory path.
     pub output_path: PathBuf,
     /// Final namespace policy frozen at admission.
     pub output_policy: ExportOutputPolicy,
+    /// Optional broadcaster-specific QC profile frozen with the request.
+    #[serde(default)]
+    pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
+    /// Explicit fixed-version external PSE analyzer and externally approved profile.
+    #[serde(default)]
+    pub regulatory_pse: Option<mondrian_export::RegulatoryPseProviderConfig>,
+    /// Optional canonical ANC program frozen with the exact export selection.
+    #[serde(default)]
+    pub frozen_ancillary: Option<mondrian_broadcast::FrozenAncillaryProgram>,
 }
 
 /// UI-stable draft state for timeline export panels.
@@ -45,6 +60,10 @@ pub struct TimelineExportDraft {
     pub range: TimelineExportRange,
     /// User-entered output file path.
     pub output_path: String,
+    /// Validated immutable ANC selected explicitly for this export draft.
+    pub ancillary: Option<ImportedAncillaryProgram>,
+    /// Explicit external PSE installation and matching regulatory QC profile.
+    pub regulatory_pse: Option<ImportedRegulatoryPseConfiguration>,
 }
 
 impl Default for TimelineExportDraft {
@@ -56,6 +75,8 @@ impl Default for TimelineExportDraft {
             selected_sequence_id: None,
             range: TimelineExportRange::SequenceInOut,
             output_path: String::new(),
+            ancillary: None,
+            regulatory_pse: None,
         }
     }
 }
@@ -81,15 +102,34 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
         .collect()
 }
 
-/// File extension implied by an export preset container.
+/// File or directory suffix implied by an export artifact.
 pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
-    match preset.container {
-        Container::Mp4 => "mp4",
-        Container::Mov => "mov",
-        Container::Mkv => "mkv",
-        Container::Gif => "gif",
-        Container::Mxf => "mxf",
-        Container::Webm => "webm",
+    if let Some(delivery) = preset.professional_delivery() {
+        return match delivery.profile {
+            mondrian_export::ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "imf",
+            mondrian_export::ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "mxf",
+            mondrian_export::ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "dcp",
+        };
+    }
+    if preset.audio_stem_format().is_some() {
+        return "wavstems";
+    }
+    if let Some(format) = preset.image_sequence_format() {
+        return match format {
+            ImageSequenceFormat::Png8 | ImageSequenceFormat::Png16 => "pngseq",
+            ImageSequenceFormat::OpenExrHalf | ImageSequenceFormat::OpenExrFloat => "exrseq",
+            ImageSequenceFormat::Dpx16 => "dpxseq",
+            ImageSequenceFormat::Tiff16 | ImageSequenceFormat::TiffFloat => "tiffseq",
+        };
+    }
+    match preset.media_file().map(|media| media.container) {
+        Some(Container::Mp4) => "mp4",
+        Some(Container::Mov) => "mov",
+        Some(Container::Mkv) => "mkv",
+        Some(Container::Gif) => "gif",
+        Some(Container::Mxf) => "mxf",
+        Some(Container::Webm) => "webm",
+        None => "export",
     }
 }
 
@@ -172,55 +212,12 @@ impl AppState {
 
     /// Build and enqueue a render job from a timeline export request.
     pub fn enqueue_timeline_export(&mut self, request: TimelineExportRequest) -> Result<JobId> {
-        if request.output_path.as_os_str().is_empty() {
-            let reason = "请指定输出路径".to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        }
-
-        let sequences = self.export_sequences_snapshot();
-        let sequence = match request.sequence_id {
-            Some(sequence_id) => {
-                sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
-            }
-            None => self.active_sequence().cloned(),
-        };
-        let Some(sequence) = sequence else {
-            let reason = "当前无序列".to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        };
-
-        if let Err(error) = resolve_export_delivery(
-            &request.preset,
-            &sequence.settings,
-            self.project_color_environment(),
-        ) {
-            let reason = error.to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        }
-
-        let include_audio = !matches!(&request.preset.audio, AudioCodecConfig::Disabled);
-        let timeline = match capture_timeline_export_snapshot(
-            self,
-            sequence,
-            sequences,
-            request.range,
-            include_audio,
-        ) {
-            Ok(timeline) => timeline,
+        let config = match self.build_timeline_export_config(request) {
+            Ok(config) => config,
             Err(reason) => {
                 self.set_status_hint(format!("导出失败：{reason}"), true);
                 return Err(export_error("enqueue_timeline_export", reason));
             }
-        };
-
-        let config = ExportConfig {
-            preset: request.preset,
-            timeline: Box::new(timeline),
-            output_path: request.output_path,
-            output_policy: request.output_policy,
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
@@ -232,6 +229,48 @@ impl AppState {
         self.set_status_hint("已加入导出队列", false);
         tracing::info!(%job_id, "导出任务已加入队列: {output_path}");
         Ok(job_id)
+    }
+
+    pub(crate) fn build_timeline_export_config(
+        &self,
+        request: TimelineExportRequest,
+    ) -> std::result::Result<ExportConfig, String> {
+        if request.output_path.as_os_str().is_empty() {
+            return Err("请指定输出路径".to_owned());
+        }
+        let sequences = self.export_sequences_snapshot();
+        let sequence = match request.sequence_id {
+            Some(sequence_id) => {
+                sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
+            }
+            None => self.active_sequence().cloned(),
+        }
+        .ok_or_else(|| "当前无序列".to_owned())?;
+        resolve_export_delivery(
+            &request.preset,
+            &sequence.settings,
+            self.project_color_environment(),
+        )
+        .map_err(|error| error.to_string())?;
+        let audio_selection = request.preset.audio_program_selection();
+        let timeline = capture_timeline_export_snapshot_with_audio_selection(
+            self,
+            sequence,
+            sequences,
+            request.range,
+            audio_selection,
+        )?;
+        Ok(ExportConfig {
+            preset: request.preset,
+            timeline: Box::new(timeline),
+            output_path: request.output_path,
+            output_policy: request.output_policy,
+            smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
+            broadcast_qc: request.broadcast_qc,
+            regulatory_pse: request.regulatory_pse,
+            frozen_ancillary: request.frozen_ancillary,
+            approved_bmx: None,
+        })
     }
 
     /// Lightweight export snapshots for UI and Headless observers.
@@ -258,6 +297,15 @@ impl AppState {
         self.render_queue.diagnostics()
     }
 
+    /// Capture the phase-owned Export queue in its linearized endurance form.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn export_endurance_snapshot(
+        &self,
+        observed_at_us: u64,
+    ) -> mondrian_export::ExportEnduranceSnapshot {
+        self.render_queue.endurance_snapshot(observed_at_us)
+    }
+
     /// Observe retained job-snapshot changes without consuming shared evidence.
     ///
     /// Queue policy and execution-yield diagnostics are intentionally excluded:
@@ -273,6 +321,7 @@ impl AppState {
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn capture_timeline_export_snapshot(
     state: &AppState,
     sequence: mondrian_timeline::sequence::Sequence,
@@ -280,9 +329,33 @@ pub(crate) fn capture_timeline_export_snapshot(
     range: TimelineExportRange,
     include_audio: bool,
 ) -> std::result::Result<TimelineExportSnapshot, String> {
-    let dependencies =
-        prepare_timeline_export_dependencies(&sequence, &sequences, range, include_audio)
-            .map_err(|error| error.to_string())?;
+    capture_timeline_export_snapshot_with_audio_selection(
+        state,
+        sequence,
+        sequences,
+        range,
+        if include_audio {
+            ExportAudioProgramSelection::Primary
+        } else {
+            ExportAudioProgramSelection::Disabled
+        },
+    )
+}
+
+pub(crate) fn capture_timeline_export_snapshot_with_audio_selection(
+    state: &AppState,
+    sequence: mondrian_timeline::sequence::Sequence,
+    sequences: Vec<mondrian_timeline::sequence::Sequence>,
+    range: TimelineExportRange,
+    audio_selection: ExportAudioProgramSelection,
+) -> std::result::Result<TimelineExportSnapshot, String> {
+    let dependencies = prepare_timeline_export_dependencies_with_audio_selection(
+        &sequence,
+        &sequences,
+        range,
+        audio_selection,
+    )
+    .map_err(|error| error.to_string())?;
 
     let media = resolve_export_media_dependencies(state, dependencies.media_components())?;
     let nested_sequences = sequences
@@ -369,12 +442,15 @@ fn resolve_export_media_dependencies(
             ExportMediaDependency {
                 path,
                 source_fingerprint,
+                source_container: media_probe.container.clone(),
+                source_video_stream: primary_video.cloned(),
                 video_stream_index: primary_video.map(|video| video.index),
                 picture_source_extent: primary_video.and_then(|video| {
                     export_picture_source_extent(&asset.kind, video.duration, video.total_frames)
                 }),
                 source_resolution: primary_video
                     .map(|video| Resolution { width: video.width, height: video.height }),
+                picture: primary_video.map(|video| video.picture),
                 audio_components,
                 interpretation: asset.interpretation,
                 color_diagnostic,
@@ -411,6 +487,39 @@ fn export_error(step_id: &'static str, reason: String) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_export_endurance_projection_matches_queue_owned_counters_and_gauges() {
+        let state = AppState::new();
+        let diagnostics = state.export_queue_diagnostics();
+        let endurance = state.export_endurance_snapshot(17);
+
+        assert_eq!(endurance.schema_version, 2);
+        assert_eq!(endurance.observed_at_us, 17);
+        assert_eq!(endurance.admissions, diagnostics.admissions);
+        assert_eq!(endurance.rejections, diagnostics.rejections);
+        assert_eq!(endurance.completions, diagnostics.completions);
+        assert_eq!(endurance.failures, diagnostics.failures);
+        assert_eq!(endurance.cancellations, diagnostics.cancellations);
+        assert_eq!(endurance.rendered_frames, diagnostics.rendered_frames);
+        assert_eq!(endurance.durable_artifacts, diagnostics.durable_artifacts);
+        assert_eq!(endurance.pending_jobs, diagnostics.pending as u64);
+        assert_eq!(
+            endurance.active_jobs,
+            diagnostics
+                .running
+                .saturating_add(diagnostics.cancelling)
+                .saturating_add(diagnostics.committing) as u64
+        );
+        assert_eq!(
+            endurance.worker_failed,
+            diagnostics.worker_failure.is_some()
+        );
+        assert_eq!(endurance.audio_source_owners_started, 0);
+        assert_eq!(endurance.audio_source_owners_closed, 0);
+        assert_eq!(endurance.audio_source_owner_failures, 0);
+        assert_eq!(endurance.active_audio_source_owners, 0);
+    }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -805,6 +914,9 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
                 output_policy: ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             })
             .expect_err("empty output path should be rejected");
 
@@ -838,7 +950,7 @@ mod tests {
         let mut state = AppState::default();
         state.set_export_draft_output_path("E:/renders/delivery.mp4");
         let mut mov = state.export_draft.preset.clone();
-        mov.container = Container::Mov;
+        mov.media_file_mut().expect("media preset").container = Container::Mov;
 
         state.set_export_draft_preset(mov.clone());
 
@@ -848,10 +960,36 @@ mod tests {
         );
 
         state.set_export_draft_output_path("E:/renders/delivery.custom");
-        mov.container = Container::Mxf;
+        mov.media_file_mut().expect("media preset").container = Container::Mxf;
         state.set_export_draft_preset(mov);
 
         assert_eq!(state.export_draft.output_path, "E:/renders/delivery.custom");
+    }
+
+    #[test]
+    fn image_master_presets_expose_representation_specific_directory_suffixes() {
+        let cases = [
+            (BuiltinExportPreset::Png16Sequence, "pngseq"),
+            (BuiltinExportPreset::OpenExrHalfSequence, "exrseq"),
+            (BuiltinExportPreset::OpenExrFloatSequence, "exrseq"),
+            (BuiltinExportPreset::Dpx16Sequence, "dpxseq"),
+            (BuiltinExportPreset::Tiff16Sequence, "tiffseq"),
+            (BuiltinExportPreset::TiffFloatSequence, "tiffseq"),
+        ];
+        for (builtin, expected) in cases {
+            assert_eq!(export_preset_extension(&builtin.preset()), expected);
+        }
+    }
+
+    #[test]
+    fn professional_delivery_presets_expose_artifact_specific_suffixes() {
+        for (builtin, expected) in [
+            (BuiltinExportPreset::ImfAppProResRdd45, "imf"),
+            (BuiltinExportPreset::As11X9NabaHd, "mxf"),
+            (BuiltinExportPreset::SmpteDcp2kFlat24, "dcp"),
+        ] {
+            assert_eq!(export_preset_extension(&builtin.preset()), expected);
+        }
     }
 
     #[test]
@@ -876,6 +1014,9 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("E:/renders/out.mp4"),
                 output_policy: ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
             })
             .expect_err("stale explicit sequence id should be rejected");
 

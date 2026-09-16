@@ -22,21 +22,26 @@ use mondrian_effects::{
     EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
 use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
+use mondrian_render_cache::{
+    TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
+};
 use mondrian_renderer::{
-    basic_title_raster_request_identity, execute_cpu_working_transform_with_session,
-    prepare_bound_visual_frame_closure, project_basic_title_transform, BasicTitleRasterFrame,
-    BasicTitleRasterRequestIdentity, ColorFrameAlpha, CpuColorFrame,
-    PreparedHeterogeneousEffectRoute, PreparedTimelinePreviewEffectRoutes,
-    PreparedVisualAuthorSnapshotIdentity, PreparedVisualChildCanvasPolicy,
-    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
-    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
-    PreparedVisualNestedSample, PreparedVisualProgramBinding, PreparedVisualProgramCache,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineAdjustmentLayer,
-    TimelineBasicTitlePlan, TimelineCompositeDiagnostics, TimelineCompositeScratch,
-    TimelineCpuCompositePrecision, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
-    TimelineMediaPlan, TimelinePreviewEffectRouteError, TimelineRenderPlanElement,
-    TimelineSolidColorLayer, TimelineTemporalDemandBatch, TimelineTemporalSource,
-    TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
+    basic_title_raster_request_identity,
+    color::{RenderColorStageDiagnostics, WorkingColorModule},
+    execute_prepared_visual_closure, prepare_bound_visual_frame_closure,
+    project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
+    ColorFrameAlpha, CpuColorFrame, PreparedHeterogeneousEffectRoute,
+    PreparedTimelinePreviewEffectRoutes, PreparedVisualAuthorSnapshotIdentity,
+    PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
+    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
+    PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
+    PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorTransformDiagnostics,
+    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeDiagnostics,
+    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineEvaluationRequest,
+    TimelineFrameExecutionRequest, TimelineMediaPlan, TimelinePreviewEffectRouteError,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
+    TimelineTemporalSource, TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -60,11 +65,12 @@ use super::preview_viewer_plan::{
 };
 
 /// Complete media-layer request emitted while materializing a prepared node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewTimelineMediaRequest {
     pub(crate) asset_id: AssetId,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
+    pub(crate) picture_overrides: mondrian_core::PictureInterpretationOverrides,
     /// Exact source-local decode target. The media Adapter alone lowers this
     /// value into an FFmpeg stream PTS.
     pub(crate) source_sample: mondrian_core::SourceSampleTarget,
@@ -78,6 +84,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
 }
 
 /// Exhaustive Adapter response for one media layer needed by Timeline execution.
+#[derive(Clone)]
 pub(crate) enum PreviewTimelineMediaFrame {
     Ready(MediaPreviewFrame),
     Pending { wait: PreviewTimelineMediaWait },
@@ -142,10 +149,13 @@ pub(crate) enum PreviewTimelinePendingDependency {
 /// Resolved root Viewer plan with an always-present semantic output identity
 /// and separate cross-call reuse evidence.
 pub(crate) struct ResolvedPreviewPlan {
+    /// Whole-closure CPU cost, admitted only if the root actually executes on CPU.
+    pub(crate) cpu_materialization_active_bytes: u64,
     pub(crate) elements: Vec<ResolvedPreviewElement>,
     pub(crate) cache_key: PreviewOutputKey,
     pub(crate) cache_reusable: bool,
     pub(crate) color_context: ProgramColorContext,
+    pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
 }
 
 /// Ordered execution fact emitted while materializing nested Sequences.
@@ -458,33 +468,88 @@ where
             };
         }
     };
+    let nested_materialization_bytes =
+        match closure.conservative_cpu_nested_materialization_active_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return PreviewTimelineResolution::Unavailable {
+                    reason: PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        error.to_string(),
+                    ),
+                }
+            }
+        };
     if let Err(error) = scratch.borrow().admit_cpu_active_working_set(
-        materialization_bytes,
+        nested_materialization_bytes,
         TimelineCpuCompositePrecision::Float32,
     ) {
         return PreviewTimelineResolution::Unavailable {
             reason: PreviewUnavailability::blocked(
                 PreviewOutputStage::TimelineEvaluation,
-                format!("Preview visual closure exceeds its CPU working-set grant: {error}"),
+                format!("Preview nested visual closure exceeds its CPU working-set grant: {error}"),
             ),
         };
     }
-    let mut execution = PreviewTimelineExecutionContext {
+    // Admit the complete already-prepared media closure before an early
+    // Pending return can defer another Current input until the next turn.
+    // Retain Ready protection leases across this bounded batch, and give the
+    // executor those exact results instead of querying an input twice.
+    let demands = match collect_prepared_visual_media_demands(&closure) {
+        Ok(demands) => demands,
+        Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+    };
+    let mut admitted = HashMap::new();
+    for demand in demands {
+        admitted.entry(demand.clone()).or_insert_with(|| media_frame(demand));
+    }
+    let mut admitted_media = |demand: PreviewTimelineMediaRequest| {
+        admitted
+            .get(&demand)
+            .cloned()
+            .unwrap_or_else(|| PreviewTimelineMediaFrame::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "prepared media execution requested an input outside its admitted closure",
+                ),
+            })
+    };
+    let mut adapter = PreviewTimelineExecutionAdapter {
         closure: &closure,
-        media_frame,
+        media_frame: &mut admitted_media,
         title_frame,
         scratch,
         facts: Vec::new(),
     };
-    let elements = match resolve_prepared_visual_node(&mut execution, closure.root()) {
-        Ok(Some(elements)) => elements,
-        Ok(None) => return PreviewTimelineResolution::Empty,
-        Err(PreviewTimelineAbort::Pending { dependency }) => {
+    let root = match execute_prepared_visual_closure(&closure, &mut adapter) {
+        Ok(root) => root,
+        Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Pending {
+            dependency,
+        })) => {
             return PreviewTimelineResolution::Pending { dependency };
         }
-        Err(PreviewTimelineAbort::Unavailable(reason)) => {
+        Err(PreparedVisualExecutionError::Adapter(PreviewTimelineAbort::Unavailable(reason))) => {
             return PreviewTimelineResolution::Unavailable { reason };
         }
+        Err(PreparedVisualExecutionError::Structure(error)) => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!("Preview prepared visual execution failed closed: {error}"),
+                ),
+            };
+        }
+    };
+    let PreparedPreviewVisualOutput::Root { elements, resolved_visual_identity } = root else {
+        return PreviewTimelineResolution::Unavailable {
+            reason: PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineEvaluation,
+                "Preview prepared visual execution returned a nested frame for the root",
+            ),
+        };
+    };
+    let Some(elements) = elements else {
+        return PreviewTimelineResolution::Empty;
     };
     let cache_key = viewer_preview_cache_key_for_resolved_plan(
         sequence.id,
@@ -494,9 +559,28 @@ where
         &color_context,
     );
     let cache_reusable = viewer_preview_plan_allows_cross_call_reuse(&elements);
+    let render_cache_identity = (cache_reusable && sequence.settings.preview.cache_enabled)
+        .then_some(resolved_visual_identity)
+        .flatten()
+        .map(|visual| {
+            TimelineRenderCacheIdentity::for_resolved_visual(
+                visual,
+                target_resolution.width,
+                target_resolution.height,
+                TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+                TimelineRenderCacheAlpha::StraightCoverage,
+            )
+        });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
-        plan: ResolvedPreviewPlan { elements, cache_key, cache_reusable, color_context },
-        facts: execution.facts,
+        plan: ResolvedPreviewPlan {
+            cpu_materialization_active_bytes: materialization_bytes,
+            elements,
+            cache_key,
+            cache_reusable,
+            color_context,
+            render_cache_identity,
+        },
+        facts: adapter.facts,
         #[cfg(test)]
         semantic_trace,
     })
@@ -566,7 +650,7 @@ impl<'a> PreviewTimelineGraph<'a> {
     fn evaluate(
         self,
         program: &Arc<mondrian_renderer::PreparedVisualProgram>,
-        frame: i64,
+        position: FramePosition,
         target_resolution: Resolution,
         normalized_preview_resolution_scale: f32,
     ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
@@ -578,7 +662,7 @@ impl<'a> PreviewTimelineGraph<'a> {
                 program.as_ref(),
                 TimelineFrameExecutionRequest::new(
                     TimelineEvaluationRequest::preview(
-                        FramePosition::new(frame, program.evaluation_time_base()),
+                        position,
                         normalized_preview_resolution_scale,
                     ),
                     self.generation,
@@ -594,7 +678,7 @@ impl<'a> PreviewTimelineGraph<'a> {
                     format!(
                         "Sequence {} frame {} execution preparation failed closed: {error}",
                         program.sequence_id(),
-                        frame.max(0)
+                        position.frame.max(0)
                     ),
                 )
             })?;
@@ -622,12 +706,80 @@ impl<'a> PreviewTimelineGraph<'a> {
     }
 }
 
-struct PreviewTimelineExecutionContext<'a, MediaFrame, TitleFrame> {
+enum PreparedPreviewVisualOutput {
+    Root {
+        elements: Option<Vec<ResolvedPreviewElement>>,
+        resolved_visual_identity: Option<mondrian_renderer::ResolvedVisualFrameIdentity>,
+    },
+    Nested(MediaPreviewFrame),
+}
+
+struct PreviewTimelineExecutionAdapter<'a, MediaFrame, TitleFrame> {
     closure: &'a PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
     media_frame: &'a mut MediaFrame,
     title_frame: &'a mut TitleFrame,
     scratch: &'a RefCell<TimelineCompositeScratch>,
     facts: Vec<PreviewTimelineExecutionFact>,
+}
+
+type PreviewNodeInputs<'a> = PreparedVisualExecutionNodeInputs<
+    'a,
+    PreparedTimelinePreviewEffectRoutes,
+    PreparedPreviewVisualOutput,
+>;
+
+impl<MediaFrame, TitleFrame> PreparedVisualExecutionAdapter<PreparedTimelinePreviewEffectRoutes>
+    for PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>
+where
+    MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
+    TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
+{
+    type Output = PreparedPreviewVisualOutput;
+    type Error = PreviewTimelineAbort;
+
+    fn materialize_node(
+        &mut self,
+        inputs: PreviewNodeInputs<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let node = inputs.node();
+        let resolved = resolve_prepared_visual_node(self, &inputs)?;
+        let resolved_visual_identity =
+            super::preview_render_cache_identity::canonical_resolved_node_materialization(
+                resolved.as_deref().unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|materialization| {
+                mondrian_renderer::resolved_visual_frame_identity(node, materialization).ok()
+            });
+        if inputs.is_root() {
+            return Ok(PreparedPreviewVisualOutput::Root {
+                elements: resolved,
+                resolved_visual_identity,
+            });
+        }
+        let inbound = inputs.inbound_binding().ok_or_else(|| {
+            PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "prepared nested visual node {} has no inbound binding",
+                    node.id().index()
+                ),
+            ))
+        })?;
+        let frame = materialize_prepared_nested_node(
+            node.sequence_id(),
+            node.author_resolution(),
+            node.frame(),
+            node.execution_resolution(),
+            inbound.parent_working_color_space(),
+            node.color_context().clone(),
+            resolved.unwrap_or_default(),
+            resolved_visual_identity,
+            self.scratch,
+            &mut self.facts,
+        )?;
+        Ok(PreparedPreviewVisualOutput::Nested(frame))
+    }
 }
 
 fn prepared_visual_node<T>(
@@ -663,6 +815,34 @@ fn prepared_nested_child<T>(
     })
 }
 
+fn prepared_preview_nested_output<'a>(
+    inputs: &'a PreviewNodeInputs<'_>,
+    placement: TimelineClipExecutionRef,
+    sample: PreparedVisualNestedSample,
+) -> Result<&'a MediaPreviewFrame, PreviewTimelineAbort> {
+    match inputs.nested_output(placement, sample) {
+        Some(PreparedPreviewVisualOutput::Nested(frame)) => Ok(frame),
+        Some(PreparedPreviewVisualOutput::Root { .. }) => Err(PreviewTimelineAbort::Unavailable(
+            PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "prepared visual child for Clip {} returned a root plan",
+                    placement.clip_id
+                ),
+            ),
+        )),
+        None => Err(PreviewTimelineAbort::Unavailable(
+            PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "prepared visual child output is unavailable for Clip {} ({sample:?})",
+                    placement.clip_id
+                ),
+            ),
+        )),
+    }
+}
+
 #[derive(Clone)]
 struct PreparedPreviewTemporalLayer {
     frame: MediaPreviewFrame,
@@ -692,14 +872,15 @@ struct ReadyPreviewTemporalBatch {
 }
 
 fn resolve_preview_temporal_batches<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
-    node_id: PreparedVisualFrameNodeId,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
+    inputs: &PreviewNodeInputs<'_>,
     batches: &[TimelineTemporalDemandBatch],
 ) -> Result<HashMap<TimelineClipExecutionRef, PreparedPreviewTemporalLayer>, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
+    let node_id = inputs.node().id();
     let (materialization, target_resolution, color_context) = {
         let node = prepared_visual_node(execution.closure, node_id)?;
         (
@@ -722,14 +903,14 @@ where
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.temporal-source.v1");
         batch.placement().hash(&mut identity);
         batch.graph().semantic_fingerprint().hash(&mut identity);
-        color_context.working_color_space.hash(&mut identity);
+        color_context.working_color_space().hash(&mut identity);
         let mut batch_pending = false;
 
         for demand in batch.source_demands() {
             demand.effect_request.hash(&mut identity);
             match resolve_preview_temporal_source(
                 execution,
-                node_id,
+                inputs,
                 materialization,
                 target_resolution,
                 &color_context,
@@ -836,7 +1017,7 @@ where
                 width: tile.frame_extent().width(),
                 height: tile.frame_extent().height(),
                 data: tile.pixels().to_vec(),
-                color_space: color_context.working_color_space,
+                color_space: color_context.working_color_space(),
             }),
             ready.logical_resolution,
             PreviewSemanticIdentity::from_complete_fingerprint(output.cache_identity()),
@@ -863,8 +1044,8 @@ where
 }
 
 fn resolve_preview_temporal_source<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
-    parent_node_id: PreparedVisualFrameNodeId,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
+    inputs: &PreviewNodeInputs<'_>,
     materialization: PreparedVisualMaterializationContract,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
@@ -880,6 +1061,7 @@ where
             source_sample,
             color_space_override,
             alpha_interpretation,
+            picture_overrides,
             auto_tone_map,
         } => {
             let request = preview_temporal_media_request(
@@ -887,6 +1069,7 @@ where
                 *source_sample,
                 *color_space_override,
                 *alpha_interpretation,
+                *picture_overrides,
                 *auto_tone_map,
                 target_resolution,
                 color_context,
@@ -910,14 +1093,14 @@ where
                 execution,
                 demand,
                 frame,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )
             .map(PreviewTemporalSourceResolution::Ready)
         }
         TimelineTemporalSource::NestedSequence { sequence_id, source_sample, .. } => {
             let child_id = prepared_nested_child(
                 execution.closure,
-                parent_node_id,
+                inputs.node().id(),
                 demand.placement,
                 PreparedVisualNestedSample::Temporal(demand.effect_request),
             )?;
@@ -933,8 +1116,6 @@ where
                     ),
                 ));
             }
-            let child_sequence_id = child_node.sequence_id();
-            let child_author_resolution = child_node.author_resolution();
             let expected = demand.effect_request.frame_extent();
             if child_node.execution_resolution().width != expected.width()
                 || child_node.execution_resolution().height != expected.height()
@@ -970,32 +1151,17 @@ where
                     ),
                 ));
             }
-            let child_frame = child_node.frame();
-            let child_resolution = child_node.execution_resolution();
-            let child_context = child_node.color_context().clone();
-            let child_elements = match resolve_prepared_visual_node(execution, child_id) {
-                Ok(elements) => elements.unwrap_or_default(),
-                Err(PreviewTimelineAbort::Pending { .. }) => {
-                    return Ok(PreviewTemporalSourceResolution::Pending);
-                }
-                Err(error) => return Err(error),
-            };
-            let frame = materialize_prepared_nested_node(
-                child_sequence_id,
-                child_author_resolution,
-                child_frame,
-                child_resolution,
-                color_context.working_color_space,
-                child_context,
-                child_elements,
-                execution.scratch,
-                &mut execution.facts,
-            )?;
+            let frame = prepared_preview_nested_output(
+                inputs,
+                demand.placement,
+                PreparedVisualNestedSample::Temporal(demand.effect_request),
+            )?
+            .clone();
             preview_temporal_source_from_media_frame(
                 execution,
                 demand,
                 frame,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )
             .map(PreviewTemporalSourceResolution::Ready)
         }
@@ -1008,7 +1174,7 @@ where
                     [color.r, color.g, color.b, color.a];
                     extent.width() as usize * extent.height() as usize
                 ],
-                color_space: color_context.working_color_space,
+                color_space: color_context.working_color_space(),
             });
             let mut identity =
                 PreviewSemanticIdentityBuilder::new(b"mondrian.preview.temporal-solid.v1");
@@ -1032,7 +1198,7 @@ where
 }
 
 fn preview_temporal_source_from_media_frame<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
     demand: &TimelineTemporalSourceDemand,
     frame: MediaPreviewFrame,
     working_color_space: mondrian_core::WorkingColorSpace,
@@ -1142,7 +1308,7 @@ fn prepare_preview_frame_closure(
         PreparedVisualFrameClosureRequest {
             root_sequence,
             sequences,
-            root_frame: frame,
+            root_position: FramePosition::new(frame, root_sequence.time_base()),
             root_resolution,
             root_color_context,
             child_canvas_policy,
@@ -1230,6 +1396,7 @@ fn collect_prepared_visual_media_demands(
                     source_sample,
                     color_space_override,
                     alpha_interpretation,
+                    picture_overrides,
                     auto_tone_map,
                 } = &demand.source
                 {
@@ -1238,6 +1405,7 @@ fn collect_prepared_visual_media_demands(
                         *source_sample,
                         *color_space_override,
                         *alpha_interpretation,
+                        *picture_overrides,
                         *auto_tone_map,
                         target_resolution,
                         color_context,
@@ -1263,7 +1431,8 @@ fn collect_prepared_visual_media_demands(
                 TimelineRenderPlanElement::NestedSequence(_) => {}
                 TimelineRenderPlanElement::SolidColor(_)
                 | TimelineRenderPlanElement::BasicTitle(_)
-                | TimelineRenderPlanElement::Adjustment(_) => {}
+                | TimelineRenderPlanElement::Adjustment(_)
+                | TimelineRenderPlanElement::TimelineGrade(_) => {}
                 TimelineRenderPlanElement::CrossDissolve(transition) => {
                     collect_prepared_transition_input_media_demand(
                         &transition.left,
@@ -1299,13 +1468,14 @@ fn standalone_preview_heterogeneous_graph_budget() -> EffectGraphExecutionBudget
 }
 
 fn resolve_prepared_visual_node<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
-    node_id: PreparedVisualFrameNodeId,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
+    inputs: &PreviewNodeInputs<'_>,
 ) -> Result<Option<Vec<ResolvedPreviewElement>>, PreviewTimelineAbort>
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
+    let node_id = inputs.node().id();
     let (materialization, target_resolution, color_context, elements, temporal_batches, routes) = {
         let node = prepared_visual_node(execution.closure, node_id)?;
         (
@@ -1321,7 +1491,7 @@ where
     if elements.is_empty() {
         return Ok(None);
     }
-    let temporal_layers = resolve_preview_temporal_batches(execution, node_id, &temporal_batches)?;
+    let temporal_layers = resolve_preview_temporal_batches(execution, inputs, &temporal_batches)?;
 
     let mut resolved = Vec::with_capacity(elements.len());
     for element in elements {
@@ -1440,7 +1610,7 @@ where
                     materialization,
                     &title,
                     target_resolution,
-                    color_context.working_color_space,
+                    color_context.working_color_space(),
                 )?;
                 resolved.push(ResolvedPreviewElement::Media {
                     frame,
@@ -1466,37 +1636,26 @@ where
                     },
                 ));
             }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                resolved.push(ResolvedPreviewElement::Adjustment(
+                    TimelineAdjustmentLayer {
+                        effect_graph: grade.effect_graph,
+                        opacity: 1.0,
+                        blend_mode: None,
+                        frame_seed: grade.frame_seed,
+                    },
+                ));
+            }
             TimelineRenderPlanElement::NestedSequence(nested) => {
                 let frame = if let Some(temporal) = temporal_layers.get(&nested.placement) {
                     temporal.frame.clone()
                 } else {
-                    let child_id = prepared_nested_child(
-                        execution.closure,
-                        node_id,
+                    prepared_preview_nested_output(
+                        inputs,
                         nested.placement,
                         PreparedVisualNestedSample::Current,
-                    )?;
-                    let child_node = prepared_visual_node(execution.closure, child_id)?;
-                    let nested_sequence_id = child_node.sequence_id();
-                    let nested_author_resolution = child_node.author_resolution();
-                    let parent_working_color_space = color_context.working_color_space;
-                    let child_frame = child_node.frame();
-                    let child_resolution = child_node.execution_resolution();
-                    let child_context = child_node.color_context().clone();
-                    let nested_elements =
-                        resolve_prepared_visual_node(execution, child_id)?.unwrap_or_default();
-                    let scratch = execution.scratch;
-                    materialize_prepared_nested_node(
-                        nested_sequence_id,
-                        nested_author_resolution,
-                        child_frame,
-                        child_resolution,
-                        parent_working_color_space,
-                        child_context,
-                        nested_elements,
-                        scratch,
-                        &mut execution.facts,
                     )?
+                    .clone()
                 };
                 let transform = project_preview_media_transform(
                     nested.transform,
@@ -1530,7 +1689,7 @@ where
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 let left = resolve_transition_input(
                     execution,
-                    node_id,
+                    inputs,
                     materialization,
                     transition.left,
                     target_resolution,
@@ -1539,7 +1698,7 @@ where
                 )?;
                 let right = resolve_transition_input(
                     execution,
-                    node_id,
+                    inputs,
                     materialization,
                     transition.right,
                     target_resolution,
@@ -1596,8 +1755,8 @@ fn transition_input_placement(
 }
 
 fn resolve_transition_input<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
-    parent_node_id: PreparedVisualFrameNodeId,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
+    inputs: &PreviewNodeInputs<'_>,
     parent_materialization: PreparedVisualMaterializationContract,
     input: TimelineTransitionInputPlan,
     target_resolution: Resolution,
@@ -1609,7 +1768,7 @@ where
     TitleFrame: FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
 {
     let parent_author_resolution = parent_materialization.author_resolution();
-    let routes = prepared_visual_node(execution.closure, parent_node_id)?
+    let routes = prepared_visual_node(execution.closure, inputs.node().id())?
         .evaluation()
         .payload()
         .clone();
@@ -1757,7 +1916,7 @@ where
                 parent_materialization,
                 &title,
                 target_resolution,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )?;
             ResolvedPreviewTransitionInput::Media {
                 frame,
@@ -1774,32 +1933,12 @@ where
             }
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
-            let child_id = prepared_nested_child(
-                execution.closure,
-                parent_node_id,
+            let frame = prepared_preview_nested_output(
+                inputs,
                 nested.placement,
                 PreparedVisualNestedSample::Current,
-            )?;
-            let child_node = prepared_visual_node(execution.closure, child_id)?;
-            let child_sequence_id = child_node.sequence_id();
-            let child_author_resolution = child_node.author_resolution();
-            let child_frame = child_node.frame();
-            let child_resolution = child_node.execution_resolution();
-            let child_context = child_node.color_context().clone();
-            let child_elements =
-                resolve_prepared_visual_node(execution, child_id)?.unwrap_or_default();
-            let scratch = execution.scratch;
-            let frame = materialize_prepared_nested_node(
-                child_sequence_id,
-                child_author_resolution,
-                child_frame,
-                child_resolution,
-                color_context.working_color_space,
-                child_context,
-                child_elements,
-                scratch,
-                &mut execution.facts,
-            )?;
+            )?
+            .clone();
             let transform = project_preview_media_transform(
                 nested.transform,
                 &frame,
@@ -1833,7 +1972,7 @@ where
 }
 
 fn resolve_basic_title_frame<MediaFrame, TitleFrame>(
-    execution: &mut PreviewTimelineExecutionContext<'_, MediaFrame, TitleFrame>,
+    execution: &mut PreviewTimelineExecutionAdapter<'_, MediaFrame, TitleFrame>,
     materialization: PreparedVisualMaterializationContract,
     title: &TimelineBasicTitlePlan,
     target_resolution: Resolution,
@@ -1878,6 +2017,7 @@ where
         ))
     })?;
     let frame_identity = basic_title_preview_frame_identity(&raster);
+    let render_cache_source_fingerprint = raster.identity().digest();
     Ok((
         MediaPreviewFrame::from_working(
             raster.into_frame(),
@@ -1885,7 +2025,8 @@ where
             frame_identity,
             mondrian_playback::FramePresentationQuality::Ready,
             super::preview_execution::PreviewDecodeExecutionSummary::default(),
-        ),
+        )
+        .with_render_cache_source_fingerprint(Some(render_cache_source_fingerprint)),
         transform,
     ))
 }
@@ -1898,6 +2039,7 @@ fn materialize_prepared_nested_node(
     parent_working_color_space: mondrian_core::WorkingColorSpace,
     color_context: ProgramColorContext,
     resolved: Vec<ResolvedPreviewElement>,
+    resolved_visual_identity: Option<mondrian_renderer::ResolvedVisualFrameIdentity>,
     scratch: &RefCell<TimelineCompositeScratch>,
     facts: &mut Vec<PreviewTimelineExecutionFact>,
 ) -> Result<MediaPreviewFrame, PreviewTimelineAbort> {
@@ -1945,10 +2087,10 @@ fn materialize_prepared_nested_node(
 
     let mut working_frame = output.frame;
     if working_frame.descriptor().color_space.working() != Some(parent_working_color_space) {
-        let converted = execute_cpu_working_transform_with_session(
+        let converted = WorkingColorModule::execute_cpu(
             &working_frame,
             parent_working_color_space,
-            color_context.engine.clone(),
+            color_context.engine().clone(),
             scratch.color_execution_mut(),
         )
         .map_err(|error| {
@@ -1961,12 +2103,12 @@ fn materialize_prepared_nested_node(
             ))
         })?;
         facts.push(PreviewTimelineExecutionFact::ColorTransform(
-            converted.result.diagnostics,
+            converted.transform_diagnostics(),
         ));
         facts.push(PreviewTimelineExecutionFact::ColorStage(
-            converted.stage_diagnostics,
+            converted.stage_diagnostics(),
         ));
-        working_frame = converted.result.frame;
+        working_frame = converted.into_frame();
     }
     let frame_identity = nested_preview_frame_identity(
         sequence_id,
@@ -1983,6 +2125,9 @@ fn materialize_prepared_nested_node(
         presentation_quality,
         decode_execution,
     )
+    .with_render_cache_source_fingerprint(
+        resolved_visual_identity.map(|identity| identity.digest()),
+    )
     .with_cross_call_reuse(cross_call_reusable))
 }
 
@@ -1997,6 +2142,10 @@ fn preview_timeline_media_request(
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
+        picture_overrides: mondrian_core::PictureInterpretationOverrides {
+            pixel_aspect_ratio: media.pixel_aspect_ratio_override,
+            field_order: media.field_order_override,
+        },
         source_sample: media.source_sample,
         target_resolution,
         input_color: color_context.media_input(media.auto_tone_map),
@@ -2030,6 +2179,7 @@ fn preview_temporal_media_request(
     source_sample: mondrian_core::SourceSampleTarget,
     color_space_override: Option<ColorSpace>,
     alpha_interpretation: AlphaInterpretation,
+    picture_overrides: mondrian_core::PictureInterpretationOverrides,
     auto_tone_map: bool,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
@@ -2038,6 +2188,7 @@ fn preview_temporal_media_request(
         asset_id,
         color_space_override,
         alpha_interpretation,
+        picture_overrides,
         source_sample,
         target_resolution,
         input_color: color_context.media_input(auto_tone_map),

@@ -11,7 +11,8 @@ use mondrian_core::authoring::{
 use mondrian_core::{
     AssetId, AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintVersion,
     AuthoringList, AuthoringSet, AuthoringSnapshot, MondrianError, ProjectColorEnvironment,
-    ProjectId, ProjectMeta, ProjectSettings, Result, SequenceId, AUTHORING_FOOTPRINT_VERSION,
+    ProjectGallery, ProjectId, ProjectMeta, ProjectSettings, Result, SequenceId,
+    AUTHORING_FOOTPRINT_VERSION,
 };
 use mondrian_project::ProjectDocument;
 use mondrian_timeline::{Sequence, SequenceCollection, SequenceSettings};
@@ -231,6 +232,7 @@ struct ProjectRestorePoint {
     color_environment: ProjectColorEnvironment,
     new_sequence_defaults: SequenceSettings,
     proxy_mode_assets: AuthoringSet<AssetId>,
+    gallery: ProjectGallery,
     sequence_order: Vec<SequenceId>,
     default_sequence_id: SequenceId,
     active_sequence_id: SequenceId,
@@ -249,6 +251,7 @@ impl ProjectRestorePoint {
             new_sequence_defaults,
             sequences,
             proxy_mode_assets,
+            gallery,
         } = document;
         let SequenceCollection {
             sequences: sequence_values,
@@ -283,6 +286,7 @@ impl ProjectRestorePoint {
             color_environment: color_environment.clone(),
             new_sequence_defaults: new_sequence_defaults.clone(),
             proxy_mode_assets: proxy_mode_assets.clone(),
+            gallery: gallery.clone(),
             sequence_order: sequence_values.iter().map(|sequence| sequence.id).collect(),
             default_sequence_id: *default_sequence_id,
             active_sequence_id: *active_sequence_id,
@@ -352,6 +356,7 @@ impl ProjectRestorePoint {
             || self.color_environment != current.color_environment
             || self.new_sequence_defaults != current.new_sequence_defaults
             || self.proxy_mode_assets != current.proxy_mode_assets
+            || self.gallery != current.gallery
             || !current_order_matches
             || self.default_sequence_id != current.sequences.default_sequence_id
         {
@@ -397,6 +402,7 @@ impl ProjectRestorePoint {
             new_sequence_defaults: _,
             sequences: current_collection,
             proxy_mode_assets: _,
+            gallery: _,
         } = current;
         let SequenceCollection {
             sequences: current_sequences,
@@ -499,6 +505,7 @@ impl ProjectRestorePoint {
                 active_sequence_id: restored_active_sequence_id,
             },
             proxy_mode_assets: self.proxy_mode_assets.clone(),
+            gallery: self.gallery.clone(),
         })
     }
 }
@@ -516,6 +523,7 @@ impl AuthoringFootprint for ProjectRestorePoint {
             color_environment,
             new_sequence_defaults,
             proxy_mode_assets,
+            gallery,
             sequence_order,
             default_sequence_id: _,
             active_sequence_id: _,
@@ -526,6 +534,7 @@ impl AuthoringFootprint for ProjectRestorePoint {
         collector.collect(color_environment)?;
         collector.collect(new_sequence_defaults)?;
         collector.collect(proxy_mode_assets)?;
+        collector.collect(gallery)?;
         collector.collect(sequence_order)?;
         collector.collect(affected_sequences)
     }

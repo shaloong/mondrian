@@ -496,8 +496,10 @@ impl AppState {
     ///
     /// Persistence ownership must be retired before this method is called.
     pub(super) fn finalize_project_close_state(&mut self) {
+        let _ = self.reference_output.retire();
         self.audio_idle_warmup.set_dispatch_enabled(false);
         self.audio_idle_warmup.bind_authoring(None);
+        self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(None);
         self.media_import.bind_project(None);
         self.media_import_batches.clear();
@@ -505,6 +507,7 @@ impl AppState {
         #[cfg(test)]
         mondrian_media::clear_thread_local_preview_decode_session();
         self.authoring = None;
+        self.gallery_comparison = None;
         self.audio_monitoring.reset();
         self.collect_released_project_libraries();
         self.project_runtime_lease = None;
@@ -1735,14 +1738,30 @@ impl AppState {
             });
         }
 
-        // Resolve media dimensions for auto-fit before borrowing seq.
-        let media_dim = if matches!(dragging.kind, AssetKind::Video | AssetKind::StillImage) {
-            self.asset_library()
+        // Resolve source display geometry for auto-fit before borrowing seq.
+        let media_picture = if matches!(dragging.kind, AssetKind::Video | AssetKind::StillImage) {
+            let video = self
+                .asset_library()
                 .and_then(|lib| lib.get_asset(dragging.asset_id).ok().flatten())
                 .and_then(|asset| {
                     asset.media_probe().and_then(|probe| probe.primary_video()).cloned()
                 })
-                .map(|v| (v.width, v.height))
+                .ok_or_else(|| mondrian_core::MondrianError::UnsupportedFormat {
+                    format: "素材没有与当前修订一致的视频图片合同".to_owned(),
+                })?;
+            Some(
+                mondrian_core::ResolvedPictureGeometry::resolve(
+                    mondrian_core::Resolution { width: video.width, height: video.height },
+                    video.picture,
+                    None,
+                    None,
+                )
+                .map_err(|error| {
+                    mondrian_core::MondrianError::UnsupportedFormat {
+                        format: format!("素材图片解释不受支持：{error}"),
+                    }
+                })?,
+            )
         } else {
             None
         };
@@ -1778,18 +1797,8 @@ impl AppState {
                     Clip::new(dragging.asset_id, start_time, duration)?
                 };
                 clip.label = Some(dragging.name.clone());
-                // Auto-fit: set anchor to media center, position to seq center, scale to fit.
-                if let Some((mw, mh)) = media_dim
-                    && mw > 0
-                    && mh > 0
-                {
-                    let seq_w = seq.settings.resolution.width.max(1) as f32;
-                    let seq_h = seq.settings.resolution.height.max(1) as f32;
-                    let fit_scale = (seq_w / mw as f32).min(seq_h / mh as f32);
-                    clip.transform
-                        .set_anchor_point(glam::Vec2::new(mw as f32 * 0.5, mh as f32 * 0.5));
-                    clip.transform.set_scale(glam::Vec2::new(fit_scale, fit_scale));
-                    clip.transform.set_position(glam::Vec2::new(seq_w * 0.5, seq_h * 0.5));
+                if let Some(picture) = media_picture {
+                    super::timeline_insert::auto_fit_picture(seq, &mut clip, picture)?;
                 }
                 let clip_id = clip.id;
 

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mondrian_core::ExecutionTerminalDisposition;
@@ -19,10 +21,14 @@ use crate::queue::{
 enum GateOutcome {
     Complete,
     Fail(String),
+    AudioOwnerClean,
+    AudioOwnerDirty,
+    AudioOwnerUnclosed,
     PublicationBeforeNamespace,
     PublicationDurabilityUnconfirmed,
     PublicationNamespaceIndeterminate,
     Panic,
+    OpaquePanic(Arc<AtomicBool>),
 }
 
 struct GateExecutor {
@@ -34,6 +40,87 @@ struct GateExecutor {
     finished_changed: Condvar,
     permits: Mutex<usize>,
     permit_changed: Condvar,
+}
+
+struct DropProbeExecutor {
+    dropped: Arc<AtomicBool>,
+}
+
+struct BlockingDropExecutor {
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+struct PanicDropProbe {
+    dropped: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct IoErrorDropProbe {
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for PanicDropProbe {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+impl std::fmt::Display for IoErrorDropProbe {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("synthetic foreign spawn error")
+    }
+}
+
+impl std::error::Error for IoErrorDropProbe {}
+
+impl Drop for IoErrorDropProbe {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for DropProbeExecutor {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+impl ExportExecutor for DropProbeExecutor {
+    fn execute(
+        &self,
+        _job: &RenderJob,
+        _cancellation: &ExecutionCancellationToken,
+        _execution_gate: &ExportExecutionGate,
+        _report: &mut dyn FnMut(ExportProgress),
+        _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        _report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
+    ) -> JobExecutionResult {
+        panic!("spawn-failure executor must never execute")
+    }
+}
+
+impl Drop for BlockingDropExecutor {
+    fn drop(&mut self) {
+        self.entered.store(true, Ordering::Release);
+        while !self.release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+}
+
+impl ExportExecutor for BlockingDropExecutor {
+    fn execute(
+        &self,
+        _job: &RenderJob,
+        _cancellation: &ExecutionCancellationToken,
+        _execution_gate: &ExportExecutionGate,
+        _report: &mut dyn FnMut(ExportProgress),
+        _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        _report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
+    ) -> JobExecutionResult {
+        panic!("destructor-order executor must never execute")
+    }
 }
 
 impl GateExecutor {
@@ -113,6 +200,7 @@ impl ExportExecutor for GateExecutor {
         execution_gate: &ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
     ) -> JobExecutionResult {
         let _finished = GateExecutionFinished(self);
         report(ExportProgress::preparing(0.1));
@@ -151,6 +239,24 @@ impl ExportExecutor for GateExecutor {
                 }
             }
             GateOutcome::Fail(detail) => JobExecutionResult::Failed(detail),
+            GateOutcome::AudioOwnerClean => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceClosed {
+                    all_resources_released: true,
+                });
+                JobExecutionResult::Failed("synthetic owner lifecycle completed".to_owned())
+            }
+            GateOutcome::AudioOwnerDirty => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceClosed {
+                    all_resources_released: false,
+                });
+                JobExecutionResult::Failed("synthetic dirty owner lifecycle".to_owned())
+            }
+            GateOutcome::AudioOwnerUnclosed => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                JobExecutionResult::Failed("synthetic unclosed owner lifecycle".to_owned())
+            }
             GateOutcome::PublicationBeforeNamespace => {
                 JobExecutionResult::PublicationFailed(ExportPublicationFailure::BeforeNamespace {
                     output_path: job.config.output_path.clone(),
@@ -178,6 +284,7 @@ impl ExportExecutor for GateExecutor {
                 )
             }
             GateOutcome::Panic => panic!("synthetic export executor panic"),
+            GateOutcome::OpaquePanic(dropped) => std::panic::panic_any(PanicDropProbe { dropped }),
         }
     }
 }
@@ -195,6 +302,11 @@ fn dummy_config(output_path: impl Into<PathBuf>) -> ExportConfig {
         }),
         output_path: output_path.into(),
         output_policy: ExportOutputPolicy::CreateNew,
+        smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
+        broadcast_qc: None,
+        regulatory_pse: None,
+        frozen_ancillary: None,
+        approved_bmx: None,
     }
 }
 
@@ -213,6 +325,34 @@ fn wait_diagnostics(
             "export diagnostics condition timed out"
         );
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_worker_completion(inner: &RenderQueueInner) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if inner.state.lock().worker_completed_at.is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "export worker completion stamp timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn wait_worker_started(inner: &RenderQueueInner) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if inner.state.lock().worker_started {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "export worker start observation timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -509,6 +649,60 @@ fn queued_and_running_cancellation_preserve_execution_boundary_evidence() {
 }
 
 #[test]
+fn cancelled_attempts_release_routes_without_reusing_retry_identity_or_cancellation() {
+    for reuse_target in [true, false] {
+        let root = tempfile::tempdir().expect("isolated output parent");
+        let original_path = root.path().join("deliverable.mp4");
+        let retry_path = if reuse_target {
+            original_path.clone()
+        } else {
+            root.path().join("retry.mp4")
+        };
+        let backend = GateExecutor::new([GateOutcome::Complete]);
+        let queue = RenderQueue::new_with_executor(backend.clone());
+        let original = queue
+            .enqueue(RenderJob::new(dummy_config(&original_path)))
+            .expect("admit original");
+        backend.wait_started(1);
+        let original_generation = queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == original)
+            .expect("original snapshot")
+            .generation;
+        assert!(matches!(
+            queue.enqueue(RenderJob::new(dummy_config(&original_path))),
+            Err(ExportAdmissionError::OutputPathBusy { .. }),
+        ));
+        assert_eq!(queue.cancel(original), ExportCancelOutcome::Requested);
+        wait_diagnostics(&queue, |diagnostics| diagnostics.cancellations == 1);
+        let retry = queue
+            .enqueue(RenderJob::new(dummy_config(&retry_path)))
+            .expect("admit retry after exact terminal release");
+        backend.wait_started(2);
+        assert_ne!(retry, original);
+        let retry_snapshot = queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == retry)
+            .expect("retry snapshot");
+        assert!(retry_snapshot.generation > original_generation);
+        assert_eq!(retry_snapshot.output_path, retry_path);
+        assert_eq!(queue.cancel(original), ExportCancelOutcome::AlreadyTerminal);
+        backend.release(1);
+        let terminal = wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+        assert_eq!(terminal.cancellations, 1);
+        assert!(terminal
+            .jobs
+            .iter()
+            .any(|job| job.id == retry && matches!(job.status, JobStatus::Completed)));
+        assert!(queue
+            .shutdown_until(Instant::now() + Duration::from_secs(2))
+            .all_resources_released());
+    }
+}
+
+#[test]
 fn completed_publication_wins_over_a_late_cancellation_request() {
     let backend = GateExecutor::committed([GateOutcome::Complete]);
     let queue = RenderQueue::new_with_executor(backend.clone());
@@ -644,6 +838,35 @@ fn progress_rejects_phase_and_unit_regression() {
     }
     .normalized(inconsistent_total);
     assert_eq!(wrong_unit.detail, ExportProgressDetail::None);
+
+    assert!(ExportProgressPhase::Encoding.rank() < ExportProgressPhase::Packaging.rank());
+    assert!(ExportProgressPhase::Packaging.rank() < ExportProgressPhase::Validating.rank());
+    assert_eq!(
+        serde_json::to_string(&ExportProgressPhase::Packaging).expect("serialize packaging phase"),
+        "\"packaging\""
+    );
+    assert_eq!(
+        serde_json::from_str::<ExportProgressPhase>("\"packaging\"")
+            .expect("deserialize packaging phase"),
+        ExportProgressPhase::Packaging
+    );
+}
+
+#[test]
+fn render_encode_package_and_validation_are_cancellable_before_publication() {
+    let gate = ExportExecutionGate::always_open_for_test();
+    let cancellation = ExecutionCancellationToken::new();
+    cancellation.cancel();
+
+    for phase in [
+        ExportProgressPhase::Rendering,
+        ExportProgressPhase::Encoding,
+        ExportProgressPhase::Packaging,
+        ExportProgressPhase::Validating,
+    ] {
+        assert!(!gate.wait_at_boundary(phase, &cancellation), "{phase:?}");
+    }
+    assert!(gate.wait_at_boundary(ExportProgressPhase::Publishing, &cancellation));
 }
 
 #[test]
@@ -686,6 +909,43 @@ fn executor_panic_is_isolated_and_next_job_runs() {
         diagnostics.jobs.iter().find(|job| job.id == completed).map(|job| &job.status),
         Some(JobStatus::Completed)
     ));
+    let shutdown = queue.shutdown_until(Instant::now() + Duration::from_secs(2));
+    assert!(shutdown.worker_terminated);
+    assert!(!shutdown.worker_panicked);
+    assert!(!shutdown.worker_timed_out);
+    assert!(!shutdown.worker_detached);
+    assert!(shutdown.all_resources_released());
+}
+
+#[test]
+fn opaque_executor_panic_payload_is_abandoned_without_stopping_worker() {
+    let payload_dropped = Arc::new(AtomicBool::new(false));
+    let backend = GateExecutor::new([
+        GateOutcome::OpaquePanic(Arc::clone(&payload_dropped)),
+        GateOutcome::Complete,
+    ]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue.set_dispatch_enabled(false);
+    queue
+        .enqueue(RenderJob::new(dummy_config("opaque-panic.mp4")))
+        .expect("admit opaque-panic export");
+    queue
+        .enqueue(RenderJob::new(dummy_config("after-opaque-panic.mp4")))
+        .expect("admit following export");
+    backend.release(2);
+    queue.set_dispatch_enabled(true);
+
+    let diagnostics = wait_diagnostics(&queue, |diagnostics| {
+        diagnostics.failures == 1 && diagnostics.completions == 1
+    });
+    assert!(diagnostics.worker_failure.is_some());
+    let shutdown = queue.shutdown_until(Instant::now() + Duration::from_secs(2));
+
+    assert!(!payload_dropped.load(Ordering::Acquire));
+    assert!(shutdown.worker_terminated);
+    assert!(!shutdown.worker_panicked);
+    assert!(shutdown.worker_owner_abandoned);
+    assert!(!shutdown.all_resources_released());
 }
 
 #[test]
@@ -780,4 +1040,578 @@ fn terminal_history_trimming_never_removes_active_work() {
         state.jobs.front().expect("oldest retained").snapshot.generation,
         2
     );
+}
+
+#[test]
+fn endurance_snapshot_retains_cumulative_frames_and_durable_artifacts() {
+    let backend = GateExecutor::new([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("endurance-snapshot.mp4")))
+        .expect("enqueue");
+    backend.wait_started(1);
+    let generation = queue
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .expect("job")
+        .generation;
+    update_job_progress(
+        &queue.inner,
+        job_id,
+        generation,
+        ExportProgress::rendering(0.5, 12, 24),
+    );
+    let running = queue.endurance_snapshot(100);
+    assert!(running.worker_running);
+    assert!(!running.worker_terminated);
+    assert_eq!(running.rendered_frames, 12);
+    assert_eq!(running.active_jobs, 1);
+
+    backend.release(1);
+    wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+    let completed = queue.endurance_snapshot(200);
+    assert_eq!(completed.completions, 1);
+    assert_eq!(completed.durable_artifacts, 1);
+    assert_eq!(completed.rendered_frames, 12);
+    assert_eq!(completed.pending_jobs, 0);
+    assert_eq!(completed.active_jobs, 0);
+    assert!(completed.activity_events > running.activity_events);
+
+    let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+    assert!(shutdown.worker_terminated);
+    assert_eq!(shutdown.pending_jobs, 0);
+    assert_eq!(shutdown.active_jobs, 0);
+}
+
+#[test]
+fn audio_source_owner_lifecycle_is_latched_into_endurance_and_shutdown_evidence() {
+    fn execute_owner_outcome(
+        outcome: GateOutcome,
+        output_name: &str,
+    ) -> (ExportEnduranceSnapshot, ExportQueueShutdownEvidence) {
+        let backend = GateExecutor::new([outcome]);
+        let queue = RenderQueue::new_with_executor(backend.clone());
+        queue
+            .enqueue(RenderJob::new(dummy_config(output_name)))
+            .expect("enqueue owner lifecycle export");
+        backend.wait_started(1);
+        backend.release(1);
+        backend.wait_finished(1);
+        wait_diagnostics(&queue, |diagnostics| diagnostics.failures == 1);
+        let snapshot = queue.endurance_snapshot(42);
+        let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+        (snapshot, shutdown)
+    }
+
+    let (clean, clean_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerClean, "owner-clean.mp4");
+    assert_eq!(clean.schema_version, 2);
+    assert_eq!(clean.audio_source_owners_started, 1);
+    assert_eq!(clean.audio_source_owners_closed, 1);
+    assert_eq!(clean.audio_source_owner_failures, 0);
+    assert_eq!(clean.active_audio_source_owners, 0);
+    assert_eq!(clean_shutdown.schema_version, 4);
+    assert!(clean_shutdown.all_resources_released());
+
+    let (dirty, dirty_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerDirty, "owner-dirty.mp4");
+    assert_eq!(dirty.audio_source_owners_started, 1);
+    assert_eq!(dirty.audio_source_owners_closed, 1);
+    assert_eq!(dirty.audio_source_owner_failures, 1);
+    assert_eq!(dirty.active_audio_source_owners, 0);
+    assert!(!dirty_shutdown.all_resources_released());
+
+    let (unclosed, unclosed_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerUnclosed, "owner-unclosed.mp4");
+    assert_eq!(unclosed.audio_source_owners_started, 1);
+    assert_eq!(unclosed.audio_source_owners_closed, 0);
+    assert_eq!(unclosed.audio_source_owner_failures, 0);
+    assert_eq!(unclosed.active_audio_source_owners, 1);
+    assert!(!unclosed_shutdown.all_resources_released());
+}
+
+#[test]
+fn endurance_snapshot_linearizes_pending_committing_terminal_and_shutdown_states() {
+    let backend = GateExecutor::committed([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue.set_dispatch_enabled(false);
+    let initial = queue.endurance_snapshot(0);
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("endurance-linearized.mp4")))
+        .expect("enqueue pending export");
+    let pending = queue.endurance_snapshot(1);
+    assert_eq!(pending.admissions, 1);
+    assert_eq!(pending.pending_jobs, 1);
+    assert_eq!(pending.active_jobs, 0);
+    assert!(pending.activity_events > initial.activity_events);
+
+    queue.set_dispatch_enabled(true);
+    backend.wait_started(1);
+    let committing = queue.endurance_snapshot(2);
+    assert_eq!(committing.pending_jobs, 0);
+    assert_eq!(committing.active_jobs, 1);
+    assert_eq!(committing.completions, 0);
+    assert!(committing.activity_events > pending.activity_events);
+    assert_eq!(queue.cancel(job_id), ExportCancelOutcome::TooLateCommitting);
+    let after_late_cancel = queue.endurance_snapshot(3);
+    assert_eq!(after_late_cancel.active_jobs, 1);
+    assert_eq!(after_late_cancel.cancellations, 0);
+    assert_eq!(
+        after_late_cancel.activity_events,
+        committing.activity_events
+    );
+
+    backend.release(1);
+    wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+    let terminal = queue.endurance_snapshot(4);
+    assert_eq!(terminal.pending_jobs, 0);
+    assert_eq!(terminal.active_jobs, 0);
+    assert_eq!(terminal.completions, 1);
+    assert_eq!(terminal.durable_artifacts, 1);
+    assert!(terminal.activity_events > after_late_cancel.activity_events);
+
+    let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+    let closed = queue.endurance_snapshot(5);
+    assert!(shutdown.worker_terminated);
+    assert!(closed.shutdown_requested);
+    assert!(!closed.worker_running);
+    assert!(closed.worker_terminated);
+    assert_eq!(closed.pending_jobs, 0);
+    assert_eq!(closed.active_jobs, 0);
+    assert_eq!(closed.activity_events, shutdown.activity_events);
+}
+
+#[test]
+fn endurance_shutdown_timeout_detaches_once_and_late_return_cannot_upgrade_receipt() {
+    let backend = GateExecutor::committed([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue
+        .enqueue(RenderJob::new(dummy_config("endurance-timeout.mp4")))
+        .expect("enqueue export");
+    backend.wait_started(1);
+
+    let timed_out = queue.shutdown_and_wait(Duration::from_millis(1));
+    let retained = queue.endurance_snapshot(10);
+    assert!(!timed_out.worker_terminated);
+    assert!(!timed_out.worker_panicked);
+    assert!(timed_out.worker_timed_out);
+    assert!(timed_out.worker_detached);
+    assert!(!timed_out.all_resources_released());
+    assert_eq!(timed_out.active_jobs, 1);
+    assert!(retained.shutdown_requested);
+    assert!(retained.worker_running);
+    assert!(!retained.worker_terminated);
+    assert_eq!(retained.active_jobs, 1);
+
+    backend.release(1);
+    backend.wait_finished(1);
+    wait_worker_completion(&queue.inner);
+    let closed = queue.shutdown_and_wait(Duration::from_secs(2));
+    let terminal = queue.endurance_snapshot(11);
+    assert!(!closed.worker_terminated);
+    assert!(closed.worker_timed_out);
+    assert!(closed.worker_detached);
+    assert!(!closed.all_resources_released());
+    assert_eq!(closed.active_jobs, 0);
+    assert!(!terminal.worker_running);
+    assert!(!terminal.worker_terminated);
+    assert_eq!(terminal.active_jobs, 0);
+}
+
+#[test]
+fn worker_panic_outside_executor_boundary_is_joined_and_classified_exactly() {
+    let payload_dropped = Arc::new(AtomicBool::new(false));
+    let worker_payload_dropped = Arc::clone(&payload_dropped);
+    let queue = RenderQueue::new_with_executor_and_spawner(
+        GateExecutor::new([]),
+        Some(Box::new(move || {
+            std::panic::panic_any(PanicDropProbe { dropped: worker_payload_dropped })
+        })),
+        |task| {
+            std::thread::Builder::new()
+                .name("mondrian-export-worker-panic-test".to_owned())
+                .spawn(task)
+        },
+    );
+
+    let evidence = queue.shutdown_until(Instant::now() + Duration::from_secs(2));
+
+    assert!(evidence.worker_started);
+    assert!(!evidence.worker_start_failed);
+    assert!(!evidence.worker_terminated);
+    assert!(evidence.worker_panicked);
+    assert!(!evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(evidence.worker_owner_abandoned);
+    assert!(!payload_dropped.load(Ordering::Acquire));
+    assert!(!evidence.all_resources_released());
+}
+
+#[test]
+fn already_finished_late_worker_is_joined_without_detach_but_cannot_be_clean() {
+    let queue = RenderQueue::new_with_executor(GateExecutor::new([]));
+    let deadline = Instant::now();
+    queue.begin_shutdown();
+    let observation_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let completed = queue.inner.state.lock().worker_completed_at.is_some();
+        let finished = queue.worker.lock().as_ref().is_some_and(JoinHandle::is_finished);
+        if completed && finished {
+            break;
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "export worker did not finish for late-completion test"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let evidence = queue.shutdown_until(deadline);
+
+    assert!(evidence.worker_started);
+    assert!(evidence.worker_terminated);
+    assert!(!evidence.worker_panicked);
+    assert!(evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(!evidence.all_resources_released());
+}
+
+#[test]
+fn completion_stamp_follows_foreign_executor_destruction() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let queue = RenderQueue::new_with_executor(Arc::new(BlockingDropExecutor {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    }));
+    queue.begin_shutdown();
+
+    let observation_deadline = Instant::now() + Duration::from_secs(2);
+    while !entered.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < observation_deadline,
+            "export executor destructor did not start"
+        );
+        std::thread::yield_now();
+    }
+    let deadline = Instant::now();
+    release.store(true, Ordering::Release);
+    let finish_observation_deadline = Instant::now() + Duration::from_secs(2);
+    while !queue.worker.lock().as_ref().is_some_and(JoinHandle::is_finished) {
+        assert!(
+            Instant::now() < finish_observation_deadline,
+            "export worker did not finish after destructor release"
+        );
+        std::thread::yield_now();
+    }
+
+    let evidence = queue.shutdown_until(deadline);
+
+    assert!(evidence.worker_terminated);
+    assert!(evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(!evidence.all_resources_released());
+}
+
+#[test]
+fn worker_spawn_error_abandons_retained_executor_without_caller_drop() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let error_dropped = Arc::new(AtomicBool::new(false));
+    let spawner_error_dropped = Arc::clone(&error_dropped);
+    let queue = RenderQueue::new_with_executor_and_spawner(
+        Arc::new(DropProbeExecutor { dropped: Arc::clone(&dropped) }),
+        None,
+        move |_task| {
+            Err(std::io::Error::other(IoErrorDropProbe {
+                dropped: spawner_error_dropped,
+            }))
+        },
+    );
+
+    let evidence = queue.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+    assert!(!dropped.load(Ordering::Acquire));
+    assert!(!evidence.worker_started);
+    assert!(evidence.worker_start_failed);
+    assert!(!evidence.worker_terminated);
+    assert!(!evidence.worker_panicked);
+    assert!(!evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(evidence.worker_owner_abandoned);
+    assert!(!evidence.all_resources_released());
+    drop(queue);
+    assert!(!dropped.load(Ordering::Acquire));
+    assert!(!error_dropped.load(Ordering::Acquire));
+}
+
+#[test]
+fn detached_worker_latches_a_late_outer_panic_without_upgrading_termination() {
+    let release = Arc::new(AtomicBool::new(false));
+    let worker_release = Arc::clone(&release);
+    let payload_dropped = Arc::new(AtomicBool::new(false));
+    let worker_payload_dropped = Arc::clone(&payload_dropped);
+    let queue = RenderQueue::new_with_executor_and_spawner(
+        GateExecutor::new([]),
+        Some(Box::new(move || {
+            while !worker_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            std::panic::panic_any(PanicDropProbe { dropped: worker_payload_dropped });
+        })),
+        |task| {
+            std::thread::Builder::new()
+                .name("mondrian-export-worker-late-panic-test".to_owned())
+                .spawn(task)
+        },
+    );
+    wait_worker_started(&queue.inner);
+
+    let detached = queue.shutdown_until(Instant::now() + Duration::from_millis(1));
+    assert!(detached.worker_timed_out);
+    assert!(detached.worker_detached);
+    assert!(!detached.worker_panicked);
+    release.store(true, Ordering::Release);
+    let observation_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let state = queue.inner.state.lock();
+        if state.worker_completed_at.is_some() && state.worker_owner_abandoned {
+            break;
+        }
+        drop(state);
+        assert!(
+            Instant::now() < observation_deadline,
+            "late detached worker panic facts were not published"
+        );
+        std::thread::yield_now();
+    }
+
+    let late = queue.shutdown_until(Instant::now() + Duration::from_secs(1));
+    assert!(!payload_dropped.load(Ordering::Acquire));
+    assert!(!late.worker_terminated);
+    assert!(late.worker_panicked);
+    assert!(late.worker_timed_out);
+    assert!(late.worker_detached);
+    assert!(late.worker_owner_abandoned);
+    assert!(!late.all_resources_released());
+}
+
+#[test]
+fn worker_spawner_panic_abandons_retained_executor_without_caller_drop() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let panic_payload_dropped = Arc::new(AtomicBool::new(false));
+    let spawner_payload_dropped = Arc::clone(&panic_payload_dropped);
+    let queue = RenderQueue::new_with_executor_and_spawner(
+        Arc::new(DropProbeExecutor { dropped: Arc::clone(&dropped) }),
+        None,
+        move |_task| -> std::io::Result<JoinHandle<()>> {
+            std::panic::panic_any(PanicDropProbe { dropped: spawner_payload_dropped })
+        },
+    );
+
+    let evidence = queue.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+    assert!(!dropped.load(Ordering::Acquire));
+    assert!(!evidence.worker_started);
+    assert!(evidence.worker_start_failed);
+    assert!(!evidence.worker_terminated);
+    assert!(!evidence.worker_panicked);
+    assert!(!evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(evidence.worker_owner_abandoned);
+    assert!(!evidence.all_resources_released());
+    drop(queue);
+    assert!(!dropped.load(Ordering::Acquire));
+    assert!(!panic_payload_dropped.load(Ordering::Acquire));
+}
+
+#[test]
+fn ordinary_drop_signals_and_detaches_active_worker_without_waiting() {
+    let backend = GateExecutor::committed([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue
+        .enqueue(RenderJob::new(dummy_config("ordinary-drop-bounded.mp4")))
+        .expect("enqueue export");
+    backend.wait_started(1);
+    let worker_inner = Arc::clone(&queue.inner);
+
+    let started_at = Instant::now();
+    drop(queue);
+    assert!(started_at.elapsed() < Duration::from_millis(500));
+    {
+        let state = worker_inner.state.lock();
+        assert!(state.shutdown_requested);
+        assert!(state.worker_detached);
+        assert!(!state.worker_timed_out);
+        assert!(!state.worker_terminated);
+    }
+
+    backend.release(1);
+    backend.wait_finished(1);
+    wait_worker_completion(&worker_inner);
+    let state = worker_inner.state.lock();
+    assert!(state.worker_detached);
+    assert!(!state.worker_terminated);
+}
+
+#[test]
+fn ordinary_drop_joins_an_already_finished_worker_without_detach() {
+    let queue = RenderQueue::new_with_executor(GateExecutor::new([]));
+    queue.begin_shutdown();
+    let observation_deadline = Instant::now() + Duration::from_secs(2);
+    while !queue.worker.lock().as_ref().is_some_and(JoinHandle::is_finished) {
+        assert!(
+            Instant::now() < observation_deadline,
+            "export worker did not finish before ordinary Drop"
+        );
+        std::thread::yield_now();
+    }
+    let worker_inner = Arc::clone(&queue.inner);
+
+    drop(queue);
+
+    let state = worker_inner.state.lock();
+    assert!(state.worker_terminated);
+    assert!(!state.worker_panicked);
+    assert!(!state.worker_detached);
+}
+
+#[test]
+fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
+    let backend = GateExecutor::new([]);
+    let queue = RenderQueue::new_with_executor(backend);
+    queue.set_dispatch_enabled(false);
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("shutdown-pending.mp4")))
+        .expect("enqueue pending");
+
+    let evidence = queue.shutdown_and_wait(Duration::from_secs(2));
+    assert!(evidence.worker_terminated);
+    assert!(!evidence.worker_panicked);
+    assert!(!evidence.worker_timed_out);
+    assert!(!evidence.worker_detached);
+    assert!(!evidence.worker_owner_abandoned);
+    assert!(evidence.all_resources_released());
+    assert_eq!(evidence.pending_jobs, 0);
+    assert_eq!(evidence.active_jobs, 0);
+    let repeated = queue.shutdown_until(Instant::now() + Duration::from_secs(2));
+    assert_eq!(repeated, evidence);
+    let snapshot = queue.endurance_snapshot(300);
+    assert!(snapshot.shutdown_requested);
+    assert!(!snapshot.worker_running);
+    assert!(snapshot.worker_terminated);
+    assert_eq!(snapshot.activity_events, evidence.activity_events);
+    assert_eq!(snapshot.cancellations, 1);
+    assert!(matches!(
+        queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("retained terminal")
+            .status,
+        JobStatus::Cancelled
+    ));
+
+    assert!(matches!(
+        queue.enqueue(RenderJob::new(dummy_config("after-shutdown.mp4"))),
+        Err(ExportAdmissionError::QueueShutdown)
+    ));
+    let after_rejection = queue.endurance_snapshot(301);
+    assert_eq!(after_rejection.pending_jobs, 0);
+    assert_eq!(after_rejection.active_jobs, 0);
+    assert_eq!(after_rejection.admissions, 1);
+}
+
+#[test]
+fn regulatory_pse_missing_provider_is_notrun_before_any_export_owner_or_job() {
+    let work = tempfile::tempdir().expect("work");
+    let queue = RenderQueue::new_unstarted();
+    let mut config = dummy_config(work.path().join("never-started.mp4"));
+    let delivery = crate::delivery::resolve_export_delivery(
+        &config.preset,
+        &config.timeline.sequence.settings,
+        &config.timeline.color_environment,
+    )
+    .expect("delivery");
+    config.broadcast_qc = Some(mondrian_broadcast::BroadcastQcProfile {
+        id: "synthetic-admission".to_owned(),
+        edition: "1".to_owned(),
+        source_sha256: [1; 32],
+        signal_color_space: delivery.color_target.color_space,
+        observation_tap:
+            mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+        active_picture: mondrian_broadcast::QcActivePicture::full(
+            delivery.resolution.width,
+            delivery.resolution.height,
+        ),
+        rules: vec![mondrian_broadcast::BroadcastQcRule::LumaFlashCandidate {
+            rule_id: "triage".to_owned(),
+            minimum_mean_luma_delta: 0.5,
+            severity: mondrian_broadcast::BroadcastQcSeverity::Info,
+        }],
+        maximum_retained_findings: 1,
+        require_regulatory_flash_analysis: true,
+        require_encoded_artifact_revalidation: true,
+    });
+    assert!(matches!(
+        queue.enqueue(RenderJob::new(config)),
+        Err(ExportAdmissionError::RegulatoryPseNotRun {
+            reason: crate::RegulatoryPseNotRun::ProviderMissing
+        })
+    ));
+    assert!(queue.list_jobs().is_empty());
+    assert!(!work.path().join("never-started.mp4").exists());
+    let _ = queue.shutdown_and_wait(Duration::from_secs(1));
+}
+
+#[test]
+fn broadcast_qc_on_unimplemented_final_artifact_families_is_rejected_before_enqueue() {
+    let work = tempfile::tempdir().expect("work");
+    let queue = RenderQueue::new_unstarted();
+    for (index, preset) in [
+        ExportPreset::png_sequence(),
+        ExportPreset::audio_stems_pcm24(),
+        ExportPreset::imf_app_prores_rdd45_1080p25(),
+        ExportPreset::smpte_dcp_2k_flat_24(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut config = dummy_config(work.path().join(format!("never-started-{index}")));
+        config.preset = preset;
+        let delivery = crate::delivery::resolve_export_delivery(
+            &config.preset,
+            &config.timeline.sequence.settings,
+            &config.timeline.color_environment,
+        )
+        .expect("builtin delivery");
+        config.broadcast_qc = Some(mondrian_broadcast::BroadcastQcProfile {
+            id: "synthetic-admission".to_owned(),
+            edition: "1".to_owned(),
+            source_sha256: [1; 32],
+            signal_color_space: delivery.color_target.color_space,
+            observation_tap:
+                mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: mondrian_broadcast::QcActivePicture::full(
+                delivery.resolution.width,
+                delivery.resolution.height,
+            ),
+            rules: vec![mondrian_broadcast::BroadcastQcRule::LumaFlashCandidate {
+                rule_id: "triage".to_owned(),
+                minimum_mean_luma_delta: 0.5,
+                severity: mondrian_broadcast::BroadcastQcSeverity::Info,
+            }],
+            maximum_retained_findings: 1,
+            require_regulatory_flash_analysis: false,
+            require_encoded_artifact_revalidation: true,
+        });
+        let Err(ExportAdmissionError::InvalidDelivery { detail }) =
+            queue.enqueue(RenderJob::new(config))
+        else {
+            panic!("unsupported final scan must not enqueue")
+        };
+        assert!(detail.contains("final-file scan path"), "{detail}");
+        assert!(queue.list_jobs().is_empty());
+    }
+    let _ = queue.shutdown_and_wait(Duration::from_secs(1));
 }

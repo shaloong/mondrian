@@ -182,6 +182,7 @@ impl PreviewHardwareDecodePlan {
         }
 
         let selected = candidates.first().cloned();
+        let selected_candidate = selected.is_some();
         let (candidate, codec_config, device_context) = selected
             .map(|candidate| {
                 (
@@ -210,6 +211,17 @@ impl PreviewHardwareDecodePlan {
         probe.candidate_handle_kind = candidate.native_handle_kind();
         probe.candidate_surface_formats = candidate.preferred_surface_formats();
         probe.decoder_adapter_available = ffmpeg_native_resource_adapter_available(&codec_config);
+        probe.reason = if selected_candidate {
+            format!(
+                "{} is the selected hardware-decode candidate; active execution remains unproven until the decode Session observes a hardware frame",
+                candidate.as_str()
+            )
+        } else {
+            format!(
+                "no statically compatible hardware-decode candidate was admitted; codec probe: {}; device probe: {}",
+                codec_config.reason, device_context.reason
+            )
+        };
         (probe, codec_config, device_context, candidates)
     }
 
@@ -379,7 +391,7 @@ impl PreviewHardwareDecodePlan {
         self.probe.selected_backend = backend;
         self.probe.decoder_adapter_available = true;
         self.probe.hardware_decode_active = true;
-        self.probe.zero_copy_active = true;
+        self.probe.zero_copy_active = kind != DecodedGpuFrameHandleKind::CudaDeviceMemory;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
         self.probe.reason = format!(
@@ -453,7 +465,6 @@ impl PreviewHardwareDecodePlan {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
         }
         if !probe.hardware_decode_active
-            || !probe.zero_copy_active
             || probe.frame_residency != DecodedFrameResidency::GpuTexture
         {
             return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
@@ -532,7 +543,7 @@ pub(super) fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConf
     match config.hw_pixel_format {
         Some(HwAccelPixelFormat::D3D12 | HwAccelPixelFormat::D3D11) => cfg!(target_os = "windows"),
         Some(HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
-        Some(HwAccelPixelFormat::Vaapi) => cfg!(target_os = "linux"),
+        Some(HwAccelPixelFormat::Vaapi | HwAccelPixelFormat::Cuda) => cfg!(target_os = "linux"),
         _ => false,
     }
 }

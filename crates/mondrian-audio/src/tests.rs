@@ -7,10 +7,11 @@ use mondrian_core::{
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioFade, AudioFadeCurve,
-    AudioMixBus, AudioProcessorInstance, AudioRoute, AudioRouteDestination, AudioRouteSource,
-    BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID, CLIP_VOLUME_DB_PARAMETER_ID,
-    FADER_DB_PARAMETER_ID, GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID,
-    ROUTE_GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
+    AudioMixBus, AudioProcessorInstance, AudioProcessorSidechainRoute, AudioRoute,
+    AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
+    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, CLIP_VOLUME_DB_PARAMETER_ID, FADER_DB_PARAMETER_ID,
+    GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
+    SAMPLE_DELAY_FRAMES_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::sync::{Arc, Mutex};
@@ -61,10 +62,13 @@ impl AudioPcmSource for FailingSource {
     }
 }
 
+#[derive(Default)]
 struct TestDelayProcessorResolver {
     latency_frames: usize,
     realtime_capable: bool,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
 }
 
 impl AudioProcessorResolver for TestDelayProcessorResolver {
@@ -126,6 +130,8 @@ impl AudioProcessorResolver for TestDelayProcessorResolver {
             contract,
             delay_samples: scratch_samples,
             fail_first_state_entry: self.fail_first_state_entry,
+            panic_on_state_entry: self.panic_on_state_entry,
+            panic_on_process: self.panic_on_process,
         }))
     }
 }
@@ -134,6 +140,8 @@ struct TestDelayProcessorFactory {
     contract: AudioProcessorExecutionContract,
     delay_samples: usize,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
 }
 
 impl AudioProcessorFactory for TestDelayProcessorFactory {
@@ -146,6 +154,8 @@ impl AudioProcessorFactory for TestDelayProcessorFactory {
             samples: vec![0.0; self.delay_samples],
             cursor: 0,
             fail_first_state_entry: self.fail_first_state_entry,
+            panic_on_state_entry: self.panic_on_state_entry,
+            panic_on_process: self.panic_on_process,
         }))
     }
 }
@@ -154,10 +164,105 @@ struct TestDelayProcessor {
     samples: Vec<f32>,
     cursor: usize,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
+}
+
+struct TestSidechainResolver;
+
+impl AudioProcessorResolver for TestSidechainResolver {
+    fn prepare(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+        if !matches!(
+            request.definition(),
+            mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
+                if plugin_id == "test.mondrian.sidechain_copy"
+        ) {
+            return BuiltInAudioProcessorResolver.prepare(request);
+        }
+        Ok(Arc::new(TestSidechainFactory {
+            layout: request.render_contract().channel_layout,
+        }))
+    }
+}
+
+struct TestSidechainFactory {
+    layout: AudioChannelLayout,
+}
+
+impl AudioProcessorFactory for TestSidechainFactory {
+    fn execution_contract(&self) -> AudioProcessorExecutionContract {
+        AudioProcessorExecutionContract::stateless()
+    }
+
+    fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
+        AudioProcessorAuxiliaryInputContract {
+            buses: vec![AudioProcessorAuxiliaryInputBusContract {
+                bus_key: "detector".to_owned(),
+                channel_layout: self.layout,
+            }],
+        }
+    }
+
+    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        Ok(Box::new(TestSidechainProcessor))
+    }
+}
+
+struct TestSidechainProcessor;
+
+impl AudioProcessor for TestSidechainProcessor {
+    fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        _context: AudioProcessorProcessContext,
+        audio: &mut dyn AudioProcessorAudioIo,
+        _parameters: AudioParameterEventBatch<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        let buses = audio.main_and_auxiliary_input("detector").ok_or_else(|| {
+            AudioProcessorHostError::Process("detector bus was not supplied".to_owned())
+        })?;
+        buses.main_interleaved.copy_from_slice(buses.auxiliary.interleaved);
+        Ok(())
+    }
+}
+
+struct EditValueSource {
+    values: std::collections::BTreeMap<AudioComponentEditId, f32>,
+}
+
+impl AudioPcmSource for EditValueSource {
+    fn read_indexed_interleaved(
+        &mut self,
+        edit: AudioComponentEditId,
+        source_frames: &[i64],
+        channel_layout: AudioChannelLayout,
+        destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        let value = self.values.get(&edit).copied().unwrap_or(0.0);
+        let channels = channel_layout.channel_count();
+        for (frame, source_frame) in source_frames.iter().enumerate() {
+            destination[frame * channels..(frame + 1) * channels].fill(if *source_frame < 0 {
+                0.0
+            } else {
+                value
+            });
+        }
+        Ok(())
+    }
 }
 
 impl AudioProcessor for TestDelayProcessor {
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        assert!(
+            !self.panic_on_state_entry,
+            "injected processor state-entry panic"
+        );
         if self.fail_first_state_entry {
             self.fail_first_state_entry = false;
             return Err(AudioProcessorHostError::StateEntry(
@@ -175,6 +280,7 @@ impl AudioProcessor for TestDelayProcessor {
         audio: &mut dyn AudioProcessorAudioIo,
         _parameters: AudioParameterEventBatch<'_>,
     ) -> Result<(), AudioProcessorHostError> {
+        assert!(!self.panic_on_process, "injected processor process panic");
         let expected = context
             .request()
             .frames
@@ -538,6 +644,129 @@ fn compiler_derives_track_and_range_from_real_clip_placement() {
 }
 
 #[test]
+fn typed_sidechain_retains_detector_only_track_and_supplies_auxiliary_pcm() {
+    let mut sequence = Sequence::new("sidechain");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let main_track = sequence.audio_tracks[0].id;
+    let detector_track = sequence.add_audio_track();
+    for (track_id, asset_id) in [
+        (main_track, AssetId::new()),
+        (detector_track, AssetId::new()),
+    ] {
+        let clip = Clip::new(asset_id, TimelineTime::ZERO, tt(4, 1)).expect("Clip");
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("authored audio Clip");
+    }
+    let main_edit = sequence
+        .audio_tracks
+        .iter()
+        .find(|track| track.id == main_track)
+        .and_then(|track| track.clips.first())
+        .and_then(|clip| clip.audio_components.first())
+        .map(|edit| edit.id)
+        .expect("main edit");
+    let detector_edit = sequence
+        .audio_tracks
+        .iter()
+        .find(|track| track.id == detector_track)
+        .and_then(|track| track.clips.first())
+        .and_then(|clip| clip.audio_components.first())
+        .map(|edit| edit.id)
+        .expect("detector edit");
+    let processor = AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.sidechain_copy".to_owned(),
+            schema_version: 1,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    };
+    let processor_id = processor.id;
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+    sequence
+        .audio_program
+        .routes
+        .retain(|route| {
+            !matches!(route.source, AudioRouteSource::Track { track_id, .. } if track_id == detector_track)
+        });
+    sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+        AudioRouteSource::Track {
+            track_id: detector_track,
+            port: AudioChannelStripOutputPort::PostMute,
+        },
+        processor_id,
+        "detector",
+    ));
+
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output))
+        .expect("sidechain Signal Closure");
+    assert_eq!(compiled.contributions().len(), 2);
+    let plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            Arc::new(compiled),
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::ScalarReference,
+            &TestSidechainResolver,
+        )
+        .expect("prepared typed sidechain"),
+    );
+    assert_eq!(plan.schedule_summary().sidechain_binding_count, 1);
+    assert_eq!(plan.schedule_summary().sidechain_source_count, 1);
+    let mut source = EditValueSource {
+        values: [(main_edit, 0.25), (detector_edit, 0.75)].into_iter().collect(),
+    };
+    let output = render_audio(
+        plan,
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("sidechain render");
+    assert_eq!(output, vec![0.75; 4]);
+
+    let mut invalid = sequence.clone();
+    invalid.audio_program.sidechain_routes[0].bus_key = "missing".to_owned();
+    let compiled = compile_audio_program(
+        &invalid,
+        AudioCompileRequest::program(invalid.audio_program.outputs[0].id),
+    )
+    .expect("semantic sidechain remains definition-independent");
+    let error = PreparedAudioPlan::prepare_with_processor_resolver(
+        Arc::new(compiled),
+        AudioRenderContract {
+            sample_rate: 2,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        },
+        AudioKernelBackend::ScalarReference,
+        &TestSidechainResolver,
+    )
+    .expect_err("undeclared auxiliary bus must fail preparation");
+    assert!(error.to_string().contains("absent from the realized processor contract"));
+}
+
+#[test]
 fn clip_static_gain_and_edge_fades_execute_identically_on_scalar_and_runtime_backends() {
     let mut sequence = sequence_with_audio_clip();
     let edit = &mut sequence.audio_tracks[0].clips[0].audio_components[0];
@@ -840,6 +1069,10 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             maximum_source_channels: 1,
             channel_mix_coefficient_count: 1,
             route_count: 2,
+            processor_auxiliary_bus_count: 0,
+            maximum_processor_auxiliary_buses: 0,
+            sidechain_binding_count: 0,
+            sidechain_source_count: 0,
             transition_binding_count: 0,
             automation_curve_count: 1,
             automation_event_span_count: 2,
@@ -1687,6 +1920,7 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -1750,6 +1984,7 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         latency_frames: 7,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let long_sequence = sequence_with_parallel_hosted_delay();
     let long_output = long_sequence.audio_program.outputs[0].id;
@@ -1843,6 +2078,7 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -1971,6 +2207,7 @@ fn public_lookahead_and_compensation_storage_fail_closed_at_preparation() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let lookahead_error = PreparedAudioPlan::prepare_with_processor_resolver(
         Arc::clone(&compiled),
@@ -2032,6 +2269,7 @@ fn processor_mode_capability_is_enforced_during_preparation() {
         latency_frames: 2,
         realtime_capable: false,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let error = PreparedAudioPlan::prepare_with_processor_resolver(
         compiled,
@@ -2069,6 +2307,7 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: true,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -2127,6 +2366,106 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
         )
         .expect("recovered render");
     assert_eq!(pcm, vec![2.0, 4.0, 6.0, 8.0]);
+}
+
+#[test]
+fn processor_panic_is_contained_and_poisons_stateful_continuity() {
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        panic_on_process: true,
+        ..Default::default()
+    };
+    let plan = prepared_parallel_delay_plan(&resolver);
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let epoch = AudioContinuityEpoch::new(70);
+    session
+        .enter_state(AudioStateEntry { epoch, start_sample: 0 })
+        .expect("state entry before injected process panic");
+    let mut source = RampSource::default();
+    let mut pcm = vec![0.0; 4];
+    assert!(matches!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::AdapterPanicked("block processing")
+        ))
+    ));
+    assert_eq!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ContinuityPoisoned(epoch))
+    );
+}
+
+#[test]
+fn failed_stateless_processor_instance_cannot_be_reused() {
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 0,
+        realtime_capable: true,
+        panic_on_process: true,
+        ..Default::default()
+    };
+    let plan = prepared_parallel_delay_plan(&resolver);
+    assert!(!plan.requires_state_entry());
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let mut source = RampSource::default();
+    let mut pcm = vec![0.0; 4];
+    assert!(matches!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::AdapterPanicked("block processing")
+        ))
+    ));
+    assert_eq!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::PoisonedInstance
+        ))
+    );
+}
+
+fn prepared_parallel_delay_plan(resolver: &TestDelayProcessorResolver) -> Arc<PreparedAudioPlan> {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::RuntimeVectorized,
+            resolver,
+        )
+        .expect("hosted plan"),
+    )
 }
 
 #[test]
@@ -2480,6 +2819,7 @@ fn nested_public_output_hides_child_lookahead_without_double_compensation() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
         &root,

@@ -7,7 +7,7 @@
 use mondrian_core::Color;
 
 /// 语义化颜色面板
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorTokens {
     // ── 表面层级 (Surface Hierarchy) ──────────────────────────────────────
     /// 窗口/页面背景

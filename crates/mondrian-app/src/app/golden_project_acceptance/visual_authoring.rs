@@ -820,8 +820,9 @@ fn effect_kernel_node_counts(graph: &mondrian_effects::CompiledEffectGraph) -> (
 
 fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualExecutionEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let program = PreparedVisualProgram::prepare(sequence)?;
     let export_plan = evaluate_prepared_visual_program(
         &program,
@@ -1822,17 +1823,20 @@ pub(super) fn execute_visual_stage(
 }
 
 #[cfg(test)]
-fn execute_visual_slice(root: &Path, paths: &GoldenRunPaths) -> anyhow::Result<GoldenVisualReport> {
+fn execute_visual_slice(
+    root: &Path,
+    paths: &GoldenRunPaths,
+) -> anyhow::Result<super::workflow::GoldenOwnedOperation<GoldenVisualReport>> {
     let contract = load_golden_contract(root)?;
     let settings = sequence_settings_from_contract(&contract.timeline)?;
-    let mut workflow = GoldenProductWorkflowDriver::create(
+    let workflow = GoldenProductWorkflowDriver::create(
         paths.project.clone(),
         "Windows Alpha Golden Visual",
         settings,
         mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
-    execute_visual_stage(&contract, &mut workflow)
+    workflow.run_with(|workflow| execute_visual_stage(&contract, workflow))
 }
 
 #[test]

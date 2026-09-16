@@ -1,11 +1,112 @@
 # Color Management
 
+Bundled OpenColorIO and its native dependencies build under a repository-owned
+Linux Make launcher. OpenColorIO's nested `ExternalProject` commands invoke
+`cmake --build --parallel` without a numeric limit; CMake specifies that this
+uses the native build tool's default and ignores `CMAKE_BUILD_PARALLEL_LEVEL`.
+The inherited Linux toolchain therefore selects `linux-bounded-make.sh` for Unix
+Makefiles, and the launcher applies an exact final `-j1` at every native Make
+boundary. `CMAKE_BUILD_PARALLEL_LEVEL=1` remains the bound for CMake calls that
+do not provide `--parallel`. A provisioned qualification host may set
+`MONDRIAN_CMAKE_BUILD_JOBS` or supply its own toolchain explicitly.
+
+Preview timing reports distinguish a measured CPU output bottleneck from GPU
+route eligibility. The recommendation first profiles processor, allocation and
+memory costs while preserving mandatory CPU working-frame cache publication.
+Selecting a GPU or existing hybrid output route still requires its typed
+color/alpha, readback and native device admission contracts; stage duration
+alone cannot establish those prerequisites.
+
 Mondrian has one typed color-management pipeline. Accepted ADR-0005 defines
 Mondrian Standard as a Mondrian-owned, immutable, versioned OCIO package and
 uses stock OCIO as the default execution infrastructure. Mondrian Standard,
 ACES, and Custom OCIO are product-level modes over that shared integration, not
 three renderer engines. Missing processors or configs required by a selected
 mode must surface as errors instead of falling back to different color science.
+
+## Color execution Module boundaries
+
+The GPU-resident encoded-source input boundary accepts both RGBA16F and
+RGBA32F. Native and compact-YUV materialization use the product RGBA32F
+intermediate without a half-precision conversion before OCIO; accepting an
+already half-precision input does not change the product working-output policy.
+
+Renderer color execution has four public semantic Modules: `color::source`,
+`color::working`, `color::program_output`, and `color::monitor`. Source consumes
+the Timeline-owned `MediaInputColorContext`; Program Output consumes the closed
+`ProgramColorContext`. App and Export therefore no longer assemble source or
+Program Output contracts from duplicated working/output/engine values.
+`ProgramOutputBoundary` has private state and read-only identity/role accessors,
+and a nested working-only context is rejected before output planning.
+
+The generic color-stage graph, planners, OCIO backend preparation, shader and
+backend-object caches, frame-id allocator, resource table, and materialization
+records are private Implementation. A hidden qualification Adapter exists only
+for ignored real-device accuracy/performance gates; it is not a Preview or
+Export integration Seam.
+
+CPU callers retain one owner-scoped `RenderCpuColorExecutionSession`. GPU
+callers retain one `GpuColorExecutionSession` shared by source, working,
+Program Output, and monitor work, so Module separation does not multiply
+shader caches, backend objects, texture pools, or frame tables. Program Output
+and monitor remain separate semantic stages; the CPU presentation path moves
+one Float32 raster through both and quantizes once, while GPU recording keeps
+the Program Output handle available for scopes and diagnostics.
+
+CPU presentation retains a separate pre-monitor Float32 frame only when the
+caller requests the Program Output signal-classification tap. Ordinary Viewer
+presentation consumes that raster through monitor adaptation; retaining an
+unused shared handle would force the consuming path to clone the whole frame.
+Monitor Output warnings retain their classification samples, not an unrelated
+Program Output frame. The public-Interface regression in
+`mondrian-renderer/tests/cpu_presentation.rs` counts full-raster allocations and
+compares pixels, alpha, stage evidence, and immutable input with the retained
+reference path, both with and without an actual monitor conversion.
+
+The Core CPU apply seam schedules the same OCIO processor over fixed 1,024-pixel
+packed tiles. One 16 KiB stack buffer replaces the whole-raster RGB scanline
+that the pinned OCIO bridge otherwise expands into three frame-sized temporary
+buffers. Each tile copies RGB into packed lanes, resets synthetic alpha to zero
+(the existing OCIO RGB ImageDesc convention), executes stock OCIO, and writes
+back RGB only. Real coverage is never passed to OCIO or rewritten, including
+its exact non-finite bit patterns. Passing real RGBA and merely restoring alpha
+afterward is not equivalent: Custom OCIO matrices may couple alpha into RGB.
+Dynamic properties are still applied once per owner invocation before tiling;
+processor identity, thread ownership, RGB math, and stage boundaries do not
+change. Whole-raster RGB oracles cover tile tails, SDR/P3/HDR views, colorimetric
+routes, dynamic exposure, and a cross-channel custom matrix. This bounded CPU
+layout is independent of GPU pass tiling and introduces no worker pool.
+
+Renderer's private `cpu_quantization` Module owns the shared terminal RGBA8
+conversion for ordinary Program Output and Viewer presentation. It preserves
+the exact `(clamp(channel, 0, 1) * 255).round() as u8` result, including NaN,
+infinities, coverage, and half-code boundaries. On x86_64, baseline SSE2 rounds
+the already-scaled value by comparing it with `trunc(value) + 0.5`; that
+threshold is exact, unlike prematurely adding 0.5 to the scaled value itself.
+Complete 16-channel chunks use unaligned SIMD loads/stores and all tails use
+the canonical scalar expression. Other architectures retain scalar execution.
+The Module allocates only the final byte raster, owns no color interpretation,
+and introduces no worker or full-float scratch. Kernel attribution, final pixel
+parity, and the original complete App first-frame budget are separate tests;
+a Windows kernel measurement is not ARM/macOS/Linux performance qualification.
+
+## Camera RAW input boundary
+
+Camera RAW development is a source-materialization step before OCIO, not a
+creative Effect or output transform. A typed DNG/CinemaDNG probe admits the
+Media-owned Adapter; that Adapter produces scene-linear Rec.709 RGBA32F after
+deterministic CFA reconstruction, authored/as-shot white balance, exposure,
+camera matrix inversion, and chromatic adaptation. Renderer then consumes the
+same `Source Frame Preparation` contract used by Preview and Export and applies
+the configured source-to-working transform exactly once.
+
+The persistent controls use fixed-point values so they remain exact author and
+cache identity. RAW output is always full-range float; ordinary encoded-video
+range overrides are ignored and disabled in Interpret Footage. Missing
+ColorMatrix or AsShotNeutral evidence, unsupported CFA geometry, Adapter drift,
+or algorithm-version drift fails closed. This slice supports one DNG or one
+single-frame CinemaDNG file; it does not claim proprietary RAW formats or a
+CinemaDNG folder-sequence model.
 
 The Rust integration pins `ocio-rs` 0.2.1 revision `933c65dc` with the `bundled`
 feature enabled, so normal application builds exercise the real OpenColorIO
@@ -114,12 +215,47 @@ project's selected Standard, ACES, or Custom OCIO configuration; they must not
 be approximated with native transfer functions, an ACES-specific side engine,
 or a baked RGBA8 fallback.
 
+Creative Grade Graphs remain inside the same working-domain contract. Core
+persists their bounded author DAG and Timeline persists typed hierarchy
+references; Effects alone lowers the active Versions to compiled execution IR.
+The fixed hierarchy ends with one full-composite Timeline Grade before Program
+Output. Program Output, rendering View, display calibration, and carrier
+encoding remain color-management boundaries and can never be inserted into or
+relabelled as a creative Grade scope. Preview and Export consume the same
+compiled graph and explicit working/output contexts, so a hierarchy edit cannot
+select different color science by consumer.
+
+Gallery capture keeps the display reference and analysis authority separate.
+The portable still raster is one frozen sRGB PNG for Viewer comparison, while
+Shot Match statistics are computed from the straight-alpha Float32
+working-linear frame before Program Output or monitor adaptation. The renderer
+examines at most 262,144 regularly strided non-transparent finite samples and
+records per-channel 5th, 50th, and 95th percentiles. Sorting is therefore
+deterministic and bounded even for high-resolution sources; no display RGB8
+histogram or machine ICC state can enter the solver.
+
+The v1 solver maps reference/target percentile spans to ColorWheel Gain and
+aligns their medians with Offset, clamping both to the registered author
+bounds. App authoring appends that operation to a freshly identity-forked Grade
+Graph in a new Grade Version and persists the complete input statistics,
+algorithm version, still identity, and authored result. This is reproducible
+statistical matching, not a semantic scene-understanding or perceptual match
+claim. Existing Shot Match evidence intentionally remains self-contained when
+its Gallery still is later removed.
+
 The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
 adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
 semantics, but they must preserve node order and the exact endpoint identities.
 Non-color data and alpha/mask payloads are typed, non-convertible domains.
+RGB DataTexture decode normalizes numeric channels once, then GPU upload binds
+the exact `NonColorData + DataTexture + Rgba32Float` descriptor. No input OCIO
+processor is created or counted. The compositor's explicit numeric bypass is
+the only operation allowed to produce a working-domain accumulator from that
+texture; native YUV, proxies, and ordinary color-input transforms cannot
+masquerade as this route. Preview and Export lower the same
+`PreparedSourceFrame` evidence into this typed upload path.
 The CPU timeline backend executes legal transitions directly through the
-selected engine's OCIO CPU processors without copying between pixel containers.
+selected engine's OCIO CPU processors without another full-frame pixel container.
 Those processors are retained only by the explicit
 `RenderCpuColorExecutionSession` owned by the Preview runtime, one Export job,
 or a dedicated derived-media worker. Timeline compositor scratch carries that
@@ -131,6 +267,16 @@ failures, GPU plans that have not yet scheduled equivalent OCIO passes, and
 invalid non-color crossings remain fail-closed and expose the shared
 `effect_domain_unresolved` root cause so correctness cannot diverge between
 interactive and final rendering.
+
+Scene-linear gamut repair is separate from the final display/output transform.
+The `builtin.gamut_compression` Effect implements the normative ACES 1.3
+Reference Gamut Compression in AP1 with the published limits
+`[1.147, 1.264, 1.312]`, thresholds `[0.815, 0.803, 0.880]`, and power `1.2`.
+Its CPU oracle tests use independent official CTL-produced OpenColorIO vectors.
+Working-space conversion is explicit and invertible around that operator; no
+output gamut, monitor profile, or OCIO View is inferred. The separate Highlight
+Recovery Effect is a luminance-preserving scene-linear chroma reconstruction,
+not a display tone map and not RAW highlight-detail recovery.
 
 ## Color-Science Validation Primitives
 
@@ -233,30 +379,47 @@ intent and the production `RenderOutputColorBoundary::from_intent` path before
 comparing GPU output with the stock-OCIO CPU result.
 
 Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
-locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
-a SHA-256 over every executable colorspace-to/from-working route plus the
-selected output processors, the exact working space, and a sorted non-empty set
-of `CustomOcioOutputIdentity` bindings. Each binding contains one standardized
+locator. It requires the source, primary config SHA-256, a versioned dependency
+manifest SHA-256 over every external resource reachable through each executable
+colorspace-to/from-working route and selected output processor, the exact
+working space, and a sorted non-empty set of `CustomOcioOutputIdentity`
+bindings. Each binding contains one standardized
 Mondrian `ColorSpace`, exact display/view, the resolved OCIO display color-space
 endpoint (including resolution of `<USE_DISPLAY_NAME>`), and effective look
 expression. The same target cannot appear twice and one display/view cannot
 claim multiple output labels. The identity also pins the sorted role map and an
-explicit dynamic-property override list. Current projects save no dynamic
-overrides and reject non-empty override lists until typed execution exists.
-Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
-and external LUT changes fail closed during deserialization or config validation.
+explicit, canonical dynamic-property override list. Supported properties are
+OCIO Exposure, Contrast, Gamma, Grading Primary, Grading Tone, Grading RGB
+Curve, and Grading Hue Curve. Primary and Tone require their complete OCIO
+component sets; RGB curves require four families and Hue curves all eight
+families. Every curve contains 2..=4096 finite points with strictly increasing
+x. Duplicate, unknown, malformed, or route-unavailable properties fail closed
+during author validation or processor preparation. Missing fields, semantic
+mismatches, config edits, role/view/endpoint changes, and external LUT changes
+fail closed during deserialization or config validation.
 
-> **Identity stability rule (corrected at M1):** a persisted package identity
+Dynamic payload values are author semantics but not static OCIO object
+identity. Config validation, CPU processor lookup, GPU shader/layout/pipeline,
+LUT textures, and bind-group identity use
+`ColorEngine::static_processor_identity()`; changing only a dynamic value does
+not reload the config or rebuild those objects. CPU execution applies the
+current values to the owner-thread processor before processing. GPU extraction
+applies them before reading OCIO's current uniform bytes; a warm backend-object
+hit repacks the current payload and performs `queue.write_buffer` only when its
+resident hash changed. Diagnostics distinguish uniform update, reuse, and
+failure. Frame/result identities continue to include the complete dynamic
+values, so static-object reuse cannot authorize stale pixels.
+
+> **Identity stability rule (completed for Standard and Custom at M2):** a persisted identity
 > may cover only contractual bytes — config text, assembly manifest, and
 > embedded resources. Engine-derived processor cache IDs are build-local
 > execution facts and must never enter a persisted identity; the Mondrian
-> Standard V2/V3 digests were re-based onto contractual bytes for exactly this
-> reason. The Custom OCIO route/output fingerprint still includes processor
-> cache IDs and therefore cannot yet roundtrip one Custom-OCIO project across
-> different engine builds; re-basing that fingerprint onto contractual content
-> is M2 color work (tracked in the ROADMAP color matrix), and until then a
-> Custom-OCIO project reopened on a different build fails closed at identity
-> validation rather than silently reinterpreting its color science.
+> Standard package digests and the Custom OCIO dependency manifest both follow
+> this rule. OCIO config and processor cache IDs remain runtime-only cache and
+> diagnostic evidence. Reopening unchanged contractual config/resource bytes
+> on another OCIO engine build refreshes that evidence; altered config, LUT,
+> role, working-space, display/view, endpoint, or look contracts still fail
+> closed.
 
 When the UI selects only a Custom `.ocio` file,
 `ProjectColorEnvironment::custom_ocio` validates the complete set of Sequence
@@ -293,11 +456,22 @@ All OCIO config mutations are centralized in `mondrian_core::ocio` through
 - A monotonic generation counter for cache invalidation
 
 `OCIO_CONFIG_OPERATION` serializes the exact sequence of selecting a config and
-constructing a CPU Processor or extracting a GPU shader. The lease ends before
-CPU pixel application and before any GPU execution, so frames do not serialize
-on a process-wide color lock. This is required because the current `ocio-rs`
-bridge exposes OCIO's process-global current config during construction even
-though the baked Processor itself is independent afterward.
+building the first immutable parent `Processor` graph for one exact static
+engine/request identity. A bounded 256-entry **OCIO Engine Artifact Registry**
+retains those graphs and uses one per-key single-flight cell, so independent
+keys do not wait on a registry-wide build lock and concurrent identical cold
+requests enter the config lease once. Failed cells are removed and remain
+retryable. The lease ends before owner CPU-handle derivation, CPU pixel
+application, GPU descriptor extraction, or GPU execution. This is required
+because the current `ocio-rs` bridge exposes OCIO's process-global current
+config during parent graph construction even though the baked graph is
+independent afterward.
+
+Every installed Config uses OCIO processor caching with
+`PROCESSOR_CACHE_ENABLED` but explicitly without
+`PROCESSOR_CACHE_SHARE_DYN_PROPERTIES`; changing that policy clears the old
+Config processor cache. The shared parent graph may therefore derive separate
+Preview/Export CPU handles without sharing mutable dynamic-property state.
 
 Global config installation, cache invalidation, config serialization, Standard
 transform construction, and GPU descriptor extraction use `ocio-rs`'s fallible
@@ -305,16 +479,20 @@ APIs. A bridge failure leaves Mondrian's source identity and generation
 unchanged and is reported to the caller; no path may silently retain a stale
 config or panic at the FFI boundary.
 
-CPU Processors live in a bounded, explicit `OcioCpuProcessorSession` keyed by
-the complete `ColorEngine`, config revision, encoded/working endpoint
-identities, and display/view when applicable. Immutable embedded and built-in
-packages use their pinned engine identity as the stable revision, so switching
-Standard -> ACES -> Standard inside one owner does not discard a warm Standard
-Processor. A validated Custom engine already contains its config, resource,
-cache-id, and processor-graph digests, so a changed mutable source creates a
-different `ColorEngine` identity rather than mutating a cache entry. A warm hit
-is looked up before process-global config selection and performs no config
-switch, file I/O, or Processor construction.
+CPU execution handles live in a bounded, explicit `OcioCpuProcessorSession`
+keyed by the static `ColorEngine`, encoded/working endpoint identities, and
+display/view when applicable. The process registry owns only the immutable
+parent graph; every Preview, Export, or derived-media owner independently
+derives and retains its mutable CPU handle. Switching Standard -> ACES ->
+Standard inside one owner does not discard a warm Standard handle. A validated
+Custom engine already contains its config and
+dependency-manifest digests, so a changed mutable source creates a different
+`ColorEngine` identity rather than mutating a cache entry. OCIO's opaque config
+and processor cache IDs remain inside runtime evidence and baked processor
+bundles. A warm owner hit is looked up before the shared registry and performs
+no lock, file I/O, or handle construction; a shared parent hit performs no
+config selection or file I/O. Session diagnostics distinguish owner hits,
+owner misses resolved by a shared graph, and graph admissions.
 
 The Session is deliberately non-`Send`: Preview, each Export job, and each
 derived-media worker construct and retire it on their owning execution thread.
@@ -326,14 +504,20 @@ the Session's diagnostics. Public convenience transforms use the uncached
 reference path and are suitable for tests or one-shot calls, not repeated
 production execution.
 
-GPU requests carry `ColorEngine` as part of their immutable cache identity.
-`OcioGpuShaderCache` therefore keeps warm plans for Standard and ACES
-simultaneously and cannot return one engine's shader for another engine merely
-because their endpoint names match. Shader extraction still occurs under the
-short config-operation lease, after which the renderer owns plain shader/LUT/
-uniform metadata and performs compilation and execution without the lease.
-Explicit cache clearing is reserved for renderer/device lifecycle invalidation,
-not ordinary engine switching.
+GPU requests carry the complete `ColorEngine`, including evaluated dynamic
+values, as part of their immutable request identity. Each
+`OcioGpuShaderCache` is an owner front cache backed by a bounded 256-entry
+process-wide registry of device-independent shader/LUT/binding/uniform plans.
+Preview and historical Export owners therefore share one exact plain artifact
+and one per-key cold extraction, while Standard and ACES can coexist and never
+alias merely because endpoint names match. The first static parent graph build
+may enter the config lease; descriptor extraction and all later compilation and
+execution do not. Concrete wgpu modules, textures, pipelines, mutable uniform
+buffers, frame tables, and failure state remain device/owner-scoped. Clearing
+an owner cache never invalidates another owner or the shared plain-artifact
+registry. Both shared registries expose hit, miss, wait, build, failure,
+eviction, occupancy, in-flight, and capacity evidence; owner caches separately
+report front-cache and shared-hit behavior.
 
 Project open or an explicit Custom `ensure_loaded` is different from the warm
 processor path: under the config-operation lease it clears stock OCIO's global
@@ -390,6 +574,23 @@ child-output bake is intentionally absent until its full execution and
 reference contract exists. No edge can select another engine, and forcing the
 parent working space never replaces the child's media-input interpretation
 policy.
+
+Signal compliance has one Core-owned contract over normalized display-encoded
+RGB. Viewer false color, zebra, and gamut alarm are machine-local,
+non-destructive consumers of that contract: they classify either retained
+Program Output or pre-ICC Monitor Output while coloring only the
+monitor-adapted presentation. They preserve Alpha and use the fixed priority
+gamut alarm over zebra over false color. These controls never enter Project,
+Sequence, grade, or render-cache identity.
+
+Export legalization is a separate destructive delivery decision. The
+materialized `ExportPreset` freezes `SignalLegalizer::Off` or `ClampRgb`; an
+active policy requires a standardized display signal, executes only on the root
+deliverable after the output transform and before the one integer/YUV
+quantization, and preserves Alpha. Nested/working frames are never legalized.
+`VideoRange::Legal` instead selects the encoder's code-value mapping and does
+not clip RGB excursions. Active legalization disables Smart Render because a
+packet remux cannot prove the requested pixel modification.
 
 `DisplayToneMapPolicy` controls the final working-to-Program-Output boundary.
 Its `Automatic` mode follows the effective workflow; the per-sequence
@@ -517,6 +718,13 @@ config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
 to the BT.2020 triangle. Negative components and values above one are preserved.
+That semantic identity does not prescribe a GPU storage width. Renderer owns a
+separate fail-closed Working Float Policy Module: today its qualified product
+Implementation is RGBA32F, while RGBA16F requires independently sealed
+end-to-end quality evidence, same-device performance benefit, and complete
+compositor/Effects/AlphaMask/heterogeneous/Viewer/Export qualification. Output
+carriers, LUTs, DataTextures, AlphaMasks, and deliverable pipe formats keep
+their own typed storage contracts and cannot be used to infer working precision.
 The package identity is also an authoring constraint: every Standard Project
 Sequence and its future-Sequence template must use Linear Rec.2020. Project
 validation, Sequence actions, and Project-environment replacement reject any
@@ -532,6 +740,29 @@ source-to-working processor, `Data` requires an explicit non-color
 bypass, and `Rejected` fails the media path. Missing metadata can assume
 Rec.709 with a diagnosed policy branch or reject the source; it can never
 silently reinterpret encoded samples as the sequence's linear working space.
+CPU float decode payloads retain an additional encoding fact at this seam:
+`SourceEncodedRgb` must enter the encoded-float input processor, while only
+`SourceLinearRgb` with a scene-linear source identity may bypass the transfer
+decode as a linear-float source. Preview and Export must preserve that fact;
+the payload's scalar type or bit depth alone never proves scene linearity.
+Renderer's `Source Frame Preparation` Module is the sole production owner of
+that classification for CPU RGBA payloads. It also validates the decoded
+extent, normalizes authored Alpha Interpretation before OCIO, and binds the
+exact `RenderInputTransform`. Preview retains the prepared source for deferred
+GPU or lazy CPU execution; Export executes that same Interface immediately.
+Neither Adapter reconstructs a `CpuSourceColorFrame` from decoder fields.
+
+`DataTexture` is a separate closed sample identity, not a missing-color or
+rejected-color state. Timeline resolves it from the authored non-color payload;
+Preview and Export lower it to the same `SourceFramePreparationIntent`.
+Media then marks the decoded RGBA payload as `DecodedRgbaEncoding::DataTexture`,
+and Renderer normalizes the numeric RGB(A) channels directly into the target
+working-frame storage without constructing or executing an OCIO processor.
+The result carries no OCIO diagnostics and records zero renderer color stages.
+Only probe-proven RGB/GBR sources are admitted: applying a YCbCr matrix would
+change utility-channel values, so YCbCr, native-surface, compact-YUV, and proxy
+representations fail closed. The DataTexture cache identity depends on the
+target working domain but not on Color Engine or input tone-map identity.
 
 There is no public monolithic `ColorPipeline`. A source/input transform consumes
 `OcioColorSpaceIdentity::Color` and produces
@@ -587,6 +818,11 @@ contract before the source-to-working transform: straight input is shared
 without copying, premultiplied input is unassociated at the typed source
 boundary, and `Ignore` forces opaque coverage. Unassociation preserves extended
 and negative float RGB values and treats zero-alpha RGB as transparent black.
+Float coverage uses an exact-zero policy: after finite-domain validation and
+clamping, every positive Float32 Alpha or opacity remains observable. No
+epsilon may reclassify a 16-bit edge, filtered sample, Effect join, or repeated
+source-over contribution as transparent. Premultiplied input is divided by
+every positive Alpha and canonicalized to zero RGBA only at exact zero.
 Preview and export cache identities include `AlphaInterpretation`, so changing
 the interpretation cannot reuse pixels produced under a different coverage
 contract.
@@ -938,12 +1174,18 @@ AV1 and ProRes requests with static metadata writing fail validation until they
 have independently implemented and verified bitstream/container backends.
 ST 2086/CLLI are descriptive HEVC HDR SEI and are not artificially restricted to
 PQ; HLG delivery may carry them when the authored delivery contract requires
-it. Source HDR10+ and Dolby Vision data is not copied across a rendered edit:
-the export health report emits `dynamic_hdr_metadata_sources` and
-`dynamic_hdr_metadata_not_preserved`, and a `WriteAuthored` request fails before
-encoder launch when referenced sources contain either
-dynamic format. Dynamic delivery requires a separately validated re-authoring
-workflow because source frame/scene metadata no longer describes edited pixels.
+it. Dynamic HDR delivery is Sequence-owned and explicit. `Omit` authorizes a
+rendered downgrade without dynamic metadata. `PreserveSourceExact` identifies a
+detectable metadata family and is admitted only for complete source-file
+identity: the source artifact is copied byte-for-byte, source/output SHA-256
+must match, and the output is independently re-probed. It is neither Smart
+Render nor remux and never falls back to rendered output. `Remake` projects one
+analyzed final-Program definition onto the exact export range and fails closed
+until an adopter-qualified/licensed generation, independent-validation, and
+human HDR/SDR QC Adapter is installed. ST 2094-40 Application #4 detection is
+not by itself an HDR10+ brand-certification claim; Dolby CM version, bitstream
+profile/level, metadata levels, licensing, and delivery qualification remain
+distinct evidence.
 
 Successful encoder exit is not proof of a correct deliverable. Timeline export
 derives `ExpectedVideoSignalConstraints` from the same
@@ -959,17 +1201,38 @@ exit. `Omit` deliveries do not pay this extra probe.
 Camera-log and GIF contracts additionally require color tags to be absent, so
 an encoder cannot silently replace an intentionally untagged signal with
 guessed metadata. ProRes 422 profiles are verified as 10-bit 4:2:2, while
-ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
+ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4. Professional mezzanine
+resolution is owned by `mondrian-export::mezzanine`: DNxHR LB/SQ/HQ are 8-bit
+4:2:2, HQX is 10-bit 4:2:2, DNxHR 444 is 10-bit RGB, AVC-Intra Class 100/200
+are 10-bit 4:2:2, and uncompressed MOV is one exact 2vuy/v210/raw RGB/r210
+representation. RGB forms require Full range; YUV presets default Legal. The
+final scale Seam owns code-value mapping before the single encoded UNORM pack.
+Raw MOV sample entries do not expose a separate range tag, so validation relies
+on that fixed representation plus exact codec tag/pixel format rather than
+inventing metadata. Professional RGB output writes and re-probes primaries,
+transfer, and GBR matrix tags.
 
 Delivery sample depth and renderer transport precision are separate contracts.
 `DeliveryBitDepth` exposes only the 8-bit, 10-bit, and 12-bit formats implemented
 by current codecs. H.264 High requires 8-bit 4:2:0; HEVC Main/Main10 require
 8/10-bit 4:2:0 respectively; ProRes 422 profiles require 10-bit 4:2:2; ProRes
 4444 profiles require 12-bit 4:4:4. A 10/12-bit delivery uses the internal
-`Rgba16Float` export frame contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
-quantized to 8-bit before encoding. That internal transport does not represent
-a 16-bit-float deliverable; no such user-facing option exists until a real
-float image/video backend is implemented. If GPU output and the renderer-owned
+`EncodedRgba16Unorm` export frame contract and `rgba64le` FFmpeg pipe. Its GPU
+output boundary is `Rgba16Float` so the renderer transform is not quantized
+until the single explicit UNORM16 pack, but the pipe itself is never described
+as Float16. `ExportFrameContract` separately defines true Float16 and Float32
+master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
+Those float seams preserve finite extended-range values without normalized
+clamping; UNORM seams validate finite input, clamp once to `[0, 1]`, and
+quantize. Non-finite samples and finite values outside Float16 range fail
+closed. OpenEXR Half uses a planar Float32 encoder seam and quantizes once in
+the EXR encoder, avoiding the packaged FFmpeg packed-Float16 conversion that
+clamps extended-range RGB. OpenEXR Half/Float32 and TIFF Float32 presets select
+those float contracts with explicit scene-linear Colorimetric targets. They
+reject display Rendering Views, normalized delivery legalization, NaN/Inf,
+out-of-range Half values, and Alpha outside `[0, 1]`; negative and greater-than-
+one RGB remain intact. Integer PNG16/DPX16/TIFF16 use the distinct UNORM16
+single-quantization contract. If GPU output and the renderer-owned
 CPU float boundary both fail, export stops with structured precision-failure
 diagnostics; an RGBA8 boundary is never expanded into a nominally high-bit pipe.
 
@@ -1061,9 +1324,13 @@ only after decoding, so already identified HDR video receives one bounded
 first-frame metadata decode during the background media probe; SDR imports do
 not. Stream and frame facts are de-duplicated by semantic kind. ICC payloads are
 parsed into a profile name plus an explicit
-`IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame HDR10+ and stream
-Dolby Vision configuration remain presence/diagnostic records until dedicated
-parsers are introduced.
+`IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame ST 2094-40
+Application #4 and stream Dolby Vision configuration remain family-presence
+diagnostics. They can authorize only exact whole-file preservation of that
+family; they do not invent Application/CM versions, bitstream profiles,
+certification, or editable shot payloads. Format-specific analyzed shot
+metadata enters author state only through a qualified analysis Adapter with
+immutable provenance and canonical payload hashes.
 Sequence/export static HDR authoring stores these typed core payloads directly.
 `StaticHdrMetadataPolicy::{Omit, WriteAuthored}` is explicit and never denotes
 source passthrough. `WriteAuthored` fails closed when either ST 2086
@@ -1091,6 +1358,12 @@ authoring. It deliberately does not claim an independent absolute HLG
 transfer-function oracle by itself or close Camera Log. HLG absolute qualification
 is instead owned by the independent core oracle and the renderer-wide Standard
 HLG/PQ luminance corpus described above.
+Real-device execution of those color boundaries is a separate sealed contract:
+the Windows Commercial Engine runner must carry the `mondrian-gpu-color` label,
+execute the complete versioned accuracy/performance profile under
+`sealed-required`, bind all wgpu reports to one captured DX12 GPU/driver, and
+publish zero skipped gates. Ordinary cross-platform test success cannot replace
+that evidence when an adapter or timestamp feature is unavailable.
 A separate camera-log golden begins with encoded Sony
 S-Log3/S-Gamut3.Cine bytes, exercises the preview lazy input transform into
 Linear Rec.2020, and compares the resulting Standard sRGB frame pixel-for-pixel
@@ -1103,9 +1376,11 @@ changes must keep these contracts green or update them only with intentional
 visual-reference and diagnostics-contract changes.
 
 Camera-log output is treated as a professional intermediate path. Export
-validation rejects consumer delivery codecs for camera-log output and only
-allows 10-bit-or-higher MOV/MXF ProRes configurations until richer metadata
-carriage is implemented.
+validation rejects consumer delivery codecs and admits only independently
+resolved 10-bit-or-higher professional representations: MOV/MXF ProRes,
+DNxHR HQX/444, AVC-Intra Class 100/200, and 10-bit uncompressed MOV. Static HDR
+metadata remains HEVC Main10-only; admitting a colorimetric Log intermediate
+does not imply ST 2086/CLLI, XAVC identity, or vendor certification.
 
 ## Unknown Media
 
@@ -1218,7 +1493,14 @@ Output context from the Sequence output color space. Preview and scopes consume
 this semantic boundary before any local monitor adaptation. Its
 typed output intent is resolved exclusively from the effective color engine and
 requested output target; display management cannot replace that engine-owned
-intent. The native GPU Viewer resolves this Program Output context first. The
+intent. `ProgramColorContext` is a closed value: its fields are private and its
+output is either an encoded endpoint or an internal working-space endpoint.
+Root construction validates the Project engine, Sequence working space,
+display-referred output, intent identity, and rendering-View mode even when a
+caller has not separately run Sequence settings validation. The concrete
+tone-map getter is derived from the validated transform resolving a rendering
+View; it cannot drift from the output intent as a separately mutable flag.
+The native GPU Viewer resolves this Program Output context first. The
 CPU raster fallback does the same through the presentation-only
 `execute_cpu_program_monitor_presentation_rgba8_with_session()` Interface: it
 retains the Program Output descriptor and diagnostics, consumes the uniquely
@@ -1235,7 +1517,14 @@ uses Program Output; `Colorimetric` permits an explicit display or Camera Log
 encoding without changing the Sequence; `RenderingView` resolves exactly one
 View from the Project engine and requires a display-referred target. The
 resolved target, encoded representation, renderer boundary, FFmpeg tags, and
-post-encode validation share one admitted contract.
+post-encode validation share one admitted contract. Export derives that contract
+through `ProgramColorContext::for_export_output(...)`; direct field replacement
+is impossible. Only a root context may derive an encoded output. A nested
+context is closed to `Working(parent_working_space)`, carries no rendering View,
+and fails if a caller attempts to promote it to delivery or display output.
+Thumbnail and other display-derived paths use
+`for_rendering_view_output(...)`; if the Project engine cannot prove that View,
+they remain unavailable instead of inventing a fallback context.
 
 `RenderMonitorAdaptation` is the renderer-owned preview-only contract from the
 encoded Program Output identity to the local monitor identity. It is a stock
@@ -1247,15 +1536,24 @@ the final monitor handle, keeping scopes and future Program Output caches
 unaffected by ICC/surface policy.
 
 Display management is machine-local runtime state. `DisplayManagementPolicy`
-carries monitor/profile reference and Viewer output mode and is never persisted
-as Project or Sequence author data. The Program Output tone-map policy is a
-different concern and remains explicit in
+has private fields and validated construction for four independent choices:
+`MonitorOutputIntent`, `DisplayCalibrationPolicy`, `IccRenderingIntent`, and
+`ViewerDisplayMode`. It is persisted only in the versioned user-level
+`AppUiPreferences`, restored into `AppState` before Preview starts, and is
+never persisted as Project or Sequence author data. Exact OCIO display/view
+preferences are admitted only when the active engine maps that pair to a
+standardized monitor output target; an arbitrary View cannot become a second
+creative output authority. The Program Output tone-map policy is a different
+concern and remains explicit in
 `SequenceColorSettings.program_output`.
 `DisplayToneMapPolicy` resolves the concrete Program Output `tone_map` flag for
 working -> output boundaries, including HDR-working to SDR-output delivery, so
 preview, export, cache keys, and diagnostics do not infer it from scattered
-booleans. Monitor/ICC adaptation follows Program Output and cannot replace its
-engine-owned rendering View.
+booleans. Monitor adaptation follows Program Output and cannot replace its
+engine-owned rendering View. ICC is a separate final device-calibration stage
+with perceptual, relative-colorimetric, saturation, and absolute-colorimetric
+intents. Surface capability remains Window/platform evidence and is never
+inferred from either preference.
 
 Root contexts retain one typed `OutputTransformIntent`. Colorimetric contexts
 carry no view. Tone-mapped Standard contexts carry the immutable package
@@ -1271,24 +1569,31 @@ when `$OCIO` is not configured.
 Preview cache keys include the complete typed output intent. An intent change
 invalidates cached viewer frames even when the output `ColorSpace` is unchanged.
 
-Program video scopes are measured from the exact float display/export-encoded
-Program Output, before any monitor/ICC adaptation or UI raster conversion.
+Program video scopes default to the exact float display/export-encoded Program
+Output. The professional Viewer control contract can instead select Monitor
+Output, meaning the result after machine-local monitor color-space adaptation
+but still before device-specific ICC calibration or UI raster conversion. A
+typed tap and exact signal color-space identity travel together; Viewer
+validation rejects any mismatch before recording GPU work.
 `mondrian-core::compute_program_color_scopes_rgba_f32` requires an explicit
 standardized output identity and selects Rec.601, Rec.709/sRGB, Display P3, or
 Rec.2020 luma/chroma coefficients accordingly. Working-linear and camera-log
 identities, malformed buffers, and non-finite RGB fail closed. The RGBA8 helper
 exists for already-quantized SDR boundaries, but HDR/10-bit scope paths must use
-the float helper. Negative and above-nominal RGB/luma values remain visible as
+the float helper. IRE aggregation bins encoded signal. An explicit nits scale
+instead decodes sRGB/SDR through its declared display EOTF, PQ through ST 2084,
+and HLG through the 1000-nit BT.2100 reference OOTF before binning absolute
+display luminance; nits are never a relabelled encoded-signal axis. Negative and
+above-nominal RGB/luma values remain visible as
 explicit `ProgramSignalExcursions` even though the density plots group them into
 their endpoint bins. A final renderer float boundary exposes this contract through
 `RenderOutputColorBoundaryFloat::program_scopes`, so callers cannot accidentally
 measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
-path over the Program Output texture; they must not introduce a per-frame
+path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
-generates display density textures on-device. Viewer validation rejects a scope
-request whose signal identity differs from the Program Output boundary before
-recording any GPU work.
+generates display density textures on-device. CPU/GPU tests compare exact bin
+counts for both encoded-signal and nits execution.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and
@@ -1360,28 +1665,24 @@ hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
 resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
 must resolve and record that readback through the renderer-owned output
 boundary API instead of deriving it from texture format at the call site.
-`RenderGpuOutputBoundaryRuntime` owns GPU output state for one explicit
-execution lifetime. Preview retains it in the live Viewer device Session.
-Export creates a separate instance per queue attempt, permits reuse only across
+`GpuColorExecutionSession` owns GPU color state for one explicit execution
+lifetime. Preview retains the shared internal runtime in its live Viewer device
+Session. Export creates a Session per queue attempt, permits reuse only across
 frames of that attempt, scopes GPU-failure backoff to that attempt, and releases
-the instance before terminal publication. It keeps the OCIO shader cache, pure
-backend prep runtime, concrete backend-object runtime, GPU frame id allocator,
-and GPU frame table together without process-global or cross-job residency.
-`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
-is the preview/export-facing sequencing point for this output boundary: it
-plans the boundary, prepares runtime-owned backend objects, derives the resource
-plan, materializes resources, schedules the pass, records the OCIO fullscreen
-draw, and records the optional readback copy in one command encoder. Its
-per-submission inputs are grouped in
-`RenderGpuOutputBoundaryRuntimeOwnedBackendContext` so app/export code passes
-device, queue, encoder, and load operation without hand-threading wgpu
-pipelines, bind groups, pass nodes, or the frame table through each layer.
+the Session before terminal publication. It keeps the OCIO shader cache, pure
+backend prep runtime, concrete backend-object runtime, GPU frame-id allocator,
+and frame table together without process-global or cross-job residency.
+`record_program_output(...)` is the Export-facing sequencing point: it accepts
+CPU or resident GPU working input plus one small backend Adapter, plans and
+records the exact boundary, and returns only the output handle, optional
+readback, and diagnostics. The private `RenderGpuOutputBoundaryRuntime`
+Implementation still performs lowering and materialization; App/Export cannot
+thread pipelines, bind groups, pass nodes, caches, or the frame table.
 The record result carries `RenderColorStageDiagnostics`; preview and export
 must use that diagnostics payload as the authoritative evidence for native GPU
 OCIO usage, transfer/readback counts, and color-stage pixel budgets.
-Callers that already hold a stage or resource plan may use the lower-level
-recorders, but app/export scheduling should prefer the runtime-owned boundary API so
-final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`
+Only renderer Implementation and the hardware-qualification Adapter may use
+lower-level recorders. `GpuColorFrameReadbackPlan`
 and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /
 `EncodedRgba8` contracts and do not reinterpret float targets. Preview and
@@ -1504,7 +1805,7 @@ for a documented production subset. Unsupported requests use
 the `document_unsupported_feature` action code; bounded support must enumerate
 its admitted subset and fail closed outside it.
 
-- **`MonitorProfileReference::IccProfile` outside a resolved Display Output
+- **Enabled `DisplayCalibrationPolicy` outside a resolved Display Output
   Contract** — Windows WCS, macOS CoreGraphics, Wayland color-management-v1,
   and X11 root properties provide platform-native default ICC discovery through
   `mondrian-platform`, and preview scheduling consumes the resolved Display
@@ -1524,19 +1825,19 @@ its admitted subset and fail closed outside it.
   Any unavailable or hardware-only probe records
   `MonitorHdrCapabilityUnknown` / `MonitorHdrCapabilityUnsupported` blockers
   when HDR correctness cannot be confirmed.
-- **GPU compositing (bounded production subset)** — The `gpu_compositor.rs` module is wired into the
-  preview/viewer GPU path for the safe production subset: media-layer affine
+- **GPU compositing (resource-admitted production path)** — The `gpu_compositor.rs` module is wired into the
+  preview/viewer GPU path for the supported production set: media-layer affine
   transforms, procedural-solid affine transforms, every canonical BlendMode, supported
   fused working-linear media/solid effect chains, working-linear adjustment
-  layers, and at most five executed layers.
+  layers, with no semantic layer-count ceiling.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
   same renderer-owned OCIO GPU output boundary used by the rest of preview.
   GPU effect lowering supports ColorAdjust, Vignette, and deterministic Grain
   without an encoded/RGBA8 intermediate. Adjustment plans sample the current
   accumulator, process it in the same working space, and blend the result back.
-  Unsupported layer stacks fail back to the CPU reference compositor with
+  Unsupported operations fail back to the CPU reference compositor with
   structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
-  `UnsupportedTransform`, `TooManyLayers`, `GpuUnavailable`). The shared GPU
+  `UnsupportedTransform`, `GpuUnavailable`). The shared GPU
   compositor implements the CPU Float32 straight-alpha algebra for every mode;
   Dissolve carries the complete frame seed and destination pixel identity, and
   real-device parity covers threshold and non-separable channel-tie inputs.
@@ -1553,13 +1854,130 @@ the taxonomy.
 ## HDR/SDR
 
 HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. Authored static HDR metadata can only be written for HDR output spaces.
-## OCIO Cache Revision Contract
 
-Mondrian Standard and pinned builtin ACES packages are immutable and use cache
-revision zero; their complete package/source identity is already part of every
-processor and shader request. Validated Custom path and environment configs
-also carry their complete resolved digest identity; reloading changed bytes
-produces a new engine key. The monotonic OCIO selection generation is
-operational evidence, not semantic cache identity. CPU processor and renderer
-GPU shader caches therefore cannot alias changed mutable sources, while a warm
-owner-scoped lookup performs no generation lock or filesystem check.
+The native Viewer presentation seam never blends machine UI in PQ/HLG code
+space. Renderer output remains encoded target code values, while the UI carrier
+decodes it into target-primary display-linear values using a 100-nit reference
+white, composites linearized UI there, and applies the final PQ/HLG encoding at
+the swapchain store. Display P3 follows the same target-primary linear rule with
+the sRGB transfer. ICC-calibrated output is not relabelled as one of these
+standard targets; it uses the separately typed opaque device-code carrier.
+## OCIO Engine Identity Contract
+
+Mondrian Standard and pinned builtin ACES packages are immutable; their complete
+package/source identity is already part of every processor and shader request.
+Validated Custom path and environment configs likewise carry their complete
+resolved config and dependency digests, so reloading changed bytes produces a
+new engine key. No synthetic cache revision is appended. The monotonic OCIO
+selection generation remains operational evidence, never semantic equality.
+CPU owner handles, shared parent graphs, renderer owner caches, and shared plain
+GPU artifacts therefore cannot alias changed mutable sources, while warm
+lookups perform no generation lock or filesystem check.
+
+## Cross-Application Reference Qualification
+
+Renderer's `cross_application_qualification` Module deepens the existing
+`color_reference` import and `color_accuracy` Interfaces; App and validation
+scripts do not own a second color interpretation. A strict schema-v1 profile
+compiles into one canonical plan that fixes the analytic stimulus digest,
+exact producer versions/builds, per-case producer closure, raster, Alpha,
+rational frame coordinate, encoding, metric, tolerance, and byte/pixel/case
+limits. The admitted first slice is scene-linear Rec.2020 numeric comparison,
+sRGB CIEDE2000, and BT.2100 PQ Delta E ITP. Display P3, HLG, and CIELAB cases
+fail during profile compilation until their distinct comparison semantics are
+implemented; they never borrow a superficially similar metric.
+
+Every artifact is imported through pre-decode byte/pixel admission and retains
+the exact executable/install, native Project, actual settings, acquisition
+Adapter, decoded metadata, operator-attestation, and payload hashes. Producer
+origin, version, build, stimulus, payload, raster, encoding, luminance, Alpha,
+and frame coordinate are checked together before comparison. A complete case
+produces all pairwise rows; report order and digest are stable regardless of
+artifact declaration order. Any numeric failure produces `failed`; absent
+required application evidence produces `incomplete`, never a diagnostic pass.
+
+The Module establishes cross-application file-output parity only. Vendor-native
+creative tone mappers are versioned baselines rather than common mathematical
+oracles. Absolute color accuracy remains owned by the Independent Colorimetric
+Oracle Corpus, while Viewer/OS color management, HDR surfaces, reference
+monitors, GPU/driver matrices, and SDI remain separate hardware qualification.
+
+### Explicit local reference producer scope
+
+Cross-application profile schema 2 can explicitly select `blender_and_premiere`
+for the user-approved local Mondrian/Blender/Premiere matrix. Schema 1 retains
+the full four-producer requirement. Scope is included in canonical profile
+identity and the output report; a missing Resolve artifact cannot silently
+reduce a legacy matrix. The separate checked-in local stimulus and policy bind
+the same analytic patches, exact frame coordinates, and required pairwise
+comparisons to their actual producer set. Installed applications do not count
+as captures: exact versions/builds and same-run exported artifacts remain
+mandatory for an executed qualification.
+
+### Blender 5.1 native capture output correction (COL-045)
+
+Native Blender readback is capture evidence, not independent color qualification.
+The fixed analytic image-sequence project uses scene origin zero with filename
+`input-0000.exr`. Blender 5.1 node RNA defines `frame_start` assuming a first picture
+numbered 1; `frame_offset = -1` is therefore required. The original offset zero
+produced frame-1 and frame-18 marker pixels for requested frames 0 and 17, despite
+correct scene-frame property readback. Decoded marker pixels must verify identity.
+
+`capture_blender.py` now sets file `color_management = OVERRIDE` and copies the
+requested display/view/look/exposure/gamma into the file's own settings before
+selecting the linear output space. `FOLLOW_SCENE` wrote `lin_rec709_scene` while
+the dormant file property read back `Linear Rec.2020`. The corrected native EXR
+header declares `lin_rec2020_scene`; it does not add a `chromaticities` attribute.
+No post-render color transform or artifact rewrite is used to obtain this result.
+
+The capture records `native_output_contract` separately from requested settings.
+Blender's native compositor/EXR output is premultiplied; this ImageFormatSettings
+RNA exposes no straight-alpha output property. The PNG save path yields straight
+RGB for nonzero alpha, while the compositor has already lost hidden RGB under
+zero alpha. The straight-coverage stimulus contract is not silently changed and
+this capture cannot qualify its hidden-RGB preservation row. Changing source
+interpretation to packed channels or fabricating missing RGB is not a correction.
+
+The second local native run (`blender-capture-v2`, Blender 5.1.1 build b70da489d7f4)
+was independently decoded with FFmpeg 6.1.1 native Float32 EXR and Pillow PNG.
+Both 64-pixel repeated frame markers identify frames 0 and 17 exactly. The EXR is
+ABGR Float32, sampling 1x1, data/display windows (0,0)..(63,63), ZIP compression;
+Rec.2020 premultiplied source pixels differ by at most 1.91e-6. Alpha values
+0/.25/.5/1 and negative -0.125 / high 16 survive. PNG nonzero-alpha pixels match
+an independently chromaticities-derived Rec.2020-to-sRGB standard transfer and
+8-bit rounding exactly; hidden RGB at alpha zero remains lost. These measurements
+explain the captured output and are not a substituted OCIO/vendor qualification
+oracle. Original failed capture and both independent diagnostics are retained.
+
+Primary native behavior sources: Blender 5.1 local RNA `CompositorNodeImage` and
+`ImageFormatSettings`, [image alpha conventions](https://docs.blender.org/manual/en/5.1/editors/image/image_settings.html),
+and [supported output formats](https://docs.blender.org/manual/en/5.1/files/media/image_formats.html).
+
+The D3D12 resident encoder's texture borrow and native frame imports compile only
+with the Windows adapter. Its private conversion contract remains present on
+other platforms, where construction rejects the backend. This does not add a
+Linux resident encoder, change the working precision, or bypass Program Output.
+
+Compositor source geometry starts from the fragment's destination pixel center,
+then applies the compiled inverse affine transform. Reconstructing that center
+from interpolated UVs can place an identity edge below 0.5 on Vulkan and can
+select a preceding integer grain coordinate. The exact fragment position keeps
+source admission and procedural effects on the same pixel grid as the CPU
+contract, without edge epsilons or relaxed color tolerances.
+
+Power Window GPU validation checks the actual DAG dependencies: the correction
+and mask-combination branches may execute in either independent topological
+order, but MatteMix must consume their exact materializations and completion
+tokens. The same validation retains the exact upload/device resource counts and
+the undersized-grant rejection; it does not impose an unrelated branch order.
+
+### Compact decoded YUV input
+
+Linux and portable CPU decode may retain planar 4:2:0 eight/ten-bit, planar
+4:2:2 ten-bit, or semiplanar NV12/P010 samples for GPU consumers. The existing
+Renderer YUV input stage consumes the exact matrix, range, chroma geometry and
+sample alignment before the shared OCIO input transform. P010 uses
+most-significant alignment; planar ten-bit uses least-significant alignment.
+This avoids CPU RGB expansion without changing the working domain, alpha
+contract, output transform, or CPU-addressable consumer requirements. A compact
+CPU payload still requires upload and is never evidence of GPU-resident decode.

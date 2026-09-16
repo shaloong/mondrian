@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "platform-gpu-color-gates-v1",
+  "package": "mondrian-renderer",
+  "all_features": true,
+  "single_test_result_required": true,
+  "diagnostic_skip_forbidden": true,
+  "gates": [
+    {
+      "id": "output-smoke",
+      "target": "lib",
+      "integration_test": null,
+      "test": "color_stage::tests::gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device",
+      "ignored": true,
+      "measurements": [
+        { "metric": "native_gpu_output_ready", "comparison": "at_least", "limit": 1.0 },
+        { "metric": "readback_stages", "comparison": "at_most", "limit": 0.0 }
+      ]
+    },
+    {
+      "id": "standard-all-views-accuracy",
+      "target": "lib",
+      "integration_test": null,
+      "test": "color_stage::tests::gpu_output_boundary_runtime_matches_cpu_for_all_standard_views_on_real_wgpu_device",
+      "ignored": false,
+      "measurements": [
+        { "metric": "max_absolute_float_delta", "comparison": "at_most", "limit": 0.001 }
+      ]
+    },
+    {
+      "id": "standard-rec709-accuracy",
+      "target": "lib",
+      "integration_test": null,
+      "test": "color_stage::tests::gpu_standard_rec709_view_matches_cpu_rgba8_on_real_wgpu_device",
+      "ignored": false,
+      "measurements": [
+        { "metric": "max_code_delta", "comparison": "at_most", "limit": 1.0 }
+      ]
+    },
+    {
+      "id": "standard-pq-delta-e-itp",
+      "target": "lib",
+      "integration_test": null,
+      "test": "color_stage::tests::gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device",
+      "ignored": false,
+      "measurements": [
+        { "metric": "max_delta_e_itp", "comparison": "at_most", "limit": 0.55 },
+        { "metric": "mean_delta_e_itp", "comparison": "at_most", "limit": 0.2 },
+        { "metric": "percentile_99_delta_e_itp", "comparison": "at_most", "limit": 0.5 },
+        { "metric": "max_alpha_absolute_error", "comparison": "at_most", "limit": 0.001 }
+      ]
+    },
+    {
+      "id": "aces-pq-delta-e-itp",
+      "target": "lib",
+      "integration_test": null,
+      "test": "color_stage::tests::gpu_aces_pq_intent_meets_delta_e_itp_budget_on_real_wgpu_device",
+      "ignored": false,
+      "measurements": [
+        { "metric": "max_delta_e_itp", "comparison": "at_most", "limit": 0.55 },
+        { "metric": "mean_delta_e_itp", "comparison": "at_most", "limit": 0.2 },
+        { "metric": "percentile_99_delta_e_itp", "comparison": "at_most", "limit": 0.5 },
+        { "metric": "max_alpha_absolute_error", "comparison": "at_most", "limit": 0.001 }
+      ]
+    },
+    {
+      "id": "native-yuv-color-accuracy",
+      "target": "lib",
+      "integration_test": null,
+      "test": "native_video::yuv_decode::tests::nv12_shader_decodes_limited_range_on_real_wgpu_device",
+      "ignored": false,
+      "measurements": [
+        { "metric": "max_rgb_absolute_error", "comparison": "at_most", "limit": 0.0015 },
+        { "metric": "max_alpha_absolute_error", "comparison": "at_most", "limit": 0.001 }
+      ]
+    },
+    {
+      "id": "standard-view-4k-performance",
+      "target": "integration",
+      "integration_test": "color_view_gpu_perf",
+      "test": "standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2",
+      "ignored": true,
+      "measurements": [
+        { "metric": "all_standard_views_within_budget", "comparison": "at_least", "limit": 1.0 },
+        { "metric": "standard_beats_aces2", "comparison": "at_least", "limit": 1.0 }
+      ]
+    },
+    {
+      "id": "standard-input-4k-performance",
+      "target": "integration",
+      "integration_test": "color_view_gpu_perf",
+      "test": "standard_input_transforms_4k_gpu_timestamp_meet_budget",
+      "ignored": true,
+      "measurements": [
+        { "metric": "all_transforms_within_budget", "comparison": "at_least", "limit": 1.0 }
+      ]
+    }
+  ]
+}

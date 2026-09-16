@@ -3,7 +3,7 @@
 //! 所有 UI 尺寸从这里获取，禁止硬编码数值。
 
 /// 间距 Token 集合 —— 所有间隙、内边距、外边距
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpacingTokens {
     // 基础间距阶梯
     pub xs: f32,
@@ -130,7 +130,7 @@ pub struct SpacingTokens {
 }
 
 /// 阴影定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShadowToken {
     pub offset_x: f32,
     pub offset_y: f32,

@@ -5,9 +5,12 @@
 //! evidence. Window code polls it and injects a shallow lookup handle into the
 //! Timeline widget; no Widget or paint callback owns FFmpeg state.
 
+use std::any::Any;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{mpsc, Arc, Weak};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
@@ -16,12 +19,15 @@ use mondrian_core::{
     ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
 pub use mondrian_media::MAX_WAVEFORM_WIDTH as WAVEFORM_MAX_WIDTH;
-use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics};
+use mondrian_media::{
+    AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics,
+    AudioSourceCacheShutdownEvidence,
+};
 use parking_lot::{Condvar, Mutex};
 
 use crate::app::single_worker_activity::{SingleWorkerActivity, SingleWorkerPhase};
 
-use analysis::{slice_and_resample, waveform_worker};
+use analysis::{slice_and_resample, waveform_worker, WaveformWorkerExit};
 use state::{
     duration_to_waveform_frames, push_terminal, retain_failure_locked, rotate_waveform_generation,
     touch_key, PendingWaveform, WaveformFailure, WaveformJob, WaveformResult, WaveformSourceKey,
@@ -29,7 +35,12 @@ use state::{
 };
 
 mod analysis;
+mod startup;
 mod state;
+pub use startup::{
+    AudioWaveformStartupFailure, AudioWaveformStartupPanic, AudioWaveformStartupShutdownEvidence,
+    AudioWaveformStartupStage,
+};
 #[cfg(test)]
 mod tests;
 
@@ -48,6 +59,98 @@ const WAVEFORM_TYPICAL_STEREO_WINDOW_BYTES: usize =
     WAVEFORM_SAMPLE_RATE as usize * WAVEFORM_DECODE_WINDOW_SECONDS * 2 * std::mem::size_of::<f32>();
 const WAVEFORM_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const WAVEFORM_COMPLETED_RESULTS_POLL_BUDGET: Duration = Duration::from_micros(2_000);
+const WAVEFORM_WORKER_TERMINAL_RUNNING: u8 = 0;
+const WAVEFORM_WORKER_TERMINAL_RETURNED: u8 = 1;
+const WAVEFORM_WORKER_TERMINAL_PANICKED: u8 = 2;
+const WAVEFORM_WORKER_TERMINAL_PANICKED_OWNER_ABANDONED: u8 = 3;
+const WAVEFORM_WORKER_TERMINAL_FAILED: u8 = 4;
+
+/// Consuming-style closure evidence for the product waveform service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AudioWaveformShutdownEvidence {
+    /// Evidence schema version.
+    pub schema_version: u32,
+    /// Dedicated analysis workers configured for this service.
+    pub workers_configured: u32,
+    /// Dedicated analysis workers successfully started.
+    pub workers_started: u32,
+    /// Worker start attempts that failed before ownership transfer.
+    pub worker_start_failures: u32,
+    /// Started workers that returned and were joined.
+    pub workers_terminated: u32,
+    /// Joined workers whose outer supervisor observed a panic.
+    pub worker_panics: u32,
+    /// Workers that returned because their bounded result transport failed.
+    pub worker_failures: u32,
+    /// Workers still running at the supplied absolute deadline.
+    pub worker_timeouts: u32,
+    /// Timed-out worker handles detached for bounded caller return.
+    pub worker_detachments: u32,
+    /// Opaque panic or spawn-error payload owners deliberately abandoned.
+    pub worker_owner_abandonments: u32,
+    /// Admitted requests at the first shutdown signal.
+    pub pending_requests_before: usize,
+    /// Deferred requests at the first shutdown signal.
+    pub deferred_requests_before: usize,
+    /// Physical worker requests at the first shutdown signal.
+    pub running_requests_before: usize,
+    /// Completed results awaiting publication at the first shutdown signal.
+    pub awaiting_publication_before: usize,
+    /// Logical requests still retained after closure.
+    pub pending_requests_remaining: usize,
+    /// Deferred requests still retained after closure.
+    pub deferred_requests_remaining: usize,
+    /// Physical worker requests still retained after closure.
+    pub running_requests_remaining: usize,
+    /// Results still awaiting publication acknowledgement after closure.
+    pub awaiting_publication_remaining: usize,
+    /// Strong decoded-source cache references outside the service owner.
+    pub external_source_cache_references: usize,
+    /// Terminal decoded-source cache evidence.
+    pub source_cache: AudioSourceCacheShutdownEvidence,
+}
+
+impl AudioWaveformShutdownEvidence {
+    /// Return true only for a current, complete, panic-free owner closure.
+    pub fn all_resources_released(self) -> bool {
+        self.analysis_resources_released(1) && self.source_cache.all_resources_released()
+    }
+
+    fn analysis_resources_released(self, expected_workers: u32) -> bool {
+        self.schema_version == 1
+            && self.workers_configured == 1
+            && self.workers_started == expected_workers
+            && self.worker_start_failures == 0
+            && self.workers_terminated == expected_workers
+            && self.worker_panics == 0
+            && self.worker_failures == 0
+            && self.worker_timeouts == 0
+            && self.worker_detachments == 0
+            && self.worker_owner_abandonments == 0
+            && self.pending_requests_remaining == 0
+            && self.deferred_requests_remaining == 0
+            && self.running_requests_remaining == 0
+            && self.awaiting_publication_remaining == 0
+            && self.external_source_cache_references == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WaveformShutdownBoundary {
+    pending_requests: usize,
+    deferred_requests: usize,
+    running_requests: usize,
+    awaiting_publication: usize,
+}
+
+struct WaveformShutdownControl {
+    worker: Option<JoinHandle<()>>,
+    boundary: Option<WaveformShutdownBoundary>,
+    receipt: Option<AudioWaveformShutdownEvidence>,
+    workers_started: u32,
+    worker_start_failures: u32,
+    worker_owner_abandonments: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WaveformFailureReason {
@@ -147,7 +250,7 @@ pub enum WaveformWorkerPhase {
 /// Cloneable, shallow Timeline Adapter over the analysis service.
 #[derive(Clone)]
 pub struct AudioWaveformSource {
-    service: Arc<AudioWaveformService>,
+    service: Weak<AudioWaveformService>,
 }
 
 impl fmt::Debug for AudioWaveformSource {
@@ -167,7 +270,9 @@ impl AudioWaveformSource {
         end_secs: f64,
         pixel_width: u32,
     ) -> Option<Vec<f32>> {
-        self.service.lookup(asset_id, source, start_secs, end_secs, pixel_width)
+        self.service
+            .upgrade()?
+            .lookup(asset_id, source, start_secs, end_secs, pixel_width)
     }
 }
 
@@ -175,11 +280,13 @@ impl AudioWaveformSource {
 pub struct AudioWaveformService {
     resource_policy: Mutex<()>,
     state: Mutex<WaveformState>,
-    jobs: mpsc::SyncSender<WaveformJob>,
+    jobs: Mutex<Option<mpsc::SyncSender<WaveformJob>>>,
     results: Mutex<mpsc::Receiver<WaveformResult>>,
-    source_cache: Arc<AudioSourceCache>,
+    source_cache: Mutex<Option<Arc<AudioSourceCache>>>,
     dispatch_gate: Arc<WaveformDispatchGate>,
     worker_activity: Arc<SingleWorkerActivity<WaveformWorkerIdentity>>,
+    worker_terminal: Arc<AtomicU8>,
+    shutdown: Mutex<WaveformShutdownControl>,
 }
 
 struct WaveformDispatchGate {
@@ -212,57 +319,17 @@ impl WaveformDispatchGate {
 }
 
 impl AudioWaveformService {
-    /// Start a bounded waveform analysis service and its dedicated worker.
-    pub fn new() -> Arc<Self> {
-        let (_, pcm_cache_byte_budget) =
-            waveform_cache_partition(WAVEFORM_SOURCE_CACHE_BYTE_BUDGET);
-        let source_cache = Arc::new(AudioSourceCache::new_bounded_with_sessions(
-            WAVEFORM_SAMPLE_RATE,
-            WAVEFORM_DECODE_WINDOW_SECONDS,
-            waveform_pcm_entry_capacity(pcm_cache_byte_budget),
-            pcm_cache_byte_budget,
-            1,
-        ));
-        let (job_tx, job_rx) = mpsc::sync_channel(WAVEFORM_JOB_QUEUE_CAPACITY);
-        let (result_tx, result_rx) = mpsc::sync_channel(WAVEFORM_JOB_QUEUE_CAPACITY + 1);
-        let worker_cache = Arc::clone(&source_cache);
-        let dispatch_gate = WaveformDispatchGate::new();
-        let worker_dispatch_gate = Arc::clone(&dispatch_gate);
-        let worker_activity = Arc::new(SingleWorkerActivity::default());
-        let physical_worker_activity = Arc::clone(&worker_activity);
-        if let Err(error) = std::thread::Builder::new()
-            .name("mondrian-waveform-analysis".to_owned())
-            .spawn(move || {
-                waveform_worker(
-                    job_rx,
-                    result_tx,
-                    worker_cache,
-                    worker_dispatch_gate,
-                    physical_worker_activity,
-                )
-            })
-        {
-            tracing::error!(%error, "failed to start waveform analysis worker");
-        }
-        Arc::new(Self {
-            resource_policy: Mutex::new(()),
-            state: Mutex::new(WaveformState::default()),
-            jobs: job_tx,
-            results: Mutex::new(result_rx),
-            source_cache,
-            dispatch_gate,
-            worker_activity,
-        })
-    }
-
     /// Create a shallow, cloneable lookup Adapter for presentation code.
     pub fn source(self: &Arc<Self>) -> AudioWaveformSource {
-        AudioWaveformSource { service: Arc::clone(self) }
+        AudioWaveformSource { service: Arc::downgrade(self) }
     }
 
     /// Bind the current project library. A different library rotates the
     /// generation, cancels all admitted work, and clears project-local state.
     pub fn set_library(&self, library: Option<Arc<AssetLibrary>>) {
+        if self.dispatch_gate.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         let mut state = self.state.lock();
         let unchanged = match (&state.library, &library) {
             (Some(current), Some(next)) => Arc::ptr_eq(current, next),
@@ -283,6 +350,9 @@ impl AudioWaveformService {
         dispatch_enabled: bool,
         aggregate_cache_byte_budget: usize,
     ) {
+        if self.dispatch_gate.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         let _resource_policy = self.resource_policy.lock();
         let aggregate_cache_byte_budget = aggregate_cache_byte_budget.max(2);
         let (envelope_cache_byte_budget, pcm_cache_byte_budget) =
@@ -302,11 +372,13 @@ impl AudioWaveformService {
             trim_waveform_cache_to_budget(&mut state);
             dispatch_enabled
         };
-        self.source_cache.reconfigure(AudioSourceCacheConfig::new(
-            waveform_pcm_entry_capacity(pcm_cache_byte_budget),
-            pcm_cache_byte_budget,
-            1,
-        ));
+        if let Some(source_cache) = self.source_cache.lock().as_ref().cloned() {
+            source_cache.reconfigure(AudioSourceCacheConfig::new(
+                waveform_pcm_entry_capacity(pcm_cache_byte_budget),
+                pcm_cache_byte_budget,
+                1,
+            ));
+        }
         self.dispatch_gate.set_enabled(dispatch_enabled);
         if should_dispatch {
             self.dispatch_deferred(WAVEFORM_MAX_DEFERRED_DISPATCH_PER_POLL);
@@ -430,7 +502,165 @@ impl AudioWaveformService {
             superseded_completions: state.counters.superseded_completions,
             cache_evictions: state.counters.cache_evictions,
             terminal_records: state.terminal_records.iter().cloned().collect(),
-            source_cache: self.source_cache.diagnostics(),
+            source_cache: self
+                .source_cache
+                .lock()
+                .as_ref()
+                .map_or_else(AudioSourceCacheDiagnostics::default, |cache| {
+                    cache.diagnostics()
+                }),
+        }
+    }
+
+    /// Close admission and signal every Waveform-owned execution owner.
+    ///
+    /// This first phase is idempotent and performs no worker join or foreign
+    /// process teardown.
+    pub fn begin_shutdown(&self) {
+        let _resource_policy = self.resource_policy.lock();
+        let mut shutdown = self.shutdown.lock();
+        if shutdown.boundary.is_some() {
+            return;
+        }
+
+        self.dispatch_gate.shutdown.store(true, Ordering::Release);
+        self.dispatch_gate.changed.notify_all();
+        let activity = self.worker_activity.snapshot();
+        let mut state = self.state.lock();
+        let boundary = WaveformShutdownBoundary {
+            pending_requests: state.pending.len(),
+            deferred_requests: state.deferred.len(),
+            running_requests: usize::from(activity.current.is_some()),
+            awaiting_publication: activity.awaiting_publication.len(),
+        };
+        rotate_waveform_generation(&mut state, None);
+        state.admit_automatic = false;
+        state.dispatch_enabled = false;
+        drop(state);
+        self.jobs.lock().take();
+        if let Some(source_cache) = self.source_cache.lock().as_ref().cloned() {
+            source_cache.begin_shutdown();
+        }
+        shutdown.boundary = Some(boundary);
+    }
+
+    /// Join the analysis worker and consume its decoded-source cache before an
+    /// absolute monotonic deadline.
+    pub fn shutdown_until(&self, deadline: Instant) -> AudioWaveformShutdownEvidence {
+        self.begin_shutdown();
+        let mut shutdown = self.shutdown.lock();
+        if let Some(receipt) = shutdown.receipt {
+            return receipt;
+        }
+        let boundary = shutdown.boundary.unwrap_or_default();
+        let mut workers_terminated = 0_u32;
+        let mut worker_panics = 0_u32;
+        let mut worker_failures = 0_u32;
+        let mut worker_timeouts = 0_u32;
+        let mut worker_detachments = 0_u32;
+        let mut worker_owner_abandonments = shutdown.worker_owner_abandonments;
+
+        if let Some(worker) = shutdown.worker.take() {
+            if worker.thread().id() == std::thread::current().id() {
+                worker_detachments = 1;
+            } else {
+                let worker = worker;
+                loop {
+                    self.drain_shutdown_results();
+                    if worker.is_finished() {
+                        workers_terminated = 1;
+                        if let Err(payload) = worker.join() {
+                            worker_panics = 1;
+                            worker_owner_abandonments =
+                                worker_owner_abandonments.saturating_add(u32::from(
+                                    dispose_canonical_or_abandon_opaque_panic_payload(payload),
+                                ));
+                        } else {
+                            match self.worker_terminal.load(Ordering::Acquire) {
+                                WAVEFORM_WORKER_TERMINAL_RETURNED => {}
+                                WAVEFORM_WORKER_TERMINAL_PANICKED => worker_panics = 1,
+                                WAVEFORM_WORKER_TERMINAL_PANICKED_OWNER_ABANDONED => {
+                                    worker_panics = 1;
+                                    worker_owner_abandonments =
+                                        worker_owner_abandonments.saturating_add(1);
+                                }
+                                WAVEFORM_WORKER_TERMINAL_FAILED => worker_failures = 1,
+                                _ => worker_panics = 1,
+                            }
+                        }
+                        break;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        worker_timeouts = 1;
+                        worker_detachments = 1;
+                        break;
+                    }
+                    std::thread::park_timeout(
+                        deadline.saturating_duration_since(now).min(Duration::from_millis(2)),
+                    );
+                }
+            }
+        }
+        self.drain_shutdown_results();
+
+        let activity = self.worker_activity.snapshot();
+        let state = self.state.lock();
+        let pending_requests_remaining = state.pending.len();
+        let deferred_requests_remaining = state.deferred.len();
+        drop(state);
+
+        let mut external_source_cache_references = 0_usize;
+        let mut source_cache_evidence = AudioSourceCacheShutdownEvidence::default();
+        if let Some(source_cache) = self.source_cache.lock().take() {
+            let strong_references = Arc::strong_count(&source_cache);
+            if workers_terminated == shutdown.workers_started {
+                match Arc::try_unwrap(source_cache) {
+                    Ok(source_cache) => {
+                        source_cache_evidence = source_cache.shutdown_until(deadline);
+                    }
+                    Err(source_cache) => {
+                        external_source_cache_references =
+                            Arc::strong_count(&source_cache).saturating_sub(1);
+                        drop(source_cache);
+                    }
+                }
+            } else {
+                external_source_cache_references = strong_references.saturating_sub(1);
+                drop(source_cache);
+            }
+        }
+
+        let receipt = AudioWaveformShutdownEvidence {
+            schema_version: 1,
+            workers_configured: 1,
+            workers_started: shutdown.workers_started,
+            worker_start_failures: shutdown.worker_start_failures,
+            workers_terminated,
+            worker_panics,
+            worker_failures,
+            worker_timeouts,
+            worker_detachments,
+            worker_owner_abandonments,
+            pending_requests_before: boundary.pending_requests,
+            deferred_requests_before: boundary.deferred_requests,
+            running_requests_before: boundary.running_requests,
+            awaiting_publication_before: boundary.awaiting_publication,
+            pending_requests_remaining,
+            deferred_requests_remaining,
+            running_requests_remaining: usize::from(activity.current.is_some()),
+            awaiting_publication_remaining: activity.awaiting_publication.len(),
+            external_source_cache_references,
+            source_cache: source_cache_evidence,
+        };
+        shutdown.receipt = Some(receipt);
+        receipt
+    }
+
+    fn drain_shutdown_results(&self) {
+        let results = self.results.lock();
+        while let Ok(result) = results.try_recv() {
+            self.worker_activity.acknowledge_publication(&result.worker_identity());
         }
     }
 
@@ -442,6 +672,9 @@ impl AudioWaveformService {
         end_secs: f64,
         pixel_width: u32,
     ) -> Option<Vec<f32>> {
+        if self.dispatch_gate.shutdown.load(Ordering::Acquire) {
+            return None;
+        }
         let key = WaveformSourceKey { asset_id, selection: source.clone() };
         let source = {
             let mut state = self.state.lock();
@@ -644,7 +877,12 @@ impl AudioWaveformService {
             state.deferred.push_back(job);
             return;
         }
-        match self.jobs.try_send(job) {
+        let sender = self.jobs.lock().as_ref().cloned();
+        let send = match sender {
+            Some(sender) => sender.try_send(job),
+            None => Err(mpsc::TrySendError::Disconnected(job)),
+        };
+        match send {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(job)) => state.deferred.push_back(job),
             Err(mpsc::TrySendError::Disconnected(_job)) => {
@@ -666,6 +904,9 @@ impl AudioWaveformService {
     }
 
     fn dispatch_deferred(&self, max_jobs: usize) {
+        if self.dispatch_gate.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         for _ in 0..max_jobs {
             let mut state = self.state.lock();
             if !state.dispatch_enabled {
@@ -687,7 +928,12 @@ impl AudioWaveformService {
                 );
                 continue;
             }
-            match self.jobs.try_send(job) {
+            let sender = self.jobs.lock().as_ref().cloned();
+            let send = match sender {
+                Some(sender) => sender.try_send(job),
+                None => Err(mpsc::TrySendError::Disconnected(job)),
+            };
+            match send {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(job)) => {
                     state.deferred.push_front(job);
@@ -825,8 +1071,36 @@ impl AudioWaveformService {
 
 impl Drop for AudioWaveformService {
     fn drop(&mut self) {
-        self.dispatch_gate.shutdown.store(true, Ordering::Release);
-        self.dispatch_gate.changed.notify_all();
+        self.begin_shutdown();
+        let shutdown = self.shutdown.get_mut();
+        if shutdown.worker.as_ref().is_some_and(JoinHandle::is_finished) {
+            let worker = shutdown.worker.take();
+            if let Some(worker) = worker
+                && let Err(payload) = worker.join()
+            {
+                dispose_canonical_or_abandon_opaque_panic_payload(payload);
+            }
+        }
+    }
+}
+
+fn dispose_canonical_or_abandon_opaque_panic_payload(payload: Box<dyn Any + Send>) -> bool {
+    if payload.is::<&'static str>() || payload.is::<String>() {
+        drop(payload);
+        false
+    } else {
+        std::mem::forget(payload);
+        true
+    }
+}
+
+fn abandon_opaque_io_error(error: std::io::Error) -> bool {
+    if error.get_ref().is_some() {
+        std::mem::forget(error);
+        true
+    } else {
+        drop(error);
+        false
     }
 }
 

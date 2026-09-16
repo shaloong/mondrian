@@ -30,12 +30,20 @@ use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
 
 use super::edid::parse_hdr_capabilities;
+use super::physical_rect_matches_target;
 
 const MAX_ICC_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn display_icc_profile(
     target: DisplayProfileProbeTarget,
 ) -> DisplayIccProfileProbeResult {
+    if !target.is_valid() {
+        return DisplayIccProfileProbeResult::missing(
+            DisplayProbeBackend::X11RootProperty,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         match cached_wayland_evidence(target) {
             Ok(evidence) => {
@@ -44,12 +52,14 @@ pub(crate) fn display_icc_profile(
                         DisplayProbeBackend::WaylandColorManagementV1,
                         evidence.display_name,
                         bytes,
-                    ),
+                    )
+                    .with_native_display_path_id(evidence.native_display_path_id),
                     None => DisplayIccProfileProbeResult::missing(
                         DisplayProbeBackend::WaylandColorManagementV1,
                         evidence.display_name,
                         "the active Wayland output image description is parametric and did not expose an ICC payload",
-                    ),
+                    )
+                    .with_native_display_path_id(evidence.native_display_path_id),
                 };
             }
             Err(wayland_error) if std::env::var_os("DISPLAY").is_none() => {
@@ -64,11 +74,12 @@ pub(crate) fn display_icc_profile(
     }
 
     match x11_icc_profile(target) {
-        Ok((name, bytes)) => DisplayIccProfileProbeResult::found_bytes(
+        Ok((native_display_path_id, name, bytes)) => DisplayIccProfileProbeResult::found_bytes(
             DisplayProbeBackend::X11RootProperty,
             name,
             bytes,
-        ),
+        )
+        .with_native_display_path_id(Some(native_display_path_id)),
         Err(reason) => DisplayIccProfileProbeResult::missing(
             DisplayProbeBackend::X11RootProperty,
             None,
@@ -78,6 +89,13 @@ pub(crate) fn display_icc_profile(
 }
 
 pub(crate) fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    if !target.is_valid() {
+        return DisplayHdrProbeResult::missing(
+            DisplayProbeBackend::LinuxDrmSysfs,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     if std::env::var_os("WAYLAND_DISPLAY").is_some()
         && let Ok(evidence) = cached_wayland_evidence(target)
     {
@@ -97,22 +115,26 @@ pub(crate) fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdr
                 max_luminance_nits: evidence.max_luminance_nits,
                 ..DisplayHdrProbeDetails::default()
             },
-        );
+        )
+        .with_native_display_path_id(evidence.native_display_path_id);
     }
 
     match drm_hdr_state(target) {
-        Ok((display_name, details)) => DisplayHdrProbeResult::found(
+        Ok((display_name, native_display_path_id, details)) => DisplayHdrProbeResult::found(
             DisplayProbeBackend::LinuxDrmSysfs,
             Some(display_name),
             details,
-        ),
+        )
+        .with_native_display_path_id(Some(native_display_path_id)),
         Err(reason) => {
             DisplayHdrProbeResult::missing(DisplayProbeBackend::LinuxDrmSysfs, None, reason)
         }
     }
 }
 
-fn x11_icc_profile(target: DisplayProfileProbeTarget) -> Result<(Option<String>, Vec<u8>), String> {
+fn x11_icc_profile(
+    target: DisplayProfileProbeTarget,
+) -> Result<(String, Option<String>, Vec<u8>), String> {
     let (connection, screen_index) =
         x11rb::connect(None).map_err(|error| format!("X11 connection failed: {error}"))?;
     let screen = connection
@@ -139,6 +161,7 @@ fn x11_icc_profile(target: DisplayProfileProbeTarget) -> Result<(Option<String>,
         })
         .ok_or_else(|| "no RandR monitor matched the winit display rectangle".to_owned())?;
     let monitor = &monitors.monitors[monitor_index];
+    let native_display_path_id = unique_x11_output_id(monitor.outputs.as_slice())?;
     let monitor_name = connection
         .get_atom_name(monitor.name)
         .ok()
@@ -182,16 +205,62 @@ fn x11_icc_profile(target: DisplayProfileProbeTarget) -> Result<(Option<String>,
             if property.value.len() > MAX_ICC_BYTES {
                 return Err("X11 ICC profile exceeds the 32 MiB safety limit".to_owned());
             }
-            return Ok((monitor_name, property.value));
+            return Ok((native_display_path_id, monitor_name, property.value));
         }
     }
 
     Err("the matching RandR monitor has no _ICC_PROFILE property".to_owned())
 }
 
+fn x11_native_output_id(target: DisplayProfileProbeTarget) -> Result<String, String> {
+    let (connection, screen_index) =
+        x11rb::connect(None).map_err(|error| format!("X11 connection failed: {error}"))?;
+    let screen = connection
+        .setup()
+        .roots
+        .get(screen_index)
+        .ok_or_else(|| "X11 default screen is missing".to_owned())?;
+    let monitors = connection
+        .randr_get_monitors(screen.root, true)
+        .map_err(|error| format!("RandR GetMonitors request failed: {error}"))?
+        .reply()
+        .map_err(|error| format!("RandR GetMonitors reply failed: {error}"))?;
+    let matching = monitors
+        .monitors
+        .iter()
+        .filter(|monitor| {
+            rectangle_matches_target(
+                i32::from(monitor.x),
+                i32::from(monitor.y),
+                u32::from(monitor.width),
+                u32::from(monitor.height),
+                target,
+            )
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "RandR target matching is ambiguous ({} rectangle matches)",
+            matching.len()
+        ));
+    }
+    unique_x11_output_id(matching[0].outputs.as_slice())
+}
+
+fn unique_x11_output_id(outputs: &[u32]) -> Result<String, String> {
+    if outputs.len() != 1 || outputs[0] == 0 {
+        return Err(format!(
+            "RandR monitor does not identify exactly one native output ({} outputs)",
+            outputs.len()
+        ));
+    }
+    Ok(outputs[0].to_string())
+}
+
 fn drm_hdr_state(
     target: DisplayProfileProbeTarget,
-) -> Result<(String, DisplayHdrProbeDetails), String> {
+) -> Result<(String, String, DisplayHdrProbeDetails), String> {
+    let native_display_path_id = x11_native_output_id(target)?;
     let drm_root = Path::new("/sys/class/drm");
     let entries = fs::read_dir(drm_root)
         .map_err(|error| format!("failed to enumerate /sys/class/drm: {error}"))?;
@@ -247,11 +316,13 @@ fn drm_hdr_state(
     };
     Ok((
         display_name,
+        native_display_path_id,
         DisplayHdrProbeDetails {
             hdr_supported: Some(hdr.pq || hdr.hlg),
             // Connector enabled does not prove that the compositor uses HDR.
             hdr_enabled: None,
-            wide_color_supported: (hdr.pq || hdr.hlg).then_some(true),
+            // HDR EOTFs do not prove BT.2020/P3 colorimetry.
+            wide_color_supported: None,
             supported_transfer_functions: transfer.into_iter().collect(),
             min_luminance_millinits: hdr.min_luminance_millinits,
             max_luminance_nits: hdr.max_luminance_nits,
@@ -267,20 +338,13 @@ fn rectangle_matches_target(
     height: u32,
     target: DisplayProfileProbeTarget,
 ) -> bool {
-    if x == target.x && y == target.y && width == target.width && height == target.height {
-        return true;
-    }
-    let center_x = target.x.saturating_add((target.width / 2) as i32);
-    let center_y = target.y.saturating_add((target.height / 2) as i32);
-    center_x >= x
-        && center_y >= y
-        && center_x < x.saturating_add(width as i32)
-        && center_y < y.saturating_add(height as i32)
+    physical_rect_matches_target(x, y, width, height, target)
 }
 
 #[derive(Debug, Clone, Default)]
 struct WaylandDisplayEvidence {
     display_name: Option<String>,
+    native_display_path_id: Option<String>,
     icc_bytes: Option<Vec<u8>>,
     transfer_function: Option<String>,
     wide_color_active: Option<bool>,
@@ -409,6 +473,7 @@ fn wayland_evidence(target: DisplayProfileProbeTarget) -> Result<WaylandDisplayE
     let output_state = state.outputs.get(&selected_id);
     state.evidence.display_name =
         output_state.and_then(|output| output.name.clone().or_else(|| output.description.clone()));
+    state.evidence.native_display_path_id = Some(selected_id.to_string());
 
     let color_output = manager.get_output(output, &qh, ());
     let _image_description = color_output.get_image_description(&qh, selected_id);

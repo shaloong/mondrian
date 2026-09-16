@@ -35,6 +35,19 @@ pub enum MondrianError {
         reason: String,
     },
 
+    /// The operating system could not provide a process or thread required by
+    /// the production media execution path.
+    #[error("媒体执行资源不可用 ({operation}): {source}; cleanup={cleanup:?}")]
+    MediaExecutionResourceUnavailable {
+        /// Exact production operation that could not acquire its OS resource.
+        operation: &'static str,
+        /// Native operating-system failure retained for diagnosis.
+        #[source]
+        source: std::io::Error,
+        /// Diagnostic copy of partial-open cleanup; owner receipts remain authoritative.
+        cleanup: Option<String>,
+    },
+
     #[error(
         "解码超时 (asset={asset_id}, access_mode={access_mode}, budget_ms={budget_ms}, frame={frame}, secs={secs:.3})"
     )]

@@ -30,7 +30,7 @@ pub(super) enum PreviewPacketSeek {
 
 pub(super) enum PreviewPacketSource {
     Direct(ffmpeg::format::context::Input),
-    Isolated(IsolatedDemuxSession),
+    Isolated(Box<IsolatedDemuxSession>),
 }
 
 pub(super) struct PreviewPacketSourceOpen {
@@ -96,7 +96,7 @@ impl PreviewPacketSource {
                             index
                         });
                     Ok(PreviewPacketSourceOpen {
-                        source: Self::Isolated(open.source),
+                        source: Self::Isolated(Box::new(open.source)),
                         parameters: stream.parameters,
                         stream_index: stream.stream_index,
                         stream_tb: stream.time_base,
@@ -113,6 +113,13 @@ impl PreviewPacketSource {
                         MondrianError::MediaOpen { path: path.display().to_string(), reason },
                     ))
                 }
+                Err(IsolatedDemuxOpenError::ExecutionResourceUnavailable {
+                    operation,
+                    source,
+                    cleanup,
+                }) => Err(PreviewPacketSourceOpenError::Failed(
+                    MondrianError::MediaExecutionResourceUnavailable { operation, source, cleanup },
+                )),
             };
         }
         match Self::open_direct(

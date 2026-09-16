@@ -8,7 +8,8 @@
 use anyhow::Context;
 use mondrian_core::{
     AssetId, AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError,
-    AuthoringSet, ProjectColorEnvironment, ProjectId, ProjectMeta, ProjectSettings, SequenceId,
+    AuthoringSet, ProjectColorEnvironment, ProjectGallery, ProjectId, ProjectMeta, ProjectSettings,
+    SequenceId, MAX_GALLERY_STILL_DECODED_BYTES, MAX_GALLERY_STILL_DIMENSION,
 };
 use mondrian_storage::{
     FilePublicationFailure as StoragePublicationFailure, FilePublicationMode, OwnedPublicationFile,
@@ -29,14 +30,14 @@ use std::sync::Arc;
 
 mod migration;
 
-use migration::JsonMigrationRegistry;
+use migration::{JsonMigrationRegistry, JsonMigrationStep};
 
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 25;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 27;
 /// Current embedded asset-library SQLite schema version.
-pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 5;
+pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
 /// Final namespace semantics for one atomic Project archive publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,9 +332,34 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     "project document",
     "schema_version",
     PROJECT_DOCUMENT_SCHEMA_VERSION,
-    &[],
+    &[JsonMigrationStep {
+        from: 26,
+        to: 27,
+        migrate: migrate_project_document_26_to_27,
+    }],
 );
 const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
+
+fn migrate_project_document_26_to_27(
+    mut value: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get_mut("sequences")
+        .and_then(|collection| collection.get_mut("sequences"))
+        .and_then(serde_json::Value::as_array_mut)
+        .context("schema 26 document has no Sequence array")?;
+    for sequence in sequences {
+        let sequence = sequence.as_object_mut().context("schema 26 Sequence is not an object")?;
+        sequence.entry("dynamic_hdr").or_insert_with(|| {
+            serde_json::json!({
+                "delivery_intent": { "intent": "omit" },
+                "programs": []
+            })
+        });
+    }
+    value["schema_version"] = serde_json::json!(27);
+    Ok(value)
+}
 
 /// Admission limits for opening one untrusted `.mdp` archive.
 ///
@@ -650,6 +676,9 @@ pub struct ProjectDocument {
     pub sequences: SequenceCollection,
     /// Assets currently forced into proxy playback mode.
     pub proxy_mode_assets: AuthoringSet<AssetId>,
+    /// Portable, authored color-reference stills shared across Sequences.
+    #[serde(default)]
+    pub gallery: ProjectGallery,
 }
 
 impl AuthoringFootprint for ProjectDocument {
@@ -667,13 +696,15 @@ impl AuthoringFootprint for ProjectDocument {
             new_sequence_defaults,
             sequences,
             proxy_mode_assets,
+            gallery,
         } = self;
         collector.collect(meta)?;
         collector.collect(settings)?;
         collector.collect(color_environment)?;
         collector.collect(new_sequence_defaults)?;
         collector.collect(sequences)?;
-        collector.collect(proxy_mode_assets)
+        collector.collect(proxy_mode_assets)?;
+        collector.collect(gallery)
     }
 }
 
@@ -883,6 +914,7 @@ impl ProjectDocument {
             new_sequence_defaults,
             sequences,
             proxy_mode_assets: AuthoringSet::new(),
+            gallery: ProjectGallery::default(),
         }
     }
 
@@ -942,6 +974,65 @@ impl ProjectDocument {
         self.new_sequence_defaults
             .validate_with_color_environment(&self.color_environment)
             .context("new Sequence defaults are invalid")?;
+        self.gallery.validate().context("Project Gallery is invalid")?;
+        for still in &self.gallery.stills {
+            let mut reader = image::ImageReader::with_format(
+                std::io::Cursor::new(&still.raster.png),
+                image::ImageFormat::Png,
+            );
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_GALLERY_STILL_DIMENSION);
+            limits.max_image_height = Some(MAX_GALLERY_STILL_DIMENSION);
+            limits.max_alloc = Some(MAX_GALLERY_STILL_DECODED_BYTES);
+            reader.limits(limits);
+            let decoded = reader
+                .decode()
+                .with_context(|| format!("Gallery still {} contains an invalid PNG", still.id))?;
+            if decoded.width() != still.raster.width || decoded.height() != still.raster.height {
+                anyhow::bail!(
+                    "Gallery still {} PNG extent {}x{} does not match declared extent {}x{}",
+                    still.id,
+                    decoded.width(),
+                    decoded.height(),
+                    still.raster.width,
+                    still.raster.height
+                );
+            }
+            if decoded.color() != image::ColorType::Rgba8 {
+                anyhow::bail!(
+                    "Gallery still {} PNG must contain canonical RGBA8 pixels, found {:?}",
+                    still.id,
+                    decoded.color()
+                );
+            }
+            let sequence = self
+                .sequences
+                .sequences
+                .iter()
+                .find(|sequence| sequence.id == still.source_sequence_id)
+                .with_context(|| {
+                    format!(
+                        "Gallery still {} references missing Sequence {}",
+                        still.id, still.source_sequence_id
+                    )
+                })?;
+            for binding in &still.active_grade_versions {
+                let definition =
+                    sequence.grade_definition(binding.definition_id).with_context(|| {
+                        format!(
+                            "Gallery still {} references missing Grade Definition {}",
+                            still.id, binding.definition_id
+                        )
+                    })?;
+                if !definition.versions.iter().any(|version| version.id == binding.version_id) {
+                    anyhow::bail!(
+                        "Gallery still {} references missing Grade Version {}",
+                        still.id,
+                        binding.version_id
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1008,6 +1099,8 @@ pub fn read_project_document_from_open_archive_with_budget(
 pub struct LoadedProjectArchive {
     /// Migrated and validated canonical project document.
     pub document: ProjectDocument,
+    /// Project document schema observed before any registered migration.
+    pub source_document_schema_version: u32,
     /// SQLite schema version declared by the archive manifest.
     pub library_schema_version: u32,
 }
@@ -1023,6 +1116,7 @@ pub struct PreparedProjectArchive<'archive> {
     archive: zip::ZipArchive<&'archive mut fs::File>,
     manifest: ProjectManifest,
     document: ProjectDocument,
+    source_document_schema_version: u32,
     budget: ProjectArchiveReadBudget,
 }
 
@@ -1037,8 +1131,15 @@ impl<'archive> PreparedProjectArchive<'archive> {
         let mut archive = zip::ZipArchive::new(&mut *file)?;
         validate_exact_archive_entry_set(&mut archive)?;
         validate_declared_archive_entry_budgets(&mut archive, budget)?;
-        let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive, budget)?;
-        Ok(Self { archive, manifest, document, budget })
+        let (manifest, document, source_document_schema_version) =
+            read_project_archive_metadata_from_zip(&mut archive, budget)?;
+        Ok(Self {
+            archive,
+            manifest,
+            document,
+            source_document_schema_version,
+            budget,
+        })
     }
 
     /// Stable Project identity available before runtime authority is acquired.
@@ -1089,6 +1190,7 @@ impl<'archive> PreparedProjectArchive<'archive> {
 
         Ok(LoadedProjectArchive {
             document: self.document,
+            source_document_schema_version: self.source_document_schema_version,
             library_schema_version: self.manifest.library_schema_version,
         })
     }
@@ -1302,8 +1404,8 @@ fn save_project_archive_from_open_library_with_publication_impl(
 fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     budget: ProjectArchiveReadBudget,
-) -> anyhow::Result<(ProjectManifest, ProjectDocument)> {
-    let manifest = read_versioned_json_entry(
+) -> anyhow::Result<(ProjectManifest, ProjectDocument, u32)> {
+    let (manifest, _) = read_versioned_json_entry(
         archive,
         MANIFEST_ENTRY,
         PROJECT_FORMAT_VERSION,
@@ -1313,7 +1415,7 @@ fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
     )?;
     manifest.validate()?;
 
-    let document = read_versioned_json_entry(
+    let (document, source_document_schema_version) = read_versioned_json_entry(
         archive,
         PROJECT_ENTRY,
         PROJECT_DOCUMENT_SCHEMA_VERSION,
@@ -1322,7 +1424,11 @@ fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
         budget,
     )?;
     document.validate()?;
-    Ok((manifest, document.normalized()))
+    Ok((
+        manifest,
+        document.normalized(),
+        source_document_schema_version,
+    ))
 }
 
 fn read_versioned_json_entry<R, T>(
@@ -1332,7 +1438,7 @@ fn read_versioned_json_entry<R, T>(
     version: impl Fn(&T) -> u32,
     migrations: &JsonMigrationRegistry,
     budget: ProjectArchiveReadBudget,
-) -> anyhow::Result<T>
+) -> anyhow::Result<(T, u32)>
 where
     R: Read + Seek,
     T: DeserializeOwned,
@@ -1340,14 +1446,18 @@ where
     let current = read_json_entry::<_, T>(archive, entry_name, budget);
 
     match current {
-        Ok(value) if version(&value) == current_version => Ok(value),
+        Ok(value) if version(&value) == current_version => Ok((value, current_version)),
         Ok(_) | Err(_) => {
             // The current schema remains a direct typed streaming read. Only an
             // older, future, or malformed payload pays for the in-memory Value
             // needed by the explicit migration Registry Seam.
             let value = read_json_entry(archive, entry_name, budget)
                 .with_context(|| format!("invalid JSON in project archive entry: {entry_name}"))?;
-            Ok(serde_json::from_value(migrations.migrate(value)?)?)
+            let source_version = migrations.source_version(&value)?;
+            Ok((
+                serde_json::from_value(migrations.migrate(value)?)?,
+                source_version,
+            ))
         }
     }
 }
@@ -1608,7 +1718,9 @@ fn ensure_direct_runtime_library_root(root: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use mondrian_core::automation::{
-        InterpolationType, Keyframe, PropertyDescriptor, PropertyMutation, PropertyValue,
+        InterpolationType, Keyframe, NormalizedCurve, NormalizedCurvePoint, PropertyDescriptor,
+        PropertyMutation, PropertyValue, PropertyValueType, QualifierSample,
+        QualifierSampleOperation, QualifierSampleSet, MAX_QUALIFIER_SAMPLES,
     };
     use mondrian_core::effect_data::{EffectNode, EffectType};
     use mondrian_core::mask_data::{MaskComponent, MaskEvaluation};
@@ -1630,7 +1742,6 @@ mod tests {
                 mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
                     mondrian_core::OcioConfigSource::Path { path },
                     "0".repeat(64),
-                    "missing-config".to_owned(),
                     "0".repeat(64),
                     "Linear Rec.2020".to_owned(),
                     vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
@@ -1769,21 +1880,27 @@ mod tests {
             opened_sequence.settings.color.program_output.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
-        let opened_context =
-            opened_sequence.settings.root_program_color_context(&opened.color_environment);
+        let opened_context = opened_sequence
+            .settings
+            .root_program_color_context(&opened.color_environment)
+            .expect("valid reopened color context");
         assert_eq!(
-            opened_context.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            opened_context.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert_eq!(
-            opened_context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            opened_context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
 
         let runtime_library = root.join("runtime-library");
         let loaded =
             load_project_archive(&project_path, &runtime_library).expect("load project archive");
         assert_eq!(loaded.document.project_id, document.project_id);
+        assert_eq!(
+            loaded.source_document_schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
         assert_eq!(
             loaded.library_schema_version,
             PROJECT_LIBRARY_SCHEMA_VERSION
@@ -2396,6 +2513,302 @@ mod tests {
     }
 
     #[test]
+    fn asc_cdl_vec3_animation_round_trips_through_project_archive() {
+        fn vec3(x: f64, y: f64, z: f64) -> PropertyValue {
+            PropertyValue::from_channel_values(
+                PropertyValueType::Vec3,
+                &[x, y, z],
+                &PropertyValue::Float(0.0),
+            )
+        }
+
+        let root = unique_temp_dir("asc-cdl-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("asc-cdl.mdp");
+
+        let mut document = test_document();
+        let parameter_id = EffectType::AscCdl
+            .parameter_id("slope")
+            .expect("ASC CDL slope parameter identity");
+        let property_path = EffectType::AscCdl.property_path("slope");
+        let mut effect = EffectNode::new(EffectType::AscCdl);
+        effect.define_property(
+            PropertyDescriptor::new(property_path.clone(), "Slope", vec3(1.0, 1.0, 1.0))
+                .with_parameter_id(parameter_id.clone()),
+        );
+        let first_time = TimelineTime::new(1, 1).expect("first key time");
+        let second_time = TimelineTime::new(4, 1).expect("second key time");
+        let first_value = vec3(0.8, 1.0, 1.2);
+        let second_value = vec3(1.3, 0.9, 1.1);
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: property_path.clone(),
+                keyframe: Keyframe::linear(first_time, first_value.clone()),
+            })
+            .expect("first ASC CDL slope key");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: property_path,
+                keyframe: Keyframe::linear(second_time, second_value.clone()),
+            })
+            .expect("second ASC CDL slope key");
+
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let effect_id = clip.add_effect_node(effect);
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let reopened_effect =
+            &reopened.sequences.active().expect("active sequence").video_tracks[0].clips[0].effects
+                [0];
+
+        assert_eq!(reopened_effect.id, effect_id);
+        assert_eq!(reopened_effect.effect_type, EffectType::AscCdl);
+        assert_eq!(reopened_effect.effect_type.key(), "builtin.asc_cdl");
+        assert_eq!(
+            reopened_effect.evaluate_parameter(&parameter_id, first_time),
+            Some(first_value)
+        );
+        assert_eq!(
+            reopened_effect.evaluate_parameter(&parameter_id, second_time),
+            Some(second_value)
+        );
+        reopened_effect.validate_author_state().expect("reopened ASC CDL author state");
+    }
+
+    #[test]
+    fn advanced_color_effect_schema_round_trips_through_project_archive() {
+        let root = unique_temp_dir("advanced-color-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("advanced-color.mdp");
+        let mut document = test_document();
+
+        let authored = [
+            (EffectType::GamutCompression, "amount", 0.72),
+            (EffectType::HighlightRecovery, "strength", 0.63),
+            (EffectType::HdrGrading, "global_exposure", 1.25),
+        ];
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let mut identities = Vec::new();
+        for (effect_type, parameter, value) in authored {
+            let parameter_id = effect_type.parameter_id(parameter).expect("parameter identity");
+            let property_path = effect_type.property_path(parameter);
+            let mut effect = EffectNode::new(effect_type.clone());
+            effect.define_property(
+                PropertyDescriptor::new(
+                    property_path.clone(),
+                    parameter,
+                    PropertyValue::Float(value),
+                )
+                .with_parameter_id(parameter_id.clone()),
+            );
+            let effect_id = clip.add_effect_node(effect);
+            identities.push((effect_id, effect_type, parameter_id, property_path, value));
+        }
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let effects =
+            &reopened.sequences.active().expect("active sequence").video_tracks[0].clips[0].effects;
+        assert_eq!(effects.len(), identities.len());
+        for (effect, (effect_id, effect_type, parameter_id, _property_path, value)) in
+            effects.iter().zip(identities)
+        {
+            assert_eq!(effect.id, effect_id);
+            assert_eq!(effect.effect_type, effect_type);
+            assert_eq!(
+                effect.evaluate_parameter(&parameter_id, TimelineTime::ZERO),
+                Some(PropertyValue::Float(value))
+            );
+            assert!(effect
+                .properties
+                .iter()
+                .any(|(_, property)| property.descriptor.parameter_id() == &parameter_id));
+            effect.validate_author_state().expect("valid reopened author state");
+        }
+    }
+
+    #[test]
+    fn structured_color_curve_round_trips_through_project_archive_without_identity_drift() {
+        let root = unique_temp_dir("color-curves-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("color-curves.mdp");
+
+        let mut document = test_document();
+        let parameter_id = EffectType::Curves
+            .parameter_id("master")
+            .expect("Curves master parameter identity");
+        let property_path = EffectType::Curves.property_path("master");
+        let authored_curve = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.03),
+            NormalizedCurvePoint::new(0.25, 0.18),
+            NormalizedCurvePoint::new(0.7, 0.82),
+            NormalizedCurvePoint::new(1.0, 0.97),
+        ])
+        .expect("valid authored curve");
+        let mut effect = EffectNode::new(EffectType::Curves);
+        effect.define_property(
+            PropertyDescriptor::new(
+                property_path.clone(),
+                "Master",
+                PropertyValue::Curve(NormalizedCurve::identity()),
+            )
+            .with_parameter_id(parameter_id.clone()),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: property_path.clone(),
+                value: PropertyValue::Curve(authored_curve.clone()),
+            })
+            .expect("set structured curve");
+        let property = effect.properties.property(&property_path).expect("master property");
+        let track_id = property.track_id;
+        assert!(!property.descriptor.schema.is_animatable);
+
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let effect_id = clip.add_effect_node(effect);
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let reopened_effect =
+            &reopened.sequences.active().expect("active sequence").video_tracks[0].clips[0].effects
+                [0];
+        let (reopened_path, reopened_property) = reopened_effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+            .expect("reopened master curve");
+
+        assert_eq!(reopened_effect.id, effect_id);
+        assert_eq!(reopened_effect.effect_type, EffectType::Curves);
+        assert!(reopened_path.contains(&effect_id.to_string()));
+        assert_eq!(reopened_property.track_id, track_id);
+        assert_eq!(reopened_property.descriptor.parameter_id(), &parameter_id);
+        assert_eq!(
+            reopened_property.static_value(),
+            &PropertyValue::Curve(authored_curve)
+        );
+        reopened_effect.validate_author_state().expect("reopened Curves author state");
+    }
+
+    #[test]
+    fn qualifier_sample_set_round_trips_through_project_archive_without_identity_drift() {
+        let root = unique_temp_dir("qualifier-samples-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("qualifier-samples.mdp");
+
+        let mut document = test_document();
+        let parameter_id = EffectType::Qualifier
+            .parameter_id("samples")
+            .expect("Qualifier samples parameter identity");
+        let property_path = EffectType::Qualifier.property_path("samples");
+        let authored_samples = QualifierSampleSet::new(
+            (0..MAX_QUALIFIER_SAMPLES)
+                .map(|index| {
+                    let value = index as f32 / (MAX_QUALIFIER_SAMPLES - 1) as f32;
+                    QualifierSample::new(
+                        [value, 1.0 - value, value * 0.5],
+                        if index % 3 == 0 {
+                            QualifierSampleOperation::Include
+                        } else {
+                            QualifierSampleOperation::Exclude
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .expect("maximum-size Include/Exclude sample set");
+        let mut effect = EffectNode::new(EffectType::Qualifier);
+        effect.define_property(
+            PropertyDescriptor::new(
+                property_path.clone(),
+                "Samples",
+                PropertyValue::QualifierSamples(QualifierSampleSet::green_screen()),
+            )
+            .with_parameter_id(parameter_id.clone()),
+        );
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: property_path.clone(),
+                value: PropertyValue::QualifierSamples(authored_samples.clone()),
+            })
+            .expect("set structured Qualifier samples");
+        let property = effect.properties.property(&property_path).expect("samples property");
+        let track_id = property.track_id;
+        assert!(!property.descriptor.schema.is_animatable);
+
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let effect_id = clip.add_effect_node(effect);
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        reopened.validate().expect("reopened Project author state");
+        let reopened_effect =
+            &reopened.sequences.active().expect("active sequence").video_tracks[0].clips[0].effects
+                [0];
+        let (reopened_path, reopened_property) = reopened_effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+            .expect("reopened Qualifier samples");
+
+        assert_eq!(reopened_effect.id, effect_id);
+        assert_eq!(reopened_effect.effect_type, EffectType::Qualifier);
+        assert_eq!(reopened_effect.effect_type.key(), "builtin.qualifier");
+        assert!(reopened_path.contains(&effect_id.to_string()));
+        assert_eq!(reopened_property.track_id, track_id);
+        assert_eq!(reopened_property.descriptor.parameter_id(), &parameter_id);
+        assert!(!reopened_property.descriptor.schema.is_animatable);
+        assert_eq!(
+            reopened_property.static_value(),
+            &PropertyValue::QualifierSamples(authored_samples.clone())
+        );
+        assert_eq!(
+            reopened_effect.evaluate_parameter(&parameter_id, TimelineTime::ZERO),
+            Some(PropertyValue::QualifierSamples(authored_samples))
+        );
+        reopened_effect
+            .validate_author_state()
+            .expect("reopened Qualifier author state");
+    }
+
+    #[test]
     fn basic_title_closed_author_state_round_trips_with_exact_animation() {
         let root = unique_temp_dir("basic-title-round-trip");
         let db_path = root.join("index.db");
@@ -2482,21 +2895,65 @@ mod tests {
         mask.write_shape(
             TimelineTime::ZERO,
             mondrian_core::mask_data::MaskShape::default(),
-            mondrian_core::mask_data::MaskShapeInterpolation::Linear,
+            mondrian_core::mask_data::MaskShapeInterpolation::Hold,
         )
         .expect("set outgoing linear interpolation");
+        let bezier_shape = mondrian_core::mask_data::MaskShape::Path {
+            points: vec![
+                mondrian_core::mask_data::BezierPoint {
+                    position: [0.2, 0.2].into(),
+                    control_in: [-0.08, 0.03].into(),
+                    control_out: [0.12, -0.04].into(),
+                },
+                mondrian_core::mask_data::BezierPoint {
+                    position: [0.8, 0.25].into(),
+                    control_in: [-0.1, -0.07].into(),
+                    control_out: [0.06, 0.13].into(),
+                },
+                mondrian_core::mask_data::BezierPoint {
+                    position: [0.65, 0.82].into(),
+                    control_in: [0.09, -0.11].into(),
+                    control_out: [-0.13, 0.05].into(),
+                },
+            ],
+            closed: true,
+        };
         mask.write_shape(
             key_time,
-            mondrian_core::mask_data::MaskShape::Rectangle {
-                x: 0.2,
-                y: 0.15,
-                width: 0.6,
-                height: 0.7,
-                corner_radius: 0.1,
-            },
+            bezier_shape.clone(),
             mondrian_core::mask_data::MaskShapeInterpolation::Hold,
         )
         .expect("insert stable shape key");
+        let tracking_id = mondrian_core::TrackingId::new();
+        mask.apply_tracking_result(
+            mondrian_core::mask_data::MaskTrackingRecipe {
+                id: tracking_id,
+                model: mondrian_core::mask_data::MaskTrackingModel::PlanarHomography,
+                direction: mondrian_core::mask_data::MaskTrackingDirection::Forward,
+                anchor_time: TimelineTime::ZERO,
+                range_start: TimelineTime::ZERO,
+                range_end: key_time,
+                settings: mondrian_core::mask_data::MaskTrackingSettings::default(),
+                source_fingerprint: mondrian_core::MediaFileFingerprint {
+                    len: Some(100),
+                    modified_secs: Some(2),
+                    modified_nanos: Some(3),
+                    object_identity: Some(mondrian_core::MediaFileObjectIdentity::Windows {
+                        volume_serial_number: 5,
+                        file_id: [7; 16],
+                    }),
+                    change_stamp: Some(mondrian_core::MediaFileChangeStamp::WindowsFileTime(11)),
+                },
+                video_stream_index: 1,
+                mean_inlier_ratio: 0.86,
+                minimum_observed_inlier_ratio: 0.71,
+            },
+            vec![
+                (TimelineTime::ZERO, bezier_shape.clone()),
+                (key_time, bezier_shape.clone()),
+            ],
+        )
+        .expect("publish tracking result");
         let mask_id = mask.id;
         let shape_key_ids = mask.shape_keyframes.iter().map(|key| key.id).collect::<Vec<_>>();
         clip.masks.push(mask);
@@ -2520,6 +2977,11 @@ mod tests {
             mondrian_core::mask_data::MaskShapeInterpolation::Linear
         );
         assert_eq!(reopened_mask.evaluate_at(key_time).opacity, 0.25);
+        assert_eq!(reopened_mask.evaluate_at(key_time).shape, bezier_shape);
+        assert_eq!(
+            reopened_mask.tracking.as_ref().map(|recipe| recipe.id),
+            Some(tracking_id)
+        );
         reopened_mask.validate_author_state().expect("valid reopened mask");
     }
 
@@ -2728,10 +3190,11 @@ mod tests {
             .active()
             .expect("active current-fixture sequence")
             .settings
-            .root_program_color_context(&first.color_environment);
+            .root_program_color_context(&first.color_environment)
+            .expect("valid fixture color context");
         assert_eq!(
-            first_context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            first_context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
         assert_eq!(
             project_document_fingerprint(first.clone()).expect("first fingerprint"),
@@ -2776,15 +3239,16 @@ mod tests {
             .active()
             .expect("active reopened legacy sequence")
             .settings
-            .root_program_color_context(&reopened.color_environment);
+            .root_program_color_context(&reopened.color_environment)
+            .expect("valid legacy color context");
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard_package(
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard_package(
                 mondrian_core::MondrianStandardPackageIdentity::V2,
             )
         );
         let (display, view) = context
-            .output_transform
+            .output_transform()
             .resolve_display_view(
                 mondrian_core::ColorSpace::Rec709,
                 reopened.color_environment.engine(),
@@ -2805,6 +3269,66 @@ mod tests {
                 .expect_err("older schemas must not migrate implicitly");
             assert!(err.to_string().contains("missing project document migration"));
         }
+    }
+
+    #[test]
+    fn schema_26_migrates_explicit_empty_dynamic_hdr_author_state() {
+        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
+        legacy["schema_version"] = serde_json::json!(26);
+        for sequence in legacy["sequences"]["sequences"].as_array_mut().expect("Sequence array") {
+            sequence.as_object_mut().expect("Sequence object").remove("dynamic_hdr");
+        }
+
+        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).expect("migrate 26 to 27");
+        assert_eq!(migrated["schema_version"], serde_json::json!(27));
+        let document: ProjectDocument =
+            serde_json::from_value(migrated).expect("decode migrated document");
+        assert!(document
+            .sequences
+            .sequences
+            .iter()
+            .all(|sequence| sequence.dynamic_hdr
+                == mondrian_timeline::DynamicHdrAuthorState::default()));
+    }
+
+    #[test]
+    fn archive_load_reports_the_pre_migration_document_schema() {
+        let root = unique_temp_dir("source-document-schema");
+        let archive_path = root.join("schema-26.mdp");
+        let runtime = root.join("runtime");
+        let manifest = serde_json::to_vec_pretty(&ProjectManifest::default())
+            .expect("serialize current manifest");
+        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
+        legacy["schema_version"] = serde_json::json!(26);
+        for sequence in legacy["sequences"]["sequences"].as_array_mut().expect("Sequence array") {
+            sequence.as_object_mut().expect("Sequence object").remove("dynamic_hdr");
+        }
+        let project = serde_json::to_vec_pretty(&legacy).expect("serialize schema-26 document");
+        write_raw_stored_archive(
+            &archive_path,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &project),
+                (LIBRARY_ENTRY, b"sqlite schema fixture"),
+            ],
+        );
+
+        let loaded =
+            load_project_archive(&archive_path, &runtime).expect("migrate schema-26 archive");
+        assert_eq!(loaded.source_document_schema_version, 26);
+        assert_eq!(
+            loaded.document.schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+        assert!(loaded
+            .document
+            .sequences
+            .sequences
+            .iter()
+            .all(|sequence| sequence.dynamic_hdr
+                == mondrian_timeline::DynamicHdrAuthorState::default()));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

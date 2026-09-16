@@ -9,14 +9,20 @@ use mondrian_effects::{
 };
 use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
 use mondrian_renderer::{
+    color::{
+        qualification::{
+            RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+            RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+        },
+        ProgramOutputBoundary,
+    },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, ColorFrameDescriptor, ColorFrameDomain,
-    ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
-    GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
-    RenderIntermediateColorTransform, RenderOutputColorBoundary,
+    product_gpu_working_texture_device_features, request_adapter_with_native_video_preference,
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameTextureFormat,
+    GpuColorQualificationExecutionPolicy, GpuCompositeLayer, GpuCompositeLayerSource,
+    GpuCompositeRequest, GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest,
+    RenderColorTransformGpuOptions, RenderInputTransform, RenderIntermediateColorTransform,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -31,6 +37,42 @@ const DEFAULT_STANDARD_P95_BUDGET_US: u64 = 5_000;
 const DEFAULT_STANDARD_TO_ACES_P95_RATIO: f64 = 0.80;
 const DEFAULT_TRANSFORM_P95_BUDGET_US: u64 = 5_000;
 const WARMUP_COUNT: usize = 4;
+
+fn emit_gpu_gate_measurements(
+    gate: &str,
+    adapter: &wgpu::AdapterInfo,
+    measurements: &[(&str, f64)],
+) -> Result<()> {
+    let Some(path) =
+        std::env::var_os("MONDRIAN_GPU_COLOR_GATE_MEASUREMENT_OUTPUT").map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let attestation =
+        mondrian_renderer::qualification_attestation::gpu_color_gate_execution_attestation()?;
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "gate_id": gate,
+        "adapter": {
+            "name": adapter.name.clone(),
+            "backend": format!("{:?}", adapter.backend),
+            "device_type": format!("{:?}", adapter.device_type),
+            "driver": adapter.driver.clone(),
+            "driver_info": adapter.driver_info.clone(),
+            "vendor_id": format!("{:04x}", adapter.vendor),
+            "device_id": format!("{:04x}", adapter.device),
+        },
+        "attestation": attestation,
+        "measurements": measurements
+            .iter()
+            .map(|(metric, value)| serde_json::json!({ "metric": metric, "value": value }))
+            .collect::<Vec<_>>(),
+    });
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    serde_json::to_writer(&mut file, &payload)?;
+    file.flush()?;
+    Ok(())
+}
 
 struct TimestampGpuContext {
     _instance: wgpu::Instance,
@@ -49,8 +91,8 @@ struct ViewCase {
 }
 
 impl ViewCase {
-    fn boundary(&self) -> RenderOutputColorBoundary {
-        RenderOutputColorBoundary::display_view(
+    fn boundary(&self) -> ProgramOutputBoundary {
+        ProgramOutputBoundary::display_view(
             self.output_color_space,
             self.display,
             self.view,
@@ -456,6 +498,7 @@ struct RecordedSample {
 async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<()> {
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
+    let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
     let Some(context) = create_timestamp_gpu_context().await? else {
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
@@ -465,6 +508,11 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
         );
+        qualification_policy.admit_capability(
+            "standard-view-4k-performance",
+            "real-adapter-with-complete-timestamp-query",
+            false,
+        )?;
         return Ok(());
     };
 
@@ -671,6 +719,28 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     if let Some(path) = std::env::var_os("MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT").map(PathBuf::from) {
         append_jsonl(&path, &json)?;
     }
+    emit_gpu_gate_measurements(
+        "standard-view-4k-performance",
+        &context.adapter.get_info(),
+        &[
+            (
+                "all_standard_views_within_budget",
+                if report.comparison.all_standard_views_within_budget {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+            (
+                "standard_beats_aces2",
+                if report.comparison.standard_pq_is_materially_faster {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+        ],
+    )?;
 
     assert!(
         report.runtime_cache.warm_path_gate.passed,
@@ -698,6 +768,7 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
 async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> {
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
+    let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
     let Some(context) = create_timestamp_gpu_context().await? else {
         eprintln!(
             "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
@@ -707,6 +778,11 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
         );
+        qualification_policy.admit_capability(
+            "standard-input-4k-performance",
+            "real-adapter-with-complete-timestamp-query",
+            false,
+        )?;
         return Ok(());
     };
 
@@ -899,6 +975,18 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     {
         append_jsonl(&path, &json)?;
     }
+    emit_gpu_gate_measurements(
+        "standard-input-4k-performance",
+        &context.adapter.get_info(),
+        &[(
+            "all_transforms_within_budget",
+            if report.all_transforms_within_budget {
+                1.0
+            } else {
+                0.0
+            },
+        )],
+    )?;
 
     assert!(
         report.runtime_cache.warm_path_gate.passed,
@@ -937,9 +1025,17 @@ async fn create_timestamp_gpu_context() -> Result<Option<TimestampGpuContext>> {
     if timestamp_features.is_empty() {
         return Ok(None);
     }
+    let working_texture_features = match product_gpu_working_texture_device_features(&adapter) {
+        Ok(features) => features,
+        Err(error) => {
+            eprintln!("color-view GPU gate NotRun: {error}");
+            return Ok(None);
+        }
+    };
     let required_features = timestamp_features
         | native_video_texture_device_features(adapter.features())
-        | ocio_lut_filtering_device_features(adapter.features());
+        | ocio_lut_filtering_device_features(adapter.features())
+        | working_texture_features;
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("mondrian-color-view-4k-timestamp-device"),
         required_features,

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate, AssetRecord};
-use mondrian_core::timeline_data::AlphaInterpretation;
+use mondrian_core::timeline_data::{AlphaInterpretation, AssetColorPayload};
 use mondrian_core::types::{ColorSpace, Rational};
 use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::info::{PixelFormat, VideoCodec};
@@ -152,6 +152,32 @@ fn video_asset_with_physical_stream_and_interpretation(
     bit_depth: u8,
     has_alpha: bool,
 ) -> AssetRecord {
+    video_asset_with_picture(
+        path,
+        color_interpretation,
+        stream_index,
+        pixel_format,
+        pixel_format_proven,
+        bit_depth,
+        has_alpha,
+        mondrian_core::PictureStreamMetadata {
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::Progressive),
+            ..Default::default()
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn video_asset_with_picture(
+    path: PathBuf,
+    color_interpretation: DetectedColorInterpretation,
+    stream_index: u32,
+    pixel_format: PixelFormat,
+    pixel_format_proven: bool,
+    bit_depth: u8,
+    has_alpha: bool,
+    picture: mondrian_core::PictureStreamMetadata,
+) -> AssetRecord {
     let color_metadata = color_interpretation.evidence.iter().find_map(|evidence| {
         let VideoColorInterpretationEvidence::ExactCicpTags { primaries, transfer, matrix, .. } =
             evidence
@@ -177,6 +203,7 @@ fn video_asset_with_physical_stream_and_interpretation(
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture,
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format,
@@ -186,6 +213,7 @@ fn video_asset_with_physical_stream_and_interpretation(
             color_metadata,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth,
             has_alpha,
             avg_bitrate: 20_000_000,
@@ -203,10 +231,134 @@ fn video_asset_with_physical_stream_and_interpretation(
     library.get_asset(asset_id).expect("read fixture Asset").expect("fixture Asset")
 }
 
+#[test]
+fn static_decode_slot_follows_frozen_asset_kind_not_path_extension() {
+    let root = unique_root("mondrian-static-source-kind");
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let path = root.join("video-disguised-as-image.png");
+    std::fs::write(&path, b"source identity fixture").expect("fixture source");
+    let mut asset =
+        video_asset_with_sampling_evidence(path, Some(ColorSpace::Rec709), true, 8, true);
+    let config = proxy_config(root.join("proxy"));
+    let context = color_context();
+    for kind in [AssetKind::Video, AssetKind::StillImage] {
+        asset.kind = kind.clone();
+        let PreviewMediaSourceOutcome::Ready(resolved) =
+            resolve_preview_media_source(PreviewMediaSourceRequest {
+                asset: &asset,
+                color_space_override: None,
+                alpha_interpretation: AlphaInterpretation::Straight,
+                picture_overrides: Default::default(),
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                input_color: &context,
+                prefer_proxy: false,
+                request_missing_proxy_generation: false,
+                proxy_config: &config,
+                proxy_color: None,
+                hardware_admission: gpu_admission(),
+                cpu_working_required: false,
+                representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+            })
+        else {
+            panic!("admitted source must resolve");
+        };
+        assert_eq!(
+            resolved.key.decode.source().is_still_image(),
+            kind == AssetKind::StillImage
+        );
+        if kind == AssetKind::StillImage {
+            assert_eq!(
+                resolved.key.decode.representation(),
+                mondrian_media::PreviewDecodeRepresentation::NativeCpu
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
+    let root = unique_root("mondrian-preview-interlaced-source");
+    let source = root.join("source.mov");
+    std::fs::create_dir_all(&root).expect("test root");
+    std::fs::write(&source, b"source").expect("source");
+    let config = proxy_config(root.join("proxy"));
+    let generator = ProxyGenerator::new(config.clone());
+    let detected = DetectedColorInterpretation {
+        candidate_color_space: Some(ColorSpace::Rec709),
+        confidence: VideoColorInterpretationConfidence::High,
+        source: VideoColorSpaceSource::Metadata,
+        method: VideoColorDetectionMethod::CicpTags,
+        evidence: Vec::new(),
+        warnings: Vec::new(),
+        user_overridable: true,
+    };
+    let asset = video_asset_with_picture(
+        source.clone(),
+        detected,
+        0,
+        PixelFormat::Yuv422p10le,
+        true,
+        10,
+        false,
+        mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: Some(mondrian_core::SampleAspectRatio::SQUARE),
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::UpperFirst),
+            field_transport_order: Some(mondrian_core::PictureFieldTransportOrder::TopTop),
+            orientation: mondrian_core::PictureOrientation::Identity,
+        },
+    );
+    let proxy_path = generator.proxy_path(&source, proxy_color(8)).expect("proxy path");
+    std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
+    std::fs::write(&proxy_path, b"proxy").expect("proxy");
+    install_proxy_manifest(&generator, &source, &proxy_path);
+    let context = color_context();
+    let PreviewMediaSourceOutcome::Ready(resolved) =
+        resolve_preview_media_source(PreviewMediaSourceRequest {
+            asset: &asset,
+            color_space_override: Some(ColorSpace::Rec709),
+            alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            input_color: &context,
+            prefer_proxy: true,
+            request_missing_proxy_generation: true,
+            proxy_config: &config,
+            proxy_color: Some(proxy_color(8)),
+            hardware_admission: gpu_admission(),
+            cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+        })
+    else {
+        panic!("qualified interlaced source")
+    };
+    assert_eq!(
+        resolved.path_resolution,
+        PreviewMediaDecodePathResolution::Source
+    );
+    assert_eq!(
+        resolved.key.decode.source().path(),
+        mondrian_assets::canonical_asset_file_path(&source).expect("source")
+    );
+    assert_eq!(
+        resolved.key.decode.representation(),
+        mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv
+    );
+    assert_eq!(
+        resolved.key.decode.field_processing(),
+        mondrian_media::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+            dominance: mondrian_core::PictureFieldDominance::TopFirst,
+        }
+    );
+    assert!(resolved.proxy_generation.is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn color_context() -> MediaInputColorContext {
     Sequence::new("preview media source")
         .settings
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid test context")
         .media_input(true)
 }
 
@@ -222,6 +374,7 @@ fn gpu_admission() -> PreviewHardwareDecodeAdmissionState {
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,
         renderer_supports_p010: true,
+        renderer_supported_surface_hint_mask: 3,
     })
 }
 
@@ -300,6 +453,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             asset: &asset,
             color_space_override: None,
             alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
             source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ONE_THIRD),
             input_color: &context,
             prefer_proxy: true,
@@ -324,8 +478,8 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
         mondrian_media::PreviewDecodeRepresentation::NativeSurface
     );
     assert_eq!(
-        keyed.key.decode.source_color().color_space,
-        proxy_color(8).source_color_space()
+        keyed.key.decode.source_color().color_space(),
+        Some(proxy_color(8).source_color_space())
     );
     assert_eq!(
         keyed.key.decode.source_color().range.baseline(),
@@ -337,6 +491,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             asset: &asset,
             color_space_override: Some(ColorSpace::Rec2020),
             alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
             source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ONE_THIRD),
             input_color: &context,
             prefer_proxy: true,
@@ -361,8 +516,8 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
     );
     assert_eq!(overridden.key.decode.source().video_stream_index(), 7);
     assert_eq!(
-        overridden.key.decode.source_color().color_space,
-        ColorSpace::Rec2020
+        overridden.key.decode.source_color().color_space(),
+        Some(ColorSpace::Rec2020)
     );
     assert!(
         overridden.proxy_generation.is_none(),
@@ -449,6 +604,7 @@ fn filename_log_suggestion_cannot_change_preview_color_plan_but_override_does() 
                 asset,
                 color_space_override,
                 alpha_interpretation: AlphaInterpretation::Straight,
+                picture_overrides: Default::default(),
                 source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 input_color: &context,
                 prefer_proxy: false,
@@ -476,14 +632,14 @@ fn filename_log_suggestion_cannot_change_preview_color_plan_but_override_does() 
         suggested_plan.key.decode.source_color()
     );
     assert_eq!(
-        suggested_plan.key.decode.source_color().color_space,
-        ColorSpace::Rec709
+        suggested_plan.key.decode.source_color().color_space(),
+        Some(ColorSpace::Rec709)
     );
 
     let overridden = resolve(&suggested, Some(ColorSpace::SonySLog3SGamut3Cine));
     assert_eq!(
-        overridden.key.decode.source_color().color_space,
-        ColorSpace::SonySLog3SGamut3Cine
+        overridden.key.decode.source_color().color_space(),
+        Some(ColorSpace::SonySLog3SGamut3Cine)
     );
     assert_eq!(
         overridden.input_color_resolution.source,
@@ -581,6 +737,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(
             TimelineTime::new(1, 2).expect("exact source time"),
         ),
@@ -615,6 +772,16 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         mondrian_media::PreviewDecodeRepresentation::NativeSurface
     );
     assert_eq!(
+        resolved
+            .key
+            .preparation_intent
+            .color_transform()
+            .expect("color-managed native source")
+            .backend,
+        mondrian_renderer::RenderColorTransformBackend::OcioGpuShaderPlan,
+        "native-surface decode must carry the renderer GPU input transform"
+    );
+    assert_eq!(
         resolved.key.native_surface_hint(),
         Some(PreviewNativeSurfaceHint::P010)
     );
@@ -624,6 +791,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(
             TimelineTime::new(1, 2).expect("exact source time"),
         ),
@@ -644,6 +812,16 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         mondrian_media::PreviewDecodeRepresentation::NativeCpu,
         "CPU-working requests retain the sampled extent instead of native-surface geometry"
     );
+    assert_eq!(
+        cpu_resolved
+            .key
+            .preparation_intent
+            .color_transform()
+            .expect("color-managed CPU source")
+            .backend,
+        mondrian_renderer::RenderColorTransformBackend::CpuOcioRgba8Boundary,
+        "CPU-addressable decode must retain the CPU input transform"
+    );
     assert_ne!(
         resolved.key, cpu_resolved.key,
         "opaque-native and CPU-working requests must never share scheduler/cache identity"
@@ -652,7 +830,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
 }
 
 #[test]
-fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
+fn undiscovered_decoder_keeps_compact_cpu_yuv_and_unmapped_rgb_keeps_rgba() {
     let root = unique_root("mondrian-preview-native-admission-evidence");
     let p010_path = root.join("p010.mp4");
     let rgb_path = root.join("rgb.mp4");
@@ -685,6 +863,7 @@ fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
             asset,
             color_space_override: None,
             alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
             source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
             input_color: &context,
             prefer_proxy: false,
@@ -704,8 +883,10 @@ fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
     };
     assert_eq!(
         undiscovered.key.decode.representation(),
-        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+        mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv,
+        "a GPU consumer can upload CPU-decoded P010 before native decoder discovery"
     );
+    assert!(!undiscovered.key.decode.representation().is_native_surface());
 
     let PreviewMediaSourceOutcome::Ready(unmapped) = resolve(&rgb, gpu_admission()) else {
         panic!("RGB source should resolve through CPU geometry");
@@ -743,6 +924,7 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &context,
         prefer_proxy: true,
@@ -763,7 +945,10 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
     let PreviewMediaSourceOutcome::Unavailable(unavailable) = outcome else {
         panic!("missing sampling must be unavailable")
     };
-    assert!(unavailable.reason.to_string().contains("Interpret Asset"));
+    assert!(unavailable
+        .reason
+        .to_string()
+        .contains("overrides cannot repair unsupported decoder sampling"));
     assert!(
         crate::app::proxy_generation::resolve_asset_proxy_color_contract(&asset, &context).is_err()
     );
@@ -785,6 +970,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &context,
         prefer_proxy: false,
@@ -810,6 +996,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         asset: &untagged,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &context,
         prefer_proxy: false,
@@ -823,6 +1010,100 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
     assert!(matches!(
         rejected,
         PreviewMediaSourceOutcome::ColorRejected(_)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rgb_data_texture_resolves_to_cpu_numeric_bypass_without_color_metadata() {
+    let root = unique_root("mondrian-preview-source-data-texture");
+    let source = root.join("utility-rgba.mov");
+    std::fs::create_dir_all(&root).expect("test root");
+    std::fs::write(&source, b"source").expect("source");
+    let mut asset =
+        video_asset_with_physical_stream(source, None, 0, PixelFormat::Rgba, true, 8, true);
+    asset.interpretation.payload = AssetColorPayload::NonColorData;
+    let config = proxy_config(root.join("proxy"));
+    let mut context = color_context();
+    context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
+
+    let PreviewMediaSourceOutcome::Ready(resolved) =
+        resolve_preview_media_source(PreviewMediaSourceRequest {
+            asset: &asset,
+            color_space_override: Some(ColorSpace::Rec2100Pq),
+            alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            input_color: &context,
+            prefer_proxy: true,
+            request_missing_proxy_generation: true,
+            proxy_config: &config,
+            proxy_color: None,
+            hardware_admission: gpu_admission(),
+            cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+        })
+    else {
+        panic!("RGB data texture must enter Preview");
+    };
+
+    assert_eq!(
+        resolved.input_color_resolution.resolved,
+        ResolvedInputColor::Data
+    );
+    assert!(resolved.key.decode.source_color().is_data_texture());
+    assert_eq!(resolved.key.decode.source_color().color_space(), None);
+    assert_eq!(
+        resolved.key.decode.representation(),
+        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+    );
+    assert!(resolved.key.preparation_intent.is_data_texture());
+    assert!(resolved.proxy_generation.is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn yuv_data_texture_fails_closed_before_decode_or_color_rejection() {
+    let root = unique_root("mondrian-preview-source-yuv-data-texture");
+    let source = root.join("utility-yuv.mov");
+    std::fs::create_dir_all(&root).expect("test root");
+    std::fs::write(&source, b"source").expect("source");
+    let mut asset = video_asset_with_physical_stream(
+        source,
+        Some(ColorSpace::Rec709),
+        0,
+        PixelFormat::P010,
+        true,
+        10,
+        false,
+    );
+    asset.interpretation.payload = AssetColorPayload::NonColorData;
+    let config = proxy_config(root.join("proxy"));
+    let context = color_context();
+
+    let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {
+        asset: &asset,
+        color_space_override: None,
+        alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
+        source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+        input_color: &context,
+        prefer_proxy: false,
+        request_missing_proxy_generation: false,
+        proxy_config: &config,
+        proxy_color: None,
+        hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
+        cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+    });
+    assert!(matches!(
+        outcome,
+        PreviewMediaSourceOutcome::Unavailable(UnavailablePreviewMediaSource {
+            reason: PreviewMediaSourceUnavailableReason::DataTextureRequiresRgb {
+                pixel_format: PixelFormat::P010,
+            },
+            ..
+        })
     ));
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -842,6 +1123,7 @@ fn assume_rec709_policy_binds_yuv_matrix_into_decode_identity() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &context,
         prefer_proxy: false,
@@ -877,6 +1159,7 @@ fn changed_source_revision_is_rejected_before_decode_uses_stale_probe_facts() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         input_color: &context,
         prefer_proxy: false,

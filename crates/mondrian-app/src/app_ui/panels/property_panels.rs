@@ -335,12 +335,20 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let position_x_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.position.clone());
     let position_y_parameter = position_x_parameter.clone();
-    let scale_parameter =
+    let scale_x_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.scale.clone());
+    let scale_y_parameter = scale_x_parameter.clone();
+    let anchor_x_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.anchor.clone());
+    let anchor_y_parameter = anchor_x_parameter.clone();
     let rotation_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.rotation.clone());
     let position_x = model.position_x;
     let position_y = model.position_y;
+    let scale_x = model.scale_x_percent;
+    let scale_y = model.scale_y_percent;
+    let anchor_x = model.anchor_x;
+    let anchor_y = model.anchor_y;
     let has_target = selected_clip.is_some();
     let can_edit = has_target && model.is_editable;
     let subtitle = model.edit_disabled_reason.as_deref().unwrap_or(if has_target {
@@ -669,11 +677,13 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     panel = panel.with_section(
         PropertySection::new("变换")
             .with_row(PropertyRow::new(
-                "Position X",
-                numeric_slider_input_control(
+                "位置 X (px)",
+                numeric_slider_input_control_with_hard_range(
                     model.position_x,
                     -4096.0,
                     4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
                     Some(1.0),
                     0,
                     can_edit,
@@ -687,11 +697,13 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Position Y",
-                numeric_slider_input_control(
+                "位置 Y (px)",
+                numeric_slider_input_control_with_hard_range(
                     model.position_y,
                     -4096.0,
                     4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
                     Some(1.0),
                     0,
                     can_edit,
@@ -705,25 +717,87 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Scale",
-                numeric_slider_input_control(
-                    model.scale_percent,
-                    0.0,
+                "缩放 X (%)",
+                numeric_slider_input_control_with_hard_range(
+                    model.scale_x_percent,
+                    -400.0,
                     400.0,
+                    -100_000.0,
+                    100_000.0,
                     Some(1.0),
                     0,
                     can_edit,
                     move |value| {
                         inspector_parameter_action(
                             selected_clip,
-                            scale_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::splat(value.max(0.0) / 100.0)),
+                            scale_x_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(value / 100.0, scale_y / 100.0)),
                         )
                     },
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Rotation",
+                "缩放 Y (%)",
+                numeric_slider_input_control_with_hard_range(
+                    model.scale_y_percent,
+                    -400.0,
+                    400.0,
+                    -100_000.0,
+                    100_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            scale_y_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(scale_x / 100.0, value / 100.0)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "锚点 X (px)",
+                numeric_slider_input_control_with_hard_range(
+                    model.anchor_x,
+                    -4096.0,
+                    4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            anchor_x_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(value, anchor_y)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "锚点 Y (px)",
+                numeric_slider_input_control_with_hard_range(
+                    model.anchor_y,
+                    -4096.0,
+                    4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            anchor_y_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(anchor_x, value)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "旋转 (°)",
                 numeric_slider_input_control(
                     model.rotation_degrees,
                     -180.0,
@@ -844,12 +918,39 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
 
     if selected_clip.is_some_and(|selection| selection.is_video_track) {
         panel = panel.with_section(
-            PropertySection::new("蒙版").with_row(PropertyRow::new(
+            PropertySection::new("Power Window（窗口）").with_row(PropertyRow::new(
                 "添加",
                 Box::new(
-                    Button::new("添加矩形蒙版")
-                        .enabled(can_edit)
-                        .on_click(inspector_add_mask_action(selected_clip)),
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(Button::new("矩形").enabled(can_edit).on_click(
+                                inspector_add_mask_action(selected_clip, MaskShape::default()),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(Button::new("椭圆").enabled(can_edit).on_click(
+                                inspector_add_mask_action(
+                                    selected_clip,
+                                    MaskShape::Ellipse {
+                                        center: glam::Vec2::splat(0.5),
+                                        radii: glam::Vec2::splat(0.35),
+                                    },
+                                ),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(Button::new("Bezier").enabled(can_edit).on_click(
+                                inspector_add_mask_action(
+                                    selected_clip,
+                                    default_bezier_power_window(),
+                                ),
+                            )),
+                            1.0,
+                        ),
+                    ])
+                    .with_gap(6.0),
                 ),
             )),
         );
@@ -875,6 +976,10 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         radii: glam::Vec2::splat(0.4),
                     },
                 ),
+            ),
+            MenuItem::new(
+                "Bezier",
+                inspector_mask_shape_action(selected_clip, mask_id, default_bezier_power_window()),
             ),
         ];
         let mut section = PropertySection::new(mask.label.clone())
@@ -967,6 +1072,100 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         }),
                 ),
             ));
+        let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
+            matches!(
+                status.phase,
+                crate::app::visual_tracking::VisualTrackingPhase::Queued
+                    | crate::app::visual_tracking::VisualTrackingPhase::Analyzing
+                    | crate::app::visual_tracking::VisualTrackingPhase::Canceling
+            )
+        });
+        let tracking_items = [
+            (
+                "目标 · 向前",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Forward,
+            ),
+            (
+                "目标 · 向后",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Backward,
+            ),
+            (
+                "目标 · 双向",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Both,
+            ),
+            (
+                "平面 · 向前",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Forward,
+            ),
+            (
+                "平面 · 向后",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Backward,
+            ),
+            (
+                "平面 · 双向",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Both,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, tracking_model, direction)| {
+            MenuItem::new(
+                label,
+                inspector_mask_start_tracking_action(
+                    selected_clip,
+                    mask_id,
+                    tracking_model,
+                    direction,
+                ),
+            )
+        })
+        .collect();
+        section = section
+            .with_row(PropertyRow::new(
+                "跟踪",
+                Box::new(
+                    Dropdown::new("选择模型与方向…", tracking_items)
+                        .enabled(mask_can_edit && !tracking_active),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "跟踪状态",
+                Box::new(Label::new(inspector_tracking_status_label(mask)).muted()),
+            ))
+            .with_row(PropertyRow::new(
+                "跟踪控制",
+                Box::new(
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(Button::new("取消").enabled(tracking_active).on_click(
+                                inspector_mask_cancel_tracking_action(selected_clip, mask_id),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(
+                                Button::new("重算")
+                                    .enabled(
+                                        mask_can_edit
+                                            && mask.has_tracking_recipe
+                                            && !tracking_active,
+                                    )
+                                    .on_click(inspector_mask_recompute_tracking_action(
+                                        selected_clip,
+                                        mask_id,
+                                    )),
+                            ),
+                            1.0,
+                        ),
+                    ])
+                    .with_gap(6.0),
+                ),
+            ));
         for property in &mask.properties {
             section = section.with_row(mask_property_row(
                 property,
@@ -977,6 +1176,66 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
         panel = panel.with_section(section);
     }
+
+    let grade = &model.grade;
+    let mut grade_section = PropertySection::new("Grade Graph").with_row(PropertyRow::new(
+        "Clip",
+        Box::new(
+            Button::new(grade.clip_grade.as_deref().unwrap_or("创建 Clip Grade"))
+                .enabled(grade.create_clip_grade_action.is_some())
+                .on_click(grade.create_clip_grade_action.clone()),
+        ),
+    ));
+    if let Some(group) = &grade.group {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Group",
+            Box::new(Label::new(group.clone()).muted()),
+        ));
+    }
+    if grade.group_pre_grade.is_some() || grade.group_post_grade.is_some() {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Group Pre/Post",
+            Box::new(
+                Label::new(format!(
+                    "{} → {}",
+                    grade.group_pre_grade.as_deref().unwrap_or("Identity"),
+                    grade.group_post_grade.as_deref().unwrap_or("Identity")
+                ))
+                .muted(),
+            ),
+        ));
+    }
+    if let Some(timeline_grade) = &grade.timeline_grade {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Timeline",
+            Box::new(Label::new(timeline_grade.clone()).muted()),
+        ));
+    }
+    if let Some(version) = &grade.active_version {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Version / Nodes",
+            Box::new(
+                Label::new(format!(
+                    "{} · {} versions · {} nodes",
+                    version, grade.version_count, grade.node_count
+                ))
+                .muted(),
+            ),
+        ));
+    }
+    if grade.clip_definition_id.is_some() {
+        let items = grade
+            .add_node_actions
+            .iter()
+            .map(|item| MenuItem::new(item.label.clone(), item.action.clone()))
+            .collect();
+        let enabled = !grade.add_node_actions.is_empty();
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Add Node",
+            Box::new(Dropdown::new("添加调色节点…", items).enabled(enabled)),
+        ));
+    }
+    panel = panel.with_section(grade_section);
 
     if !model.effects.is_empty() {
         for (index, effect) in model.effects.iter().enumerate() {
@@ -1049,7 +1308,17 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         .with_gap(8.0),
                     ),
                 ));
+            let mut previous_group = None;
             for property in &effect.properties {
+                if property.group_name.as_deref() != previous_group {
+                    if let Some(group_name) = &property.group_name {
+                        section = section.with_row(PropertyRow::new(
+                            group_name.clone(),
+                            Box::new(Label::new("")),
+                        ));
+                    }
+                    previous_group = property.group_name.as_deref();
+                }
                 section = section.with_row(effect_property_row(
                     property,
                     can_edit,
@@ -1545,13 +1814,45 @@ pub(super) fn inspector_reorder_effect_action(
     })
 }
 
-pub(super) fn inspector_add_mask_action(selection: Option<SelectedClipRef>) -> Option<Action> {
+pub(super) fn inspector_add_mask_action(
+    selection: Option<SelectedClipRef>,
+    shape: MaskShape,
+) -> Option<Action> {
     selection.filter(|selection| selection.is_video_track).map(|selection| {
         visual_mask_add_to_clip_action(VisualMaskAddToClipPayload {
             clip_id: selection.clip_id,
-            shape: MaskShape::default(),
+            shape,
         })
     })
+}
+
+pub(super) fn default_bezier_power_window() -> MaskShape {
+    const HANDLE: f32 = 0.193_299_9;
+    MaskShape::Path {
+        points: vec![
+            BezierPoint {
+                position: glam::Vec2::new(0.5, 0.15),
+                control_in: glam::Vec2::new(-HANDLE, 0.0),
+                control_out: glam::Vec2::new(HANDLE, 0.0),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.85, 0.5),
+                control_in: glam::Vec2::new(0.0, -HANDLE),
+                control_out: glam::Vec2::new(0.0, HANDLE),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.5, 0.85),
+                control_in: glam::Vec2::new(HANDLE, 0.0),
+                control_out: glam::Vec2::new(-HANDLE, 0.0),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.15, 0.5),
+                control_in: glam::Vec2::new(0.0, HANDLE),
+                control_out: glam::Vec2::new(0.0, -HANDLE),
+            },
+        ],
+        closed: true,
+    }
 }
 
 pub(super) fn inspector_mask_select_action(
@@ -1618,6 +1919,76 @@ pub(super) fn inspector_mask_shape_action(
             interpolation: MaskShapeInterpolation::Hold,
         })
     })
+}
+
+pub(super) fn inspector_mask_start_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    model: MaskTrackingModel,
+    direction: MaskTrackingDirection,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_start_tracking_action(VisualMaskStartTrackingPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            model,
+            direction,
+            settings: MaskTrackingSettings::default(),
+        })
+    })
+}
+
+pub(super) fn inspector_mask_cancel_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_cancel_tracking_action(VisualMaskTargetPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+        })
+    })
+}
+
+pub(super) fn inspector_mask_recompute_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_recompute_tracking_action(VisualMaskTargetPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+        })
+    })
+}
+
+pub(super) fn inspector_tracking_status_label(mask: &InspectorMaskModel) -> String {
+    let Some(status) = &mask.tracking_status else {
+        return if mask.has_tracking_recipe {
+            "已生成 · 可重算".to_owned()
+        } else {
+            "未跟踪".to_owned()
+        };
+    };
+    use crate::app::visual_tracking::VisualTrackingPhase;
+    match status.phase {
+        VisualTrackingPhase::Queued => "排队中".to_owned(),
+        VisualTrackingPhase::Analyzing => {
+            format!("分析中 {}/{}", status.completed_pairs, status.total_pairs)
+        }
+        VisualTrackingPhase::Canceling => "正在取消".to_owned(),
+        VisualTrackingPhase::Canceled => "已取消".to_owned(),
+        VisualTrackingPhase::Completed => "已完成 · 可重算".to_owned(),
+        VisualTrackingPhase::CacheHit => "缓存命中 · 已应用".to_owned(),
+        VisualTrackingPhase::Stale => status.detail.as_deref().map_or_else(
+            || "结果已过期".to_owned(),
+            |detail| format!("已过期 · {detail}"),
+        ),
+        VisualTrackingPhase::Failed => status
+            .detail
+            .as_deref()
+            .map_or_else(|| "失败".to_owned(), |detail| format!("失败 · {detail}")),
+    }
 }
 
 pub(super) fn inspector_remove_mask_action(
@@ -1787,6 +2158,10 @@ pub(super) fn inspector_property_row(
 
 pub(super) fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
     let components: usize = match value {
+        PropertyValue::Curve(_) => return Some(150.0),
+        PropertyValue::QualifierSamples(samples) => {
+            return Some((samples.samples().len() as f32 + 1.0) * 34.0);
+        }
         PropertyValue::Vec2(_) => 2,
         PropertyValue::Vec3(_) => 3,
         PropertyValue::Vec4(_) => 4,
@@ -2020,6 +2395,31 @@ pub(super) fn inspector_property_value_widget(
                 }),
             )
         }
+        PropertyValue::Curve(curve) => {
+            let points =
+                curve.points().iter().map(|point| CurvePoint::new(point.x, point.y)).collect();
+            let selected_clip = selection;
+            Box::new(
+                CurveEditor::with_points(points).enabled(can_edit).on_change(move |points| {
+                    let curve = NormalizedCurve::new(
+                        points
+                            .iter()
+                            .map(|point| NormalizedCurvePoint::new(point.x, point.y))
+                            .collect(),
+                    )
+                    .ok()?;
+                    inspector_property_action(
+                        selected_clip,
+                        target.clone(),
+                        &path,
+                        PropertyValue::Curve(curve),
+                    )
+                }),
+            )
+        }
+        PropertyValue::QualifierSamples(samples) => {
+            qualifier_sample_editor(samples, can_edit, selection, target, path)
+        }
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
             &[value.x, value.y],
@@ -2051,6 +2451,117 @@ pub(super) fn inspector_property_value_widget(
             |values| PropertyValue::Vec4([values[0], values[1], values[2], values[3]]),
         ),
     }
+}
+
+fn qualifier_sample_editor(
+    samples: &QualifierSampleSet,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: String,
+) -> Box<dyn Widget> {
+    let mut rows = Vec::with_capacity(samples.samples().len() + 1);
+    for (index, sample) in samples.samples().iter().copied().enumerate() {
+        let base_for_color = samples.clone();
+        let color_target = target.clone();
+        let color_path = path.clone();
+        let color = Color {
+            r: sample.rgb[0],
+            g: sample.rgb[1],
+            b: sample.rgb[2],
+            a: 1.0,
+        };
+        let color_picker = color_picker_trigger(color).enabled(can_edit).on_change(move |color| {
+            let mut changed = base_for_color.samples().to_vec();
+            changed[index].rgb = [
+                color.r.clamp(0.0, 1.0),
+                color.g.clamp(0.0, 1.0),
+                color.b.clamp(0.0, 1.0),
+            ];
+            qualifier_sample_set_action(selection, color_target.clone(), &color_path, changed)
+        });
+
+        let operation_items = [
+            (QualifierSampleOperation::Include, "包含"),
+            (QualifierSampleOperation::Exclude, "排除"),
+        ]
+        .into_iter()
+        .map(|(operation, label)| {
+            let mut changed = samples.samples().to_vec();
+            changed[index].operation = operation;
+            MenuItem::new(
+                label,
+                qualifier_sample_set_action(selection, target.clone(), &path, changed),
+            )
+        })
+        .collect();
+        let operation_label = match sample.operation {
+            QualifierSampleOperation::Include => "包含",
+            QualifierSampleOperation::Exclude => "排除",
+        };
+        let mut without = samples.samples().to_vec();
+        without.remove(index);
+        let remove = qualifier_sample_set_action(selection, target.clone(), &path, without);
+        rows.push(FlexChild::fixed(Box::new(
+            FlexContainer::row(vec![
+                FlexChild::fixed(Box::new(color_picker)),
+                FlexChild::flex(
+                    Box::new(Dropdown::new(operation_label, operation_items).enabled(can_edit)),
+                    1.0,
+                ),
+                FlexChild::fixed(Box::new(
+                    Button::new("删除").enabled(can_edit && remove.is_some()).on_click(remove),
+                )),
+            ])
+            .with_gap(4.0),
+        )));
+    }
+
+    let can_add = can_edit && samples.samples().len() < MAX_QUALIFIER_SAMPLES;
+    let add_action = |operation| {
+        let mut changed = samples.samples().to_vec();
+        changed.push(QualifierSample::new([0.5, 0.5, 0.5], operation));
+        qualifier_sample_set_action(selection, target.clone(), &path, changed)
+    };
+    let add_include = add_action(QualifierSampleOperation::Include);
+    let add_exclude = add_action(QualifierSampleOperation::Exclude);
+    rows.push(FlexChild::fixed(Box::new(
+        FlexContainer::row(vec![
+            FlexChild::flex(
+                Box::new(
+                    Button::new("+ 包含")
+                        .enabled(can_add && add_include.is_some())
+                        .on_click(add_include),
+                ),
+                1.0,
+            ),
+            FlexChild::flex(
+                Box::new(
+                    Button::new("+ 排除")
+                        .enabled(can_add && add_exclude.is_some())
+                        .on_click(add_exclude),
+                ),
+                1.0,
+            ),
+        ])
+        .with_gap(4.0),
+    )));
+    Box::new(FlexContainer::column(rows).with_gap(4.0))
+}
+
+pub(super) fn qualifier_sample_set_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: &str,
+    samples: Vec<QualifierSample>,
+) -> Option<Action> {
+    let samples = QualifierSampleSet::new(samples).ok()?;
+    inspector_property_action(
+        selection,
+        target,
+        path,
+        PropertyValue::QualifierSamples(samples),
+    )
 }
 
 pub(super) fn vector_property_widget(

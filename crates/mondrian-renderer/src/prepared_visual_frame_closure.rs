@@ -15,8 +15,8 @@ use crate::{
 };
 use mondrian_core::timeline_data::{NestedColorProcessing, TimelineClipExecutionRef};
 use mondrian_core::{
-    FramePosition, Resolution, SequenceId, SequenceRevision, SourceSampleTarget, TimelineTime,
-    WorkingColorSpace,
+    FramePosition, Rational, Resolution, SequenceId, SequenceRevision, SourceSampleTarget,
+    TimelineTime, WorkingColorSpace,
 };
 use mondrian_effects::EffectTemporalFrameRequest;
 use mondrian_timeline::sequence::{
@@ -40,6 +40,10 @@ impl PreparedVisualFrameNodeId {
     /// Zero-based deterministic node index within its owning closure.
     pub const fn index(self) -> usize {
         self.0 as usize
+    }
+
+    pub(crate) const fn from_raw_for_execution(index: u32) -> Self {
+        Self(index)
     }
 }
 
@@ -172,8 +176,8 @@ pub struct PreparedVisualFrameClosureRequest<'a> {
     pub root_sequence: &'a Sequence,
     /// Reachable Sequence snapshots available to nested lookup.
     pub sequences: &'a [Sequence],
-    /// Exact nonnegative root frame on the root Sequence Evaluation Grid.
-    pub root_frame: i64,
+    /// Exact nonnegative root sample on the frame or doubled field grid.
+    pub root_position: FramePosition,
     /// Explicit root execution/output raster.
     pub root_resolution: Resolution,
     /// Exact root Program color context.
@@ -238,7 +242,7 @@ pub struct PreparedVisualFrameNode<T> {
     program: Arc<PreparedVisualProgram>,
     sequence_id: SequenceId,
     sequence_revision: SequenceRevision,
-    frame: i64,
+    position: FramePosition,
     time: TimelineTime,
     materialization: PreparedVisualMaterializationContract,
     execution_resolution: Resolution,
@@ -272,7 +276,12 @@ impl<T> PreparedVisualFrameNode<T> {
 
     /// Projected frame on this Sequence's Evaluation Grid.
     pub const fn frame(&self) -> i64 {
-        self.frame
+        self.position.frame
+    }
+
+    /// Exact frame-grid or doubled-field-grid evaluation coordinate.
+    pub const fn position(&self) -> FramePosition {
+        self.position
     }
 
     /// Exact Sequence-local sample time represented by `frame`.
@@ -337,7 +346,7 @@ impl<T> PreparedVisualFrameNode<T> {
             program: self.program,
             sequence_id: self.sequence_id,
             sequence_revision: self.sequence_revision,
-            frame: self.frame,
+            position: self.position,
             time: self.time,
             materialization: self.materialization,
             execution_resolution: self.execution_resolution,
@@ -413,11 +422,32 @@ impl<T> PreparedVisualFrameClosure<T> {
     /// until its composite runs. It additionally reserves four canvases at
     /// the largest node extent for the compositor's proven worst case
     /// (output, both Cross Dissolve endpoints, and one Effect result).
-    /// Preview and Export must admit this value against the same owner-scoped
-    /// active-byte grant used by [`crate::TimelineCompositeScratch`] before
-    /// materializing any child pixels.
+    /// CPU-root consumers must admit this value against the same owner-scoped
+    /// active-byte grant used by [`crate::TimelineCompositeScratch`]. Consumers
+    /// that defer the root backend may first admit only CPU child materialization
+    /// using [`Self::conservative_cpu_nested_materialization_active_bytes`].
     pub fn conservative_cpu_materialization_active_bytes(
         &self,
+    ) -> Result<u64, PreparedVisualFrameClosureError> {
+        self.cpu_materialization_active_bytes(true)
+    }
+
+    /// Bound CPU child materialization while leaving the root as an unrendered plan.
+    ///
+    /// Preview resolves nested CPU outputs before selecting the root backend.
+    /// This counts every child output and the same worst-case child scratch as
+    /// full CPU materialization, but no hypothetical root CPU canvas. A caller
+    /// that later executes the root on CPU must separately admit the complete
+    /// closure estimate against its current owner grant before allocating pixels.
+    pub fn conservative_cpu_nested_materialization_active_bytes(
+        &self,
+    ) -> Result<u64, PreparedVisualFrameClosureError> {
+        self.cpu_materialization_active_bytes(false)
+    }
+
+    fn cpu_materialization_active_bytes(
+        &self,
+        include_root: bool,
     ) -> Result<u64, PreparedVisualFrameClosureError> {
         const FLOAT_PIXEL_BYTES: u64 = std::mem::size_of::<[f32; 4]>() as u64;
         const WORST_LOCAL_COMPOSITOR_CANVASES: u64 = 4;
@@ -425,6 +455,9 @@ impl<T> PreparedVisualFrameClosure<T> {
         let mut retained_outputs = 0_u64;
         let mut largest_output = 0_u64;
         for node in &self.nodes {
+            if !include_root && node.id == self.root {
+                continue;
+            }
             let resolution = node.execution_resolution;
             let bytes = u64::from(resolution.width)
                 .checked_mul(u64::from(resolution.height))
@@ -459,14 +492,14 @@ struct NestedDemand {
     color_processing: NestedColorProcessing,
 }
 
-/// Build the sole recursive visual closure for one root frame.
+/// Build the sole recursive visual closure for one root picture sample.
 ///
 /// `resolve_program` binds each distinct Sequence snapshot to exactly one
 /// immutable Program. The Program identity, revision, and conservative author
 /// fingerprint are validated before `evaluate` can observe it.
 ///
 /// `evaluate` receives no raw Sequence and may only lower the already prepared
-/// Program for the exact frame, execution raster, color context, and normalized
+/// Program for the exact frame/field position, execution raster, color context, and normalized
 /// authored Preview scale supplied here. It may attach consumer-specific
 /// evidence that is local to this node, but must not recurse. Evidence that
 /// needs canonical child bindings is finalized later through
@@ -477,7 +510,7 @@ pub fn prepare_visual_frame_closure<T>(
     mut resolve_program: impl FnMut(&Sequence) -> Result<Arc<PreparedVisualProgram>, String>,
     evaluate: impl FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
@@ -506,15 +539,15 @@ pub fn prepare_bound_visual_frame_closure<T>(
     mut resolve_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
     mut evaluate: impl FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
     ) -> Result<PreparedVisualFrameEvaluation<T>, String>,
 ) -> Result<PreparedVisualFrameClosure<T>, PreparedVisualFrameClosureError> {
-    if request.root_frame < 0 {
+    if request.root_position.frame < 0 {
         return Err(PreparedVisualFrameClosureError::NegativeRootFrame {
-            frame: request.root_frame,
+            frame: request.root_position.frame,
         });
     }
     validate_resolution(request.root_sequence.id, request.root_resolution)?;
@@ -549,7 +582,7 @@ pub fn prepare_bound_visual_frame_closure<T>(
     };
     let root = builder.prepare_node(
         request.root_sequence,
-        request.root_frame,
+        request.root_position,
         request.root_resolution,
         request.root_color_context,
         Arc::from([]),
@@ -572,7 +605,7 @@ impl<'a, T, Evaluate> PreparedVisualFrameClosureBuilder<'a, T, Evaluate>
 where
     Evaluate: FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
@@ -582,7 +615,7 @@ where
     fn prepare_node(
         &mut self,
         sequence: &Sequence,
-        frame: i64,
+        position: FramePosition,
         execution_resolution: Resolution,
         color_context: ProgramColorContext,
         instance_path: Arc<[PreparedVisualNestedInstanceStep]>,
@@ -601,22 +634,20 @@ where
             path.push(sequence.id);
             return Err(PreparedVisualFrameClosureError::Cycle { path });
         }
-        if frame < 0 {
+        if position.frame < 0 {
             return Err(PreparedVisualFrameClosureError::NegativeNestedFrame {
                 sequence_id: sequence.id,
-                frame,
+                frame: position.frame,
             });
         }
         validate_resolution(sequence.id, execution_resolution)?;
-        let time =
-            TimelineTime::from_frame_position(FramePosition::new(frame, sequence.time_base()))
-                .map_err(
-                    |error| PreparedVisualFrameClosureError::FrameTimeProjection {
-                        sequence_id: sequence.id,
-                        frame,
-                        reason: error.to_string(),
-                    },
-                )?;
+        let time = TimelineTime::from_frame_position(position).map_err(|error| {
+            PreparedVisualFrameClosureError::FrameTimeProjection {
+                sequence_id: sequence.id,
+                frame: position.frame,
+                reason: error.to_string(),
+            }
+        })?;
 
         self.active_path.push(sequence.id);
         let result = (|| {
@@ -627,17 +658,17 @@ where
             );
             let evaluation = (self.evaluate)(
                 &program,
-                frame,
+                position,
                 execution_resolution,
                 &color_context,
                 preview_resolution_scale,
             )
             .map_err(|reason| PreparedVisualFrameClosureError::Evaluation {
                 sequence_id: sequence.id,
-                frame,
+                frame: position.frame,
                 reason,
             })?;
-            validate_evaluation(sequence, frame, &evaluation.plan)?;
+            validate_evaluation(sequence, position, &evaluation.plan)?;
             let demands = collect_nested_demands(&evaluation.plan, &evaluation.temporal_batches);
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
@@ -648,7 +679,7 @@ where
                 program,
                 sequence_id: sequence.id,
                 sequence_revision: sequence.revision,
-                frame,
+                position,
                 time,
                 execution_resolution,
                 color_context: color_context.clone(),
@@ -688,20 +719,17 @@ where
                         );
                     }
                 }
-                let child_frame = demand
-                    .source_sample
-                    .to_frame_position(child.settings.frame_rate)
+                let child_position = exact_nested_visual_position(demand.source_sample, child)
                     .map_err(
-                        |error| PreparedVisualFrameClosureError::NestedTimeProjection {
+                        |reason| PreparedVisualFrameClosureError::NestedTimeProjection {
                             parent_sequence_id: sequence.id,
                             nested_sequence_id: child.id,
                             placement: Box::new(demand.placement),
                             source_time: demand.source_sample.time(),
-                            reason: error.to_string(),
+                            reason,
                         },
-                    )?
-                    .frame;
-                if child_frame < 0 {
+                    )?;
+                if child_position.frame < 0 {
                     return Err(PreparedVisualFrameClosureError::InsufficientNestedHandle {
                         parent_sequence_id: sequence.id,
                         nested_sequence_id: child.id,
@@ -711,7 +739,12 @@ where
                 }
                 let child_context = child
                     .settings
-                    .nested_render_color_context(color_context.clone(), demand.color_processing);
+                    .nested_render_color_context(&color_context, demand.color_processing)
+                    .map_err(|error| PreparedVisualFrameClosureError::ColorContext {
+                        parent_sequence_id: sequence.id,
+                        nested_sequence_id: child.id,
+                        reason: error.to_string(),
+                    })?;
                 let mut child_path = Vec::with_capacity(instance_path.len().saturating_add(1));
                 child_path.extend_from_slice(&instance_path);
                 child_path.push(PreparedVisualNestedInstanceStep {
@@ -720,7 +753,7 @@ where
                 });
                 let child_id = self.prepare_node(
                     child,
-                    child_frame,
+                    child_position,
                     child_resolution,
                     child_context.clone(),
                     Arc::from(child_path),
@@ -732,8 +765,8 @@ where
                     placement: demand.placement,
                     sample: demand.sample,
                     source_sample: demand.source_sample,
-                    parent_working_color_space: color_context.working_color_space,
-                    child_working_color_space: child_context.working_color_space,
+                    parent_working_color_space: color_context.working_color_space(),
+                    child_working_color_space: child_context.working_color_space(),
                 };
                 let node = self
                     .nodes
@@ -796,25 +829,62 @@ where
 
 fn validate_evaluation(
     sequence: &Sequence,
-    frame: i64,
+    position: FramePosition,
     plan: &TimelineRenderPlan,
 ) -> Result<(), PreparedVisualFrameClosureError> {
-    if plan.position.frame != frame {
+    if plan.position.frame != position.frame {
         return Err(PreparedVisualFrameClosureError::EvaluationFrameMismatch {
             sequence_id: sequence.id,
-            requested: frame,
+            requested: position.frame,
             evaluated: plan.position.frame,
         });
     }
-    let expected_time_base = sequence.time_base();
-    if plan.position.time_base != expected_time_base {
+    if plan.position.time_base != position.time_base {
         return Err(PreparedVisualFrameClosureError::EvaluationGridMismatch {
             sequence_id: sequence.id,
-            expected: expected_time_base,
+            expected: position.time_base,
             evaluated: plan.position.time_base,
         });
     }
     Ok(())
+}
+
+fn exact_nested_visual_position(
+    target: SourceSampleTarget,
+    sequence: &Sequence,
+) -> Result<FramePosition, String> {
+    let frame_position = target
+        .to_frame_position(sequence.settings.frame_rate)
+        .map_err(|error| error.to_string())?;
+    if target.boundary() == mondrian_core::SourceSamplingBoundary::Covering
+        && TimelineTime::from_frame_position(frame_position).map_err(|error| error.to_string())?
+            == target.time()
+    {
+        return Ok(frame_position);
+    }
+    let field_rate = Rational::new(
+        sequence
+            .settings
+            .frame_rate
+            .num
+            .checked_mul(2)
+            .ok_or_else(|| "nested field-rate grid overflowed".to_owned())?,
+        sequence.settings.frame_rate.den,
+    );
+    let field_position = target.to_frame_position(field_rate).map_err(|error| error.to_string())?;
+    let selected_time =
+        TimelineTime::from_frame_position(field_position).map_err(|error| error.to_string())?;
+    let exact = match target.boundary() {
+        mondrian_core::SourceSamplingBoundary::Covering => selected_time == target.time(),
+        mondrian_core::SourceSamplingBoundary::StrictPredecessor => selected_time < target.time(),
+    };
+    if !exact {
+        return Err(format!(
+            "nested source time {} is not representable on the child frame or field grid",
+            target.time()
+        ));
+    }
+    Ok(field_position)
 }
 
 fn collect_nested_demands(
@@ -853,6 +923,7 @@ fn collect_nested_demands(
             }
             TimelineRenderPlanElement::Media(_)
             | TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_) => {}
         }
@@ -1070,6 +1141,15 @@ pub enum PreparedVisualFrameClosureError {
         /// Effect-declared source extent.
         required_resolution: Resolution,
     },
+    /// A child Sequence could not derive a valid context from its parent.
+    ColorContext {
+        /// Parent Sequence.
+        parent_sequence_id: SequenceId,
+        /// Child Sequence.
+        nested_sequence_id: SequenceId,
+        /// Closed-context validation diagnostic.
+        reason: String,
+    },
     /// A plan emitted the same exact nested binding twice.
     DuplicateNestedBinding {
         /// Parent Sequence.
@@ -1206,6 +1286,14 @@ impl fmt::Display for PreparedVisualFrameClosureError {
                 required_resolution.width,
                 required_resolution.height
             ),
+            Self::ColorContext {
+                parent_sequence_id,
+                nested_sequence_id,
+                reason,
+            } => write!(
+                formatter,
+                "Sequence {parent_sequence_id} cannot derive nested Sequence {nested_sequence_id} color context: {reason}"
+            ),
             Self::DuplicateNestedBinding { parent_sequence_id, placement, sample } => write!(
                 formatter,
                 "Sequence {parent_sequence_id} placement {} emitted duplicate nested binding {sample:?}",
@@ -1230,8 +1318,10 @@ impl std::error::Error for PreparedVisualFrameClosureError {}
 mod tests {
     use super::*;
     use crate::{
-        evaluate_prepared_visual_program, PreparedVisualProgram, TimelineCompositeScratch,
-        TimelineCpuCompositePrecision, TimelineCpuWorkingSetError, TimelineCpuWorkingSetGrant,
+        evaluate_prepared_visual_program, execute_prepared_visual_closure,
+        PreparedVisualExecutionAdapter, PreparedVisualExecutionNodeInputs, PreparedVisualProgram,
+        TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCpuWorkingSetError,
+        TimelineCpuWorkingSetGrant,
     };
     use mondrian_core::timeline_data::TimelineClipEndpointContext;
     use mondrian_core::{
@@ -1256,6 +1346,7 @@ mod tests {
         sequence
             .settings
             .root_program_color_context(&ProjectColorEnvironment::default())
+            .expect("valid test color context")
     }
 
     fn prepare_direct_closure(
@@ -1265,13 +1356,35 @@ mod tests {
         root_resolution: Resolution,
         child_canvas_policy: PreparedVisualChildCanvasPolicy,
     ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
+        prepare_direct_closure_with_color_environment(
+            root,
+            sequences,
+            root_frame,
+            root_resolution,
+            child_canvas_policy,
+            &ProjectColorEnvironment::default(),
+        )
+    }
+
+    fn prepare_direct_closure_with_color_environment(
+        root: &Sequence,
+        sequences: &[Sequence],
+        root_frame: i64,
+        root_resolution: Resolution,
+        child_canvas_policy: PreparedVisualChildCanvasPolicy,
+        color_environment: &ProjectColorEnvironment,
+    ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
+        let root_color_context = root
+            .settings
+            .root_program_color_context(color_environment)
+            .expect("valid test color context");
         prepare_visual_frame_closure(
             PreparedVisualFrameClosureRequest {
                 root_sequence: root,
                 sequences,
-                root_frame,
+                root_position: FramePosition::new(root_frame, root.time_base()),
                 root_resolution,
-                root_color_context: root_color_context(root),
+                root_color_context,
                 child_canvas_policy,
             },
             |sequence| {
@@ -1279,13 +1392,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, _, _, _| {
+            |program, position, _, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
@@ -1384,7 +1494,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: root,
                 sequences,
-                root_frame,
+                root_position: FramePosition::new(root_frame, root.time_base()),
                 root_resolution,
                 root_color_context: root_color_context(root),
                 child_canvas_policy,
@@ -1394,13 +1504,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, resolution, _, _| {
+            |program, position, resolution, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
@@ -1434,7 +1541,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[duplicate],
-                root_frame: 0,
+                root_position: FramePosition::new(0, root.time_base()),
                 root_resolution: root.settings.resolution,
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1471,7 +1578,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[],
-                root_frame: 0,
+                root_position: FramePosition::new(0, root.time_base()),
                 root_resolution: Resolution { width: 64, height: 36 },
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1506,7 +1613,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[],
-                root_frame: 3,
+                root_position: FramePosition::new(3, root.time_base()),
                 root_resolution: Resolution { width: 64, height: 36 },
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1516,13 +1623,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, _, _, _| {
+            |program, position, _, _, _| {
                 let mut plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 plan.position.time_base = equivalent_but_not_identical;
@@ -1563,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_child_samples_from_distinct_placements_keep_distinct_instance_paths() {
+    fn distinct_sibling_instances_keep_paths_and_execute_once_in_binding_order() {
         let mut child = Sequence::new("child");
         child.settings.resolution = Resolution { width: 2, height: 1 };
 
@@ -1623,6 +1727,52 @@ mod tests {
         assert_ne!(
             closure.node(first_child).expect("first child").instance_path(),
             closure.node(second_child).expect("second child").instance_path()
+        );
+
+        struct RecordingAdapter {
+            order: Vec<PreparedVisualFrameNodeId>,
+            first_sibling: PreparedVisualFrameNodeId,
+            second_sibling: PreparedVisualFrameNodeId,
+        }
+
+        impl PreparedVisualExecutionAdapter<()> for RecordingAdapter {
+            type Output = PreparedVisualFrameNodeId;
+            type Error = std::convert::Infallible;
+
+            fn materialize_node(
+                &mut self,
+                inputs: PreparedVisualExecutionNodeInputs<'_, (), Self::Output>,
+            ) -> Result<Self::Output, Self::Error> {
+                if inputs.node().id() == self.second_sibling {
+                    assert!(
+                        inputs.child_output(self.first_sibling).is_none(),
+                        "an Adapter must not observe a completed sibling output"
+                    );
+                }
+                for binding in inputs.node().bindings() {
+                    assert_eq!(
+                        inputs.child_output(binding.child()),
+                        Some(&binding.child()),
+                        "every direct child must finish before its parent Adapter call"
+                    );
+                }
+                assert_eq!(inputs.is_root(), inputs.inbound_binding().is_none());
+                self.order.push(inputs.node().id());
+                Ok(inputs.node().id())
+            }
+        }
+
+        let mut adapter = RecordingAdapter {
+            order: Vec::new(),
+            first_sibling: first_child,
+            second_sibling: second_child,
+        };
+        let output = execute_prepared_visual_closure(&closure, &mut adapter)
+            .expect("shared execution driver");
+        assert_eq!(output, closure.root());
+        assert_eq!(
+            adapter.order,
+            vec![first_child, second_child, closure.root()]
         );
     }
 
@@ -1698,12 +1848,15 @@ mod tests {
             )
             .expect("add nested placement");
 
-        let closure = prepare_direct_closure(
+        let closure = prepare_direct_closure_with_color_environment(
             &root,
             std::slice::from_ref(&child),
             12,
             Resolution { width: 64, height: 36 },
             PreparedVisualChildCanvasPolicy::preview_scaled(4).expect("Preview policy"),
+            &ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            }),
         )
         .expect("prepared closure");
         let binding = &closure.node(closure.root()).expect("root").bindings()[0];
@@ -1732,7 +1885,7 @@ mod tests {
             WorkingColorSpace::LinearRec2020
         );
         assert_eq!(
-            child_node.color_context().working_color_space,
+            child_node.color_context().working_color_space(),
             WorkingColorSpace::LinearRec2020
         );
     }
@@ -1967,6 +2120,65 @@ mod tests {
             closure.conservative_cpu_materialization_active_bytes(),
             Err(PreparedVisualFrameClosureError::CpuMaterializationEstimateOverflow)
         ));
+    }
+
+    #[test]
+    fn deferred_root_cpu_materialization_charges_only_real_children() {
+        let mut child = Sequence::new("CPU child");
+        child.settings.resolution = Resolution { width: 2, height: 1 };
+        let mut root = Sequence::new("GPU root");
+        root.settings.resolution = Resolution { width: 3840, height: 2160 };
+        let flat = prepare_direct_closure(
+            &root,
+            &[],
+            0,
+            root.settings.resolution,
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .expect("flat closure");
+        assert_eq!(
+            flat.conservative_cpu_nested_materialization_active_bytes()
+                .expect("nested estimate"),
+            0
+        );
+        let time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    TimelineTime::ZERO,
+                    frame_time(24, time_base),
+                    None,
+                )
+                .expect("nested placement"),
+            )
+            .expect("add nested");
+        let closure = prepare_direct_closure(
+            &root,
+            &[child],
+            0,
+            root.settings.resolution,
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .expect("nested closure");
+        let required = closure
+            .conservative_cpu_nested_materialization_active_bytes()
+            .expect("CPU child estimate");
+        assert_eq!(required, 160);
+        assert_eq!(
+            closure
+                .conservative_cpu_materialization_active_bytes()
+                .expect("full CPU estimate"),
+            663_552_032
+        );
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+            max_active_bytes: required - 1,
+            max_retained_scratch_bytes: 0,
+        });
+        assert!(scratch
+            .admit_cpu_active_working_set(required, TimelineCpuCompositePrecision::Float32)
+            .is_err());
     }
 
     #[test]

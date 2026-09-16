@@ -200,6 +200,15 @@ impl SmpteDisplayTimecodeContract {
         self.start_frame
     }
 
+    /// Parse one conventional label into its signed actual frame-grid value.
+    ///
+    /// The separator must match this contract's counting mode. Drop-frame
+    /// labels that name one of the deliberately skipped frame numbers are
+    /// rejected instead of being normalized to a nearby valid label.
+    pub fn parse_label(self, label: &str) -> Result<i64, DisplayTimecodeError> {
+        parse_smpte_label(label, self.frame_rate, self.mode)
+    }
+
     /// Resolve one signed Sequence-relative frame offset to a SMPTE label value.
     pub fn timecode_at_frame(
         self,
@@ -223,6 +232,71 @@ impl SmpteDisplayTimecodeContract {
     ) -> Result<SmpteDisplayTimecode, DisplayTimecodeError> {
         let frame = time.to_frame_position(self.frame_rate, rounding)?;
         self.timecode_at_frame(frame.frame)
+    }
+}
+
+/// Persisted exact relationship between a media source frame grid and its
+/// external SMPTE label origin.
+///
+/// `start_frame` is an actual frame count at media source time zero. It is not
+/// a nominal drop-frame label number, so arithmetic remains exact and the
+/// counting convention is applied only at the display/interchange seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmpteTimecodeReference {
+    frame_rate: Rational,
+    mode: SmpteCountingMode,
+    start_frame: i64,
+}
+
+impl SmpteTimecodeReference {
+    /// Construct a validated source-timecode reference from an actual origin.
+    pub fn new(
+        frame_rate: Rational,
+        mode: SmpteCountingMode,
+        start_frame: i64,
+    ) -> Result<Self, DisplayTimecodeError> {
+        validate_smpte_frame_rate(frame_rate, mode)?;
+        Ok(Self { frame_rate, mode, start_frame })
+    }
+
+    /// Construct a reference by parsing the label shown at media time zero.
+    pub fn parse_start(
+        frame_rate: Rational,
+        mode: SmpteCountingMode,
+        label: &str,
+    ) -> Result<Self, DisplayTimecodeError> {
+        let start_frame = parse_smpte_label(label, frame_rate, mode)?;
+        Self::new(frame_rate, mode, start_frame)
+    }
+
+    /// Revalidate a persisted reference before it enters author state.
+    pub fn validate(self) -> Result<(), DisplayTimecodeError> {
+        validate_smpte_frame_rate(self.frame_rate, self.mode)
+    }
+
+    /// Exact source frame rate owned by this reference.
+    pub const fn frame_rate(self) -> Rational {
+        self.frame_rate
+    }
+
+    /// SMPTE label-counting convention.
+    pub const fn mode(self) -> SmpteCountingMode {
+        self.mode
+    }
+
+    /// Actual frame value whose label appears at media source time zero.
+    pub const fn start_frame(self) -> i64 {
+        self.start_frame
+    }
+
+    /// Format the source timecode at a signed media-frame offset.
+    pub fn timecode_at_media_frame(
+        self,
+        media_frame: i64,
+    ) -> Result<SmpteDisplayTimecode, DisplayTimecodeError> {
+        SmpteDisplayTimecodeContract::new(self.frame_rate, self.mode, self.start_frame)?
+            .timecode_at_frame(media_frame)
     }
 }
 
@@ -363,6 +437,76 @@ fn drop_frame_label_number(frame: u64, nominal: u64, dropped_per_minute: u64) ->
     frame + dropped_per_minute * 9 * ten_minute_blocks + dropped_per_minute * completed_drop_minutes
 }
 
+fn parse_smpte_label(
+    label: &str,
+    frame_rate: Rational,
+    mode: SmpteCountingMode,
+) -> Result<i64, DisplayTimecodeError> {
+    validate_smpte_frame_rate(frame_rate, mode)?;
+    let (negative, label) = match label.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, label),
+    };
+    let bytes = label.as_bytes();
+    let expected_last_separator = match mode {
+        SmpteCountingMode::NonDropFrame => b':',
+        SmpteCountingMode::DropFrame => b';',
+    };
+    if bytes.len() != 11
+        || bytes[2] != b':'
+        || bytes[5] != b':'
+        || bytes[8] != expected_last_separator
+    {
+        return Err(DisplayTimecodeError::InvalidTimecodeLabel);
+    }
+    let hours = parse_two_digits(&bytes[0..2])?;
+    let minutes = parse_two_digits(&bytes[3..5])?;
+    let seconds = parse_two_digits(&bytes[6..8])?;
+    let frames = parse_two_digits(&bytes[9..11])?;
+    let nominal = u64::from(nominal_frames_per_second(frame_rate)?);
+    if hours >= 24 || minutes >= 60 || seconds >= 60 || frames >= nominal {
+        return Err(DisplayTimecodeError::InvalidTimecodeComponent);
+    }
+
+    let total_minutes = hours
+        .checked_mul(60)
+        .and_then(|value| value.checked_add(minutes))
+        .ok_or(DisplayTimecodeError::Overflow)?;
+    let nominal_frame = hours
+        .checked_mul(3_600)
+        .and_then(|value| value.checked_add(minutes * 60))
+        .and_then(|value| value.checked_add(seconds))
+        .and_then(|value| value.checked_mul(nominal))
+        .and_then(|value| value.checked_add(frames))
+        .ok_or(DisplayTimecodeError::Overflow)?;
+    let actual_frame = match mode {
+        SmpteCountingMode::NonDropFrame => nominal_frame,
+        SmpteCountingMode::DropFrame => {
+            let dropped = dropped_frames_per_minute(frame_rate)?;
+            if minutes % 10 != 0 && seconds == 0 && frames < dropped {
+                return Err(DisplayTimecodeError::InvalidDropFrameLabel);
+            }
+            let completed_drop_minutes = total_minutes - total_minutes / 10;
+            nominal_frame
+                .checked_sub(dropped * completed_drop_minutes)
+                .ok_or(DisplayTimecodeError::Overflow)?
+        }
+    };
+    let actual_frame = i64::try_from(actual_frame).map_err(|_| DisplayTimecodeError::Overflow)?;
+    if negative {
+        actual_frame.checked_neg().ok_or(DisplayTimecodeError::Overflow)
+    } else {
+        Ok(actual_frame)
+    }
+}
+
+fn parse_two_digits(bytes: &[u8]) -> Result<u64, DisplayTimecodeError> {
+    if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(DisplayTimecodeError::InvalidTimecodeLabel);
+    }
+    Ok(u64::from(bytes[0] - b'0') * 10 + u64::from(bytes[1] - b'0'))
+}
+
 /// Invalid or unsupported SMPTE display request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DisplayTimecodeError {
@@ -375,6 +519,15 @@ pub enum DisplayTimecodeError {
     /// Drop-frame labels are defined here only for 30000/1001 and 60000/1001.
     #[error("drop-frame timecode requires 30000/1001 or 60000/1001 fps")]
     UnsupportedDropFrameRate,
+    /// A label did not use the exact conventional `HH:MM:SS:FF` shape.
+    #[error("invalid SMPTE timecode label")]
+    InvalidTimecodeLabel,
+    /// A parsed hour, minute, second, or frame component was out of range.
+    #[error("SMPTE timecode label component is out of range")]
+    InvalidTimecodeComponent,
+    /// A drop-frame label named one of the frame numbers skipped by SMPTE.
+    #[error("SMPTE drop-frame label names a skipped frame number")]
+    InvalidDropFrameLabel,
     /// Adding the configured origin to a requested frame exceeded `i64`.
     #[error("display timecode frame offset overflow")]
     FrameOffsetOverflow,
@@ -464,5 +617,77 @@ mod tests {
 
         assert_eq!(restored, settings);
         assert!(json.contains("drop_frame"));
+    }
+
+    #[test]
+    fn non_drop_frame_label_inverse_round_trips_signed_frames() {
+        let contract =
+            SmpteDisplayTimecodeContract::new(Rational::FPS_25, SmpteCountingMode::NonDropFrame, 0)
+                .expect("contract");
+
+        for frame in [-89_999, -1, 0, 1, 89_999] {
+            let label = contract.timecode_at_frame(frame).expect("format").label();
+            assert_eq!(contract.parse_label(&label).expect("parse"), frame);
+        }
+    }
+
+    #[test]
+    fn drop_frame_label_inverse_recovers_actual_frame_count() {
+        let contract =
+            SmpteDisplayTimecodeContract::new(Rational::FPS_2997, SmpteCountingMode::DropFrame, 0)
+                .expect("contract");
+
+        assert_eq!(contract.parse_label("00:01:00;02").expect("parse"), 1_800);
+        assert_eq!(contract.parse_label("00:10:00;00").expect("parse"), 17_982);
+        assert_eq!(contract.parse_label("-00:01:00;02").expect("parse"), -1_800);
+    }
+
+    #[test]
+    fn drop_frame_inverse_rejects_skipped_and_mismatched_labels() {
+        let contract =
+            SmpteDisplayTimecodeContract::new(Rational::FPS_2997, SmpteCountingMode::DropFrame, 0)
+                .expect("contract");
+
+        assert_eq!(
+            contract.parse_label("00:01:00;00").expect_err("skipped"),
+            DisplayTimecodeError::InvalidDropFrameLabel
+        );
+        assert_eq!(
+            contract.parse_label("00:01:00:02").expect_err("separator"),
+            DisplayTimecodeError::InvalidTimecodeLabel
+        );
+        assert_eq!(
+            contract.parse_label("00:60:00;02").expect_err("minutes"),
+            DisplayTimecodeError::InvalidTimecodeComponent
+        );
+    }
+
+    #[test]
+    fn source_timecode_reference_round_trips_the_persisted_origin() {
+        let reference = SmpteTimecodeReference::parse_start(
+            Rational::FPS_2997,
+            SmpteCountingMode::DropFrame,
+            "01:00:00;00",
+        )
+        .expect("source reference");
+        assert_eq!(reference.start_frame(), 107_892);
+        assert_eq!(
+            reference.timecode_at_media_frame(1_800).expect("later label").label(),
+            "01:01:00;02"
+        );
+
+        let json = serde_json::to_string(&reference).expect("serialize");
+        let restored: SmpteTimecodeReference = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, reference);
+
+        let mut invalid = serde_json::to_value(reference).expect("serialize value");
+        invalid["frame_rate"] =
+            serde_json::to_value(Rational::FPS_25).expect("serialize invalid rate");
+        let invalid: SmpteTimecodeReference =
+            serde_json::from_value(invalid).expect("deserialize closed shape");
+        assert_eq!(
+            invalid.validate().expect_err("invalid persisted combination"),
+            DisplayTimecodeError::UnsupportedDropFrameRate
+        );
     }
 }

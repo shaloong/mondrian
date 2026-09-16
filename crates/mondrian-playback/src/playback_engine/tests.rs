@@ -312,6 +312,59 @@ fn audio_clock_advance_refreshes_the_published_frame_demand() {
 }
 
 #[test]
+fn fractional_nanosecond_seek_anchor_does_not_regress_on_first_tick() {
+    for time_base in [
+        Rational::new(1, 30),
+        Rational::new(1001, 30000),
+        Rational::new(1001, 60000),
+    ] {
+        let mut engine = PlaybackEngine::new(time_base, PlaybackPolicy::default()).expect("engine");
+        engine.seek(FramePosition::new(1, time_base), ts(0)).expect("seek");
+        engine.play(100, ts(0)).expect("play");
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+        assert_eq!(
+            engine.tick(ts(0)).expect("first tick").position.frame,
+            1,
+            "{time_base:?}"
+        );
+    }
+}
+
+#[test]
+fn fractional_nanosecond_terminal_boundary_preserves_the_last_frame() {
+    for time_base in [
+        Rational::new(1, 30),
+        Rational::new(1001, 30000),
+        Rational::new(1001, 60000),
+        Rational::new(1, 25),
+    ] {
+        for last in [47, 6_479_999] {
+            let mut engine =
+                PlaybackEngine::new(time_base, PlaybackPolicy::default()).expect("engine");
+            engine.play(last, ts(0)).expect("play");
+            engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+            let boundary =
+                timeline_frame_boundary_ns(FramePosition::new(last, time_base)).expect("boundary");
+            let before =
+                MonotonicTimestamp::from_duration(Duration::from_nanos((boundary - 1) as u64));
+            let snapshot = engine.tick(before).expect("before boundary");
+            assert_ne!(
+                snapshot.state,
+                TransportState::Ended,
+                "{time_base:?} {last}"
+            );
+            let at = MonotonicTimestamp::from_duration(Duration::from_nanos(boundary as u64));
+            let ended = engine.tick(at).expect("at boundary");
+            assert_eq!(ended.state, TransportState::Ended);
+            assert_eq!(ended.position.frame, last, "{time_base:?}");
+            let demand = engine.pending_frame_demand().expect("final still");
+            assert_eq!(demand.target.frame, last);
+            assert_eq!(demand.deadline, None);
+        }
+    }
+}
+
+#[test]
 fn audio_clock_natural_end_publishes_an_untimed_final_demand() {
     let mut engine = engine();
     engine.play(1, ts(0)).unwrap();
@@ -595,8 +648,10 @@ fn transient_stale_callback_keeps_audio_master_within_grace() {
     let held = engine.observe_audio_device_clock(uncertain).unwrap();
     assert_eq!(held.clock_master, Some(ClockMaster::AudioDevice));
 
+    // A fresh callback catches up the exact count to 100 ms. Returning only
+    // 40 ms of samples here would be an impossible 60 ms phase regression.
     let resumed = engine
-        .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(100)))
+        .observe_audio_device_clock(audio_observation(&engine, 5_800, ts(100)))
         .unwrap();
     assert_eq!(resumed.clock_master, Some(ClockMaster::AudioDevice));
 }
@@ -656,6 +711,187 @@ fn decreasing_callback_position_falls_back_to_synthetic() {
     assert_eq!(fallback.position.frame, 1);
     assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
     assert_eq!(engine.tick(ts(90)).unwrap().position.frame, 2);
+}
+
+#[test]
+fn latency_estimate_jitter_at_callback_boundary_keeps_audio_clock_authority() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+
+    let mut before_boundary = audio_observation(&engine, 1_100, ts(20));
+    before_boundary.estimated_latency_frames = 100;
+    before_boundary.uncertainty_frames = 512;
+    let acquired = engine.observe_audio_device_clock(before_boundary).unwrap();
+    assert_eq!(acquired.clock_master, Some(ClockMaster::AudioDevice));
+
+    // The exact callback counter advanced by one 512-frame block. The host's
+    // refreshed latency estimate grew by 514 frames, so the derived point
+    // estimate moved back by two frames while both uncertainty intervals still
+    // overlap. This is ordinary callback-boundary sampling, not device loss.
+    let mut after_boundary = audio_observation(&engine, 1_612, ts(30));
+    after_boundary.estimated_latency_frames = 614;
+    after_boundary.uncertainty_frames = 512;
+    let retained = engine.observe_audio_device_clock(after_boundary).unwrap();
+
+    assert_eq!(retained.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(retained.position.frame, acquired.position.frame);
+}
+
+#[test]
+fn refreshed_audio_point_cannot_rewind_an_already_extrapolated_phase() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+    assert_eq!(
+        engine.tick(ts(40)).expect("advance old observation").position.frame,
+        1
+    );
+
+    let mut refreshed = audio_observation(&engine, 2_680, ts(40));
+    refreshed.uncertainty_frames = 512;
+    let retained = engine.observe_audio_device_clock(refreshed).expect("refresh audio");
+    assert_eq!(retained.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(engine.tick(ts(40)).expect("same instant").position.frame, 1);
+    let sample = engine
+        .authoritative_audio_sample_position_at(
+            retained.epoch,
+            ts(40),
+            AudioSampleRate::new(48_000).expect("sample rate"),
+        )
+        .expect("continuous phase");
+    assert_eq!(sample.sample(), 1_920);
+    assert_eq!(
+        engine.audio_device_anchor.expect("retained anchor").last_uncertainty_frames,
+        752
+    );
+}
+
+#[test]
+fn output_retirement_renews_pending_and_consumed_still_tickets_without_seeking() {
+    for completed in [false, true] {
+        let mut engine = engine();
+        engine
+            .seek_timeline(
+                timeline_binding(100),
+                FramePosition::new(4, Rational::new(1, 25)),
+                ts(0),
+            )
+            .expect("seek still");
+        let old = engine.frame_demand().expect("original still");
+        if completed {
+            engine
+                .observe_frame_delivery(current_delivery(&engine, FrameDeliveryKind::Ready, ts(0)))
+                .expect("present original");
+        }
+        let before = engine.snapshot();
+        let renewed = engine
+            .renew_still_frame_demand_after_output_retirement(ts(1))
+            .expect("retired output")
+            .expect("fresh still");
+        assert_eq!(engine.snapshot(), before);
+        assert_ne!(renewed.identity(), old.identity());
+        assert_eq!(renewed.kind, FrameDemandKind::PersistentStill);
+        assert_eq!(renewed.deadline, None);
+        assert_eq!(engine.pending_frame_demand(), Some(renewed));
+        let old_delivery =
+            FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                .complete_at(ts(2));
+        assert!(!engine
+            .observe_frame_delivery(old_delivery)
+            .expect("reject old ticket")
+            .accepted());
+        assert_eq!(engine.pending_frame_demand(), Some(renewed));
+    }
+}
+
+#[test]
+fn still_output_retirement_never_renews_a_timed_playback_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let before = engine.frame_demand();
+    let snapshot = engine.snapshot();
+    assert_eq!(
+        engine
+            .renew_still_frame_demand_after_output_retirement(ts(1))
+            .expect("ignore timed"),
+        None
+    );
+    assert_eq!(engine.frame_demand(), before);
+    assert_eq!(engine.snapshot(), snapshot);
+}
+
+#[test]
+fn uncertain_audio_cannot_hide_counter_or_anchor_lifecycle_violations() {
+    for violation in 0..3 {
+        let mut engine = engine();
+        engine.play(100, ts(0)).expect("play");
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .expect("acquire audio");
+        let mut observation = audio_observation(&engine, 1_000, ts(10));
+        observation.state = AudioDeviceClockState::Uncertain;
+        match violation {
+            0 => observation.consumed_frames = 999,
+            1 => {
+                observation.media_anchor = AudioSamplePosition::new(
+                    48_000,
+                    AudioSampleRate::new(48_000).expect("sample rate"),
+                )
+            }
+            _ => observation.stream_generation += 1,
+        }
+        let rejected = engine.observe_audio_device_clock(observation).expect("fail closed");
+        assert_eq!(
+            rejected.clock_master,
+            Some(ClockMaster::Synthetic),
+            "violation {violation}"
+        );
+        assert_eq!(rejected.position.frame, 0);
+    }
+}
+
+#[test]
+fn audio_phase_clamp_cannot_hide_error_beyond_the_existing_policy() {
+    let mut engine = engine();
+    engine.policy.max_audio_clock_uncertainty = Duration::from_millis(12);
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+    engine.tick(ts(40)).expect("advance old observation");
+    let mut refreshed = audio_observation(&engine, 2_680, ts(40));
+    refreshed.uncertainty_frames = 512;
+    let fallback = engine.observe_audio_device_clock(refreshed).expect("refresh audio");
+    // The raw 10.667 ms estimate is admitted, but its 5 ms displacement is not
+    // free precision: the corrected 15.667 ms bound exceeds this 12 ms policy.
+    assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(engine.tick(ts(40)).expect("same instant").position.frame, 1);
+}
+
+#[test]
+fn audio_refresh_outside_phase_uncertainty_fails_closed_without_rewind() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    engine
+        .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+        .expect("acquire audio");
+    assert_eq!(
+        engine.tick(ts(80)).expect("advance old observation").position.frame,
+        2
+    );
+    let fallback = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(80)))
+        .expect("reject impossible slow device slope");
+    assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(engine.tick(ts(80)).expect("same instant").position.frame, 2);
 }
 
 #[test]
@@ -798,6 +1034,8 @@ fn video_preroll(
         demand: engine.frame_demand().expect("active frame demand").identity(),
         ready_media_frames,
         preservable_media_frames,
+        bounded_cold_activation_ready: true,
+        presentation_successor_ready: true,
     }
 }
 
@@ -884,6 +1122,78 @@ fn presented_current_frame_waits_for_bounded_video_preroll() {
 }
 
 #[test]
+fn presented_current_frame_cannot_bypass_observed_preroll_at_fallback_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    assert!(!engine.observe_video_preroll(video_preroll(&engine, 0, 8), ts(17)).unwrap());
+
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Priming
+    );
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    assert!(engine.observe_video_preroll(video_preroll(&engine, 8, 8), ts(1600)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
+fn presented_current_frame_waits_for_physical_presentation_successor() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    let mut observation = video_preroll(&engine, 8, 8);
+    observation.presentation_successor_ready = false;
+
+    assert!(!engine.observe_video_preroll(observation, ts(17)).unwrap());
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Priming
+    );
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    observation.presentation_successor_ready = true;
+    assert!(engine.observe_video_preroll(observation, ts(1510)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
+fn presented_current_frame_waits_for_bounded_cold_source_activation() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    let mut observation = video_preroll(&engine, 8, 8);
+    observation.bounded_cold_activation_ready = false;
+
+    assert!(!engine.observe_video_preroll(observation, ts(17)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Priming);
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    observation.bounded_cold_activation_ready = true;
+    assert!(engine.observe_video_preroll(observation, ts(1510)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
+fn presented_current_without_a_preroll_observation_retains_deadline_fallback() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Playing
+    );
+}
+
+#[test]
 fn video_preroll_cannot_start_before_current_frame_is_presented() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
@@ -948,6 +1258,8 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: first_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                bounded_cold_activation_ready: true,
+                presentation_successor_ready: true,
             },
             ts(2)
         )
@@ -963,6 +1275,8 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: wrong_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                bounded_cold_activation_ready: true,
+                presentation_successor_ready: true,
             },
             ts(2)
         )
@@ -1174,7 +1488,7 @@ fn repeated_presentable_degradation_enters_resolution_recovery() {
 }
 
 #[test]
-fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
+fn clock_superseded_unpresented_demands_escalate_bounded_resolution_recovery() {
     let policy = PlaybackPolicy {
         pressure_window: 3,
         pressure_threshold: 3,
@@ -1198,21 +1512,19 @@ fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
         3
     );
 
-    for instant in [160, 200, 240] {
+    for instant in [160, 200] {
         engine.tick(ts(instant)).unwrap();
     }
     assert_eq!(
         engine.snapshot().preview_scale,
         PreviewResolutionScale::Half,
-        "a new scale must receive one terminal execution attempt before another reduction"
+        "less than one complete pressure window must not thrash scale"
     );
-
-    let half_attempt = current_delivery(&engine, FrameDeliveryKind::Late, ts(240));
-    engine.observe_frame_delivery(half_attempt).unwrap();
+    engine.tick(ts(240)).unwrap();
     assert_eq!(
         engine.snapshot().preview_scale,
         PreviewResolutionScale::Quarter,
-        "a failed Half attempt may authorize the next bounded reduction"
+        "a complete window with no current Half result must authorize the next bounded reduction"
     );
 }
 
@@ -1250,6 +1562,145 @@ fn fractional_rates_do_not_accumulate_float_drift() {
         .tick(MonotonicTimestamp::from_duration(Duration::from_secs(1001)))
         .unwrap();
     assert_eq!(snapshot.position.frame, 30_000);
+}
+
+#[test]
+fn editorial_shuttle_changes_direction_and_rate_without_losing_exact_phase() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(50, Rational::new(1, 25)),
+            ts(0),
+        )
+        .expect("position");
+    let reverse = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            FramePosition::new(50, Rational::new(1, 25)),
+            PlaybackShuttleDirection::Reverse,
+            ts(0),
+        )
+        .expect("reverse");
+    assert_eq!(reverse.rate, PlaybackRate::REVERSE_1X);
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("reverse priming");
+    assert_eq!(
+        engine.tick(ts(40)).expect("reverse tick").position.frame,
+        49
+    );
+
+    let faster = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Reverse,
+            ts(40),
+        )
+        .expect("faster reverse");
+    assert_eq!(faster.rate, PlaybackRate::new(-2, 1).expect("rate"));
+    engine.complete_priming(ClockMaster::Synthetic, ts(40)).expect("faster priming");
+    assert_eq!(engine.tick(ts(60)).expect("faster tick").position.frame, 48);
+
+    let forward = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Forward,
+            ts(60),
+        )
+        .expect("direction change");
+    assert_eq!(forward.rate, PlaybackRate::FORWARD_1X);
+    engine
+        .complete_priming(ClockMaster::Synthetic, ts(60))
+        .expect("forward priming");
+    assert_eq!(
+        engine.tick(ts(100)).expect("forward tick").position.frame,
+        49
+    );
+}
+
+#[test]
+fn fractional_phase_rounding_is_direction_symmetric() {
+    let origin = MonotonicTimestamp::from_duration(Duration::ZERO);
+    let observed = MonotonicTimestamp::from_duration(Duration::from_nanos(3));
+    let anchor_phase = 1_000_i128;
+
+    let mut forward = engine();
+    forward.rate = PlaybackRate::new(1, 2).expect("forward half rate");
+    forward.reanchor_at_phase(origin, anchor_phase);
+
+    let mut reverse = engine();
+    reverse.rate = PlaybackRate::new(-1, 2).expect("reverse half rate");
+    reverse.reanchor_at_phase(origin, anchor_phase);
+
+    assert_eq!(
+        forward.synthetic_phase_ns_at(observed).expect("forward phase"),
+        1_001
+    );
+    assert_eq!(
+        reverse.synthetic_phase_ns_at(observed).expect("reverse phase"),
+        999
+    );
+}
+
+#[test]
+fn reverse_shuttle_reaches_start_with_an_untimed_boundary_frame() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(1, Rational::new(1, 25)),
+            ts(0),
+        )
+        .expect("position");
+    engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            FramePosition::new(1, Rational::new(1, 25)),
+            PlaybackShuttleDirection::Reverse,
+            ts(0),
+        )
+        .expect("reverse");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("priming");
+
+    let ended = engine.tick(ts(40)).expect("boundary");
+    let still = engine.frame_demand().expect("boundary still");
+    assert_eq!(ended.state, TransportState::Ended);
+    assert_eq!(ended.position.frame, 0);
+    assert_eq!(still.kind, FrameDemandKind::PersistentStill);
+    assert_eq!(still.target.frame, 0);
+}
+
+#[test]
+fn varispeed_deadlines_scale_in_runtime_and_never_admit_audio_master() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("priming");
+    engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Forward,
+            ts(0),
+        )
+        .expect("2x");
+    assert_eq!(
+        engine.snapshot().rate,
+        PlaybackRate::new(2, 1).expect("rate")
+    );
+    assert_eq!(
+        engine.complete_priming(ClockMaster::AudioDevice, ts(0)),
+        Err(PlaybackError::AudioClockIncompatiblePlaybackRate)
+    );
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("synthetic");
+    assert_eq!(
+        engine.pending_frame_demand().and_then(|demand| demand.deadline),
+        Some(ts(10))
+    );
+
+    let observation = audio_observation(&engine, 1_000, ts(1));
+    let snapshot = engine.observe_audio_device_clock(observation).expect("muted audio evidence");
+    assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
 }
 
 #[test]
@@ -1509,7 +1960,7 @@ fn audio_clock_handoff_accounts_for_point_and_growing_uncertainty() {
 }
 
 #[test]
-fn quality_revision_and_recovery_cannot_extend_current_frame_deadline() {
+fn quality_revision_transitions_defer_new_demand_until_the_next_frame() {
     let policy = PlaybackPolicy {
         pressure_window: 1,
         pressure_threshold: 1,
@@ -1531,22 +1982,153 @@ fn quality_revision_and_recovery_cannot_extend_current_frame_deadline() {
         .expect("pressure delivery")
         .accepted());
 
-    let recovery = engine.pending_frame_demand().expect("recovery demand");
     assert_eq!(engine.snapshot().state, TransportState::Recovering);
-    assert_eq!(recovery.target, full_quality.target);
-    assert_eq!(recovery.deadline, full_quality.deadline);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "the terminally completed coordinate must not receive another demand against its spent deadline"
+    );
+
+    let subframe = engine.tick(ts(11)).unwrap();
+    assert_eq!(subframe.position, full_quality.target);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "a subframe clock observation must not reissue the completed coordinate for its new quality revision"
+    );
+
+    engine.tick(ts(40)).unwrap();
+    let recovery = engine.pending_frame_demand().expect("next-frame recovery demand");
+    assert_eq!(recovery.target.frame, full_quality.target.frame + 1);
+    assert_eq!(recovery.deadline, Some(ts(60)));
     assert!(engine
         .observe_frame_delivery(
             FrameDeliveryCandidate::for_demand(recovery.identity(), FrameDeliveryKind::Ready)
-                .complete_at(ts(10))
+                .complete_at(ts(40))
         )
         .expect("healthy recovery delivery")
         .accepted());
 
-    let restored = engine.pending_frame_demand().expect("restored demand");
     assert_eq!(engine.snapshot().state, TransportState::Playing);
-    assert_eq!(restored.target, full_quality.target);
-    assert_eq!(restored.deadline, full_quality.deadline);
+    assert!(
+        engine.pending_frame_demand().is_none(),
+        "quality restoration also applies at the next clock boundary"
+    );
+    engine.tick(ts(80)).unwrap();
+    let restored = engine.pending_frame_demand().expect("restored next-frame demand");
+    assert_eq!(restored.target.frame, recovery.target.frame + 1);
+    assert_eq!(restored.preview_scale, PreviewResolutionScale::Full);
+    assert_eq!(restored.deadline, Some(ts(100)));
+}
+
+#[test]
+fn bounded_recovery_can_reissue_the_current_quality_after_a_terminal_scale_change() {
+    let policy = PlaybackPolicy {
+        pressure_window: 1,
+        pressure_threshold: 1,
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let original = engine.pending_frame_demand().expect("original demand");
+
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Degraded,)
+                .complete_at(ts(10)),
+        )
+        .expect("terminal degraded delivery")
+        .accepted());
+    let transitioned = engine.snapshot();
+    assert_eq!(transitioned.state, TransportState::Recovering);
+    assert!(transitioned.quality_revision > original.quality_revision);
+    assert!(engine.pending_frame_demand().is_none());
+
+    let recovery = engine
+        .reissue_current_frame_demand_for_recovery(ts(11), ts(5_011))
+        .expect("bounded current-quality recovery demand");
+    assert_eq!(recovery.epoch, original.epoch);
+    assert_eq!(recovery.target, original.target);
+    assert_eq!(recovery.quality_revision, transitioned.quality_revision);
+    assert_eq!(recovery.preview_scale, transitioned.preview_scale);
+    assert_eq!(recovery.deadline, Some(ts(5_011)));
+    assert_ne!(recovery.sequence, original.sequence);
+}
+
+#[test]
+fn bounded_recovery_reissues_only_the_exact_current_running_demand() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let original = engine.pending_frame_demand().expect("original demand");
+    let before = engine.snapshot();
+
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Late)
+                .complete_at(ts(21))
+        )
+        .unwrap()
+        .accepted());
+    assert!(engine.pending_frame_demand().is_none());
+
+    let recovery = engine
+        .reissue_current_frame_demand_for_recovery(ts(21), ts(5_021))
+        .expect("bounded recovery demand");
+    let after = engine.snapshot();
+    assert_eq!(recovery.kind, FrameDemandKind::TimedPlayback);
+    assert_eq!(recovery.epoch, original.epoch);
+    assert_eq!(recovery.quality_revision, original.quality_revision);
+    assert_eq!(recovery.target, original.target);
+    assert_eq!(recovery.deadline, Some(ts(5_021)));
+    assert_ne!(recovery.sequence, original.sequence);
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.position, before.position);
+    assert_eq!(after.quality_revision, before.quality_revision);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.clock_master, before.clock_master);
+
+    assert!(
+        !engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(original.identity(), FrameDeliveryKind::Ready)
+                    .complete_at(ts(22))
+            )
+            .unwrap()
+            .accepted(),
+        "the superseded recovery ticket must lose authority"
+    );
+    assert!(engine
+        .observe_frame_delivery(
+            FrameDeliveryCandidate::for_demand(recovery.identity(), FrameDeliveryKind::Ready)
+                .complete_at(ts(5_020))
+        )
+        .unwrap()
+        .accepted());
+}
+
+#[test]
+fn bounded_recovery_rejects_non_running_or_non_future_authority_atomically() {
+    let mut stopped = engine();
+    let before = stopped.snapshot();
+    assert_eq!(
+        stopped.reissue_current_frame_demand_for_recovery(ts(1), ts(10)),
+        Err(PlaybackError::InvalidRecoveryFrameDemand)
+    );
+    assert_eq!(stopped.snapshot(), before);
+    assert_eq!(stopped.monotonic_high_water(), ts(0));
+
+    let mut running = engine();
+    running.play(100, ts(0)).unwrap();
+    running.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let demand = running.pending_frame_demand().expect("running demand");
+    let before = running.snapshot();
+    assert_eq!(
+        running.reissue_current_frame_demand_for_recovery(ts(5), ts(5)),
+        Err(PlaybackError::InvalidRecoveryFrameDemand)
+    );
+    assert_eq!(running.snapshot(), before);
+    assert_eq!(running.pending_frame_demand(), Some(demand));
+    assert_eq!(running.monotonic_high_water(), ts(0));
 }
 
 #[test]

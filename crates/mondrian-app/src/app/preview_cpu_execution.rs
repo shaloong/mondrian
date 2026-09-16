@@ -15,9 +15,12 @@ use mondrian_effects::{
     EffectFloatUnsupportedReason,
 };
 use mondrian_renderer::{
+    color::{
+        MonitorColorModule, ProgramOutputBoundary, ProgramOutputBoundaryError, ProgramOutputModule,
+        ProgramOutputRole, RenderColorStageDiagnostics,
+    },
     composite_timeline_elements_color_frame_with_diagnostics, CpuColorFrame,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformError,
-    RenderMonitorAdaptation, RenderMonitorAdaptationError, RenderOutputColorBoundary,
+    RenderColorTransformDiagnostics, RenderColorTransformError, RenderMonitorAdaptationError,
     TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
     TimelineCompositeError, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
@@ -47,6 +50,11 @@ pub(crate) enum PreviewCpuExecutionError {
         #[source]
         source: std::sync::Arc<RenderColorTransformError>,
     },
+    #[error("Preview signal monitoring failed: {source}")]
+    SignalMonitoring {
+        #[source]
+        source: std::sync::Arc<mondrian_renderer::color::CpuSignalMonitoringError>,
+    },
 }
 
 impl PreviewCpuExecutionError {
@@ -55,10 +63,13 @@ impl PreviewCpuExecutionError {
         match self {
             Self::WorkingFrame(MediaPreviewWorkingFrameError::NativeSurfaceRequiresGpu {
                 ..
-            }) => PreviewUnavailability::blocked(
-                PreviewOutputStage::InputAdaptation,
-                self.to_string(),
-            ),
+            })
+            | Self::WorkingFrame(MediaPreviewWorkingFrameError::CpuYuvRequiresGpu) => {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputAdaptation,
+                    self.to_string(),
+                )
+            }
             Self::WorkingFrame(MediaPreviewWorkingFrameError::InputColorTransform { .. }) => {
                 PreviewUnavailability::failed(PreviewOutputStage::InputAdaptation, self.to_string())
             }
@@ -79,7 +90,7 @@ impl PreviewCpuExecutionError {
                 PreviewOutputStage::MonitorAdaptation,
                 self.to_string(),
             ),
-            Self::FinalColorTransform { .. } => {
+            Self::FinalColorTransform { .. } | Self::SignalMonitoring { .. } => {
                 PreviewUnavailability::failed(PreviewOutputStage::ProgramOutput, self.to_string())
             }
         }
@@ -130,6 +141,8 @@ pub(crate) struct PreviewCpuExecutionDurations {
 
 pub(crate) struct PreviewCompositeOutput {
     pub(crate) rgba: Vec<u8>,
+    /// Exact post-effect/post-composite working frame before display adaptation.
+    pub(crate) working_frame: CpuColorFrame,
     pub(crate) composite_diagnostics: TimelineCompositeDiagnostics,
     pub(crate) input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
     pub(crate) input_color_stage_diagnostics: RenderColorStageDiagnostics,
@@ -291,7 +304,10 @@ pub(crate) fn composite_resolved_preview_working(
         height,
         &elements,
         TimelineCompositeOptions::default(),
-        TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
+        TimelineEffectColorRuntime::new(
+            color_context.engine(),
+            color_context.working_color_space(),
+        ),
         scratch,
     )?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
@@ -380,22 +396,22 @@ fn lower_transition_input<'a>(
 
 pub(crate) fn output_boundary_from_color_context(
     color_context: &ProgramColorContext,
-) -> Result<RenderOutputColorBoundary, PreviewCpuExecutionError> {
-    let output_color_space = color_context.output_color_space.color().ok_or({
-        PreviewCpuExecutionError::ProgramOutputIdentity {
-            identity: color_context.output_color_space,
+) -> Result<ProgramOutputBoundary, PreviewCpuExecutionError> {
+    ProgramOutputModule::boundary(ProgramOutputRole::Display, color_context).map_err(|error| {
+        match error {
+            ProgramOutputBoundaryError::WorkingOnly { .. } => {
+                PreviewCpuExecutionError::ProgramOutputIdentity {
+                    identity: color_context.output_color_space(),
+                }
+            }
+            ProgramOutputBoundaryError::Intent(error) => {
+                PreviewCpuExecutionError::ProgramOutputTransform(error)
+            }
         }
-    })?;
-    RenderOutputColorBoundary::from_intent(
-        mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
-        output_color_space,
-        &color_context.output_transform,
-        color_context.output_tone_map,
-        color_context.engine.clone(),
-    )
-    .map_err(PreviewCpuExecutionError::from)
+    })
 }
 
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn composite_resolved_preview(
     width: u32,
     height: u32,
@@ -405,16 +421,35 @@ pub(crate) fn composite_resolved_preview(
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    present_preview_working(composite, color_context, scratch)
+}
+
+pub(crate) fn composite_resolved_preview_with_signal_monitoring(
+    width: u32,
+    height: u32,
+    resolved: &[ResolvedPreviewElement],
+    color_context: &ProgramColorContext,
+    tap: mondrian_core::ProgramScopesTap,
+    settings: mondrian_core::SignalMonitoringSettings,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
+    let composite =
+        composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    present_preview_working_with_signal_monitoring(composite, color_context, tap, settings, scratch)
+}
+
+/// Apply only the production Program Output/monitor boundary to an already
+/// materialized working composite, including a verified Timeline cache hit.
+pub(crate) fn present_preview_working(
+    composite: PreviewWorkingCompositeOutput,
+    color_context: &ProgramColorContext,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let output_boundary_started_at = Instant::now();
     let mut execution_durations = composite.execution_durations;
     let boundary = output_boundary_from_color_context(color_context)?;
-    let program_output = boundary.output_color_space;
-    let adaptation = RenderMonitorAdaptation::new(
-        program_output,
-        ColorSpace::Srgb,
-        color_context.engine.clone(),
-    )?;
-    mondrian_renderer::execute_cpu_program_monitor_presentation_rgba8_with_session(
+    let adaptation = MonitorColorModule::plan(&boundary, ColorSpace::Srgb)?;
+    MonitorColorModule::present_cpu_rgba8(
         &composite.frame,
         &boundary,
         &adaptation,
@@ -425,6 +460,7 @@ pub(crate) fn composite_resolved_preview(
             duration_us(output_boundary_started_at.elapsed());
         PreviewCompositeOutput {
             rgba: output.rgba,
+            working_frame: composite.frame,
             composite_diagnostics: composite.composite_diagnostics,
             input_color_diagnostics: composite.input_color_diagnostics,
             input_color_stage_diagnostics: composite.input_color_stage_diagnostics,
@@ -435,6 +471,48 @@ pub(crate) fn composite_resolved_preview(
         }
     })
     .map_err(|source| PreviewCpuExecutionError::FinalColorTransform {
+        source: std::sync::Arc::new(source),
+    })
+}
+
+pub(crate) fn present_preview_working_with_signal_monitoring(
+    composite: PreviewWorkingCompositeOutput,
+    color_context: &ProgramColorContext,
+    tap: mondrian_core::ProgramScopesTap,
+    settings: mondrian_core::SignalMonitoringSettings,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
+    if !settings.is_active() {
+        return present_preview_working(composite, color_context, scratch);
+    }
+    let output_boundary_started_at = Instant::now();
+    let mut execution_durations = composite.execution_durations;
+    let boundary = output_boundary_from_color_context(color_context)?;
+    let adaptation = MonitorColorModule::plan(&boundary, ColorSpace::Srgb)?;
+    MonitorColorModule::present_cpu_rgba8_with_signal_monitoring(
+        &composite.frame,
+        &boundary,
+        &adaptation,
+        tap,
+        settings,
+        scratch.color_execution_mut(),
+    )
+    .map(|output| {
+        execution_durations.cpu_output_boundary_us =
+            duration_us(output_boundary_started_at.elapsed());
+        PreviewCompositeOutput {
+            rgba: output.rgba,
+            working_frame: composite.frame,
+            composite_diagnostics: composite.composite_diagnostics,
+            input_color_diagnostics: composite.input_color_diagnostics,
+            input_color_stage_diagnostics: composite.input_color_stage_diagnostics,
+            color_diagnostics: output.program_color_diagnostics,
+            monitor_color_diagnostics: output.monitor_color_diagnostics,
+            color_stage_diagnostics: output.stage_diagnostics,
+            execution_durations,
+        }
+    })
+    .map_err(|source| PreviewCpuExecutionError::SignalMonitoring {
         source: std::sync::Arc::new(source),
     })
 }

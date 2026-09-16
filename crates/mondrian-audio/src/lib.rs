@@ -14,10 +14,12 @@ mod dependency;
 mod dsp;
 mod latency;
 mod lookahead_limiter;
+mod loudness;
 mod meter;
 mod plan;
 mod processor;
 mod processor_host;
+mod processor_isolation;
 mod processor_parameters;
 mod render;
 mod runtime;
@@ -31,12 +33,14 @@ pub use delivery::{
 pub use dependency::{
     compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
 };
+pub use loudness::{AudioLoudnessAnalyzer, AudioLoudnessError, AudioLoudnessReport};
 pub use meter::{
     AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver, AudioMeterTarget,
     AudioMeterTargetFrame,
 };
 pub use plan::*;
 pub use processor::*;
+pub use processor_isolation::*;
 pub use render::{
     render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
     AudioRenderRequest, AudioRenderSession, AudioStateEntry,

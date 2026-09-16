@@ -1294,6 +1294,6 @@ mod tests {
                 .display(),
             "Rec.1886 Rec.709 - Display"
         );
-        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(!identity.dependency_manifest_sha256().is_empty());
     }
 }

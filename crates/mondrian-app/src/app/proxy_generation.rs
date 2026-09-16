@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 
 use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ProjectId};
@@ -22,12 +23,14 @@ use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
 
 use self::backend::{MediaProxyGenerationBackend, ProxyGenerationBackend};
+use self::state::clear_after_workers_terminated;
 use self::state::{
     bind_project_generation, cancel_for_shutdown, diagnostics_snapshot, preflight_request,
     record_immediate_failure, request_admission, request_running_resource_yield,
     terminal_delta_snapshot, ProxyGenerationInner, ProxyGenerationKey, ProxyGenerationRequest,
     ProxyGenerationState, RunningResourceYieldScope,
 };
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
 mod backend;
@@ -185,6 +188,14 @@ pub struct ProxyGenerationDiagnostics {
     pub automatic_dispatch_enabled: bool,
     /// Product-requested global running-attempt limit.
     pub dispatch_parallelism: usize,
+    /// Whether lazy worker startup was attempted.
+    pub worker_startup_attempted: bool,
+    /// Workers configured for this service instance.
+    pub requested_workers: usize,
+    /// Worker threads successfully created.
+    pub started_workers: usize,
+    /// Whether a started worker returned before shutdown was requested.
+    pub worker_unexpectedly_exited: bool,
     /// Admitted attempts waiting for a worker.
     pub queued: usize,
     /// Explicit user attempts waiting for a worker.
@@ -478,6 +489,12 @@ impl ProxyGenerationService {
         let state = self.inner.state.lock();
         let mut diagnostics = diagnostics_snapshot(&state);
         diagnostics.revision = self.inner.diagnostics_revision.load(Ordering::Acquire);
+        diagnostics.worker_startup_attempted = self.started_workers.get().is_some();
+        diagnostics.requested_workers = self.requested_worker_count;
+        diagnostics.started_workers = self.worker_handles.lock().len();
+        diagnostics.worker_unexpectedly_exited =
+            self.worker_handles.lock().iter().any(JoinHandle::is_finished)
+                && !self.inner.shutdown.load(Ordering::Acquire);
         diagnostics
     }
 
@@ -546,6 +563,36 @@ impl ProxyGenerationService {
             started
         })
     }
+
+    pub(crate) fn begin_endurance_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        cancel_for_shutdown(&mut self.inner.state.lock());
+        self.inner.available.notify_all();
+    }
+
+    pub(crate) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        let startup_attempted = self.started_workers.get().is_some();
+        self.begin_endurance_shutdown();
+        let join = join_workers_until(self.worker_handles.get_mut(), deadline);
+        let mut state = self.inner.state.lock();
+        let cumulative_failures = state.counters.failures.saturating_add(state.counters.rejections);
+        if join.all_workers_returned_normally() {
+            clear_after_workers_terminated(&mut state);
+        }
+        let diagnostics = diagnostics_snapshot(&state);
+        EnduranceWorkerShutdownEvidence::from_join(
+            self.requested_worker_count,
+            startup_attempted,
+            join,
+            diagnostics.queued,
+            diagnostics.running,
+            diagnostics.queued.saturating_add(diagnostics.running),
+            cumulative_failures,
+        )
+    }
 }
 
 impl Default for ProxyGenerationService {
@@ -556,9 +603,7 @@ impl Default for ProxyGenerationService {
 
 impl Drop for ProxyGenerationService {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        cancel_for_shutdown(&mut self.inner.state.lock());
-        self.inner.available.notify_all();
+        self.begin_endurance_shutdown();
     }
 }
 
@@ -612,6 +657,7 @@ pub(crate) fn resolve_app_state_proxy_color_contract(
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
+        .map_err(|error| format!("proxy generation color context is invalid: {error}"))?
         .media_input(sequence.settings.color.input.auto_tone_map_media);
     resolve_asset_proxy_color_contract(asset, &input_color)
 }

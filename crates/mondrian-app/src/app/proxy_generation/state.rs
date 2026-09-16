@@ -495,6 +495,16 @@ pub(super) fn cancel_for_shutdown(state: &mut ProxyGenerationState) {
     }
 }
 
+pub(super) fn clear_after_workers_terminated(state: &mut ProxyGenerationState) {
+    state.pending.clear();
+    state.active_by_key.clear();
+    state.user_queue.clear();
+    state.recovery_queue.clear();
+    state.import_queue.clear();
+    state.running = 0;
+    state.running_by_cache_root.clear();
+}
+
 pub(super) fn record_immediate_failure(
     state: &mut ProxyGenerationState,
     key: Option<ProxyGenerationKey>,
@@ -716,6 +726,10 @@ pub(super) fn diagnostics_snapshot(state: &ProxyGenerationState) -> ProxyGenerat
         dispatch_enabled: state.dispatch_enabled,
         automatic_dispatch_enabled: state.automatic_dispatch_enabled,
         dispatch_parallelism: state.dispatch_parallelism,
+        worker_startup_attempted: false,
+        requested_workers: 0,
+        started_workers: 0,
+        worker_unexpectedly_exited: false,
         queued: state
             .pending
             .values()

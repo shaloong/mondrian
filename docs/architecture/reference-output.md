@@ -1,0 +1,372 @@
+# Reference Output
+
+The Reference Output Module is Mondrian's machine-local scheduled clean-feed
+boundary for professional video I/O. It is separate from Viewer presentation,
+Export publication, and platform utility services.
+
+```text
+Prepared Visual full-raster working composite     Audio Program (48 kHz)
+                    |                                      |
+                    v                                      v
+      Program Output [ReferenceOutput role]       exact frame interval
+                    |                                      |
+                    +------------------+-------------------+
+                                       v
+           v210 10-bit 4:2:2 or RGB 12-bit + s24 PCM + ANC frame
+                                       |
+                                       v
+                  bounded Reference Output scheduler Module
+                                       |
+                                       v
+             Windows DeckLink COM / AJA NTV2 native bridges
+                                       |
+                                       v
+                         physical device / SDI connector
+```
+
+## Ownership and clean-feed semantics
+
+`mondrian-reference-output` is the deep execution Module. Its public Interface
+owns exact signal admission, packed video, embedded-audio, and ancillary
+payloads, bounded
+scheduled playback, provider events, lifecycle diagnostics, and the Adapter
+Seam. It has no Timeline, Renderer, App, UI, wgpu, FFmpeg, COM, or C++
+dependency. SDK ABI details remain behind `VendorReferenceOutputBridge`
+Implementations, while every vendor handle, callback thread, and profile-
+restoration guard transfers into the returned provider Session. The bridge and
+Adapter are discovery/factory roots only and must have non-blocking Drop paths;
+they cannot retain a second provider lifetime owner after `open` returns.
+
+Renderer is the only owner of picture lowering. `ReferenceOutputProgram`
+starts with one canonical full-resolution working composite, resolves the
+Sequence's `ProgramColorContext`, and applies the distinct
+`ProgramOutputRole::ReferenceOutput` boundary. It never enters Viewer spatial
+scaling, comparison, monitor adaptation, ICC calibration, Scopes, false color,
+zebra, gamut alarm, or canvas background. Alpha is discarded only at the
+physical carrier boundary.
+
+Embedded audio comes from the selected public Audio Program. It never consumes
+Monitor Path PCM, device-volume state, or a convenience downmix. The first
+product matrix requires exact 48 kHz channel semantics and at most 16 channels.
+
+The validation-only `PersistentReferenceOutputPump` is the canonical endurance
+producer over those two seams. It freezes one ordinary exact-source Timeline
+Export snapshot, owns one persistent visual materialization Session, and owns
+one independent public Audio Program Runtime with an empty audition overlay.
+The visual Session reuses decoder, title, prepared Program, Effect, color, and
+composite state across contiguous frames, uses authored full-resolution child
+canvases, and stops at the root Float32 working composite before any Export
+delivery transform. `TimelineRenderIntent::ReferenceOutput` fixes full raster,
+Final quality, Working color target, and no frame drop. This is a temporary
+qualification reuse of Export's canonical frozen materializer, not a second
+Timeline interpreter and not a claim that Reference Output should remain
+coupled to Export as a product architecture.
+
+The pump uses one exact frame index as both Timeline coordinate and physical
+cadence phase. `ReferenceAudioCadence` derives the corresponding 48 kHz start
+and length; the first window enters one Audio continuity generation and every
+later window strictly continues it. Picture materialization, Audio Program
+rendering, Program Output, carrier packing, and provider schedule are ordered
+as one fail-closed transaction: no bundle reaches the provider unless every
+upstream step succeeded. Sequence identity/revision or Project Author
+Generation drift permanently faults the generation. Closing cancels software
+work and hands provider teardown to the existing App lifecycle owner, whose
+ordinary or endurance consuming receipts remain the only release evidence.
+
+App is the composition and lifecycle Adapter. A Session binds to exact
+`SequenceId`, `SequenceRevision`, and Project author generation. Discovery,
+open, schedule, start, poll, and stop are machine-local operations and never
+enter Project state or Undo/Redo. Any author edit or active-Sequence change
+revokes the binding and admits an asynchronous stop request before more output
+can be scheduled. `AppReferenceOutputTeardownStatus::Stopping` is distinct from
+provider diagnostics: it means only that the non-blocking request was accepted,
+not that callbacks or device ownership are already closed. Open, start, bind,
+and adapter replacement non-blockingly reap a completed coordinator first and
+otherwise fail with `TeardownInProgress`; a terminal receipt latches `Failed`
+and prevents a second hardware owner from being admitted. Project close retires
+the complete Module within a fixed product budget. App Drop uses a zero-wait
+handoff, so neither path performs Session shutdown or Adapter/bridge Drop on the
+UI/calling thread.
+
+If the provider rejects or panics during the non-blocking request, the App does
+not report `Stopping`: it immediately latches request-failed-pending state,
+projects cached diagnostics as `Failed`, and keeps the coordinator solely to
+consume the unsafe owner. Its eventual terminal receipt replaces that interim
+diagnostic. Rebind remains blocked throughout.
+
+## Exact signal contract
+
+The request closes raster, rational cadence, scan, pixel carrier, encoded color
+identity, code range, HDR signalling record, audio layout, reference policy,
+preroll, and queue bound. A provider must advertise and read back the identical
+mode. Implicit scaling, frame-rate conversion, scan conversion, range changes,
+chroma changes, bit-depth downshift, color relabelling, audio remap, and silent
+free-run fallback are forbidden.
+
+The portable host carriers are compact little-endian v210 10-bit Y'CbCr 4:2:2
+and full-range 12-bit RGB stored in 16-bit lanes. The vendor bridge performs any
+last device-specific 12-bit packing only after exact admission. Float Program
+Output remains extended until this final quantization. Embedded float PCM is
+rounded once to signed 24-bit values in interleaved 32-bit lanes.
+
+Audio windows use exact rational frame boundaries. At 30000/1001 fps the first
+five 48 kHz intervals contain `1601, 1602, 1601, 1602, 1602` sample frames;
+per-frame rounding is never used. One atomic bundle owns the video frame and
+the corresponding audio interval. Frame gaps, duplicates, signal mismatch,
+queue overflow, and out-of-order completion fail closed. The same atomic bundle
+also carries one canonical `mondrian-broadcast::AncillaryFrame`; a packet can
+never be scheduled independently from its exact video/audio frame identity.
+
+Mode admission declares `Disabled`, `Required`, or `RequiredWithReadback`
+ancillary policy. A nonempty inventory is rejected when ancillary is disabled.
+Required readback needs provider evidence distinct from scheduling support.
+Every completed frame then carries the provider's actual ancillary-inventory
+digest; the Module compares it with the scheduled digest and fails the Session
+on omission or mismatch. Simulated matching remains non-hardware evidence.
+ST 291 packet construction, parity/checksum, ATC, AFD, and CDP transport remain
+owned by the Broadcast Module; this Module owns only exact scheduling and
+provider evidence.
+
+HDR transfer/colorimetry requires an explicit `ReferenceHdrSignal` even when
+no static fields are authored. Mode evidence distinguishes HDR signalling
+(for example an ST 352 VPID) from complete mastering-display and content-light
+transport. A provider that proves the former but not the latter cannot admit a
+request carrying static metadata.
+
+Interlaced hardware output remains unqualified under ADR-0008 and is rejected
+by the App seam even though the platform-neutral value type can represent TFF.
+
+## Runtime and failure semantics
+
+Loading user preferences never loads an SDK or acquires a device. Preferences
+store only optional provider/device identity, carrier preference, and reference
+policy. The composition root installs a physical Adapter explicitly.
+
+Windows has concrete DeckLink API 12.0 COM and AJA SDK 18.1.0 native adapters
+behind the vendor boundary. The separately built DLLs use pinned interface/SDK
+sources with their redistribution notices preserved; ordinary Cargo builds do
+not require vendor drivers or hardware. The platform registry installs their
+actual package-local loaders. Missing images, runtimes, devices and incompatible
+interfaces remain typed unavailable results. `UnavailableVendorReferenceOutputBridge`
+also preserves an explicit unavailable seam. A physical Session is accepted
+only when evidence is hardware-backed and provider, request readback, and
+device generation all match. Other operating systems and physical hardware
+qualification remain NotRun.
+
+Callbacks publish only bounded low-frequency completion/status events. The
+controlling Module owns ordering and accounting. Required external-reference
+playout cannot start until a positive lock event is observed; subsequent lock
+loss, device removal, or profile change stops the Session and enters `Blocked`;
+provider execution failure enters `Failed`. Stop clears queued authority and
+requests playback cessation, but does not by itself prove callback-thread or
+device lifetime closure. Every provider Session must implement the object-safe
+consuming shutdown seam and return a `ReferenceOutputSessionShutdownReceipt`
+that independently proves playback stopped, callback execution terminated,
+device ownership released, zero outstanding frames/resources, and no provider
+failure. There is intentionally no default implementation that promotes
+`stop(&mut self)` into release evidence.
+
+`ReferenceOutputModule::shutdown` consumes the sole Module owner and returns a
+`ReferenceOutputModuleShutdownReceipt`. A never-opened Module has an explicit
+clean no-Session receipt. An opened Module preserves the queue depth observed
+at shutdown, final cumulative diagnostics, provider lifetime facts, and any
+provider or accounting failure. `all_resources_released()` is fail closed: a
+missing callback/device proof, any unresolved resource, or any captured failure
+rejects phase isolation even though Rust subsequently drops the consumed
+object. The reusable `stop` operation also consumes its active Session and
+returns success only when the same provider receipt proves complete release.
+
+Ordinary product stop uses `ReferenceOutputModule::begin_stop` instead of that
+direct reusable operation. The caller performs only the contractually
+non-blocking shutdown request, then transfers the complete Module to an opaque
+stop coordinator. Request admission is reported separately and never promoted
+to clean provider evidence. A joined clean coordinator returns the Module and
+its discovery Adapter for reuse; the exact Session receipt is retained in that
+Module so a later qualification shutdown can still report the original Session
+lifetime. Provider failure consumes the Module on the coordinator and returns a
+terminal receipt. While stop is active, the App retains cached pre-stop
+diagnostics plus the independent `Stopping` status; it never rewrites provider
+state to `Stopped` before coordinator completion.
+
+Qualification first calls the non-blocking Session shutdown request, then
+moves the entire Module—not only the Session—onto one deadline coordinator.
+The coordinator therefore owns Session consumption plus Adapter/bridge
+destruction. Only a joined coordinator can produce clean schema-2 evidence;
+spawn failure abandons the owner fail-closed, while panic, timeout, or detach
+retains nonzero resource and coordinator facts without blocking the caller.
+The ordinary-stop coordinator uses the same absolute-deadline and
+completion-wins rule. Each worker publishes a monotonic completion timestamp
+before its handle becomes finished; clean evidence is accepted only when that
+timestamp is at or before the supplied deadline. An already-finished late
+worker therefore remains timeout/detach evidence rather than being promoted by
+a delayed caller observation. If a still-running or already-completed handle is
+discarded by product retirement/App Drop, a detached reaper joins it and drops
+any returned Module on that reaper. Reaper spawn failure intentionally abandons
+the handle rather than running a potentially blocking destructor on the
+caller. Stop-coordinator spawn failure likewise retains the Module outside the
+unstarted closure and leaks it fail-closed. Both coordinator and reaper spawner
+calls are panic-isolated; `Err` and unwind use the same retained-payload
+abandonment path, so neither can destroy Module/Session/Adapter ownership on the
+caller. Nested provider receipt schemas are never upgraded: a stale provider
+schema remains stale even inside a schema-2 Module/coordinator receipt.
+
+The deterministic simulated Adapter qualifies Module semantics and fault
+injection only. Its evidence permanently has `hardware_backed = false`, so it
+cannot satisfy DeckLink/AJA, connector, wire-level, reference-lock, monitor, or
+broadcast qualification.
+
+## Performance and qualification
+
+The queue is bounded to 64 complete bundles and reports scheduled high-water,
+completed/late/dropped/flushed counts, exact audio-frame accounting, provider
+versions, device generation, reference status, ancillary packet count, and
+ancillary word/readback-verification counts. Long-duration evidence additionally
+retains current outstanding and explicitly aborted frames, callback count,
+positive-to-negative reference-lock transitions, and typed provider hardware
+time (`ticks` plus `ticks_per_second`). Rate changes or non-monotonic hardware
+ticks fail the Session; stop/block/failure classifies every queued frame so
+`scheduled = completed + late + dropped + flushed + aborted + outstanding`
+always remains auditable. Provider poll/stop failures and out-of-order
+callbacks also enter stable failure and abort the complete remaining queue.
+The current Renderer seam and persistent qualification pump have a correct CPU
+Float32 full-raster Program Output and packing path with exact public Audio
+Program cadence. They deliberately do not claim a GPU-to-device resident path,
+vendor performance, or wire correctness; future work should deepen the same
+Module with reusable pinned buffers or device-resident transfers rather than
+creating a second signal interpretation.
+
+Software tests prove exact mode admission, carrier packing, cadence, ordering,
+coordinator spawn/join identity (including optional coordinators),
+reference-loss behavior, runtime-unavailable behavior, clean-feed color
+identity, persistent exact-source visual/Audio continuity, App author binding,
+author-drift fault latching, ordinary stop completion, and preference
+persistence. Commercial hardware
+qualification additionally requires licensed vendor bridges, supported
+DeckLink/AJA hardware and drivers, SDI capture/monitor loopback including ANC
+line/field readback, external
+reference equipment, platform/driver matrices, and long-duration soak. Those
+facts belong to COL-042 HITL plus COL-043, COL-046, and COL-047; software
+simulation cannot close them.
+
+Vendor API references include the official
+[DeckLink SDK manual](https://documents.blackmagicdesign.com/UserManuals/DeckLinkSDKManual.pdf),
+[DeckLink scheduled output API](https://sdk-doc.blackmagicdesign.com/decklink-sdk/decklinkapi.html),
+[AJA NTV2 SDK](https://github.com/aja-video/libajantv2), and
+[AJA AutoCirculate guidance](https://sdkdocs.aja.com/public/ntv2/current/d9/d9a/recordplaytechniques.html).
+
+## Concrete Windows AJA provider and physical endurance admission
+
+`native_aja` now implements the real Windows AJA adapter, with its pinned
+C++ AutoCirculate owner under `native/reference-output-aja`. The separate SDK
+build is optional for Cargo and produces a package-local DLL; absence of the
+image, driver, exact device, supported mode, or external reference remains an
+admission-time NotRun. The native owner snapshots configuration before any
+mutation, acquires the card exclusively, reads back configured output,
+transfers bounded canonical video/Audio bundles, and records completion only
+from a previously observed active-frame cookie and the hardware Audio clock.
+See `native/reference-output-aja/README.md` for reproducible build and exact
+limits. The current implementation is SDR/v210 progressive SDI1 and includes
+validation-only luma VANC insertion plus independent second-card raw SDI
+capture. These capabilities require the exact receiver/marker binding below;
+they do not establish physical wire qualification on a machine without the
+rig. HDR and unsupported carriage remain unadvertised. The separate Windows
+DeckLink implementation is described below.
+
+`ReferenceOutputAdapter::preflight_reference_lock` is read-only and defaults to
+unknown. The physical endurance factory discovers and retains the same native
+adapter it later moves into the phase App, checks provider/SDK/driver/device
+identity and exact mode, and derives pre-start capability inventory from those
+observations. Registration alone is not capability evidence. The Windows
+registry registers the actual package-local AJA and DeckLink loaders. Native
+no-device probes validate their ABI, rejected-owner teardown and bounded ANC
+codecs; actual SDI/reference qualification requires the physical rig and remains
+NotRun locally.
+
+If a vendor open returns a mismatched or partially initialized session, that
+session is consumed through the ordinary Module shutdown coordinator before
+returning a rejection. The rejection carries the whole shutdown receipt;
+subsequent Module shutdown preserves that failure instead of relabeling the
+session never-opened. Native callback-worker join failures retain executable
+image ownership and remain visible outstanding resources.
+
+The validation-only AJA wire extension now adds full-raster progressive luma
+VANC insertion and an independent second-card SDI capture owner. Its exact
+capabilities are advertised only with the configured distinct receiver, exact
+mode, live input route and representable marker placement. The phase factory
+constructs a fresh nonce and transfers the same canonical
+`AncillaryWireCorrelation` to the Timeline pump and adapter. The pump explicitly
+constructs the marker-bearing `AncillaryFrame` before Renderer packing.
+Captured raster words are independently decoded and correlated by the actual
+on-wire nonce/frame packet; output completion or an echoed expected digest is
+insufficient. Full scheduled and received words, digests, and hardware times
+are retained in bounded create-only JSONL journals, synchronized at consuming
+shutdown. HANC/chroma ANC and unsupported geometries remain unadvertised.
+
+The Windows DeckLink path is now an independently implemented COM bridge under
+`native/reference-output-decklink`, compiled by Microsoft MIDL/MSVC from the
+27 unmodified BMD-licensed API **12.0** interfaces redistributed by official OBS
+commit `671fb57daf4972fcd506689a48a474dd4eda9e66`. It does not claim SDK 16 or
+hardware qualification. `native-decklink` enables the Rust dynamic loader without making
+ordinary Cargo builds depend on SDK headers, MIDL, installed drivers or cards.
+
+`DeckLinkReferenceOutputAdapter` retains the exact absolute DLL image lease and
+hash, distinguishes missing COM registration from missing API interfaces, and
+discovers persistent device IDs, physical-card groups, profile generations and
+separate input/output mode inventories. Its initial output scope is progressive
+HD legal-range Rec709 v210 with 48kHz stereo or 7.1 PCM24. Native scheduled
+video/audio timestamps preserve the canonical absolute-frame audio cadence,
+including nonzero initial frame positions. Native readback verifies the active
+output mode and PsF/3D status, configuration controls and unity digital gain.
+
+Output and independent capture run on separate MTA owner threads. Physical
+completion timestamps and external-reference status come from the SDK; raw
+VANC words come exclusively from retained input-callback frames. Receiver
+admission rejects two subdevices in the same physical group and requires the
+selected input mode. The shared broadcast correlation contract still owns
+nonce/frame markers and validates full expected/captured packet inventories.
+The App registry and existing machine-plan wire branch now assemble either
+actual AJA or actual DeckLink adapters. Missing image/driver/card remains
+admission-time NotRun; packet completion alone grants no wire qualification.
+
+Every partial native open has a consuming owner. Callback deregistration,
+stop, outstanding-frame or configuration-restoration failure remains in the
+shutdown receipt and conservatively retains the executable mapping. Native
+boundary probes cover failed-owner polling/teardown, 128 repeated rejected
+opens, same-line overlap, maximal packets, end-of-line placement, header parity,
+checksum corruption and overflow; they explicitly report nonqualifying results.
+
+Final native lifecycle audit tightened the stop boundary: `begin_shutdown`
+sets only an atomic signal, while the MTA owner executes SDK waits. An
+initialization deadline retains a heap-owned promise and partial owner. When
+stop/disable/callback deregistration cannot establish quiescence, the native
+bridge keeps the complete COM/callback/frame/audio owner, parks its thread on a
+condition variable, and reports unjoined/unreleased resources. It does not
+destroy the owner just because the Rust coordinator's deadline expired. The
+native fault probe exercises these mechanisms independently of any hardware.
+
+
+### Consuming program-bound wire journals
+
+Both Windows native bridge adapters accept an optional immutable program/phase
+journal binding. Their existing raw JSONL begins with the exact source hash and
+phase identity and retains actual scheduled/captured component words. The
+create-new file denies external write/delete sharing; consuming output/capture
+shutdown synchronizes it and checks its actual length through the same handle.
+The digest advances only after complete successful writes under this lease; a
+partial write or exceeded bound permanently prevents publication. This avoids
+rescanning a full day of raw journals during bounded shutdown. Path/SHA publish
+only after native owner closure is clean. The shared
+inventory does not infer evidence from filenames or expose abandoned sessions
+as completed readback. Missing hardware remains typed `NotRun`.
+
+A journal receipt proves the actual closed writer contents, not that shutdown
+met a deadline. The existing phase owner applies its original shutdown deadline
+to the complete native close/join operation. A late close may retain this raw
+diagnostic inventory but the phase remains failed and cannot qualify.
+
+The persistent physical endurance pump rejects a `Simulated` device descriptor
+before opening a Session or scheduling any preroll bundle. Its consuming fault
+state remains latched. Native-provider evidence, live external lock and Running
+state are still checked after actual hardware startup; rejecting a known
+simulation early does not replace those independent checks. Software Adapter
+tests never produce `PhysicalReferenceStartEvidence`.

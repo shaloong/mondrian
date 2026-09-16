@@ -83,6 +83,18 @@ pub struct AudioRenderCapacity {
     pub source_scratch_samples: usize,
     /// Preallocated interleaved gain lane shared by Route automation.
     pub route_gain_scratch_samples: usize,
+    /// Stable sidechain source ports retained as block-local snapshots.
+    pub sidechain_source_buffers: usize,
+    /// Preallocated samples across all sidechain source snapshots.
+    pub sidechain_source_samples: usize,
+    /// Prepared processor auxiliary buses, including explicit silent buses.
+    pub processor_auxiliary_buses: usize,
+    /// Largest auxiliary-bus set presented to one processor callback.
+    pub maximum_processor_auxiliary_buses: usize,
+    /// Preallocated PCM samples for the largest processor auxiliary-bus set.
+    pub processor_auxiliary_scratch_samples: usize,
+    /// Enabled per-occurrence sidechain Route bindings.
+    pub sidechain_bindings: usize,
     /// Non-zero Contribution and Route compensation lines.
     pub compensation_delay_line_count: usize,
     /// Interleaved sample storage retained by all compensation lines.
@@ -173,6 +185,8 @@ pub struct AudioRenderSession {
     scratch: RenderScratch,
     contribution_delay_lines: Vec<FixedDelayLine>,
     route_delay_lines: Vec<FixedDelayLine>,
+    sidechain_delay_lines: Vec<FixedDelayLine>,
+    sidechain_source_buffers: Vec<Vec<f32>>,
     processor_host: PreparedProcessorHost,
     meter_bank: AudioMeterBank,
     meter_block_serial: u64,
@@ -228,14 +242,27 @@ impl AudioRenderSession {
                 FixedDelayLine::new(route.compensation_delay_frames, contract.channel_count())
             })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
+        let sidechain_delay_lines = plan
+            .schedule
+            .sidechain_bindings
+            .iter()
+            .map(|binding| {
+                FixedDelayLine::new(binding.compensation_delay_frames, contract.channel_count())
+            })
+            .collect::<Result<Vec<_>, AudioExecutionError>>()?;
+        let sidechain_source_buffers = (0..plan.schedule.sidechain_sources.len())
+            .map(|_| vec![0.0; samples])
+            .collect::<Vec<_>>();
         let compensation_delay_line_count = contribution_delay_lines
             .iter()
             .chain(route_delay_lines.iter())
+            .chain(sidechain_delay_lines.iter())
             .filter(|line| line.sample_capacity() > 0)
             .count();
         let compensation_delay_samples = contribution_delay_lines
             .iter()
             .chain(route_delay_lines.iter())
+            .chain(sidechain_delay_lines.iter())
             .try_fold(0_usize, |total, line| {
                 total
                     .checked_add(line.sample_capacity())
@@ -269,6 +296,23 @@ impl AudioRenderSession {
             maximum_source_channels: plan.schedule.summary.maximum_source_channels,
             source_scratch_samples: source_samples,
             route_gain_scratch_samples: samples,
+            sidechain_source_buffers: sidechain_source_buffers.len(),
+            sidechain_source_samples: sidechain_source_buffers
+                .len()
+                .checked_mul(samples)
+                .ok_or(AudioExecutionError::BufferTooLarge)?,
+            processor_auxiliary_buses: plan.schedule.processor_auxiliary_buses.len(),
+            maximum_processor_auxiliary_buses: plan
+                .schedule
+                .summary
+                .maximum_processor_auxiliary_buses,
+            processor_auxiliary_scratch_samples: plan
+                .schedule
+                .summary
+                .maximum_processor_auxiliary_buses
+                .checked_mul(samples)
+                .ok_or(AudioExecutionError::BufferTooLarge)?,
+            sidechain_bindings: plan.schedule.sidechain_bindings.len(),
             compensation_delay_line_count,
             compensation_delay_samples,
             processor_occurrences: processor_host.occurrence_count(),
@@ -285,6 +329,8 @@ impl AudioRenderSession {
             scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
             contribution_delay_lines,
             route_delay_lines,
+            sidechain_delay_lines,
+            sidechain_source_buffers,
             processor_host,
             meter_bank,
             meter_block_serial: 0,
@@ -350,6 +396,7 @@ impl AudioRenderSession {
             .contribution_delay_lines
             .iter_mut()
             .chain(self.route_delay_lines.iter_mut())
+            .chain(self.sidechain_delay_lines.iter_mut())
         {
             delay.reset();
         }
@@ -536,6 +583,8 @@ impl AudioRenderSession {
                     &mut self.scratch,
                     &mut self.contribution_delay_lines,
                     &mut self.processor_host,
+                    &self.sidechain_source_buffers,
+                    &mut self.sidechain_delay_lines,
                 )?;
             } else {
                 for route_index in node.incoming.clone() {
@@ -567,7 +616,21 @@ impl AudioRenderSession {
                 &mut self.node_buffers[scratch_slot],
                 &mut self.scratch,
                 &mut self.processor_host,
+                &self.sidechain_source_buffers,
+                &mut self.sidechain_delay_lines,
             )?;
+            for source_slot in &node.sidechain_source_buffers {
+                let source = schedule
+                    .sidechain_sources
+                    .get(*source_slot)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                let destination = self
+                    .sidechain_source_buffers
+                    .get_mut(*source_slot)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                destination[..samples]
+                    .copy_from_slice(self.node_buffers[scratch_slot].port(source.port, samples));
+            }
             if meter_start_sample.is_some()
                 && !self.meter_bank.measure_target(
                     node_slot,
@@ -622,6 +685,8 @@ fn render_track_contributions(
     scratch: &mut RenderScratch,
     delay_lines: &mut [FixedDelayLine],
     processor_host: &mut PreparedProcessorHost,
+    sidechain_source_buffers: &[Vec<f32>],
+    sidechain_delay_lines: &mut [FixedDelayLine],
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
     let samples = request
@@ -729,6 +794,8 @@ fn render_track_contributions(
         processor_host.process_rack(
             &contribution.scope_rack,
             &schedule.processors,
+            &schedule.processor_auxiliary_buses,
+            &schedule.sidechain_bindings,
             AudioRenderRequest {
                 start_sample: execution_start_sample,
                 frames: execution_frame_count,
@@ -737,6 +804,8 @@ fn render_track_contributions(
             channel_layout,
             backend,
             &mut scratch.contribution_processed[execution_sample_start..execution_sample_end],
+            sidechain_source_buffers,
+            sidechain_delay_lines,
         )?;
 
         scratch.contribution_sample_gains[..execution_samples].fill(0.0);
@@ -1010,6 +1079,8 @@ fn process_strip(
     buffers: &mut NodeBuffers,
     scratch: &mut RenderScratch,
     processor_host: &mut PreparedProcessorHost,
+    sidechain_source_buffers: &[Vec<f32>],
+    sidechain_delay_lines: &mut [FixedDelayLine],
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
     let samples = request
@@ -1026,11 +1097,15 @@ fn process_strip(
     processor_host.process_rack(
         &node.pre_rack,
         &schedule.processors,
+        &schedule.processor_auxiliary_buses,
+        &schedule.sidechain_bindings,
         request,
         sample_rate,
         channel_layout,
         backend,
         &mut buffers.pre_fader[..samples],
+        sidechain_source_buffers,
+        sidechain_delay_lines,
     )?;
 
     if let Some(curve) = &node.fader_automation {
@@ -1060,11 +1135,15 @@ fn process_strip(
     processor_host.process_rack(
         &node.post_rack,
         &schedule.processors,
+        &schedule.processor_auxiliary_buses,
+        &schedule.sidechain_bindings,
         request,
         sample_rate,
         channel_layout,
         backend,
         &mut buffers.post_fader_pre_mute[..samples],
+        sidechain_source_buffers,
+        sidechain_delay_lines,
     )?;
     if node.muted {
         buffers.post_mute[..samples].fill(0.0);

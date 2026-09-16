@@ -275,6 +275,13 @@ impl std::fmt::Display for BasicTitleRasterRequestIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BasicTitleRasterIdentity([u8; 32]);
 
+impl BasicTitleRasterIdentity {
+    /// Stable digest of the complete shaped/rasterized title request.
+    pub const fn digest(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 impl std::fmt::Display for BasicTitleRasterIdentity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write_hex_identity(self.0, formatter)
@@ -1161,6 +1168,22 @@ mod tests {
             .expect("title")
             .evaluate(TimelineTime::ZERO)
             .expect("evaluate")
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_default_title_renders_authored_chinese_without_undeclared_fallback() {
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let output = rasterizer
+            .rasterize(
+                &evaluated("标题"),
+                Resolution::FHD,
+                0.20,
+                Resolution::HD,
+                WorkingColorSpace::LinearRec709,
+            )
+            .expect("the default title must use its declared font");
+        assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
     }
 
     #[test]

@@ -184,6 +184,18 @@ pub(crate) struct CompiledRoute {
     pub(crate) gain_automation: Option<ExactAutomationCurve>,
 }
 
+/// One enabled typed processor auxiliary-input Route retained by the selected
+/// Signal Closure.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompiledProcessorSidechainRoute {
+    pub(crate) id: mondrian_core::AudioRouteId,
+    pub(crate) source: AudioRouteSource,
+    pub(crate) processor_id: mondrian_core::AudioProcessorInstanceId,
+    pub(crate) bus_key: String,
+    pub(crate) gain_db: f64,
+    pub(crate) gain_automation: Option<ExactAutomationCurve>,
+}
+
 /// One compiled explicit Transition relationship.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledTransition {
@@ -205,6 +217,7 @@ pub struct CompiledAudioProgram {
     pub(crate) bus_order: Vec<MixBusId>,
     pub(crate) output: CompiledChannelStrip,
     pub(crate) routes: Vec<CompiledRoute>,
+    pub(crate) sidechain_routes: Vec<CompiledProcessorSidechainRoute>,
 }
 
 /// Whether one compiled Program Output can be omitted without changing PCM.

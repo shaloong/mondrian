@@ -561,7 +561,7 @@ impl OsDisplayProfileStatus {
     /// Whether the OS can provide ICC profile data for the current monitor.
     ///
     /// When this returns `false` and the user configures
-    /// `MonitorProfileReference::IccProfile`, the display output contract
+    /// `DisplayCalibrationPolicy::OsDefault`, the display output contract
     /// **must** emit `MonitorProfileStatus::IccProfileUnsupported` — never
     /// silently fall back to Rec.709.
     pub fn can_discover_os_icc_profile(&self) -> bool {

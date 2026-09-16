@@ -3,6 +3,27 @@ use crate::{FrameExecutionCancellationEvidence, MediaWorkReservationIntent};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
+#[test]
+fn lifecycle_waker_publishes_existing_revision_without_retaining_broker() {
+    let broker = FrameWorkBroker::<u64, u64, u64>::new(1, 1);
+    let weak = Arc::downgrade(&broker.shared);
+    let before = broker.worker_lifecycle_revision();
+    let waker = broker.worker_lifecycle_waker();
+    waker.wake_by_ref();
+    assert_eq!(broker.worker_lifecycle_revision(), before + 1);
+    assert!(matches!(
+        broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Any,
+            Duration::ZERO,
+            before,
+        ),
+        FrameWorkReceiveWait::Interrupted { revision } if revision == before + 1
+    ));
+    drop(broker);
+    assert!(weak.upgrade().is_none());
+    waker.wake_by_ref();
+}
+
 #[derive(Clone)]
 struct ManualRuntimeClock {
     now_nanos: Arc<AtomicU64>,
@@ -38,6 +59,7 @@ fn request(key: u64, generation: u64, class: FrameWorkClass) -> FrameWorkRequest
         generation,
         priority: FrameWorkPriority::Current,
         work_class: class,
+        worker_affinity: None,
         resource_scope: FrameWorkResourceScope::Shared,
         demand_identity: None,
         deadline: None,
@@ -247,6 +269,41 @@ fn current_still_work_preserves_decoder_lane_affinity() {
 }
 
 #[test]
+fn explicit_worker_affinity_survives_prefetch_to_current_rebinding() {
+    let broker = FrameWorkBroker::new(2, 2);
+    let generation = broker.begin_generation();
+    let mut cold_source = request(1, generation, FrameWorkClass::Playback);
+    cold_source.priority = FrameWorkPriority::Prefetch;
+    cold_source.worker_affinity = Some(FrameWorkerLane::NonPlayback);
+    assert!(matches!(
+        broker.submit(cold_source),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    assert_eq!(
+        broker.bind_existing(binding_request(1, generation, FrameWorkClass::Playback)),
+        FrameWorkBindingSubmission::UpdatedQueued {
+            priority_promoted: true,
+            work_class_changed: false,
+            generation_changed: false,
+        }
+    );
+    assert!(matches!(
+        broker.receive_timeout(FrameWorkerLane::Playback, Duration::ZERO),
+        FrameWorkReceiveWait::TimedOut
+    ));
+    let execution = match broker.receive(FrameWorkerLane::NonPlayback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected receive: {other:?}"),
+    };
+    assert_eq!(execution.priority, FrameWorkPriority::Current);
+    assert_eq!(
+        broker.resolve_execution(execution.id, true).completion,
+        FrameRequestCompletion::Current
+    );
+}
+
+#[test]
 fn exact_binding_rerequest_reuses_in_flight_without_a_fallback() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -277,6 +334,7 @@ fn bind_existing_updates_queued_metadata_without_replacing_or_dropping_payload()
         generation,
         priority: FrameWorkPriority::Prefetch,
         work_class: FrameWorkClass::Playback,
+        worker_affinity: None,
         resource_scope: FrameWorkResourceScope::Shared,
         demand_identity: Some(demand_identity(1)),
         deadline: None,
@@ -320,6 +378,32 @@ fn bind_existing_updates_queued_metadata_without_replacing_or_dropping_payload()
         resolution.binding.expect("rebound binding").resource_scope,
         FrameWorkResourceScope::Shared
     );
+}
+
+#[test]
+fn promoted_current_queue_wait_starts_at_latest_binding() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
+    let generation = broker.begin_generation();
+    let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+    prefetch.priority = FrameWorkPriority::Prefetch;
+    assert!(matches!(
+        broker.submit(prefetch),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    clock.set(Duration::from_millis(110));
+    assert!(matches!(
+        broker.bind_existing(binding_request(1, generation, FrameWorkClass::Playback)),
+        FrameWorkBindingSubmission::UpdatedQueued { priority_promoted: true, .. }
+    ));
+    clock.set(Duration::from_millis(117));
+
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected receive: {other:?}"),
+    };
+    assert_eq!(execution.queue_wait, Duration::from_millis(7));
 }
 
 #[test]
@@ -561,6 +645,37 @@ fn superseded_in_flight_playback_current_finishes_for_locality_without_publicati
 }
 
 #[test]
+fn superseded_playback_demand_with_old_queue_preserves_running_decoder_locality() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut running = request(1, generation, FrameWorkClass::Playback);
+    running.demand_identity = Some(demand_identity(1));
+    running.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(running);
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected current receive: {other:?}"),
+    };
+
+    let mut old_queued = request(2, generation, FrameWorkClass::Playback);
+    old_queued.demand_identity = Some(demand_identity(1));
+    old_queued.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(old_queued);
+
+    assert_eq!(
+        broker.synchronize_playback_current_demand(demand_identity(2)),
+        1
+    );
+    assert_eq!(broker.execution_cancellation(execution.id), None);
+    let resolution = broker.resolve_execution(execution.id, true);
+    assert_eq!(resolution.completion, FrameRequestCompletion::CacheOnly);
+    assert!(resolution.binding.is_none());
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.queued_work, 0);
+    assert_eq!(diagnostics.in_flight_work, 0);
+}
+
+#[test]
 fn spatial_generation_rotation_retains_playback_decode_without_publication() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -632,6 +747,43 @@ fn viewer_generation_rotation_rebinds_queued_playback_prefetch() {
 }
 
 #[test]
+fn representation_rotation_retains_running_playback_but_prunes_old_queue() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut running = request(1, generation, FrameWorkClass::Playback);
+    running.demand_identity = Some(demand_identity(1));
+    running.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(running);
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected current receive: {other:?}"),
+    };
+
+    let mut queued = request(2, generation, FrameWorkClass::Playback);
+    queued.priority = FrameWorkPriority::Prefetch;
+    queued.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    assert!(matches!(
+        broker.submit(queued),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    let next = broker.begin_generation_preserving_in_flight_playback_locality();
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.latest_generation, next);
+    assert_eq!(diagnostics.queued_work, 0);
+    assert_eq!(diagnostics.pending_requests, 0);
+    assert_eq!(diagnostics.pruned_queued, 1);
+    assert_eq!(diagnostics.in_flight_generation_invalidations, 0);
+    assert_eq!(diagnostics.in_flight_binding_invalidations, 0);
+    assert_eq!(broker.execution_cancellation(execution.id), None);
+
+    let resolution = broker.resolve_execution(execution.id, true);
+    assert_eq!(resolution.completion, FrameRequestCompletion::CacheOnly);
+    assert!(resolution.binding.is_none());
+    assert_eq!(broker.diagnostics().pending_requests, 0);
+}
+
+#[test]
 fn semantic_generation_rotation_cancels_previously_retained_playback_decode() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -647,6 +799,7 @@ fn semantic_generation_rotation_cancels_previously_retained_playback_decode() {
     broker.begin_generation_preserving_playback_locality();
     assert_eq!(broker.execution_cancellation(execution.id), None);
     broker.begin_generation();
+    assert_eq!(broker.diagnostics().in_flight_generation_invalidations, 1);
     assert!(matches!(
         broker.execution_cancellation(execution.id),
         Some(FrameExecutionCancellation::Superseded { .. })
@@ -681,6 +834,55 @@ fn same_key_execution_may_rebind_to_the_active_playback_demand() {
         Some(demand_identity(2))
     );
     assert_eq!(broker.diagnostics().queued_work, 0);
+}
+
+#[test]
+fn reusable_winner_detaches_running_playback_fallback_without_canceling_decoder_locality() {
+    let broker = FrameWorkBroker::new(2, 2);
+    let generation = broker.begin_generation();
+    let mut original = request(1, generation, FrameWorkClass::Playback);
+    original.demand_identity = Some(demand_identity(1));
+    original.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(original);
+    let winner = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected original receive: {other:?}"),
+    };
+
+    let mut fallback = request(1, generation, FrameWorkClass::Playback);
+    fallback.demand_identity = Some(demand_identity(2));
+    fallback.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    assert!(matches!(
+        broker.submit(fallback),
+        FrameWorkSubmission::Queued { .. }
+    ));
+    let fallback = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected fallback receive: {other:?}"),
+    };
+
+    assert!(broker.mark_execution_completed(winner.id));
+    let winner_resolution = broker.resolve_execution(winner.id, true);
+    assert_eq!(
+        winner_resolution.completion,
+        FrameRequestCompletion::Current
+    );
+    assert_eq!(
+        winner_resolution.binding.expect("latest binding").demand_identity,
+        Some(demand_identity(2))
+    );
+    assert_eq!(broker.execution_cancellation(fallback.id), None);
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.in_flight_binding_invalidations, 0);
+    assert_eq!(diagnostics.in_flight_binding_locality_detachments, 1);
+
+    assert!(broker.mark_execution_completed(fallback.id));
+    let fallback_resolution = broker.resolve_execution(fallback.id, true);
+    assert_eq!(
+        fallback_resolution.completion,
+        FrameRequestCompletion::CacheOnly
+    );
+    assert_eq!(fallback_resolution.binding, None);
 }
 
 #[test]
@@ -793,6 +995,62 @@ fn injected_clock_makes_realtime_expiration_exact() {
     assert_eq!(expired[0].key, 1);
     assert_eq!(expired[0].removed_queued_work, 1);
     assert_eq!(expired[0].retained_in_flight_work, 0);
+}
+
+#[test]
+fn playback_current_deadline_overrides_the_generic_stall_watchdog() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(100));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    let mut current = request(1, generation, FrameWorkClass::Playback);
+    current.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(20),
+    ));
+    broker.submit(current);
+
+    clock.set(Duration::from_millis(119));
+    assert!(
+        broker.expire_playback_current_older_than(Duration::from_millis(250)).is_empty(),
+        "a concrete presentation deadline must not expire early"
+    );
+    clock.set(Duration::from_millis(120));
+    let expired = broker.expire_playback_current_older_than(Duration::from_millis(250));
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].key, 1);
+}
+
+#[test]
+fn same_binding_reobservation_cannot_renew_a_playback_current_deadline() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(100));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    let mut original = request(1, generation, FrameWorkClass::Playback);
+    original.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(20),
+    ));
+    broker.submit(original);
+
+    clock.set(Duration::from_millis(110));
+    let mut observed_again = binding_request(1, generation, FrameWorkClass::Playback);
+    observed_again.deadline = Some(FrameWorkDeadline::from_remaining(
+        7,
+        Duration::from_millis(10),
+    ));
+    assert!(matches!(
+        broker.bind_existing(observed_again),
+        FrameWorkBindingSubmission::UpdatedQueued { .. }
+    ));
+
+    clock.set(Duration::from_millis(119));
+    assert!(broker.expire_playback_current_older_than(Duration::from_secs(1)).is_empty());
+    clock.set(Duration::from_millis(120));
+    assert_eq!(
+        broker.expire_playback_current_older_than(Duration::from_secs(1)).len(),
+        1,
+        "re-observation must preserve the owner's original absolute deadline"
+    );
 }
 
 #[test]
@@ -1769,7 +2027,7 @@ fn authorized_playback_failover_precedes_sustained_non_playback_current_work() {
 }
 
 #[test]
-fn non_playback_failover_never_takes_playback_prefetch() {
+fn non_playback_lane_uses_idle_capacity_for_playback_prefetch() {
     let clock = ManualRuntimeClock::at(Duration::ZERO);
     let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
     let generation = broker.begin_generation();
@@ -1785,11 +2043,77 @@ fn non_playback_failover_never_takes_playback_prefetch() {
     broker.submit(prefetch);
 
     clock.set(Duration::from_micros(5_001));
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 1);
+    let preload = match broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO) {
+        FrameWorkReceiveWait::Work(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("idle shared lane must accept playback Prefetch: {other:?}"),
+    };
+    assert_eq!(preload.key, 2);
+    assert_eq!(preload.priority, FrameWorkPriority::Prefetch);
+    assert_eq!(preload.work_class, FrameWorkClass::Playback);
+    assert_eq!(broker.diagnostics().in_flight_non_playback_lane, 1);
+}
+
+#[test]
+fn non_playback_lane_does_not_steal_prefetch_from_an_idle_playback_lane() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    for key in 1..=3 {
+        let mut prefetch = request(key, generation, FrameWorkClass::Playback);
+        prefetch.priority = FrameWorkPriority::Prefetch;
+        assert!(matches!(
+            broker.submit(prefetch),
+            FrameWorkSubmission::Queued { .. }
+        ));
+    }
+
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 0);
     assert!(matches!(
         broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO),
         FrameWorkReceiveWait::TimedOut
     ));
-    assert_eq!(broker.diagnostics().queued_prefetch, 1);
+
+    let playback = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("playback lane must receive the nearest successor: {other:?}"),
+    };
+    assert_eq!(playback.key, 1);
+
+    let remaining = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("sequential prefetch must remain with the playback lane: {other:?}"),
+    };
+    assert_eq!(remaining.key, 2);
+}
+
+#[test]
+fn non_playback_current_work_precedes_playback_prefetch() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+    prefetch.priority = FrameWorkPriority::Prefetch;
+    broker.submit(prefetch);
+    broker.submit(request(2, generation, FrameWorkClass::Still));
+
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 1);
+
+    let current = match broker.receive(FrameWorkerLane::NonPlayback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("shared current work must outrank a playback preload: {other:?}"),
+    };
+    assert_eq!(current.key, 2);
+    assert_eq!(current.priority, FrameWorkPriority::Current);
+
+    assert!(matches!(
+        broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO),
+        FrameWorkReceiveWait::TimedOut
+    ));
+    let preload = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("playback preload must remain with its dedicated lane: {other:?}"),
+    };
+    assert_eq!(preload.key, 1);
+    assert_eq!(preload.priority, FrameWorkPriority::Prefetch);
 }
 
 #[test]

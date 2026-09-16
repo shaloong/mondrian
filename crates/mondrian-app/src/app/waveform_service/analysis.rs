@@ -15,13 +15,20 @@ use super::{
     WAVEFORM_MAX_WIDTH, WAVEFORM_SAMPLE_RATE,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WaveformWorkerExit {
+    JobChannelClosed,
+    ResultTransportFull,
+    ResultTransportDisconnected,
+}
+
 pub(super) fn waveform_worker(
     jobs: mpsc::Receiver<WaveformJob>,
     results: mpsc::SyncSender<WaveformResult>,
     source_cache: Arc<AudioSourceCache>,
     dispatch_gate: Arc<WaveformDispatchGate>,
     activity: Arc<SingleWorkerActivity<WaveformWorkerIdentity>>,
-) {
+) -> WaveformWorkerExit {
     for job in jobs {
         let identity = job.worker_identity();
         let mut activity_lease = activity.begin(identity);
@@ -39,11 +46,17 @@ pub(super) fn waveform_worker(
             elapsed: started.elapsed(),
         };
         activity_lease.finish_for_publication();
-        match results.send(result) {
+        match results.try_send(result) {
             Ok(()) => activity_lease.commit_publication(),
-            Err(_) => break,
+            Err(mpsc::TrySendError::Full(_)) => {
+                return WaveformWorkerExit::ResultTransportFull;
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return WaveformWorkerExit::ResultTransportDisconnected;
+            }
         }
     }
+    WaveformWorkerExit::JobChannelClosed
 }
 
 fn build_waveform_source(

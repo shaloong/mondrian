@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 const TIMESTAMP_READBACK_BYTES: u64 = 2 * wgpu::QUERY_SIZE as u64;
-const VIEWER_STAGE_TIMESTAMP_COUNT: u32 = 7;
+const VIEWER_STAGE_TIMESTAMP_COUNT: u32 = 8;
 const VIEWER_STAGE_TIMESTAMP_READBACK_BYTES: u64 =
     VIEWER_STAGE_TIMESTAMP_COUNT as u64 * wgpu::QUERY_SIZE as u64;
 
@@ -207,10 +207,12 @@ pub enum GpuTimestampStageMarker {
     AfterSpatial,
     /// Program Output boundary commands have been recorded.
     AfterProgramOutputBoundary,
-    /// Optional Program Output scopes commands have been recorded.
-    AfterProgramScopes,
     /// Preview-only monitor-adaptation commands have been recorded.
     AfterMonitorAdaptation,
+    /// Optional Program/Monitor scopes commands have been recorded.
+    AfterProgramScopes,
+    /// Optional fused false-color/zebra/gamut commands have been recorded.
+    AfterSignalMonitoring,
 }
 
 impl GpuTimestampStageMarker {
@@ -219,8 +221,9 @@ impl GpuTimestampStageMarker {
             Self::AfterWorkingComposite => 1,
             Self::AfterSpatial => 2,
             Self::AfterProgramOutputBoundary => 3,
-            Self::AfterProgramScopes => 4,
-            Self::AfterMonitorAdaptation => 5,
+            Self::AfterMonitorAdaptation => 4,
+            Self::AfterProgramScopes => 5,
+            Self::AfterSignalMonitoring => 6,
         }
     }
 }
@@ -234,10 +237,12 @@ pub struct GpuTimestampStageDurations {
     pub spatial_us: u64,
     /// Program Output color boundary after spatial processing.
     pub program_output_boundary_us: u64,
-    /// Demand-driven Program Output scopes after the color boundary.
+    /// Demand-driven Program/Monitor scopes after monitor adaptation.
     pub program_scopes_us: u64,
     /// Preview-only monitor adaptation after Program Output.
     pub monitor_adaptation_us: u64,
+    /// Fused signal-monitoring pass after analysis and before calibration.
+    pub signal_monitoring_us: u64,
     /// Optional display calibration after monitor adaptation.
     pub display_calibration_us: u64,
 }
@@ -347,11 +352,12 @@ impl GpuTimestampStageTimer {
             through_working_composite_us: segment(0, 1)?,
             spatial_us: segment(1, 2)?,
             program_output_boundary_us: segment(2, 3)?,
-            program_scopes_us: segment(3, 4)?,
-            monitor_adaptation_us: segment(4, 5)?,
-            display_calibration_us: segment(5, 6)?,
+            monitor_adaptation_us: segment(3, 4)?,
+            program_scopes_us: segment(4, 5)?,
+            signal_monitoring_us: segment(5, 6)?,
+            display_calibration_us: segment(6, 7)?,
         };
-        Ok((segment(0, 6)?, stages))
+        Ok((segment(0, 7)?, stages))
     }
 }
 
@@ -639,6 +645,7 @@ mod tests {
 
     #[test]
     fn timestamp_ring_discards_when_full_and_collects_after_one_final_wait() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) =
@@ -690,8 +697,9 @@ mod tests {
             GpuTimestampStageMarker::AfterWorkingComposite,
             GpuTimestampStageMarker::AfterSpatial,
             GpuTimestampStageMarker::AfterProgramOutputBoundary,
-            GpuTimestampStageMarker::AfterProgramScopes,
             GpuTimestampStageMarker::AfterMonitorAdaptation,
+            GpuTimestampStageMarker::AfterProgramScopes,
+            GpuTimestampStageMarker::AfterSignalMonitoring,
         ] {
             ring.mark_stage(&mut encoder, token, marker).expect("ordered stage marker");
         }
@@ -707,6 +715,7 @@ mod tests {
 
     #[test]
     fn timestamp_ring_abandon_releases_recording_slot_without_waiting() {
+        let _gpu_permit = crate::context::TestGpuContextPermit::acquire();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) =

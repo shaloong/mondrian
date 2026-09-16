@@ -14,35 +14,40 @@ use mondrian_assets::library::FolderRecord;
 use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
-    AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
+    AnimationParameterAddress, NormalizedCurve, NormalizedCurvePoint, ParameterResourceReference,
+    ParameterSchema, PropertyValue, QualifierSample, QualifierSampleOperation, QualifierSampleSet,
+    MAX_QUALIFIER_SAMPLES,
 };
-use mondrian_core::display_labels::color_space_label;
+use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
+use mondrian_core::mask_data::{MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings};
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
     EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, TimeScale,
-    TimelineDisplayContract, TimelineDisplayFormat, TimelineTime, TimelineTimeRange,
-    WorkingColorSpace,
+    AudioChannelLayout, Color, DynamicHdrMetadataFamily, FramePosition, FrameRounding,
+    ParameterUnit, SampleAspectRatio, SignalLegalizer, TimeScale, TimelineDisplayContract,
+    TimelineDisplayFormat, TimelineTime, TimelineTimeRange, WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{
-    effect_display_name, effect_library_types, MaskShape, MaskShapeInterpolation,
+    effect_display_name, effect_library_types, BezierPoint, MaskShape, MaskShapeInterpolation,
 };
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
-    AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
-    ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset, H264Profile,
-    HevcProfile, ProResProfile, Resolution as ExportResolution, TimelineExportRange,
-    VideoCodecConfig, VideoRateControl,
+    AudioCodecConfig, Av1Profile, AvcIntraClass, BuiltinExportPreset, Container, DnxHrProfile,
+    ExportAlphaMode, ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget,
+    ExportParameter, ExportPreset, H264Profile, HevcProfile, ImageSequenceFormat, ProResProfile,
+    ProfessionalDeliveryProfile, Resolution as ExportResolution, TimelineExportRange,
+    UncompressedVideoFormat, VideoCodecConfig, VideoRateControl,
 };
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
     ExportProgressPhase, JobStatus,
 };
+use mondrian_export::{VideoCodingStructure, VideoSceneCutPolicy};
 use mondrian_media::info::ChannelLayout;
 use mondrian_media::{
     AudioStreamInfo, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
@@ -58,11 +63,12 @@ use mondrian_timeline::sequence::{
 use mondrian_timeline::track::Track;
 use mondrian_timeline::VideoTransitionType;
 use mondrian_timeline::{
-    AudioComponentMutation, EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
+    AudioComponentMutation, DynamicHdrAuthorEdit, DynamicHdrDeliveryIntent,
+    EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
 };
 use mondrian_ui_core::types::SplitDirection;
-use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
+use mondrian_ui_core::{DragPayload, RasterImageColorSpace};
 use mondrian_ui_theme::current_theme;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
@@ -79,12 +85,17 @@ use mondrian_ui_widgets::{
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
-    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
-    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    TimelineView, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
+    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
+    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::preview_unavailability::{PreviewUnavailability, PreviewUnavailabilityDisposition};
+use crate::app::product_action::{
+    GradeAddEffectPayload, GradeCreateDefinitionPayload, GradeProductAction, ProductAction,
+};
 pub use crate::app::thumbnail_service::{
     ThumbnailFailure as AssetThumbnailFailure,
     ThumbnailFailureReason as AssetThumbnailFailureReason,
@@ -93,45 +104,45 @@ use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
     app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-    assets_create_adjustment_layer_action, assets_create_folder_action,
-    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
-    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_rebind_audio_component_action,
+    app_shell_scopes_settings_changed_action, assets_create_adjustment_layer_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
+    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
+    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
+    assets_open_folder_action, assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    export_enqueue_action, timeline_clear_in_out_points_action, timeline_drop_asset_action,
-    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
-    timeline_move_clip_action, timeline_open_nested_sequence_action,
-    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
-    timeline_select_clip_action, timeline_set_in_out_point_action,
-    timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
-    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
-    track_add_action, track_move_action, track_set_author_control_action,
-    track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
-    video_transition_select_action, video_transition_set_range_action,
-    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
-    visual_effect_select_action, visual_effect_set_enabled_action,
+    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
+    timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
+    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
+    timeline_seek_with_source_action, timeline_select_clip_action,
+    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
+    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
+    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
+    track_set_author_control_action, track_set_edit_policy_action,
+    video_transition_create_cross_dissolve_action, video_transition_select_action,
+    video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
+    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
+    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
     visual_mask_set_enabled_action, visual_mask_set_locked_action,
     visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
-    visual_mask_write_shape_action, AppShellInputColorPipelineDiagnostics,
-    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
-    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
-    AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
-    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-    ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-    ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
+    visual_mask_start_tracking_action, visual_mask_write_shape_action,
+    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
+    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsSetProxyModePayload, ClipCurveEditPayload, ClipEditNumericCurvePayload,
+    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
+    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, DockDropAreaPayload,
+    ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
     TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
     TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
     TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
@@ -144,7 +155,7 @@ use crate::app::ui_actions::{
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
-    VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+    VisualMaskStartTrackingPayload, VisualMaskTargetPayload, VisualMaskWriteShapePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
@@ -702,10 +713,13 @@ pub struct ViewerPanelModel {
     pub preview_resolution_scale: f32,
     pub width: u32,
     pub height: u32,
+    pub sample_aspect_ratio: SampleAspectRatio,
     pub playing: bool,
     pub preview_waiting: bool,
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
+    /// Frozen Project Gallery reference painted over the current frame.
+    pub comparison_reference: Option<ViewerComparisonReference>,
     pub canvas_background: ViewerCanvasBackground,
     /// Whether the exact current presentation is a texture-free transparent canvas.
     pub transparent_canvas: bool,
@@ -713,6 +727,16 @@ pub struct ViewerPanelModel {
     pub preview_unavailability: Option<PreviewUnavailability>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
+    /// Selected Clip-local Power Window projected at the current author time.
+    pub power_window: Option<ViewerPowerWindowModel>,
+}
+
+/// App-owned identity plus domain-light Viewer geometry for one Power Window.
+#[derive(Debug, Clone)]
+pub struct ViewerPowerWindowModel {
+    pub clip_id: ClipId,
+    pub mask_id: MaskId,
+    pub overlay: ViewerPowerWindow,
 }
 
 /// Program Output scopes data independent from renderer GPU handles.
@@ -720,16 +744,28 @@ pub struct ViewerPanelModel {
 pub struct ScopesPanelModel {
     /// Stable registry keys become available only with a current external GPU frame.
     pub textures: Option<VideoScopesTextureSet>,
+    /// Machine-local controls shared by the widget and GPU request adapter.
+    pub settings: VideoScopesSettings,
+    /// Exact encoded signal identity used for guide geometry and labels.
+    pub signal_color_space: ColorSpace,
 }
 
 impl ScopesPanelModel {
     pub(crate) fn from_viewer(viewer: &ViewerPanelModel) -> Self {
+        Self::from_viewer_with_settings(viewer, VideoScopesSettings::default(), ColorSpace::Rec709)
+    }
+
+    pub(crate) fn from_viewer_with_settings(
+        viewer: &ViewerPanelModel,
+        settings: VideoScopesSettings,
+        signal_color_space: ColorSpace,
+    ) -> Self {
         let textures = matches!(
             viewer.frame_content.as_ref(),
             Some(ViewerFrameContent::ExternalTexture(_))
         )
         .then(crate::app_ui::scopes::texture_set);
-        Self { textures }
+        Self { textures, settings, signal_color_space }
     }
 }
 
@@ -848,6 +884,30 @@ impl ViewerPanelModel {
             | ViewerPreviewState::StaleTransparent
             | ViewerPreviewState::Loading => None,
         });
+        let comparison_reference = state.gallery_comparison().and_then(|comparison| {
+            let layout = match comparison.layout {
+                crate::app::product_action::GalleryComparisonLayout::WipeVertical { position } => {
+                    ViewerComparisonLayout::WipeVertical { position }
+                }
+                crate::app::product_action::GalleryComparisonLayout::WipeHorizontal {
+                    position,
+                } => ViewerComparisonLayout::WipeHorizontal { position },
+                crate::app::product_action::GalleryComparisonLayout::SplitVertical => {
+                    ViewerComparisonLayout::SplitVertical
+                }
+                crate::app::product_action::GalleryComparisonLayout::SplitHorizontal => {
+                    ViewerComparisonLayout::SplitHorizontal
+                }
+            };
+            RasterImage::new(
+                format!("gallery.still:{}", comparison.still_id),
+                comparison.width,
+                comparison.height,
+                RasterImageColorSpace::Srgb,
+                std::sync::Arc::clone(&comparison.rgba),
+            )
+            .map(|frame| ViewerComparisonReference { frame, layout })
+        });
         let transparent_canvas = matches!(
             preview_state,
             Some(ViewerPreviewState::Transparent | ViewerPreviewState::StaleTransparent)
@@ -893,10 +953,16 @@ impl ViewerPanelModel {
             preview_resolution_scale,
             width: resolution.width,
             height: resolution.height,
+            sample_aspect_ratio: sequence
+                .settings
+                .pixel_aspect_ratio
+                .exact_ratio()
+                .unwrap_or_default(),
             playing: state.is_playing(),
             preview_waiting,
             enabled: true,
             frame_content,
+            comparison_reference,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas,
             empty_message: if let Some(rejection) =
@@ -917,6 +983,7 @@ impl ViewerPanelModel {
             color_rejection,
             color_pipeline_status: preview
                 .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
+            power_window: viewer_power_window_model(state, sequence),
         }
     }
 
@@ -935,17 +1002,100 @@ impl ViewerPanelModel {
             preview_resolution_scale: 1.0,
             width: 16,
             height: 9,
+            sample_aspect_ratio: SampleAspectRatio::SQUARE,
             playing: false,
             preview_waiting: false,
             enabled: false,
             frame_content: None,
+            comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas: false,
             empty_message: Some("未载入序列".into()),
             preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
+            power_window: None,
         }
+    }
+}
+
+fn viewer_power_window_model(
+    state: &AppState,
+    sequence: &Sequence,
+) -> Option<ViewerPowerWindowModel> {
+    let selection = state.primary_selected_clip()?;
+    if !selection.is_video_track {
+        return None;
+    }
+    let (mask_id, mask_clip_id, _) = state.primary_selected_mask()?;
+    if mask_clip_id != selection.clip_id {
+        return None;
+    }
+    let (resolved_selection, clip) = clip_for_selection(sequence, &selection)?;
+    let mask = clip.mask(mask_id)?;
+    let timeline_time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
+    let author_time = clip.clamped_visual_author_time(timeline_time).unwrap_or(clip.clip_time_in);
+    let shape = viewer_power_window_shape(&mask.evaluate_at(author_time).shape);
+    Some(ViewerPowerWindowModel {
+        clip_id: clip.id,
+        mask_id,
+        overlay: ViewerPowerWindow {
+            shape,
+            editable: !state.is_playing()
+                && !mask.locked
+                && !selected_clip_track_is_locked(state, resolved_selection),
+        },
+    })
+}
+
+fn viewer_power_window_shape(shape: &MaskShape) -> ViewerPowerWindowShape {
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, corner_radius } => {
+            ViewerPowerWindowShape::Rectangle {
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+                corner_radius: *corner_radius,
+            }
+        }
+        MaskShape::Ellipse { center, radii } => {
+            ViewerPowerWindowShape::Ellipse { center: center.to_array(), radii: radii.to_array() }
+        }
+        MaskShape::Path { points, closed } => ViewerPowerWindowShape::Bezier {
+            points: points
+                .iter()
+                .map(|point| ViewerPowerWindowBezierPoint {
+                    position: point.position.to_array(),
+                    control_in: point.control_in.to_array(),
+                    control_out: point.control_out.to_array(),
+                })
+                .collect(),
+            closed: *closed,
+        },
+    }
+}
+
+fn mask_shape_from_viewer(shape: ViewerPowerWindowShape) -> MaskShape {
+    match shape {
+        ViewerPowerWindowShape::Rectangle { x, y, width, height, corner_radius } => {
+            MaskShape::Rectangle { x, y, width, height, corner_radius }
+        }
+        ViewerPowerWindowShape::Ellipse { center, radii } => MaskShape::Ellipse {
+            center: glam::Vec2::from_array(center),
+            radii: glam::Vec2::from_array(radii),
+        },
+        ViewerPowerWindowShape::Bezier { points, closed } => MaskShape::Path {
+            points: points
+                .into_iter()
+                .map(|point| mondrian_effects::BezierPoint {
+                    position: glam::Vec2::from_array(point.position),
+                    control_in: glam::Vec2::from_array(point.control_in),
+                    control_out: glam::Vec2::from_array(point.control_out),
+                })
+                .collect(),
+            closed,
+        },
     }
 }
 
@@ -1060,7 +1210,7 @@ impl Default for TimelinePanelModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TimelineEditAvailability {
     cut: bool,
     copy: bool,
@@ -1324,7 +1474,7 @@ impl TimelinePanelModel {
             timeline_display: TimelineDisplayContract::default(),
             enabled: false,
             empty_message: Some("未载入序列\n打开项目或创建序列以开始编辑".into()),
-            edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
+            edit_availability: Some(TimelineEditAvailability::default()),
             track_refs: Vec::new(),
             clip_refs: Vec::new(),
             transition_refs: Vec::new(),
@@ -1566,6 +1716,8 @@ pub struct InspectorVisualParameterTargets {
     pub position: Option<AnimationParameterAddress>,
     /// Transform scale parameter, absent for Clip kinds that expose opacity only.
     pub scale: Option<AnimationParameterAddress>,
+    /// Transform anchor parameter, absent for Clip kinds that expose opacity only.
+    pub anchor: Option<AnimationParameterAddress>,
     /// Transform rotation parameter, absent for Clip kinds that expose opacity only.
     pub rotation: Option<AnimationParameterAddress>,
 }
@@ -1597,8 +1749,14 @@ pub struct InspectorPanelModel {
     pub position_x: f32,
     /// Vertical transform position in sequence pixels.
     pub position_y: f32,
-    /// Uniform transform scale shown in UI percent units.
-    pub scale_percent: f32,
+    /// Horizontal transform scale shown in UI percent units.
+    pub scale_x_percent: f32,
+    /// Vertical transform scale shown in UI percent units.
+    pub scale_y_percent: f32,
+    /// Horizontal anchor coordinate in source-authoring pixels.
+    pub anchor_x: f32,
+    /// Vertical anchor coordinate in source-authoring pixels.
+    pub anchor_y: f32,
     /// Transform rotation shown in degrees.
     pub rotation_degrees: f32,
     /// Stable author targets for direct visual parameter gestures.
@@ -1625,6 +1783,8 @@ pub struct InspectorPanelModel {
     pub clip_properties: Vec<InspectorEffectPropertyModel>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
+    /// Sequence-owned clip/group/timeline Grade Graph hierarchy.
+    pub grade: InspectorGradeHierarchyModel,
     /// Masks currently attached to the selected video Clip.
     pub masks: Vec<InspectorMaskModel>,
 }
@@ -1710,6 +1870,31 @@ pub struct InspectorEffectModel {
     pub properties: Vec<InspectorEffectPropertyModel>,
 }
 
+/// Compact Inspector projection of the selected Clip's grading hierarchy.
+#[derive(Debug, Clone, Default)]
+pub struct InspectorGradeHierarchyModel {
+    pub clip_definition_id: Option<mondrian_core::GradeDefinitionId>,
+    pub clip_grade: Option<String>,
+    pub group: Option<String>,
+    pub group_pre_grade: Option<String>,
+    pub group_post_grade: Option<String>,
+    pub timeline_grade: Option<String>,
+    pub active_version: Option<String>,
+    pub version_count: usize,
+    pub node_count: usize,
+    /// Clip-grade creation command admitted against current Track authority.
+    pub create_clip_grade_action: Option<Action>,
+    /// Sequence-level shared-definition edits admitted independently of Clip lock state.
+    pub add_node_actions: Vec<InspectorGradeNodeActionModel>,
+}
+
+/// One admitted Grade Graph node command shown by the Inspector.
+#[derive(Debug, Clone)]
+pub struct InspectorGradeNodeActionModel {
+    pub label: String,
+    pub action: Action,
+}
+
 /// One Clip-local visual Mask projected into the Inspector.
 #[derive(Debug, Clone)]
 pub struct InspectorMaskModel {
@@ -1725,6 +1910,10 @@ pub struct InspectorMaskModel {
     pub shape_animation_enabled: bool,
     /// Current evaluated primitive family shown by the shape control.
     pub shape_label: String,
+    /// Latest background tracking state, when any request has run this Session.
+    pub tracking_status: Option<crate::app::visual_tracking::VisualTrackingStatus>,
+    /// Whether a completed recomputable recipe is persisted on the Mask.
+    pub has_tracking_recipe: bool,
     /// Stable-address scalar Mask parameters.
     pub properties: Vec<InspectorEffectPropertyModel>,
 }
@@ -1742,6 +1931,8 @@ pub struct InspectorEffectPropertyModel {
     pub path: String,
     /// Human-readable property name from the descriptor.
     pub label: String,
+    /// Definition-owned Inspector group; adjacent equal values form one visual subgroup.
+    pub group_name: Option<String>,
     /// The evaluated value at the current playback time.
     pub value: PropertyValue,
     /// UI min/max bounds extracted from the descriptor.
@@ -1769,6 +1960,7 @@ fn inspector_property_model(
         },
         path: path.to_owned(),
         label: property.descriptor.display_name.clone(),
+        group_name: property.descriptor.ui_metadata.group_name.clone(),
         value: property.evaluate(author_time),
         min: numeric.map(|contract| contract.soft_range.min),
         max: numeric.map(|contract| contract.soft_range.max),
@@ -1776,6 +1968,75 @@ fn inspector_property_model(
         hard_max: numeric.map(|contract| contract.hard_range.max),
         step: numeric.and_then(|contract| contract.step),
         is_animatable: property.descriptor.schema.is_animatable,
+    }
+}
+
+fn inspector_grade_hierarchy_model(
+    state: &AppState,
+    sequence: &Sequence,
+    clip: &Clip,
+) -> InspectorGradeHierarchyModel {
+    let definition_label =
+        |id| sequence.grade_definition(id).map(|definition| definition.name.clone());
+    let group = clip
+        .grade_group
+        .and_then(|id| sequence.grade_groups.iter().find(|group| group.id == id));
+    let clip_definition = clip.grade.and_then(|id| sequence.grade_definition(id));
+    let active = clip_definition.and_then(|definition| definition.active());
+    let create_clip_grade = ProductAction::Grade(GradeProductAction::CreateDefinition(
+        GradeCreateDefinitionPayload {
+            name: "Clip Grade".to_owned(),
+            assign_to: Some(mondrian_timeline::GradeScope::Clip(clip.id)),
+        },
+    ));
+    let create_clip_grade_action = (clip_definition.is_none()
+        && state.product_action_availability().allows(&create_clip_grade))
+    .then(|| create_clip_grade.into_external_action());
+    let add_node_actions = clip_definition.map_or_else(Vec::new, |definition| {
+        effect_library_types()
+            .iter()
+            .filter(|effect_type| {
+                matches!(
+                    effect_type,
+                    EffectType::BasicCorrection
+                        | EffectType::WhiteBalance
+                        | EffectType::Lut3D
+                        | EffectType::ColorWheel
+                        | EffectType::HdrGrading
+                        | EffectType::AscCdl
+                        | EffectType::Curves
+                        | EffectType::GamutCompression
+                        | EffectType::HighlightRecovery
+                        | EffectType::HueSaturationLightness
+                )
+            })
+            .filter_map(|effect_type| {
+                let action =
+                    ProductAction::Grade(GradeProductAction::AddEffect(GradeAddEffectPayload {
+                        definition_id: definition.id,
+                        effect_type: effect_type.clone(),
+                    }));
+                state.product_action_availability().allows(&action).then(|| {
+                    InspectorGradeNodeActionModel {
+                        label: effect_type.display_name().to_owned(),
+                        action: action.into_external_action(),
+                    }
+                })
+            })
+            .collect()
+    });
+    InspectorGradeHierarchyModel {
+        clip_definition_id: clip_definition.map(|definition| definition.id),
+        clip_grade: clip_definition.map(|definition| definition.name.clone()),
+        group: group.map(|group| group.name.clone()),
+        group_pre_grade: group.and_then(|group| group.pre_clip_grade).and_then(&definition_label),
+        group_post_grade: group.and_then(|group| group.post_clip_grade).and_then(&definition_label),
+        timeline_grade: sequence.timeline_grade.and_then(&definition_label),
+        active_version: active.map(|version| version.name.clone()),
+        version_count: clip_definition.map_or(0, |definition| definition.versions.len()),
+        node_count: active.map_or(0, |version| version.graph.nodes.len()),
+        create_clip_grade_action,
+        add_node_actions,
     }
 }
 
@@ -1796,11 +2057,13 @@ impl InspectorPanelModel {
         let opacity = (clip.transform.evaluate_opacity(clip_author_time) * 100.0).clamp(0.0, 100.0);
         let position = clip.transform.get_position(clip_author_time);
         let scale = clip.transform.get_scale(clip_author_time);
+        let anchor = clip.transform.get_anchor_point(clip_author_time);
         let intrinsic_parameters = clip.intrinsic_parameter_bag();
         let visual_parameters = InspectorVisualParameterTargets {
             opacity: intrinsic_parameters.address_for_path(Transform2D::OPACITY_PATH),
             position: intrinsic_parameters.address_for_path(Transform2D::POSITION_PATH),
             scale: intrinsic_parameters.address_for_path(Transform2D::SCALE_PATH),
+            anchor: intrinsic_parameters.address_for_path(Transform2D::ANCHOR_POINT_PATH),
             rotation: intrinsic_parameters.address_for_path(Transform2D::ROTATION_PATH),
         };
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
@@ -1840,7 +2103,10 @@ impl InspectorPanelModel {
             shows_tint: clip.is_solid_color(),
             position_x: position.x,
             position_y: position.y,
-            scale_percent: scale.x * 100.0,
+            scale_x_percent: scale.x * 100.0,
+            scale_y_percent: scale.y * 100.0,
+            anchor_x: anchor.x,
+            anchor_y: anchor.y,
             rotation_degrees: clip_rotation_degrees(clip, time),
             visual_parameters: Some(visual_parameters),
             in_frame: clip
@@ -1905,6 +2171,7 @@ impl InspectorPanelModel {
                     },
                 })
                 .collect(),
+            grade: inspector_grade_hierarchy_model(state, sequence, clip),
             masks: clip
                 .masks
                 .iter()
@@ -1923,6 +2190,8 @@ impl InspectorPanelModel {
                         locked: mask.locked,
                         shape_animation_enabled: mask.shape_animation_enabled,
                         shape_label,
+                        tracking_status: state.visual_tracking_status(clip.id, mask.id).cloned(),
+                        has_tracking_recipe: mask.tracking.is_some(),
                         properties: mask
                             .properties
                             .iter()
@@ -1950,7 +2219,10 @@ impl InspectorPanelModel {
             shows_tint: false,
             position_x: 0.0,
             position_y: 0.0,
-            scale_percent: 100.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
+            anchor_x: 0.0,
+            anchor_y: 0.0,
             rotation_degrees: 0.0,
             visual_parameters: None,
             in_frame: 0.0,
@@ -1964,6 +2236,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            grade: InspectorGradeHierarchyModel::default(),
             masks: Vec::new(),
         }
     }
@@ -1983,7 +2256,10 @@ impl InspectorPanelModel {
             shows_tint: true,
             position_x: 12.0,
             position_y: -8.0,
-            scale_percent: 100.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
+            anchor_x: 0.0,
+            anchor_y: 0.0,
             rotation_degrees: 0.0,
             visual_parameters: None,
             in_frame: 0.0,
@@ -1997,6 +2273,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            grade: InspectorGradeHierarchyModel::default(),
             masks: Vec::new(),
         }
     }
@@ -2014,12 +2291,42 @@ pub struct ExportPanelModel {
     pub preset_customized: bool,
     pub sequences: Vec<ExportSequenceOptionModel>,
     pub selected_sequence_id: Option<SequenceId>,
+    /// Sequence-owned Dynamic HDR author intent and admitted product commands.
+    pub dynamic_hdr: ExportDynamicHdrModel,
     pub range: TimelineExportRange,
     pub output_path: String,
+    /// Explicit immutable ANC selection; clones retain the owner cheaply.
+    pub ancillary: Option<crate::app::exporting::ImportedAncillaryProgram>,
+    /// Shared Export selection/profile preflight failure for the attachment.
+    pub ancillary_error: Option<String>,
+    /// Explicit provider/QC selection frozen independently from UI rendering.
+    pub regulatory_pse: Option<crate::app::exporting::ImportedRegulatoryPseConfiguration>,
     pub delivery_error: Option<String>,
     pub status: Option<(String, bool)>,
     pub jobs: Vec<ExportJobModel>,
     pub can_clear_terminal_history: bool,
+}
+
+/// Dynamic HDR delivery state shown by the Export workspace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportDynamicHdrModel {
+    /// Current persistent delivery intent.
+    pub intent_label: String,
+    /// Honest readiness statement; never a branded-certification claim.
+    pub readiness: String,
+    /// Number of analyzed final-Program definitions retained by the Sequence.
+    pub program_count: usize,
+    /// Alternative author intents admitted for the active Sequence.
+    pub intent_actions: Vec<ExportDynamicHdrIntentActionModel>,
+}
+
+/// One admitted Dynamic HDR delivery-intent command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportDynamicHdrIntentActionModel {
+    /// Product-visible alternative intent label.
+    pub label: String,
+    /// External typed Product Action emitted by the dropdown.
+    pub action: Action,
 }
 
 #[derive(Debug, Clone)]
@@ -2043,6 +2350,8 @@ pub struct ExportJobModel {
     pub title: String,
     pub status: String,
     pub color_diagnostics: Option<String>,
+    /// Frozen broadcaster-profile report summary, when QC was requested.
+    pub broadcast_qc: Option<String>,
     pub progress_percent: u8,
     pub can_cancel: bool,
     pub is_completed: bool,
@@ -2194,6 +2503,17 @@ impl ExportPanelModel {
             .or(state.default_sequence_id())
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
+        let selected_sequence_snapshot = selected_sequence_id
+            .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id));
+        let dynamic_hdr = selected_sequence_snapshot.map_or_else(
+            || ExportDynamicHdrModel {
+                intent_label: "没有序列".to_owned(),
+                readiness: "选择一个序列以配置 Dynamic HDR 交付".to_owned(),
+                program_count: 0,
+                intent_actions: Vec::new(),
+            },
+            |sequence| export_dynamic_hdr_model(state, sequence),
+        );
         let delivery_error = selected_sequence_id
             .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id))
             .and_then(|sequence| {
@@ -2205,6 +2525,22 @@ impl ExportPanelModel {
                 .err()
                 .map(|error| error.to_string())
             });
+        let ancillary = state.export_draft.ancillary.clone();
+        let ancillary_error = ancillary.as_ref().and_then(|item| {
+            selected_sequence_snapshot.map_or_else(
+                || Some("选择序列后才能绑定 ANC 帧范围".to_owned()),
+                |sequence| {
+                    mondrian_export::queue::check_ancillary_export_selection(
+                        &item.program,
+                        &preset,
+                        sequence,
+                        state.export_draft.range,
+                        state.project_color_environment(),
+                    )
+                    .err()
+                },
+            )
+        });
 
         let jobs = state.export_jobs_snapshot();
         let queue_count = jobs.len();
@@ -2218,6 +2554,7 @@ impl ExportPanelModel {
                 title: export_job_title(job.output_path.as_path()),
                 status: export_job_status_label(&job.status, job.progress),
                 color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
+                broadcast_qc: export_job_broadcast_qc_label(job.diagnostics.broadcast_qc.as_ref()),
                 progress_percent: (job.progress.fraction.clamp(0.0, 1.0) * 100.0).round() as u8,
                 can_cancel: job.status.can_cancel(),
                 is_completed: job.status.is_terminal(),
@@ -2232,8 +2569,12 @@ impl ExportPanelModel {
             preset_customized,
             sequences,
             selected_sequence_id,
+            dynamic_hdr,
             range: state.export_draft.range,
             output_path: state.export_draft.output_path.clone(),
+            ancillary,
+            ancillary_error,
+            regulatory_pse: state.export_draft.regulatory_pse.clone(),
             delivery_error,
             status: state.status_hint.clone(),
             jobs,
@@ -2250,6 +2591,7 @@ impl ExportPanelModel {
             && self.selected_sequence_id.is_some()
             && !self.output_path.trim().is_empty()
             && self.delivery_error.is_none()
+            && self.ancillary_error.is_none()
     }
 
     fn can_choose_output(&self) -> bool {
@@ -2267,6 +2609,8 @@ impl ExportPanelModel {
             "没有可用导出预设".to_owned()
         } else if let Some(error) = &self.delivery_error {
             format!("交付设置不兼容：{error}")
+        } else if let Some(error) = &self.ancillary_error {
+            format!("ANC 预检失败：{error}")
         } else if let Some((message, true)) = &self.status {
             format!("错误：{message}")
         } else if self.output_path.trim().is_empty() {
@@ -2278,10 +2622,12 @@ impl ExportPanelModel {
         }
     }
 
-    fn enqueue_request(&self) -> Option<TimelineExportRequest> {
+    /// Materialize this snapshot for non-interactive callers. The product button
+    /// uses EnqueueDraft so large ANC payloads are frozen only at dispatch.
+    pub fn enqueue_request(&self) -> Option<TimelineExportRequest> {
         let preset = self.selected_preset()?.clone();
         let sequence_id = self.selected_sequence_id?;
-        if self.delivery_error.is_some() {
+        if self.delivery_error.is_some() || self.ancillary_error.is_some() {
             return None;
         }
         let output_path = self.output_path.trim();
@@ -2294,6 +2640,9 @@ impl ExportPanelModel {
             range: self.range,
             output_path: output_path.into(),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            broadcast_qc: self.regulatory_pse.as_ref().map(|selected| selected.qc_profile.clone()),
+            regulatory_pse: self.regulatory_pse.as_ref().map(|selected| selected.provider.clone()),
+            frozen_ancillary: self.ancillary.as_ref().map(|item| item.program.as_ref().clone()),
         })
     }
 
@@ -2301,6 +2650,93 @@ impl ExportPanelModel {
         self.selected_sequence_id
             .and_then(|id| self.sequences.iter().find(|sequence| sequence.id == id))
             .or_else(|| self.sequences.first())
+    }
+}
+
+fn export_dynamic_hdr_model(state: &AppState, sequence: &Sequence) -> ExportDynamicHdrModel {
+    let intent_label = match sequence.dynamic_hdr.delivery_intent() {
+        DynamicHdrDeliveryIntent::Omit => "省略 Dynamic HDR".to_owned(),
+        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => {
+            format!("逐字节保留 {}", family.diagnostic_label())
+        }
+        DynamicHdrDeliveryIntent::Remake { program_id } => sequence
+            .dynamic_hdr
+            .program(*program_id)
+            .map(|program| format!("重制：{}", program.name))
+            .unwrap_or_else(|| "重制：缺失 Program".to_owned()),
+    };
+    let active = state.active_sequence_id() == Some(sequence.id);
+    let readiness = match sequence.dynamic_hdr.delivery_intent() {
+        DynamicHdrDeliveryIntent::Omit => {
+            "已明确省略动态元数据；静态 HDR 仍由序列交付策略独立控制".to_owned()
+        }
+        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => format!(
+            "仅允许完整源文件逐字节复制并复探测 {}；剪辑、重封装或渲染均不回退",
+            family.diagnostic_label()
+        ),
+        DynamicHdrDeliveryIntent::Remake { program_id } => sequence
+            .dynamic_hdr
+            .program(*program_id)
+            .map(|program| {
+                format!(
+                    "{} / {} 个 shot；需合格且已授权的生成、独立验证和人工 HDR/SDR QC Adapter",
+                    program.standard.diagnostic_label(),
+                    program.shots.len()
+                )
+            })
+            .unwrap_or_else(|| "引用的 Dynamic HDR Program 已缺失，交付将阻断".to_owned()),
+    };
+    let mut alternatives = vec![
+        (
+            "省略 Dynamic HDR".to_owned(),
+            DynamicHdrDeliveryIntent::Omit,
+        ),
+        (
+            "逐字节保留 ST 2094-40 App #4".to_owned(),
+            DynamicHdrDeliveryIntent::PreserveSourceExact {
+                family: DynamicHdrMetadataFamily::St2094_40Application4,
+            },
+        ),
+        (
+            "逐字节保留 Dolby Vision 元数据".to_owned(),
+            DynamicHdrDeliveryIntent::PreserveSourceExact {
+                family: DynamicHdrMetadataFamily::DolbyVision,
+            },
+        ),
+    ];
+    alternatives.extend(sequence.dynamic_hdr.programs().iter().map(|program| {
+        (
+            format!("重制：{}", program.name),
+            DynamicHdrDeliveryIntent::Remake { program_id: program.id },
+        )
+    }));
+    let intent_actions = if active {
+        alternatives
+            .into_iter()
+            .filter_map(|(label, intent)| {
+                let action =
+                    ProductAction::DynamicHdr(DynamicHdrAuthorEdit::SetDeliveryIntent { intent });
+                state.product_action_availability().allows(&action).then(|| {
+                    ExportDynamicHdrIntentActionModel {
+                        label,
+                        action: action.into_external_action(),
+                    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let readiness = if active {
+        readiness
+    } else {
+        format!("{readiness}；先打开此序列才能修改交付意图")
+    };
+    ExportDynamicHdrModel {
+        intent_label,
+        readiness,
+        program_count: sequence.dynamic_hdr.programs().len(),
+        intent_actions,
     }
 }
 
@@ -2562,7 +2998,9 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
 }
 
 fn scopes_panel(model: &ScopesPanelModel) -> VideoScopesSurface {
-    let surface = VideoScopesSurface::new();
+    let surface = VideoScopesSurface::new()
+        .with_settings(model.settings, model.signal_color_space)
+        .on_settings_changed(app_shell_scopes_settings_changed_action);
     match model.textures.clone() {
         Some(textures) => surface.with_textures(textures),
         None => surface,
@@ -2578,6 +3016,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
         .with_zoom_scale(model.zoom_scale)
+        .with_sample_aspect_ratio(model.sample_aspect_ratio)
         .with_preview_quality_label(model.preview_quality_label.clone())
         .with_canvas_background(model.canvas_background)
         .playing(model.playing)
@@ -2595,9 +3034,27 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     } else {
         surface
     };
-    match model.frame_content.clone() {
+    let surface = match model.frame_content.clone() {
         Some(frame_content) => surface.with_frame_content(frame_content),
         None => surface,
+    };
+    let surface = match model.comparison_reference.clone() {
+        Some(reference) => surface.with_comparison_reference(reference),
+        None => surface,
+    };
+    if let Some(window) = model.power_window.clone() {
+        let clip_id = window.clip_id;
+        let mask_id = window.mask_id;
+        surface.with_power_window(window.overlay).on_power_window_edit(move |shape| {
+            visual_mask_write_shape_action(VisualMaskWriteShapePayload {
+                clip_id,
+                mask_id,
+                shape: mask_shape_from_viewer(shape),
+                interpolation: MaskShapeInterpolation::Hold,
+            })
+        })
+    } else {
+        surface
     }
 }
 
@@ -3070,6 +3527,7 @@ fn asset_grid_asset_context_menu_items(
                             sampling: video.proven_sampling(),
                             color_metadata: video.color_metadata.clone(),
                             color_metadata_hints: video.color_metadata_hints.clone(),
+                            camera_raw: video.camera_raw.as_deref().cloned(),
                         },
                     ),
                     input_pipeline: input_pipeline.cloned(),
@@ -4322,6 +4780,9 @@ fn export_container_label(container: &Container) -> &'static str {
 }
 
 fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    if preset.media_file().is_none() {
+        return Vec::new();
+    }
     [
         Container::Mp4,
         Container::Mov,
@@ -4334,13 +4795,18 @@ fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .map(|container| {
         let label = export_container_label(&container);
         let mut updated = preset.clone();
-        updated.container = container;
+        if let Some(media) = updated.media_file_mut() {
+            media.container = container;
+        }
         MenuItem::new(label, export_preset_update_action(updated))
     })
     .collect()
 }
 
 fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
+    if let Some(label) = mondrian_export::mezzanine::professional_mezzanine_label(video) {
+        return label;
+    }
     match video {
         VideoCodecConfig::H264 { profile: H264Profile::High, .. } => "H.264 High",
         VideoCodecConfig::Hevc { profile: HevcProfile::Main, .. } => "HEVC Main",
@@ -4353,6 +4819,21 @@ fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour } => "ProRes 4444",
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq } => "ProRes 4444 XQ",
         VideoCodecConfig::Gif { .. } => "GIF palette",
+        VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => unreachable!("handled above"),
+    }
+}
+
+fn export_image_sequence_format_label(format: ImageSequenceFormat) -> &'static str {
+    match format {
+        ImageSequenceFormat::Png8 => "PNG 8-bit（无损）",
+        ImageSequenceFormat::Png16 => "PNG 16-bit（无损）",
+        ImageSequenceFormat::OpenExrHalf => "OpenEXR Half（ZIP16）",
+        ImageSequenceFormat::OpenExrFloat => "OpenEXR Float32（ZIP16）",
+        ImageSequenceFormat::Dpx16 => "DPX 16-bit RGB",
+        ImageSequenceFormat::Tiff16 => "TIFF 16-bit（Deflate）",
+        ImageSequenceFormat::TiffFloat => "TIFF Float32（无损）",
     }
 }
 
@@ -4361,15 +4842,22 @@ fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateContr
         VideoCodecConfig::H264 { rate_control, .. }
         | VideoCodecConfig::Hevc { rate_control, .. } => Some((*rate_control, 51)),
         VideoCodecConfig::Av1 { rate_control, .. } => Some((*rate_control, 63)),
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => None,
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => None,
     }
 }
 
 fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
-    let rate_control = export_video_rate_control(&preset.video)
+    let Some(media) = preset.media_file() else {
+        return Vec::new();
+    };
+    let rate_control = export_video_rate_control(&media.video)
         .map(|(rate_control, _)| rate_control)
         .unwrap_or_else(|| VideoRateControl::constant_quality(20));
-    let (gif_colors, gif_dither) = match preset.video {
+    let (gif_colors, gif_dither) = match media.video {
         VideoCodecConfig::Gif { colors, dither } => (colors, dither),
         _ => (256, true),
     };
@@ -4384,6 +4872,17 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         VideoCodecConfig::ProRes { profile: ProResProfile::Hq },
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour },
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Lb },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Sq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hqx },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::FourFourFour },
+        VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class100 },
+        VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class200 },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Eight },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Ten },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbEight },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbTen },
         VideoCodecConfig::Gif { colors: gif_colors, dither: gif_dither },
     ];
     choices
@@ -4391,7 +4890,46 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         .map(|video| {
             let label = export_video_codec_label(&video);
             let mut updated = preset.clone();
-            updated.video = video;
+            let video_coding = match video {
+                VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. } => {
+                    VideoCodingStructure::h26x_delivery()
+                }
+                VideoCodecConfig::Av1 { .. } => VideoCodingStructure::av1_delivery(),
+                VideoCodecConfig::ProRes { .. }
+                | VideoCodecConfig::DnxHr { .. }
+                | VideoCodecConfig::AvcIntra { .. }
+                | VideoCodecConfig::Uncompressed { .. }
+                | VideoCodecConfig::Gif { .. } => VideoCodingStructure::IntraOnly,
+            };
+            if let Some(defaults) =
+                mondrian_export::mezzanine::professional_mezzanine_authoring_defaults(&video)
+            {
+                updated.video_signal.bit_depth = ExportParameter::Explicit(defaults.bit_depth);
+                updated.video_signal.range = ExportParameter::Explicit(defaults.video_range);
+                updated.video_signal.chroma_sampling = defaults.chroma_sampling;
+                updated.alpha_mode = ExportAlphaMode::FlattenBlack;
+                if let Some(resolution) = defaults.resolution {
+                    updated.resolution = Some(ExportResolution {
+                        width: resolution.width,
+                        height: resolution.height,
+                    });
+                }
+                if let Some(frame_rate) = defaults.frame_rate {
+                    updated.frame_rate = ExportParameter::Explicit(frame_rate);
+                }
+            }
+            if let Some(media) = updated.media_file_mut() {
+                media.video_coding = video_coding;
+                media.video = video.clone();
+                if let Some(defaults) =
+                    mondrian_export::mezzanine::professional_mezzanine_authoring_defaults(&video)
+                {
+                    media.container = defaults.container;
+                    if defaults.video_only {
+                        media.audio = AudioCodecConfig::Disabled;
+                    }
+                }
+            }
             MenuItem::new(label, export_preset_update_action(updated))
         })
         .collect()
@@ -4407,15 +4945,18 @@ fn export_audio_codec_label(audio: &AudioCodecConfig) -> &'static str {
 }
 
 fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
-    let aac_bitrate = match preset.audio {
+    let Some(media) = preset.media_file() else {
+        return Vec::new();
+    };
+    let aac_bitrate = match media.audio {
         AudioCodecConfig::Aac { bitrate_kbps } => bitrate_kbps,
         _ => 192,
     };
-    let pcm_bit_depth = match preset.audio {
+    let pcm_bit_depth = match media.audio {
         AudioCodecConfig::Pcm { bit_depth } => bit_depth,
         _ => 24,
     };
-    let mp3_bitrate = match preset.audio {
+    let mp3_bitrate = match media.audio {
         AudioCodecConfig::Mp3 { bitrate_kbps } => bitrate_kbps,
         _ => 192,
     };
@@ -4429,7 +4970,9 @@ fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .map(|audio| {
         let label = export_audio_codec_label(&audio);
         let mut updated = preset.clone();
-        updated.audio = audio;
+        if let Some(media) = updated.media_file_mut() {
+            media.audio = audio;
+        }
         MenuItem::new(label, export_preset_update_action(updated))
     })
     .collect()
@@ -4468,6 +5011,27 @@ fn export_resolution_items(preset: &ExportPreset) -> Vec<MenuItem> {
         MenuItem::new(label, export_preset_update_action(updated))
     })
     .collect()
+}
+
+fn export_frame_rate_label(frame_rate: ExportParameter<Rational>) -> String {
+    match frame_rate {
+        ExportParameter::FollowSequence => "跟随序列".to_owned(),
+        ExportParameter::Explicit(frame_rate) => frame_rate_label(frame_rate),
+    }
+}
+
+fn export_frame_rate_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    std::iter::once(ExportParameter::FollowSequence)
+        .chain(Rational::SEQUENCE_FRAME_RATES.into_iter().map(ExportParameter::Explicit))
+        .map(|frame_rate| {
+            let mut updated = preset.clone();
+            updated.frame_rate = frame_rate;
+            MenuItem::new(
+                export_frame_rate_label(frame_rate),
+                export_preset_update_action(updated),
+            )
+        })
+        .collect()
 }
 
 fn export_bit_depth_label(bit_depth: ExportParameter<DeliveryBitDepth>) -> &'static str {
@@ -4655,13 +5219,24 @@ fn is_explicit_export_color_space(color_space: ColorSpace) -> bool {
     color_space.is_display_referred() || color_space.encoding().is_scene_log()
 }
 
-fn export_color_target_spaces(mode: ExportColorTargetMode) -> Vec<ColorSpace> {
+fn export_color_target_spaces(
+    mode: ExportColorTargetMode,
+    preset: &ExportPreset,
+) -> Vec<ColorSpace> {
     ColorSpace::ALL
         .into_iter()
         .filter(|color_space| match mode {
             ExportColorTargetMode::FollowSequence => false,
             ExportColorTargetMode::RenderingView => color_space.is_display_referred(),
-            ExportColorTargetMode::Colorimetric => is_explicit_export_color_space(*color_space),
+            ExportColorTargetMode::Colorimetric => {
+                is_explicit_export_color_space(*color_space)
+                    || (preset.image_sequence_format().is_some_and(|format| {
+                        !matches!(
+                            format,
+                            ImageSequenceFormat::Png8 | ImageSequenceFormat::Png16
+                        )
+                    }) && color_space.is_scene_linear())
+            }
         })
         .collect()
 }
@@ -4686,7 +5261,7 @@ fn export_color_target_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
 
 fn export_color_target_space_items(preset: &ExportPreset) -> Vec<MenuItem> {
     let mode = export_color_target_mode(preset.color_target);
-    export_color_target_spaces(mode)
+    export_color_target_spaces(mode, preset)
         .into_iter()
         .map(|color_space| {
             let mut updated = preset.clone();
@@ -4709,13 +5284,44 @@ fn export_with_rate_control(
     mut preset: ExportPreset,
     rate_control: VideoRateControl,
 ) -> ExportPreset {
-    match &mut preset.video {
+    let Some(media) = preset.media_file_mut() else {
+        return preset;
+    };
+    match &mut media.video {
         VideoCodecConfig::H264 { rate_control: current, .. }
         | VideoCodecConfig::Hevc { rate_control: current, .. }
         | VideoCodecConfig::Av1 { rate_control: current, .. } => *current = rate_control,
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => {}
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => {}
     }
     preset
+}
+
+#[derive(Clone, Copy)]
+enum ProfessionalMetadataField {
+    Title,
+    Issuer,
+    Creator,
+    Language,
+}
+
+fn export_professional_metadata_action(
+    mut preset: ExportPreset,
+    field: ProfessionalMetadataField,
+    value: &str,
+) -> Action {
+    if let ExportArtifactEncoding::ProfessionalDelivery(delivery) = &mut preset.artifact {
+        match field {
+            ProfessionalMetadataField::Title => delivery.metadata.title = value.to_owned(),
+            ProfessionalMetadataField::Issuer => delivery.metadata.issuer = value.to_owned(),
+            ProfessionalMetadataField::Creator => delivery.metadata.creator = value.to_owned(),
+            ProfessionalMetadataField::Language => delivery.metadata.language = value.to_owned(),
+        }
+    }
+    export_preset_update_action(preset)
 }
 
 fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
@@ -4739,32 +5345,67 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         })
         .collect::<Vec<_>>();
     let preset_dropdown = Dropdown::new(preset_label, preset_items).with_max_visible_items(6);
+    let media = model.preset.media_file();
+    let professional = model.preset.professional_delivery();
+    let professional_container_label = professional.map(|delivery| match delivery.profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "IMF package",
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AS-11 X9 OP1a MXF",
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "SMPTE DCP package",
+    });
+    let professional_video_label = professional.map(|delivery| match delivery.profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "ProRes 422 HQ / RDD 45",
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AVC High 4:2:2 / AS-11 X9",
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "JPEG 2000 / ST 428-1 XYZ 12-bit",
+    });
     let container_dropdown = Dropdown::new(
-        export_container_label(&model.preset.container),
+        media
+            .map(|media| export_container_label(&media.container))
+            .or(professional_container_label)
+            .unwrap_or("图像序列目录"),
         export_container_items(&model.preset),
     )
-    .with_max_visible_items(6);
+    .with_max_visible_items(6)
+    .enabled(media.is_some() && professional.is_none());
     let video_codec_dropdown = Dropdown::new(
-        export_video_codec_label(&model.preset.video),
+        media
+            .map(|media| export_video_codec_label(&media.video))
+            .or(professional_video_label)
+            .unwrap_or_else(|| {
+                model
+                    .preset
+                    .image_sequence_format()
+                    .map(export_image_sequence_format_label)
+                    .unwrap_or("无视频")
+            }),
         export_video_codec_items(&model.preset),
     )
-    .with_max_visible_items(8);
+    .with_max_visible_items(8)
+    .enabled(media.is_some() && professional.is_none());
     let resolution_dropdown = Dropdown::new(
         export_resolution_label(model.preset.resolution),
         export_resolution_items(&model.preset),
     )
-    .with_max_visible_items(5);
+    .with_max_visible_items(5)
+    .enabled(professional.is_none());
+    let frame_rate_dropdown = Dropdown::new(
+        export_frame_rate_label(model.preset.frame_rate),
+        export_frame_rate_items(&model.preset),
+    )
+    .with_max_visible_items(8)
+    .enabled(professional.is_none());
     let bit_depth_dropdown = Dropdown::new(
         export_bit_depth_label(model.preset.video_signal.bit_depth),
         export_bit_depth_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some() && professional.is_none());
     let color_target_mode = export_color_target_mode(model.preset.color_target);
     let color_target_mode_dropdown = Dropdown::new(
         export_color_target_mode_label(color_target_mode),
         export_color_target_mode_items(&model.preset),
     )
-    .with_max_visible_items(3);
+    .with_max_visible_items(3)
+    .enabled(professional.is_none());
     let color_target_space_label = match model.preset.color_target {
         ExportColorTarget::FollowSequence => "由序列 Program Output 决定".to_owned(),
         ExportColorTarget::RenderingView(color_space)
@@ -4775,27 +5416,101 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_color_target_space_items(&model.preset),
     )
     .with_max_visible_items(8)
-    .enabled(color_target_mode != ExportColorTargetMode::FollowSequence);
+    .enabled(professional.is_none() && color_target_mode != ExportColorTargetMode::FollowSequence);
     let video_range_dropdown = Dropdown::new(
         export_video_range_label(model.preset.video_signal.range),
         export_video_range_items(&model.preset),
     )
-    .with_max_visible_items(3);
+    .with_max_visible_items(3)
+    .enabled(media.is_some() && professional.is_none());
     let chroma_dropdown = Dropdown::new(
         export_chroma_label(model.preset.video_signal.chroma_sampling),
         export_chroma_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some() && professional.is_none());
     let alpha_dropdown = Dropdown::new(
         export_alpha_mode_label(model.preset.alpha_mode),
         export_alpha_mode_items(&model.preset),
     )
-    .with_max_visible_items(2);
+    .with_max_visible_items(2)
+    .enabled(professional.is_none());
+    let legalizer_preset = model.preset.clone();
+    let legalizer_checkbox = Checkbox::new(
+        "限制到合法 RGB 信号范围",
+        model.preset.legalizer == SignalLegalizer::ClampRgb,
+    )
+    .enabled(
+        professional.is_none()
+            && !matches!(
+                model.preset.artifact,
+                mondrian_export::preset::ExportArtifactEncoding::AudioStems { .. }
+            ),
+    )
+    .on_change(move |enabled| {
+        let mut updated = legalizer_preset.clone();
+        updated.legalizer = if enabled {
+            SignalLegalizer::ClampRgb
+        } else {
+            SignalLegalizer::Off
+        };
+        export_preset_update_action(updated)
+    });
     let audio_codec_dropdown = Dropdown::new(
-        export_audio_codec_label(&model.preset.audio),
+        media
+            .map(|media| export_audio_codec_label(&media.audio))
+            .or(professional.map(|_| "PCM 24-bit / 48 kHz / stereo"))
+            .unwrap_or("无音频（图像序列）"),
         export_audio_codec_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some() && professional.is_none());
+    let metadata = professional.map(|delivery| delivery.metadata.clone());
+    let metadata_enabled = metadata.is_some();
+    let title_preset = model.preset.clone();
+    let title_input = TextInput::new("交付标题")
+        .with_text(metadata.as_ref().map(|value| value.title.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                title_preset.clone(),
+                ProfessionalMetadataField::Title,
+                value,
+            )
+        });
+    let issuer_preset = model.preset.clone();
+    let issuer_input = TextInput::new("发行方")
+        .with_text(metadata.as_ref().map(|value| value.issuer.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                issuer_preset.clone(),
+                ProfessionalMetadataField::Issuer,
+                value,
+            )
+        });
+    let creator_preset = model.preset.clone();
+    let creator_input = TextInput::new("创建系统")
+        .with_text(metadata.as_ref().map(|value| value.creator.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                creator_preset.clone(),
+                ProfessionalMetadataField::Creator,
+                value,
+            )
+        });
+    let language_preset = model.preset.clone();
+    let language_input = TextInput::new("RFC 5646 语言")
+        .with_text(metadata.as_ref().map(|value| value.language.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                language_preset.clone(),
+                ProfessionalMetadataField::Language,
+                value,
+            )
+        });
 
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
@@ -4832,6 +5547,17 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         ],
     )
     .enabled(model.can_select_range());
+    let dynamic_hdr_dropdown = Dropdown::new(
+        model.dynamic_hdr.intent_label.clone(),
+        model
+            .dynamic_hdr
+            .intent_actions
+            .iter()
+            .map(|item| MenuItem::new(item.label.clone(), item.action.clone()))
+            .collect(),
+    )
+    .with_max_visible_items(8)
+    .enabled(!model.dynamic_hdr.intent_actions.is_empty());
 
     let selected_preset = model.selected_preset();
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
@@ -4854,11 +5580,91 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         FlexChild::fixed(Box::new(output_browse)),
     ])
     .with_gap(8.0);
-    let enqueue_action = model.enqueue_request().map(export_enqueue_action);
+    let enqueue_action = crate::app::ui_actions::export_enqueue_draft_action();
     let enqueue_button = AppIcon::Export
         .text_button_or_label("Add to queue")
         .enabled(model.can_enqueue())
         .on_click(enqueue_action);
+    let ancillary_import = AppIcon::Folder
+        .text_button_or_label("导入 ANC / 字幕…")
+        .on_click(crate::app::ui_actions::app_shell_import_export_ancillary_dialog_action());
+    let ancillary_clear = AppIcon::Trash
+        .text_button_or_label("移除")
+        .enabled(model.ancillary.is_some())
+        .on_click(export_edit_draft_action(ExportDraftEdit::ClearAncillary));
+    let ancillary_row = FlexContainer::row(vec![
+        FlexChild::fixed(Box::new(ancillary_import)),
+        FlexChild::fixed(Box::new(ancillary_clear)),
+    ])
+    .with_gap(current_theme().spacing.sm);
+    let ancillary_source = model
+        .ancillary
+        .as_ref()
+        .map(|item| item.path.display().to_string())
+        .unwrap_or_else(|| "未选择 ANC / 广播字幕".to_owned());
+    let ancillary_range = model
+        .ancillary
+        .as_ref()
+        .map(|item| {
+            format!(
+                "0…{} · {} 帧 · 起点 {}",
+                item.program.frame_count() - 1,
+                item.program.frame_count(),
+                item.program.source_start()
+            )
+        })
+        .unwrap_or_else(|| "—".to_owned());
+    let ancillary_cadence = model
+        .ancillary
+        .as_ref()
+        .map(|item| {
+            format!(
+                "{}/{} fps · {} 个包",
+                item.program.output_frame_rate().num,
+                item.program.output_frame_rate().den,
+                item.packet_count
+            )
+        })
+        .unwrap_or_else(|| "—".to_owned());
+    let ancillary_readiness = model.ancillary_error.clone().unwrap_or_else(|| {
+        if let Some(source)=model.ancillary.as_ref().and_then(|item|item.program.caption_source()) {
+            let format=match source.source_format {
+                mondrian_broadcast::CaptionSourceFormat::ScenaristSccV1=>"SCC V1.0 · 608 Field 1",
+                mondrian_broadcast::CaptionSourceFormat::RawCdpSt334_2_2015=>"原始 CDP · ST334-2:2015",
+            };
+            format!("{format} · 导入器 v{} · 608 通道位图 {:04b} · 708 服务 {:?}。传输校验通过；成品复读后发布，未授予字幕显示或 SDI 硬件资格",source.importer_version,source.cea608_channels,source.cea708_services)
+        } else if model.ancillary.is_some() {"ST436 结构与导出范围已验证；成品复读通过后发布，未授予 SDI 硬件资格".to_owned()}
+        else {"AS-11：ANC JSON、SCC V1.0（29.97→59.94 / Field 1）、原始 CDP；≤8 MiB / 100000 字幕帧，VANC 第 20 行。按序列起始时码与导出范围对齐".to_owned()}
+    });
+    let pse_import = AppIcon::Folder
+        .text_button_or_label("导入 PSE 配置…")
+        .on_click(crate::app::ui_actions::app_shell_import_export_pse_dialog_action());
+    let pse_clear = AppIcon::Trash
+        .text_button_or_label("移除")
+        .enabled(model.regulatory_pse.is_some())
+        .on_click(export_edit_draft_action(
+            ExportDraftEdit::ClearRegulatoryPse,
+        ));
+    let pse_row = FlexContainer::row(vec![
+        FlexChild::fixed(Box::new(pse_import)),
+        FlexChild::fixed(Box::new(pse_clear)),
+    ])
+    .with_gap(current_theme().spacing.sm);
+    let pse_identity = model
+        .regulatory_pse
+        .as_ref()
+        .map(|item| {
+            format!(
+                "{} / {}",
+                item.provider.approval.provider_id, item.provider.approval.provider_version
+            )
+        })
+        .unwrap_or_else(|| "未选择独立监管分析器".to_owned());
+    let pse_status = if model.regulatory_pse.is_some() {
+        "配置已冻结；入队核验分析器身份，成品复扫后判定监管结果"
+    } else {
+        "导入 provider 与广播 QC profile 的 JSON 配置"
+    };
     let clear_terminal_button = AppIcon::Trash
         .text_button_or_label("Clear finished")
         .enabled(model.can_clear_terminal_history)
@@ -4877,7 +5683,8 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let mut format_section = PropertySection::new("格式")
         .with_row(PropertyRow::new("容器", Box::new(container_dropdown)))
         .with_row(PropertyRow::new("视频编码", Box::new(video_codec_dropdown)))
-        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)));
+        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)))
+        .with_row(PropertyRow::new("帧率", Box::new(frame_rate_dropdown)));
     if let Some(resolution) = model.preset.resolution {
         let width_preset = model.preset.clone();
         let width_input = NumberInput::new(
@@ -4925,10 +5732,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_row(PropertyRow::new(
             "目标空间",
             Box::new(color_target_space_dropdown),
-        ));
+        ))
+        .with_row(PropertyRow::new("Legalizer", Box::new(legalizer_checkbox)));
 
     let mut encoding_section = PropertySection::new("编码参数");
-    if let Some((rate_control, max_crf)) = export_video_rate_control(&model.preset.video) {
+    if let Some((rate_control, max_crf)) =
+        media.and_then(|media| export_video_rate_control(&media.video))
+    {
         let crf_preset = model.preset.clone();
         let crf_input = NumberInput::new(rate_control.crf as f64, 0.0, max_crf as f64)
             .with_step(1.0)
@@ -4973,14 +5783,136 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 Box::new(max_bitrate_input),
             ))
             .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
-    } else if let VideoCodecConfig::Gif { colors, dither } = model.preset.video {
+
+        match media.map(|media| media.video_coding) {
+            Some(VideoCodingStructure::H26xLongGop {
+                keyframe_interval_seconds,
+                max_b_frames,
+                closed_gop,
+                scene_cut,
+            }) => {
+                let keyframe_preset = model.preset.clone();
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
+                    .with_step(1.0)
+                    .on_change(move |seconds| {
+                        let mut updated = keyframe_preset.clone();
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop {
+                                keyframe_interval_seconds,
+                                ..
+                            } = &mut media.video_coding
+                        {
+                            *keyframe_interval_seconds = seconds.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let b_frame_preset = model.preset.clone();
+                let b_frame_input = NumberInput::new(max_b_frames as f64, 0.0, 4.0)
+                    .with_step(1.0)
+                    .on_change(move |frames| {
+                        let mut updated = b_frame_preset.clone();
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop { max_b_frames, .. } =
+                                &mut media.video_coding
+                        {
+                            *max_b_frames = frames.round() as u8;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let closed_preset = model.preset.clone();
+                let closed_checkbox =
+                    Checkbox::new("封闭 GOP", closed_gop).on_change(move |enabled| {
+                        let mut updated = closed_preset.clone();
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
+                                &mut media.video_coding
+                        {
+                            *closed_gop = enabled;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let scene_cut_preset = model.preset.clone();
+                let scene_cut_checkbox = Checkbox::new(
+                    "场景切换插入关键帧",
+                    scene_cut == VideoSceneCutPolicy::Adaptive,
+                )
+                .on_change(move |enabled| {
+                    let mut updated = scene_cut_preset.clone();
+                    if let Some(media) = updated.media_file_mut()
+                        && let VideoCodingStructure::H26xLongGop { scene_cut, .. } =
+                            &mut media.video_coding
+                    {
+                        *scene_cut = if enabled {
+                            VideoSceneCutPolicy::Adaptive
+                        } else {
+                            VideoSceneCutPolicy::Disabled
+                        };
+                    }
+                    export_preset_update_action(updated)
+                });
+                encoding_section = encoding_section
+                    .with_row(PropertyRow::new(
+                        "关键帧间隔（秒）",
+                        Box::new(keyframe_input),
+                    ))
+                    .with_row(PropertyRow::new("最大连续 B 帧", Box::new(b_frame_input)))
+                    .with_row(PropertyRow::new("GOP", Box::new(closed_checkbox)))
+                    .with_row(PropertyRow::new("场景切换", Box::new(scene_cut_checkbox)));
+            }
+            Some(VideoCodingStructure::Av1RandomAccess {
+                keyframe_interval_seconds,
+                lookahead_frames,
+            }) => {
+                let keyframe_preset = model.preset.clone();
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
+                    .with_step(1.0)
+                    .on_change(move |seconds| {
+                        let mut updated = keyframe_preset.clone();
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::Av1RandomAccess {
+                                keyframe_interval_seconds,
+                                ..
+                            } = &mut media.video_coding
+                        {
+                            *keyframe_interval_seconds = seconds.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let lookahead_preset = model.preset.clone();
+                let lookahead_input = NumberInput::new(lookahead_frames as f64, 0.0, 120.0)
+                    .with_step(1.0)
+                    .on_change(move |frames| {
+                        let mut updated = lookahead_preset.clone();
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::Av1RandomAccess {
+                                lookahead_frames, ..
+                            } = &mut media.video_coding
+                        {
+                            *lookahead_frames = frames.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                encoding_section = encoding_section
+                    .with_row(PropertyRow::new(
+                        "关键帧间隔（秒）",
+                        Box::new(keyframe_input),
+                    ))
+                    .with_row(PropertyRow::new("Lookahead 帧", Box::new(lookahead_input)));
+            }
+            Some(VideoCodingStructure::IntraOnly) | None => {}
+        }
+    } else if let Some(VideoCodecConfig::Gif { colors, dither }) =
+        media.map(|media| media.video.clone())
+    {
         let colors_preset = model.preset.clone();
         let colors_input =
             NumberInput::new(colors as f64, 2.0, 256.0)
                 .with_step(1.0)
                 .on_change(move |colors| {
                     let mut updated = colors_preset.clone();
-                    if let VideoCodecConfig::Gif { colors: current, .. } = &mut updated.video {
+                    if let Some(media) = updated.media_file_mut()
+                        && let VideoCodecConfig::Gif { colors: current, .. } = &mut media.video
+                    {
                         *current = colors.round() as u16;
                     }
                     export_preset_update_action(updated)
@@ -4988,7 +5920,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         let dither_preset = model.preset.clone();
         let dither_checkbox = Checkbox::new("允许调色板抖动", dither).on_change(move |enabled| {
             let mut updated = dither_preset.clone();
-            if let VideoCodecConfig::Gif { dither, .. } = &mut updated.video {
+            if let Some(media) = updated.media_file_mut()
+                && let VideoCodecConfig::Gif { dither, .. } = &mut media.video
+            {
                 *dither = enabled;
             }
             export_preset_update_action(updated)
@@ -5005,32 +5939,37 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 
     let mut audio_section = PropertySection::new("音频")
         .with_row(PropertyRow::new("编码", Box::new(audio_codec_dropdown)));
-    match model.preset.audio {
-        AudioCodecConfig::Disabled => {}
-        AudioCodecConfig::Aac { bitrate_kbps } | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+    match media.map(|media| media.audio.clone()) {
+        None | Some(AudioCodecConfig::Disabled) => {}
+        Some(AudioCodecConfig::Aac { bitrate_kbps })
+        | Some(AudioCodecConfig::Mp3 { bitrate_kbps }) => {
             let bitrate_preset = model.preset.clone();
             let bitrate_input = NumberInput::new(bitrate_kbps as f64, 1.0, 1_536.0)
                 .with_step(8.0)
                 .on_change(move |bitrate| {
                     let mut updated = bitrate_preset.clone();
-                    match &mut updated.audio {
-                        AudioCodecConfig::Aac { bitrate_kbps }
-                        | AudioCodecConfig::Mp3 { bitrate_kbps } => {
-                            *bitrate_kbps = bitrate.round() as u32;
+                    if let Some(media) = updated.media_file_mut() {
+                        match &mut media.audio {
+                            AudioCodecConfig::Aac { bitrate_kbps }
+                            | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+                                *bitrate_kbps = bitrate.round() as u32;
+                            }
+                            AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
                         }
-                        AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
                     }
                     export_preset_update_action(updated)
                 });
             audio_section =
                 audio_section.with_row(PropertyRow::new("码率 kbps", Box::new(bitrate_input)));
         }
-        AudioCodecConfig::Pcm { bit_depth } => {
+        Some(AudioCodecConfig::Pcm { bit_depth }) => {
             let items = [16u8, 24, 32]
                 .into_iter()
                 .map(|candidate| {
                     let mut updated = model.preset.clone();
-                    updated.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
+                    if let Some(media) = updated.media_file_mut() {
+                        media.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
+                    }
                     MenuItem::new(
                         format!("{candidate}-bit integer"),
                         export_preset_update_action(updated),
@@ -5077,10 +6016,82 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 ),
         )
         .with_section(format_section)
+        .with_section(
+            PropertySection::new("交付元数据")
+                .with_row(PropertyRow::new("标题", Box::new(title_input)))
+                .with_row(PropertyRow::new("发行方", Box::new(issuer_input)))
+                .with_row(PropertyRow::new("创建者", Box::new(creator_input)))
+                .with_row(PropertyRow::new("语言", Box::new(language_input))),
+        )
         .with_section(color_section)
         .with_section(signal_section)
         .with_section(encoding_section)
         .with_section(audio_section)
+        .with_section(
+            PropertySection::new("广播 ANC")
+                .with_row(PropertyRow::new("选择", Box::new(ancillary_row)))
+                .with_row(
+                    PropertyRow::new(
+                        "来源",
+                        Box::new(Label::new(ancillary_source).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(
+                    PropertyRow::new(
+                        "帧范围",
+                        Box::new(Label::new(ancillary_range).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(PropertyRow::new(
+                    "帧率 / 包数",
+                    Box::new(Label::new(ancillary_cadence).muted()),
+                ))
+                .with_row(
+                    PropertyRow::new(
+                        "资格",
+                        Box::new(Label::new(ancillary_readiness).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 5.0),
+                ),
+        )
+        .with_section(
+            PropertySection::new("监管 PSE")
+                .with_row(PropertyRow::new("选择", Box::new(pse_row)))
+                .with_row(
+                    PropertyRow::new(
+                        "分析器",
+                        Box::new(Label::new(pse_identity).muted().wrapped()),
+                    )
+                    .with_height(current_theme().spacing.interact_height * 2.0),
+                )
+                .with_row(
+                    PropertyRow::new("状态", Box::new(Label::new(pse_status).muted().wrapped()))
+                        .with_height(current_theme().spacing.interact_height * 3.0),
+                ),
+        )
+        .with_section(
+            PropertySection::new("Dynamic HDR 交付")
+                .with_row(PropertyRow::new("意图", Box::new(dynamic_hdr_dropdown)))
+                .with_row(PropertyRow::new(
+                    "Program",
+                    Box::new(
+                        Label::new(format!(
+                            "{} 个已分析 Program",
+                            model.dynamic_hdr.program_count
+                        ))
+                        .muted(),
+                    ),
+                ))
+                .with_row(
+                    PropertyRow::new(
+                        "资格状态",
+                        Box::new(Label::new(model.dynamic_hdr.readiness.clone()).muted().wrapped()),
+                    )
+                    .with_height(58.0),
+                ),
+        )
         .with_section(
             PropertySection::new("输入")
                 .with_row(PropertyRow::new("序列", Box::new(sequence_dropdown)))
@@ -5119,6 +6130,11 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
             Label::new(color_diagnostics.clone()).muted().wrapped().with_padding(0.0, 0.0),
         )));
     }
+    if let Some(broadcast_qc) = &job.broadcast_qc {
+        summary_children.push(FlexChild::fixed(Box::new(
+            Label::new(broadcast_qc.clone()).muted().wrapped().with_padding(0.0, 0.0),
+        )));
+    }
     let summary = FlexContainer::column(summary_children).with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
@@ -5137,12 +6153,32 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     };
 
     let base_height = if job.can_cancel { 48.0 } else { 42.0 };
-    let height = if job.color_diagnostics.is_some() {
-        base_height + 18.0
-    } else {
-        base_height
-    };
+    let detail_rows =
+        usize::from(job.color_diagnostics.is_some()) + usize::from(job.broadcast_qc.is_some());
+    let height = base_height + detail_rows as f32 * 18.0;
     PropertyRow::new("任务", content).with_height(height)
+}
+
+fn export_job_broadcast_qc_label(
+    report: Option<&mondrian_broadcast::BroadcastQcReport>,
+) -> Option<String> {
+    let report = report?;
+    let coverage = match (report.first_frame, report.last_frame) {
+        (Some(first), Some(last)) => format!("{first}..={last}"),
+        _ => "none".to_owned(),
+    };
+    Some(format!(
+        "广播 QC: {}@{} / {:?} / {} 帧 ({coverage}) / findings {} retained {} overflow {} / obligations {} / {}",
+        report.profile_id,
+        report.profile_edition,
+        report.verdict,
+        report.analyzed_frames,
+        report.finding_count,
+        report.findings.len(),
+        report.overflow_count,
+        report.obligations.len(),
+        if report.complete { "complete" } else { "incomplete" }
+    ))
 }
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {
@@ -5273,11 +6309,46 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         .as_ref()
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
         .unwrap_or_else(|| "Follow sequence".to_owned());
-    let bitrate = match &preset.video {
+    if let Some(delivery) = preset.professional_delivery() {
+        let (profile, layout, essence) = match delivery.profile {
+            ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => (
+                "IMF RDD 45",
+                "directory package",
+                "ProRes 422 HQ 10-bit 4:2:2",
+            ),
+            ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => (
+                "AMWA AS-11 X9",
+                "OP1a MXF file",
+                "AVC High 4:2:2 10-bit intra",
+            ),
+            ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => (
+                "SMPTE DCP 2K Flat",
+                "directory package",
+                "JPEG 2000 XYZ 12-bit",
+            ),
+        };
+        return format!(
+            "{resolution} / {profile} / {essence} / {} / PCM 24-bit 48 kHz stereo / {layout} / .{}",
+            export_frame_rate_label(preset.frame_rate),
+            export_preset_extension(preset),
+        );
+    }
+    let Some(media) = preset.media_file() else {
+        return format!(
+            "{resolution} / PNG 无损序列 / sRGB / {} / {} / .{} 目录",
+            export_alpha_mode_label(preset.alpha_mode),
+            export_frame_rate_label(preset.frame_rate),
+            export_preset_extension(preset)
+        );
+    };
+    let bitrate = match &media.video {
         VideoCodecConfig::H264 { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Hevc { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Av1 { rate_control, .. } => export_rate_control_label(*rate_control),
-        VideoCodecConfig::ProRes { .. } => "固定 Profile 质量".to_owned(),
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => "固定 Profile/Class 表示".to_owned(),
         VideoCodecConfig::Gif { colors, dither } => {
             format!(
                 "{colors} 色 / dither {}",
@@ -5285,7 +6356,7 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
             )
         }
     };
-    let audio = match preset.audio {
+    let audio = match media.audio {
         AudioCodecConfig::Disabled => "无音频".to_owned(),
         AudioCodecConfig::Aac { bitrate_kbps } => format!("AAC {bitrate_kbps} kbps"),
         AudioCodecConfig::Pcm { bit_depth } => format!("PCM {bit_depth}-bit"),
@@ -5293,7 +6364,7 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
     };
     format!(
         "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {} / {audio} / .{}",
-        export_video_codec_label(&preset.video),
+        export_video_codec_label(&media.video),
         export_color_target_label(preset.color_target),
         export_bit_depth_label(preset.video_signal.bit_depth),
         export_video_range_label(preset.video_signal.range),
@@ -5349,6 +6420,7 @@ fn export_progress_phase_label(phase: ExportProgressPhase) -> &'static str {
         ExportProgressPhase::Preparing => "Preparing",
         ExportProgressPhase::Rendering => "Rendering",
         ExportProgressPhase::Encoding => "Encoding",
+        ExportProgressPhase::Packaging => "Packaging",
         ExportProgressPhase::Validating => "Validating",
         ExportProgressPhase::Publishing => "Publishing",
     }

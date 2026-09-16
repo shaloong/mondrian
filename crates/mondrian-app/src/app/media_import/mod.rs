@@ -90,6 +90,12 @@ pub struct MediaImportDiagnostics {
     pub dispatch_enabled: bool,
     /// Product-requested running-file limit.
     pub dispatch_parallelism: usize,
+    /// Workers configured for this service instance.
+    pub requested_workers: usize,
+    /// Worker threads successfully created.
+    pub started_workers: usize,
+    /// Whether a worker returned before service shutdown was requested.
+    pub worker_unexpectedly_exited: bool,
     /// Admitted current-generation batches.
     pub active_batches: usize,
     /// Stable identities of admitted current-generation batches.
@@ -111,6 +117,10 @@ pub struct MediaImportDiagnostics {
     pub imported_files: u64,
     /// Current-generation file failures.
     pub failed_files: u64,
+    /// Physical preparation failures, including results not yet polled by AppState.
+    pub preparation_failures: u64,
+    /// Asset Library publication failures after successful preparation.
+    pub publication_failures: u64,
     /// Files canceled before a committed import.
     pub canceled_files: u64,
     /// Late results made ineligible by Project generation rotation.

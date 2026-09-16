@@ -1,7 +1,8 @@
 use super::PreviewDecodeDiagnostics;
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceColorModel,
+    DecodedVideoSurfaceFormat,
 };
 use ffmpeg_next as ffmpeg;
 use std::any::Any;
@@ -25,9 +26,15 @@ use std::sync::OnceLock;
 #[derive(Clone, Debug, Default)]
 pub(super) struct PreviewNativeOutputTracker {
     outstanding: Arc<AtomicUsize>,
+    release_waker: Option<std::task::Waker>,
 }
 
 impl PreviewNativeOutputTracker {
+    pub(super) fn with_release_waker(mut self, waker: std::task::Waker) -> Self {
+        self.release_waker = Some(waker);
+        self
+    }
+
     pub(super) fn outstanding(&self) -> usize {
         self.outstanding.load(Ordering::Acquire)
     }
@@ -48,6 +55,11 @@ impl PreviewNativeOutputTracker {
     fn decrement(&self) {
         let previous = self.outstanding.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "native-output tracker underflow");
+        if previous == 1
+            && let Some(waker) = &self.release_waker
+        {
+            waker.wake_by_ref();
+        }
     }
 }
 
@@ -264,6 +276,115 @@ impl FfmpegNativeDecodedFrameResource {
             .map_err(Clone::clone)
     }
 
+    /// Borrow CUDA device pointers and their exact FFmpeg context. The returned
+    /// view retains this resource's borrow; pointers must never be CPU-dereferenced.
+    #[cfg(target_os = "linux")]
+    pub fn cuda_frame(
+        &self,
+    ) -> Result<FfmpegCudaFrameView<'_>, FfmpegNativeDecodedFrameResourceError> {
+        let invalid = |reason: &str| FfmpegNativeDecodedFrameResourceError::InvalidCudaFrame {
+            reason: reason.to_owned(),
+        };
+        if self.pixel_format != ffmpeg::format::Pixel::CUDA {
+            return Err(invalid("frame is not AV_PIX_FMT_CUDA"));
+        }
+        // SAFETY: retained AVFrame and its ref-counted contexts remain live for
+        // this borrow. Validate buffer extents before reading each public ABI.
+        let frame = unsafe { self.frame.as_ref() };
+        let frames_ref =
+            NonNull::new(frame.hw_frames_ctx).ok_or_else(|| invalid("missing frames context"))?;
+        let frames_ref = unsafe { frames_ref.as_ref() };
+        if frames_ref.size < std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>()
+            || frames_ref.data.is_null()
+        {
+            return Err(invalid("truncated frames context"));
+        }
+        let frames = unsafe { &*frames_ref.data.cast::<ffmpeg::ffi::AVHWFramesContext>() };
+        let device_ref =
+            NonNull::new(frames.device_ref).ok_or_else(|| invalid("missing device reference"))?;
+        let device_ref = unsafe { device_ref.as_ref() };
+        if device_ref.size < std::mem::size_of::<ffmpeg::ffi::AVHWDeviceContext>()
+            || device_ref.data.is_null()
+        {
+            return Err(invalid("truncated device context"));
+        }
+        let device = unsafe { &*device_ref.data.cast::<ffmpeg::ffi::AVHWDeviceContext>() };
+        if device.type_ != ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
+            || device.hwctx.is_null()
+        {
+            return Err(invalid("frames device is not CUDA"));
+        }
+        // libavutil/hwcontext_cuda.h public AVCUDADeviceContext prefix. No CUDA
+        // SDK or driver is loaded by Media; the concrete Renderer Adapter uses it.
+        #[repr(C)]
+        struct CudaContextPrefix {
+            context: *mut c_void,
+            stream: *mut c_void,
+        }
+        let cuda = unsafe { &*device.hwctx.cast::<CudaContextPrefix>() };
+        if cuda.context.is_null() {
+            return Err(invalid("missing CUDA context"));
+        }
+        let (format, component_bytes) = match frames.sw_format {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 => {
+                (DecodedVideoSurfaceFormat::Nv12, 1usize)
+            }
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE => {
+                (DecodedVideoSurfaceFormat::P010, 2usize)
+            }
+            _ => return Err(invalid("CUDA surface is not NV12 or P010")),
+        };
+        if frame.width <= 0
+            || frame.height <= 0
+            || frame.width > frames.width
+            || frame.height > frames.height
+        {
+            return Err(invalid("visible extent exceeds the CUDA frames allocation"));
+        }
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let mut planes = [(0usize, 0usize); 2];
+        for (index, plane) in planes.iter_mut().enumerate() {
+            let columns = if index == 0 {
+                width
+            } else {
+                width.div_ceil(2) * 2
+            };
+            let rows = if index == 0 {
+                height
+            } else {
+                height.div_ceil(2)
+            };
+            let row_bytes = columns
+                .checked_mul(component_bytes)
+                .ok_or_else(|| invalid("row size overflow"))?;
+            let pitch = usize::try_from(frame.linesize[index])
+                .map_err(|_| invalid("negative CUDA pitch"))?;
+            let address = frame.data[index] as usize;
+            if address == 0 || pitch < row_bytes || pitch % component_bytes != 0 {
+                return Err(invalid("invalid CUDA plane address or pitch"));
+            }
+            address
+                .checked_add(
+                    pitch
+                        .checked_mul(rows - 1)
+                        .and_then(|v| v.checked_add(row_bytes))
+                        .ok_or_else(|| invalid("plane extent overflow"))?,
+                )
+                .ok_or_else(|| invalid("plane address overflow"))?;
+            *plane = (address, pitch);
+        }
+        Ok(FfmpegCudaFrameView {
+            context: cuda.context,
+            stream: cuda.stream,
+            planes,
+            width: frame.width as u32,
+            height: frame.height as u32,
+            format,
+            _owner: std::marker::PhantomData,
+        })
+    }
+
     /// Hardware pixel format retained by this frame.
     pub fn pixel_format(&self) -> ffmpeg::util::format::pixel::Pixel {
         self.pixel_format
@@ -289,9 +410,25 @@ impl fmt::Debug for FfmpegNativeDecodedFrameResource {
 impl Drop for FfmpegNativeDecodedFrameResource {
     fn drop(&mut self) {
         let mut frame = self.frame.as_ptr();
+        let started = std::time::Instant::now();
+        // Consume the mapped child while the source and its output lease are
+        // still live. Automatic field drop would retire the lease before the
+        // later DRM cache field finishes its foreign release callback.
+        #[cfg(target_os = "linux")]
+        drop(self.drm_prime_frame.take());
         // SAFETY: retain obtained sole ownership of this AVFrame allocation from
         // av_frame_clone. Drop runs exactly once and av_frame_free accepts &mut.
         unsafe { ffmpeg::ffi::av_frame_free(&mut frame) };
+        let elapsed_us = started.elapsed().as_micros();
+        if elapsed_us >= 5_000 {
+            tracing::debug!(
+                kind = ?self.kind,
+                resource_id = self.id.get(),
+                elapsed_us,
+                thread = ?std::thread::current().id(),
+                "slow native FFmpeg frame release"
+            );
+        }
     }
 }
 
@@ -353,9 +490,34 @@ impl FfmpegD3D11TextureView {
     }
 }
 
+/// Borrowed immutable FFmpeg CUDA surface ABI. The AVFrame owns all pointers.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+pub struct FfmpegCudaFrameView<'a> {
+    /// CUDA context that owns these device addresses; never a CPU pixel pointer.
+    pub context: *mut c_void,
+    /// FFmpeg's producer stream. Null denotes the CUDA default stream.
+    pub stream: *mut c_void,
+    /// Luma and interleaved chroma `(device_address, pitch_bytes)` pairs.
+    pub planes: [(usize, usize); 2],
+    /// Visible luma width.
+    pub width: u32,
+    /// Visible luma height.
+    pub height: u32,
+    /// Exact physical NV12/P010 storage interpretation.
+    pub format: DecodedVideoSurfaceFormat,
+    _owner: std::marker::PhantomData<&'a FfmpegNativeDecodedFrameResource>,
+}
+
 /// Error retaining or interpreting an FFmpeg native decoded frame.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum FfmpegNativeDecodedFrameResourceError {
+    /// CUDA frame/context or plane storage failed the native ABI contract.
+    #[error("invalid FFmpeg CUDA frame: {reason}")]
+    InvalidCudaFrame {
+        /// Concrete rejected context, format, extent or plane property.
+        reason: String,
+    },
     /// The frame is not backed by a supported FFmpeg hardware pixel format.
     #[error("FFmpeg pixel format {pixel_format:?} is not a supported native decode surface")]
     UnsupportedPixelFormat {
@@ -717,6 +879,9 @@ impl FfmpegDrmPrimeFrame {
     }
 
     /// Duplicate one object FD for ownership transfer to Vulkan.
+    ///
+    /// The duplicate is close-on-exec from creation, so concurrently spawned
+    /// helpers cannot inherit this temporary transfer owner.
     pub fn duplicate_object_fd(
         &self,
         object_index: usize,
@@ -726,9 +891,10 @@ impl FfmpegDrmPrimeFrame {
         let object = self.objects.get(object_index).ok_or_else(|| {
             invalid_drm_descriptor(format!("object index {object_index} is out of range"))
         })?;
-        // SAFETY: `object.fd` remains live through `self`; dup returns a new
-        // independently owned descriptor on success.
-        let duplicated = unsafe { libc::dup(object.fd) };
+        // SAFETY: `object.fd` remains live through `self`. F_DUPFD_CLOEXEC
+        // creates an independent descriptor and its exec barrier atomically;
+        // dup followed by F_SETFD would race a concurrent helper spawn.
+        let duplicated = unsafe { libc::fcntl(object.fd, libc::F_DUPFD_CLOEXEC, 0) };
         if duplicated < 0 {
             return Err(
                 FfmpegNativeDecodedFrameResourceError::DrmPrimeFileDescriptorDuplicationFailed {
@@ -737,7 +903,7 @@ impl FfmpegDrmPrimeFrame {
                 },
             );
         }
-        // SAFETY: dup returned a fresh owned descriptor.
+        // SAFETY: fcntl returned a fresh owned descriptor.
         Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
     }
 }
@@ -847,10 +1013,11 @@ fn validate_native_decoded_video_sampling(
             actual: sampling.bit_depth,
         });
     }
-    if matches!(
-        surface_format,
-        DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::P010
-    ) && sampling.chroma_location == DecodedVideoChromaLocation::Unknown
+    if surface_format.descriptor().is_some_and(|descriptor| {
+        descriptor.color_model == DecodedVideoSurfaceColorModel::Ycbcr
+            && descriptor.chroma_subsampling
+                != Some(crate::DecodedVideoSurfaceChromaSubsampling::Cs444)
+    }) && sampling.chroma_location == DecodedVideoChromaLocation::Unknown
     {
         return Err(PreviewNativeDecodedFrameError::MissingVideoChromaLocation { surface_format });
     }
@@ -905,6 +1072,38 @@ mod session_output_lease_tests {
     use super::*;
 
     #[test]
+    fn final_native_output_release_wakes_only_after_both_counters_are_zero() {
+        struct ObserveRelease {
+            family: PreviewNativeOutputTracker,
+            session: PreviewNativeOutputTracker,
+            wakes: AtomicUsize,
+        }
+        impl std::task::Wake for ObserveRelease {
+            fn wake(self: Arc<Self>) {
+                assert!(self.family.is_released());
+                assert!(self.session.is_released());
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let observer = Arc::new(ObserveRelease {
+            family: family.clone(),
+            session: session.clone(),
+            wakes: AtomicUsize::new(0),
+        });
+        let family = family.with_release_waker(std::task::Waker::from(observer.clone()));
+        let first = PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("first");
+        let clone = first.clone();
+        let second = PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("second");
+        drop(first);
+        drop(second);
+        assert_eq!(observer.wakes.load(Ordering::SeqCst), 0);
+        drop(clone);
+        assert_eq!(observer.wakes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn logical_outputs_are_counted_once_while_clones_share_their_token() {
         let family = PreviewNativeOutputTracker::default();
         let session = PreviewNativeOutputTracker::default();
@@ -942,5 +1141,145 @@ mod session_output_lease_tests {
 
         drop(output);
         assert!(family.is_released());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod drm_descriptor_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    struct ReleaseObservation {
+        family: PreviewNativeOutputTracker,
+        session: PreviewNativeOutputTracker,
+        seen_family: Arc<AtomicUsize>,
+        seen_session: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn observe_mapping_release(opaque: *mut c_void, data: *mut u8) {
+        let observation = unsafe { Box::from_raw(opaque.cast::<ReleaseObservation>()) };
+        observation
+            .seen_family
+            .store(observation.family.outstanding(), Ordering::Release);
+        observation
+            .seen_session
+            .store(observation.session.outstanding(), Ordering::Release);
+        unsafe { ffmpeg::ffi::av_free(data.cast()) };
+    }
+
+    #[test]
+    fn mapped_frame_release_finishes_before_native_output_lease_retires() {
+        let family = PreviewNativeOutputTracker::default();
+        let session = PreviewNativeOutputTracker::default();
+        let seen_family = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen_session = Arc::new(AtomicUsize::new(usize::MAX));
+        let source_fd = std::fs::File::open("/dev/null").expect("descriptor owner");
+        let mut mapped = ffmpeg::util::frame::video::Video::empty();
+        // A real AVBuffer free callback observes the production destructor's
+        // lease order. No VA-API device or driver completion is manufactured.
+        unsafe {
+            let size = std::mem::size_of::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            let data = ffmpeg::ffi::av_mallocz(size).cast::<u8>();
+            assert!(!data.is_null(), "descriptor allocation");
+            let observation = Box::new(ReleaseObservation {
+                family: family.clone(),
+                session: session.clone(),
+                seen_family: Arc::clone(&seen_family),
+                seen_session: Arc::clone(&seen_session),
+            });
+            let buffer = ffmpeg::ffi::av_buffer_create(
+                data,
+                size,
+                Some(observe_mapping_release),
+                Box::into_raw(observation).cast(),
+                0,
+            );
+            assert!(!buffer.is_null(), "observed buffer");
+            (*mapped.as_mut_ptr()).buf[0] = buffer;
+            (*mapped.as_mut_ptr()).data[0] = data;
+            let descriptor = &mut *data.cast::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            descriptor.nb_objects = 1;
+            descriptor.objects[0].fd = source_fd.as_raw_fd();
+            descriptor.objects[0].size = 4096;
+            descriptor.nb_layers = 1;
+            descriptor.layers[0].nb_planes = 1;
+            descriptor.layers[0].planes[0].pitch = 64;
+        }
+        let retained = NonNull::new(unsafe { ffmpeg::ffi::av_frame_clone(mapped.as_ptr()) })
+            .expect("retained mapping");
+        let mapping = FfmpegDrmPrimeFrame::from_mapped_frame(retained).expect("mapping descriptor");
+        drop(mapped);
+
+        let mut source = ffmpeg::util::frame::video::Video::empty();
+        source.set_format(ffmpeg::util::format::pixel::Pixel::VAAPI);
+        unsafe {
+            let buffer = ffmpeg::ffi::av_buffer_alloc(1);
+            assert!(!buffer.is_null(), "source reference");
+            (*source.as_mut_ptr()).buf[0] = buffer;
+            (*source.as_mut_ptr()).data[0] = (*buffer).data;
+        }
+        let resource = FfmpegNativeDecodedFrameResource::retain_with_session_output_lease(
+            &source,
+            Some(
+                PreviewDecodeSessionOutputLease::acquire(&family, &session).expect("output lease"),
+            ),
+        )
+        .expect("retained source");
+        drop(source);
+        resource.drm_prime_frame.set(Ok(mapping)).expect("single cached mapping");
+        drop(resource);
+        assert_eq!(
+            seen_family.load(Ordering::Acquire),
+            1,
+            "mapping release must remain charged to its family"
+        );
+        assert_eq!(
+            seen_session.load(Ordering::Acquire),
+            1,
+            "mapping release must remain charged to its Session"
+        );
+        assert!(family.is_released());
+        assert!(session.is_released());
+    }
+
+    #[test]
+    fn duplicated_drm_object_is_close_on_exec() {
+        // Exercise the production FD transfer with a real descriptor. The
+        // AVFrame owns only descriptor storage; this is not a VA-API fixture.
+        let source = std::fs::File::open("/dev/null").expect("open source descriptor");
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        unsafe {
+            let buffer = ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<
+                ffmpeg::ffi::AVDRMFrameDescriptor,
+            >());
+            assert!(!buffer.is_null(), "descriptor buffer");
+            (*frame.as_mut_ptr()).buf[0] = buffer;
+            (*frame.as_mut_ptr()).data[0] = (*buffer).data;
+            let descriptor = (*buffer).data.cast::<ffmpeg::ffi::AVDRMFrameDescriptor>();
+            std::ptr::write_bytes(descriptor, 0, 1);
+            (*descriptor).nb_objects = 1;
+            (*descriptor).objects[0].fd = source.as_raw_fd();
+            (*descriptor).objects[0].size = 4096;
+            (*descriptor).nb_layers = 1;
+            (*descriptor).layers[0].nb_planes = 1;
+            (*descriptor).layers[0].planes[0].pitch = 64;
+        }
+        let retained = NonNull::new(unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) })
+            .expect("retain descriptor storage");
+        let mapping = FfmpegDrmPrimeFrame::from_mapped_frame(retained).expect("owned descriptor");
+        let duplicate = mapping.duplicate_object_fd(0).expect("duplicate for Vulkan");
+        assert_ne!(duplicate.as_raw_fd(), source.as_raw_fd());
+        let flags = unsafe { libc::fcntl(duplicate.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0, "live duplicate");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "a concurrent helper exec must not inherit the DMA-BUF transfer descriptor"
+        );
+        drop(duplicate);
+        assert!(
+            unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0,
+            "original ownership remains live"
+        );
     }
 }

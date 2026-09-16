@@ -19,6 +19,8 @@ pub enum TimelineRenderIntent {
     Preview,
     /// Final timeline export.
     Export,
+    /// Full-raster working-space program prepared for scheduled reference output.
+    ReferenceOutput,
     /// Thumbnail or low-cost still generation.
     Thumbnail,
     /// Non-presentational analysis such as diagnostics or media collection.
@@ -81,6 +83,20 @@ impl TimelineRenderSettings {
         }
     }
 
+    /// Settings for full-raster reference-output preparation.
+    ///
+    /// The result remains in working space because the dedicated Reference
+    /// Output Program applies the exact Program Output transform and signal
+    /// packing after Timeline compositing.
+    pub fn reference_output() -> Self {
+        Self {
+            resolution_scale: 1.0,
+            quality: TimelineRenderQuality::Final,
+            color_target: TimelineRenderColorTarget::Working,
+            allow_frame_drop: false,
+        }
+    }
+
     /// Settings for timeline diagnostics and non-presentational analysis.
     pub fn analysis() -> Self {
         Self {
@@ -92,14 +108,14 @@ impl TimelineRenderSettings {
     }
 }
 
-/// A request to evaluate one sequence frame into a render plan.
+/// A request to evaluate one exact visual sample into a render plan.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimelineEvaluationRequest {
-    /// Exact Sequence-local frame position.
+    /// Exact Sequence-local progressive-frame or half-frame field position.
     ///
-    /// Evaluation rejects a negative frame or a time base that is not exactly
-    /// the source Sequence's Evaluation Grid. The renderer never clamps this
-    /// value or silently substitutes the source grid.
+    /// Evaluation rejects a negative position or a time base other than the
+    /// source Sequence Evaluation Grid or its exact doubled field grid. The
+    /// renderer never rounds a field instant back to an authored frame.
     pub position: FramePosition,
     /// Caller intent.
     pub intent: TimelineRenderIntent,
@@ -123,6 +139,15 @@ impl TimelineEvaluationRequest {
             position,
             intent: TimelineRenderIntent::Export,
             settings: TimelineRenderSettings::export(),
+        }
+    }
+
+    /// Build a full-raster reference-output evaluation request.
+    pub fn reference_output(position: FramePosition) -> Self {
+        Self {
+            position,
+            intent: TimelineRenderIntent::ReferenceOutput,
+            settings: TimelineRenderSettings::reference_output(),
         }
     }
 
@@ -210,6 +235,13 @@ pub struct TimelineAdjustmentPlan {
     pub frame_seed: i64,
 }
 
+/// Full-composite Sequence grade evaluated once after every visual item.
+#[derive(Debug, Clone)]
+pub struct TimelineGradePlan {
+    pub effect_graph: Arc<CompiledEffectGraph>,
+    pub frame_seed: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineSolidColorPlan {
     /// Exact prepared placement and endpoint identity.
@@ -294,6 +326,8 @@ pub enum TimelineRenderPlanElement {
     NestedSequence(TimelineNestedSequencePlan),
     /// A two-input operation occupying one position in the Track stack.
     CrossDissolve(Box<TimelineCrossDissolvePlan>),
+    /// Explicit full-composite grade; never masquerades as a Clip placement.
+    TimelineGrade(TimelineGradePlan),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -377,6 +411,7 @@ pub(crate) fn collect_timeline_color_diagnostics_with_display_view(
                 }
             }
             TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_)
             | TimelineRenderPlanElement::NestedSequence(_) => {}
@@ -455,6 +490,11 @@ pub fn evaluate_prepared_visual_program_with_session(
 trait ClipEffectResolver {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>>;
 
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>>;
+
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()>;
 }
 
@@ -475,6 +515,13 @@ impl ClipEffectResolver for DirectClipEffectResolver {
         .map_err(|error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() })
     }
 
+    fn evaluate_timeline_grade(
+        &mut self,
+        _sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        Ok(None)
+    }
+
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
         validate_flat_transition_definition(transition)
     }
@@ -487,6 +534,13 @@ struct PreparedClipEffectResolver<'a> {
 impl ClipEffectResolver for PreparedClipEffectResolver<'_> {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program.evaluate_clip_effects(clip.clip_id, clip.clip_time)
+    }
+
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        self.program.evaluate_timeline_grade(sequence_time)
     }
 
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
@@ -505,6 +559,13 @@ impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
             .evaluate_clip_effects_with_session(clip.clip_id, clip.clip_time, self.session)
     }
 
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        self.program.evaluate_timeline_grade_with_session(sequence_time, self.session)
+    }
+
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
         self.program.ensure_transition_ready(transition.transition_id)
     }
@@ -516,14 +577,30 @@ fn evaluate_timeline_render_plan_with_effects(
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlan> {
     let expected_time_base = source.source_time_base();
-    if request.position.time_base != expected_time_base {
+    let field_time_base = Rational::new(
+        expected_time_base.num,
+        expected_time_base
+            .den
+            .checked_mul(2)
+            .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "evaluate_timeline_render_plan".to_owned(),
+                reason: format!(
+                    "Sequence {} field evaluation grid overflowed",
+                    source.source_sequence_id()
+                ),
+            })?,
+    );
+    if request.position.time_base != expected_time_base
+        && request.position.time_base != field_time_base
+    {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
-                "evaluation position grid {} does not match Sequence {} grid {}",
+                "evaluation position grid {} does not match Sequence {} frame grid {} or field grid {}",
                 request.position.time_base,
                 source.source_sequence_id(),
-                expected_time_base
+                expected_time_base,
+                field_time_base,
             ),
         });
     }
@@ -569,6 +646,12 @@ fn evaluate_timeline_render_plan_with_effects(
                 )?);
             }
         }
+    }
+
+    if let Some(effect_graph) = effects.evaluate_timeline_grade(current_time)? {
+        elements.push(TimelineRenderPlanElement::TimelineGrade(
+            TimelineGradePlan { effect_graph, frame_seed: request.position.frame },
+        ));
     }
 
     diagnostics.emitted_elements = elements.len();
@@ -706,6 +789,9 @@ fn compile_transition_input(
             reason: "Adjustment Layer cannot be a Transition endpoint".to_owned(),
         }),
         TimelineRenderPlanElement::CrossDissolve(_) => unreachable!("a Clip cannot lower itself"),
+        TimelineRenderPlanElement::TimelineGrade(_) => {
+            unreachable!("a Clip cannot lower itself into the Timeline Grade")
+        }
     }
 }
 
@@ -786,10 +872,6 @@ fn compile_flat_clip(
             } else {
                 ac.source_sample
             };
-            let transform = apply_pixel_aspect_to_affine(
-                ac.transform_matrix,
-                interpretation.pixel_aspect_ratio_override,
-            );
             TimelineRenderPlanElement::Media(TimelineMediaPlan {
                 placement,
                 asset_id,
@@ -801,7 +883,7 @@ fn compile_flat_clip(
                 source_sample,
                 opacity,
                 blend_mode: ac.blend_mode,
-                transform,
+                transform: ac.transform_matrix,
                 effect_graph,
                 frame_seed,
                 auto_tone_map: source.auto_tone_map_media(),
@@ -853,21 +935,6 @@ pub fn project_affine_to_sampled_extents(
         output_y * transform[5],
     ];
     projected.iter().all(|value| value.is_finite()).then_some(projected)
-}
-
-fn apply_pixel_aspect_to_affine(
-    mut transform: [f32; 6],
-    pixel_aspect_ratio: Option<PixelAspectRatio>,
-) -> [f32; 6] {
-    let Some(ratio) = pixel_aspect_ratio.and_then(PixelAspectRatio::ratio) else {
-        return transform;
-    };
-    if (ratio - 1.0).abs() <= f32::EPSILON {
-        return transform;
-    }
-    transform[0] *= ratio;
-    transform[3] *= ratio;
-    transform
 }
 
 fn normalize_resolution_scale(scale: f32) -> f32 {
@@ -968,17 +1035,49 @@ mod tests {
     }
 
     #[test]
-    fn sampled_extent_projection_preserves_authored_fit() {
-        let projected = project_affine_to_sampled_extents(
-            [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
-            Resolution { width: 3840, height: 2160 },
-            Resolution { width: 960, height: 540 },
-            Resolution { width: 1920, height: 1080 },
-            Resolution { width: 960, height: 540 },
-        )
-        .expect("valid sampled extents");
+    fn sampled_extent_projection_preserves_authored_fit_across_preview_and_proxy_sizes() {
+        let source_authoring = Resolution { width: 3840, height: 2160 };
+        let output_authoring = Resolution { width: 1920, height: 1080 };
+        let cases = [
+            (
+                Resolution { width: 3840, height: 2160 },
+                Resolution { width: 1920, height: 1080 },
+            ),
+            (
+                Resolution { width: 1920, height: 1080 },
+                Resolution { width: 960, height: 540 },
+            ),
+            (
+                Resolution { width: 1280, height: 720 },
+                Resolution { width: 480, height: 270 },
+            ),
+            (
+                Resolution { width: 960, height: 540 },
+                Resolution { width: 480, height: 270 },
+            ),
+        ];
 
-        assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        for (source_sampled, output_sampled) in cases {
+            let projected = project_affine_to_sampled_extents(
+                [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+                source_authoring,
+                source_sampled,
+                output_authoring,
+                output_sampled,
+            )
+            .expect("valid sampled extents");
+
+            let bottom_right = glam::Vec2::new(
+                projected[0] * source_sampled.width as f32
+                    + projected[1] * source_sampled.height as f32
+                    + projected[2],
+                projected[3] * source_sampled.width as f32
+                    + projected[4] * source_sampled.height as f32
+                    + projected[5],
+            );
+            assert!((bottom_right.x - output_sampled.width as f32).abs() < 0.01);
+            assert!((bottom_right.y - output_sampled.height as f32).abs() < 0.01);
+        }
     }
 
     #[test]
@@ -1099,7 +1198,7 @@ mod tests {
         let interpretation = clip.media_interpretation_mut().expect("media interpretation");
         interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
         interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
-        interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        interpretation.field_order_override = Some(FieldOrder::Progressive);
         interpretation.alpha = AlphaInterpretation::Premultiplied;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
@@ -1115,12 +1214,12 @@ mod tests {
             media.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::Anamorphic2x)
         );
-        assert_eq!(media.field_order_override, Some(FieldOrder::UpperFirst));
+        assert_eq!(media.field_order_override, Some(FieldOrder::Progressive));
         assert_eq!(
             media.alpha_interpretation,
             AlphaInterpretation::Premultiplied
         );
-        assert!((media.transform[0] - 2.0).abs() < 1.0e-6);
+        assert_eq!(media.transform, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -1537,6 +1636,10 @@ mod tests {
             right: RenderPlanSemanticTransitionInput,
             progress: f32,
         },
+        TimelineGrade {
+            graph_signature: u64,
+            frame_seed: i64,
+        },
     }
 
     #[derive(Debug, PartialEq)]
@@ -1616,6 +1719,12 @@ mod tests {
                         left: transition_input_signature(&transition.left),
                         right: transition_input_signature(&transition.right),
                         progress: transition.progress,
+                    }
+                }
+                TimelineRenderPlanElement::TimelineGrade(grade) => {
+                    RenderPlanSemanticElement::TimelineGrade {
+                        graph_signature: grade.effect_graph.signature_hash(),
+                        frame_seed: grade.frame_seed,
                     }
                 }
             })
