@@ -4542,7 +4542,7 @@ pub struct RenderProgramMonitorBoundaryRgba8 {
 
 /// Presentation-only CPU fallback result.
 ///
-/// Unlike [`RenderProgramMonitorBoundaryRgba8`], this contract retains only
+/// Unlike the internal boundary result, this contract retains only
 /// Program Output metadata and diagnostics. Its pixels are consumed in place
 /// by monitor adaptation, allowing one owned Float32 raster to serve both
 /// exact OCIO stages before final RGBA8 quantization.
