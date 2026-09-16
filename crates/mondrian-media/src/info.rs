@@ -2238,21 +2238,21 @@ fn map_video_codec_with_profile(id: ffmpeg::codec::Id, profile: i32) -> VideoCod
         Id::AV1 => VideoCodec::Av1,
         Id::VP9 => VideoCodec::Vp9,
         Id::PRORES => VideoCodec::ProRes(match profile {
-            ffmpeg::ffi::FF_PROFILE_PRORES_PROXY => ProResVariant::Proxy,
-            ffmpeg::ffi::FF_PROFILE_PRORES_LT => ProResVariant::Lt,
-            ffmpeg::ffi::FF_PROFILE_PRORES_HQ => ProResVariant::Hq,
-            ffmpeg::ffi::FF_PROFILE_PRORES_4444 => ProResVariant::R4444,
-            ffmpeg::ffi::FF_PROFILE_PRORES_XQ => ProResVariant::R4444Xq,
+            ffmpeg::ffi::AV_PROFILE_PRORES_PROXY => ProResVariant::Proxy,
+            ffmpeg::ffi::AV_PROFILE_PRORES_LT => ProResVariant::Lt,
+            ffmpeg::ffi::AV_PROFILE_PRORES_HQ => ProResVariant::Hq,
+            ffmpeg::ffi::AV_PROFILE_PRORES_4444 => ProResVariant::R4444,
+            ffmpeg::ffi::AV_PROFILE_PRORES_XQ => ProResVariant::R4444Xq,
             _ => ProResVariant::Standard,
         }),
         Id::DNXHD
             if matches!(
                 profile,
-                ffmpeg::ffi::FF_PROFILE_DNXHR_LB
-                    | ffmpeg::ffi::FF_PROFILE_DNXHR_SQ
-                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQ
-                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQX
-                    | ffmpeg::ffi::FF_PROFILE_DNXHR_444
+                ffmpeg::ffi::AV_PROFILE_DNXHR_LB
+                    | ffmpeg::ffi::AV_PROFILE_DNXHR_SQ
+                    | ffmpeg::ffi::AV_PROFILE_DNXHR_HQ
+                    | ffmpeg::ffi::AV_PROFILE_DNXHR_HQX
+                    | ffmpeg::ffi::AV_PROFILE_DNXHR_444
             ) =>
         {
             VideoCodec::DnxHr
@@ -2574,11 +2574,53 @@ mod tests {
     }
 
     #[test]
+    fn probe_mapping_preserves_all_professional_codec_profiles() {
+        use ffmpeg::codec::Id;
+        use ffmpeg::ffi;
+
+        // AV_PROFILE_* is available from the minimum supported FFmpeg 6.1;
+        // the deprecated FF_PROFILE_* aliases are absent in newer headers.
+        for (profile, expected) in [
+            (ffi::AV_PROFILE_PRORES_PROXY, ProResVariant::Proxy),
+            (ffi::AV_PROFILE_PRORES_LT, ProResVariant::Lt),
+            (ffi::AV_PROFILE_PRORES_STANDARD, ProResVariant::Standard),
+            (ffi::AV_PROFILE_PRORES_HQ, ProResVariant::Hq),
+            (ffi::AV_PROFILE_PRORES_4444, ProResVariant::R4444),
+            (ffi::AV_PROFILE_PRORES_XQ, ProResVariant::R4444Xq),
+        ] {
+            assert_eq!(
+                map_video_codec_with_profile(Id::PRORES, profile),
+                VideoCodec::ProRes(expected)
+            );
+        }
+        for profile in [
+            ffi::AV_PROFILE_DNXHR_LB,
+            ffi::AV_PROFILE_DNXHR_SQ,
+            ffi::AV_PROFILE_DNXHR_HQ,
+            ffi::AV_PROFILE_DNXHR_HQX,
+            ffi::AV_PROFILE_DNXHR_444,
+        ] {
+            assert_eq!(
+                map_video_codec_with_profile(Id::DNXHD, profile),
+                VideoCodec::DnxHr
+            );
+        }
+        assert_eq!(
+            map_video_codec_with_profile(Id::DNXHD, 0),
+            VideoCodec::DnxHd
+        );
+        assert_eq!(
+            map_video_codec_with_profile(Id::DNXHD, -99),
+            VideoCodec::DnxHd
+        );
+    }
+
+    #[test]
     fn probe_mapping_distinguishes_dnxhr_and_uncompressed_essence() {
         assert_eq!(
             map_video_codec_with_profile(
                 ffmpeg::codec::Id::DNXHD,
-                ffmpeg::ffi::FF_PROFILE_DNXHR_HQX,
+                ffmpeg::ffi::AV_PROFILE_DNXHR_HQX,
             ),
             VideoCodec::DnxHr
         );

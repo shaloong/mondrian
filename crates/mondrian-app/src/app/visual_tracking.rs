@@ -1527,22 +1527,7 @@ mod tests {
 
     use super::*;
 
-    fn generate_translation_fixture(root: &std::path::Path) -> Option<PathBuf> {
-        let mut availability =
-            mondrian_media::ffmpeg_command().expect("admit tracking fixture probe");
-        let development_search_path = availability.get_program() == std::ffi::OsStr::new("ffmpeg");
-        match availability.arg("-version").output() {
-            Err(error)
-                if development_search_path && error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return None
-            }
-            Err(error) => panic!("tracking fixture version probe could not execute: {error}"),
-            Ok(output) => assert!(
-                output.status.success(),
-                "tracking fixture version probe failed: {output:?}"
-            ),
-        }
+    fn generate_translation_fixture(root: &std::path::Path) -> PathBuf {
         let frames = root.join("frames");
         std::fs::create_dir_all(&frames).expect("create tracking frames");
         for frame_index in 0..5_u32 {
@@ -1563,7 +1548,7 @@ mod tests {
                 .save(frames.join(format!("frame{frame_index:03}.png")))
                 .expect("write tracking source frame");
         }
-        let video = root.join("translation.mp4");
+        let video = root.join("translation.mkv");
         let status = mondrian_media::ffmpeg_command()
             .expect("admit tracking fixture encoder")
             .args([
@@ -1579,9 +1564,9 @@ mod tests {
             .args([
                 "-an",
                 "-c:v",
-                "mpeg4",
-                "-q:v",
-                "2",
+                "ffv1",
+                "-vf",
+                "scale=out_range=tv,format=yuv420p,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
                 "-color_range",
                 "tv",
                 "-colorspace",
@@ -1594,7 +1579,11 @@ mod tests {
             .arg(&video)
             .status()
             .expect("run ffmpeg tracking fixture encoder");
-        status.success().then_some(video)
+        assert!(
+            status.success(),
+            "tracking fixture encoder failed: {status}"
+        );
+        video
     }
 
     fn wait_for_terminal(state: &mut AppState, clip_id: ClipId, mask_id: MaskId) {
@@ -1892,9 +1881,7 @@ mod tests {
     #[test]
     fn real_media_tracking_is_atomic_undoable_cacheable_cancelable_and_stale_safe() {
         let root = tempfile::tempdir().expect("tracking fixture root");
-        let Some(video_path) = generate_translation_fixture(root.path()) else {
-            return;
-        };
+        let video_path = generate_translation_fixture(root.path());
         let canonical_path = std::fs::canonicalize(&video_path).expect("canonical video path");
         let media_info = mondrian_media::probe_media_info(&canonical_path).expect("probe fixture");
         let fingerprint = MediaFileFingerprint::capture(&canonical_path);
@@ -1958,7 +1945,9 @@ mod tests {
         wait_for_terminal(&mut state, clip_id, mask_id);
         assert_eq!(
             state.visual_tracking_status(clip_id, mask_id).map(|status| status.phase),
-            Some(VisualTrackingPhase::Completed)
+            Some(VisualTrackingPhase::Completed),
+            "tracking status: {:?}",
+            state.visual_tracking_status(clip_id, mask_id)
         );
         let tracked = find_clip(state.active_sequence().expect("Sequence"), clip_id)
             .and_then(|clip| clip.mask(mask_id))

@@ -20,7 +20,11 @@ use mondrian_renderer::{
     TimelineTemporalPreparationError,
 };
 use mondrian_timeline::{clip::ClipContent, Clip, GradeGroup, GradeScope, Sequence, Track};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// Registration changes the process-wide effect revision. Keep the entire
+// prepare/evaluate and cache-reuse assertions isolated from that mutation.
+static EFFECT_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn tt(sequence: &Sequence, frame: i64) -> TimelineTime {
     TimelineTime::from_frame_position(FramePosition::new(frame, sequence.time_base()))
@@ -133,6 +137,7 @@ fn commercial_grade_hierarchy_sequence() -> Sequence {
 
 #[test]
 fn grade_hierarchy_enters_clip_plan_in_exact_order_and_timeline_grade_runs_once_last() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let sequence = commercial_grade_hierarchy_sequence();
     let program = prepare_stable(&sequence);
     let plan = evaluate_prepared_visual_program(
@@ -165,6 +170,7 @@ fn grade_hierarchy_enters_clip_plan_in_exact_order_and_timeline_grade_runs_once_
 
 #[test]
 fn preview_and_export_share_exact_clip_and_timeline_grade_graphs() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let sequence = commercial_grade_hierarchy_sequence();
     let program = prepare_stable(&sequence);
     let preview = evaluate_prepared_visual_program(
@@ -257,6 +263,7 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
 
 #[test]
 fn clip_program_reuse_invalidates_only_the_grade_definition_it_references() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let mut sequence = single_solid_sequence(None);
     let second = Clip::new_solid_color(
         AssetId::new(),
@@ -302,6 +309,7 @@ fn clip_program_reuse_invalidates_only_the_grade_definition_it_references() {
 
 #[test]
 fn timeline_grade_blocker_fails_preflight_and_active_frame_closed() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let mut sequence = single_solid_sequence(None);
     let timeline_grade = sequence.add_grade_definition("Unavailable Timeline Grade");
     append_grade_effect(
@@ -323,6 +331,7 @@ fn timeline_grade_blocker_fails_preflight_and_active_frame_closed() {
 
 #[test]
 fn temporal_timeline_grade_fails_closed_until_full_stack_history_is_admitted() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let effect_type = EffectType::Plugin("test.timeline.grade.temporal".to_owned());
     let offset = TimelineTime::new(1, 24).expect("temporal offset");
     register_effect_definition(
@@ -383,6 +392,7 @@ fn temporal_timeline_grade_fails_closed_until_full_stack_history_is_admitted() {
 
 #[test]
 fn empty_transparent_timeline_retains_explicit_grade_but_skips_pixel_execution() {
+    let _registry_guard = EFFECT_REGISTRY_TEST_LOCK.lock().expect("effect registry test lock");
     let mut sequence = Sequence::new("empty Timeline Grade");
     let timeline_grade = sequence.add_grade_definition("Timeline");
     append_grade_effect(

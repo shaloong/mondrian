@@ -3,7 +3,7 @@
 //! `ffmpeg-sys-next` generates bindings from the headers installed on the
 //! build machine, so enum constants introduced after the oldest supported
 //! FFmpeg (6.1) are absent there. Probe the concrete libavcodec version once
-//! and expose `mondrian_ffmpeg_7_1` for conditional references. An
+//! and expose `mondrian_ffmpeg_*` for conditional references. An
 //! undetectable version fails closed to the oldest supported surface.
 
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_0)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_1)");
+    println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_8_0)");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=FFMPEG_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
@@ -19,6 +20,10 @@ fn main() {
 
     match detect_libavcodec_version() {
         Some((major, minor)) => {
+            // FFmpeg 8 removes deprecated AVFrame scan-field mirrors.
+            if major >= 62 {
+                println!("cargo:rustc-cfg=mondrian_ffmpeg_8_0");
+            }
             // FFmpeg 7.0 ships libavcodec 61.3; 7.1 ships 61.19.
             if major > 61 || (major == 61 && minor >= 3) {
                 println!("cargo:rustc-cfg=mondrian_ffmpeg_7_0");

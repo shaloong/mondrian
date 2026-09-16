@@ -632,7 +632,14 @@ pub fn launch(plan: &LaunchPlan) -> Result<LaunchReport, LaunchError> {
         )
         .env("PATH", &root)
         .env(PIPE_ENV, pipe_name)
-        .creation_flags(0x0800_0000 | 4);
+        // CREATE_NO_WINDOW still creates a hidden console host, whose teardown
+        // can outlive the application and violate this Job's owner closure.
+        // This pipe-authenticated child needs no console. Detach it entirely,
+        // while retaining suspension until it has been assigned to the Job.
+        .creation_flags(
+            windows_sys::Win32::System::Threading::DETACHED_PROCESS
+                | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+        );
     command
         .env("TEMP", canonical(&std::env::temp_dir())?)
         .env("TMP", canonical(&std::env::temp_dir())?);

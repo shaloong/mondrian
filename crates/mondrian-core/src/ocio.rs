@@ -3895,7 +3895,20 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
     // scanline allocation. This is layout scheduling, not different color math.
     let mut scratch = [0.0_f32; 1024 * 4];
     let complete_len = data.len() / 4 * 4;
-    for chunk in data[..complete_len].chunks_mut(scratch.len()) {
+    let mut remaining = &mut data[..complete_len];
+    while !remaining.is_empty() {
+        // OCIO's LUT kernels select a scalar path for one pixel and a SIMD
+        // path for larger spans. Do not turn a bulk raster's final pixel into
+        // a singleton call: the two paths need not produce identical bits.
+        // Leave two pixels for the last tile, within the same 16 KiB bound.
+        // A genuinely one-pixel raster still uses OCIO's scalar semantics.
+        let chunk_len = if remaining.len() == scratch.len() + 4 {
+            scratch.len() - 4
+        } else {
+            remaining.len().min(scratch.len())
+        };
+        let (chunk, rest) = remaining.split_at_mut(chunk_len);
+        remaining = rest;
         let scratch = &mut scratch[..chunk.len()];
         for (source, target) in chunk.chunks_exact(4).zip(scratch.chunks_exact_mut(4)) {
             target[..3].copy_from_slice(&source[..3]);
