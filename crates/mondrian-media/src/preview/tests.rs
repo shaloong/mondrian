@@ -2841,7 +2841,10 @@ fn interlaced_decoded_frame_fails_before_native_or_cpu_materialization() {
     // SAFETY: the test owns this AVFrame exclusively and only sets FFmpeg's public scan flag.
     unsafe {
         (*decoded.as_mut_ptr()).flags |= ffmpeg::ffi::AV_FRAME_FLAG_INTERLACED;
-        (*decoded.as_mut_ptr()).interlaced_frame = 1;
+        #[cfg(not(mondrian_ffmpeg_8_0))]
+        {
+            (*decoded.as_mut_ptr()).interlaced_frame = 1;
+        }
     }
     let mut plan = PreviewHardwareDecodePlan::resolve(
         PreviewHardwareDecodeRequest::Auto,
