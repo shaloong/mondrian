@@ -31,6 +31,23 @@ enum RealtimeAudioOutputStream {
     },
 }
 
+/// Prove that the selected physical output can create and start the exact
+/// production stream contract, then close that same bounded owner.
+pub fn probe_realtime_audio_output_contract(
+    selection: &RealtimeAudioOutputDeviceSelection,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+) -> std::result::Result<RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure> {
+    let (output, handle, observer) =
+        RealtimeAudioOutput::try_new(selection, sample_rate, channel_layout)
+            .map_err(|error| error.into_open_failure(sample_rate, channel_layout))?;
+    let evidence = output.device_evidence.as_ref().clone();
+    drop(observer);
+    drop(handle);
+    drop(output);
+    Ok(evidence)
+}
+
 // Native timestamps name the first frame; callback counters name the end.
 fn callback_tail_playback_delay(
     first_frame_delay: Duration,

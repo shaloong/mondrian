@@ -3907,10 +3907,11 @@ working space.
 
 Physical endurance admission now calls
 `probe_realtime_audio_output_contract` to use the same exact device selection,
-sample rate, channel-layout and platform negotiation as the real Audio output
-owner. The probe creates no running stream and cannot prove later callback
-progress; stream-open/runtime evidence still belongs to the phase owner. A
-missing device or unsupported exact contract produces missing pre-start
+sample rate, channel-layout, platform negotiation and bounded stream owner as
+the real Audio output path. The probe must create and start that production
+stream, capture its concrete device evidence, and close it before admission
+returns; later callback progress still belongs to the phase owner. A missing
+device or unsupported exact stream contract produces missing pre-start
 capability and NotRun, while a later device loss is a startup/runtime failure.
 
 ### Qualified CLI capsule and native process closure

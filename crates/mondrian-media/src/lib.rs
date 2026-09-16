@@ -42,15 +42,17 @@ mod qualified_ffmpeg;
 mod resident_encode;
 pub mod waveform;
 
-pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
+pub use audio::{
+    probe_realtime_audio_output_contract, AudioBuffer, RealtimeAudioOutputControlError,
+    RealtimeAudioOutputSnapshot,
+};
 pub use audio_device::{
-    discover_realtime_audio_output_devices, probe_realtime_audio_output_contract,
-    RealtimeAudioCandidateCounts, RealtimeAudioChannelSemantics, RealtimeAudioOutputContract,
-    RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceDescriptor,
-    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceId,
-    RealtimeAudioOutputDeviceIdError, RealtimeAudioOutputDeviceSelection,
-    RealtimeAudioOutputDiscoveryFailure, RealtimeAudioOutputOpenFailure,
-    RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    discover_realtime_audio_output_devices, RealtimeAudioCandidateCounts,
+    RealtimeAudioChannelSemantics, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceCatalog,
+    RealtimeAudioOutputDeviceDescriptor, RealtimeAudioOutputDeviceEvidence,
+    RealtimeAudioOutputDeviceId, RealtimeAudioOutputDeviceIdError,
+    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputDiscoveryFailure,
+    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
 pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
