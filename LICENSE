@@ -1,3 +1,53 @@
+MONDRIAN — LICENSING / 许可说明
+
+Copyright (c) 2026 Shaloong. Other rightsholders retain their rights and notices.
+其他权利人保留其权利和声明。
+
+Except for separately licensed material, Mondrian is available under
+AGPL-3.0-or-later, with the Plugin Additional Permission where applicable,
+or under a separately negotiated commercial license covering rights the
+licensor is authorized to grant. Commercial use is permitted under the AGPL
+subject to its conditions. This notice does not itself grant a commercial
+license. Contact Shaloong: contact@shaloong.com.
+
+除另有许可声明的材料外，Mondrian 提供 AGPL-3.0-or-later 许可，适用时另附
+插件附加许可；也可在许可方有权授权的范围内另行协商商业许可。遵守 AGPL
+条款即可商用。本说明本身不授予商业许可。联系 Shaloong：contact@shaloong.com。
+
+Under LICENSES/PLUGIN-EXCEPTION.md, you may choose the license terms for
+independent extensions and whether to charge for them, including extensions
+that change or replace functionality. It does not exempt copied or adapted
+Mondrian implementation. Identified SDK and example code is additionally
+available under LICENSES/MIT-SDK.txt.
+
+依 LICENSES/PLUGIN-EXCEPTION.md，独立扩展可自主选择许可条款并决定是否收费，
+包括改变或替换功能的扩展；复制或改编的 Mondrian 实现不因此豁免。列明的 SDK 和示例代码另按
+LICENSES/MIT-SDK.txt 提供。
+
+The Licensor is 王晓亮 (WANG, XIAOLIANG), using Shaloong as a brand,
+not a separate legal entity. Other rightsholders retain their rights.
+Commercial licenses require an effective agreement with the Licensor or
+an authorized representative. Third-party components retain their own
+licenses and notices; neither commercial licensing nor the Plugin Additional
+Permission waives those terms or grants third-party patent or trademark rights.
+Distributions must satisfy the applicable third-party requirements, including
+required notices, license texts and source materials.
+
+许可方为使用 Shaloong 品牌的王晓亮（WANG, XIAOLIANG）；Shaloong 不是独立
+法律主体。其他权利人保留其权利。商业许可须与许可方或其授权代表订立有效协议。
+第三方组件保留各自许可和声明；商业许可及插件附加许可均不豁免其条款，
+也不授予第三方专利或商标权。发行时须履行适用的第三方义务，包括提供所需的
+声明、许可证及源码材料。
+
+This overview adds no open-source restrictions. Applicable licenses, file
+notices and effective agreements govern within their respective scope.
+本概览不增加开源许可限制；适用许可、文件声明和有效协议在各自范围内优先。
+
+The following GNU AGPL v3 text is unmodified and separate from this notice.
+以下为未经修改的 GNU AGPL 第3版原文，不含上述项目说明。
+
+----- BEGIN UNMODIFIED GNU AGPL v3 TEXT -----
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
