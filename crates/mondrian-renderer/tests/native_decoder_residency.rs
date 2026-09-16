@@ -1,5 +1,8 @@
 #![cfg(target_os = "windows")]
 
+#[path = "support/gpu_availability.rs"]
+mod gpu_availability;
+
 use mondrian_media::HwDeviceContextPool;
 use mondrian_renderer::{GpuContext, GpuNativeDecodedFrameImportMode, ViewerGpuExecutionRuntime};
 
@@ -8,7 +11,12 @@ mod retirement_support;
 
 #[test]
 fn dx12_renderer_publishes_one_installable_zero_copy_decoder_generation() {
-    let context = pollster::block_on(GpuContext::new()).expect("real GPU context");
+    if !gpu_availability::gpu_is_available(
+        "dx12_renderer_publishes_one_installable_zero_copy_decoder_generation",
+    ) {
+        return;
+    }
+    let context = pollster::block_on(GpuContext::new()).expect("available GPU must initialize");
     if context.adapter.get_info().backend != wgpu::Backend::Dx12 {
         eprintln!("skipped: selected adapter is not the Windows DX12 production backend");
         return;

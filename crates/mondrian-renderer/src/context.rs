@@ -140,14 +140,19 @@ impl Drop for TestGpuContextPermit {
     }
 }
 
-/// Optional wgpu features required to sample native NV12/P010 video textures.
+/// Optional wgpu features for native video textures and uploaded YUV planes.
 ///
 /// Only features advertised by the selected adapter are returned, so callers
 /// can add the result to `DeviceDescriptor::required_features` without turning
 /// an unsupported native-video format into device creation failure.
 pub fn native_video_texture_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    // Metal and compact CPU uploads use separate R16/RG16 planes without
+    // advertising the packed TEXTURE_FORMAT_P010 feature. Admit 16-bit plane
+    // sampling independently so those production paths retain 10/12-bit data.
     let mut required = adapter_features
-        & (wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
+        & (wgpu::Features::TEXTURE_FORMAT_NV12
+            | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+            | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF);
     let p010_requirements =
         wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
     if adapter_features.contains(p010_requirements) {
@@ -353,6 +358,14 @@ mod tests {
                 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
                 | wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF
         );
+    }
+
+    #[test]
+    fn sixteen_bit_planes_do_not_require_a_packed_p010_texture() {
+        let supported = wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        let requested = native_video_texture_device_features(supported);
+        assert!(requested.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM));
+        assert!(!requested.contains(wgpu::Features::TEXTURE_FORMAT_P010));
     }
 
     #[test]

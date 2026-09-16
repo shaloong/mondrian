@@ -1,21 +1,16 @@
 use super::*;
 
+#[path = "../../tests/support/gpu_availability.rs"]
+mod gpu_availability;
+
 #[test]
 fn retirement_drop_revokes_escaped_pool_lease_return() {
     use crate::{ColorFrameDescriptor, ColorFrameDomain, GpuColorFrameAllocationPlan, GpuContext};
     use std::time::Duration;
 
-    // Absence of an adapter is a host capability limit. Once an adapter is
-    // present, initialization and retirement errors remain real test failures.
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    if pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty() {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr(),
-            "SKIP retirement_drop_revokes_escaped_pool_lease_return: no GPU adapter exposed by this host");
+    if !gpu_availability::gpu_is_available("retirement_drop_revokes_escaped_pool_lease_return") {
         return;
     }
-    drop(instance);
     let context = pollster::block_on(GpuContext::new()).expect("available GPU must initialize");
     let runtime = ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
         .expect("Viewer runtime");
