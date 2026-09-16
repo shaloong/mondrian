@@ -32,7 +32,9 @@ fn assert_bits(actual: &[f32], expected: &[f32]) {
 }
 
 fn assert_bulk_parity(cpu: &CPUProcessor) {
-    for count in [0, 1, 3, 1023, 1024, 1025, 4095, 4096, 4097, 8192, 8205] {
+    for count in [
+        0, 1, 2, 3, 15, 16, 17, 1023, 1024, 1025, 1026, 2049, 4095, 4096, 4097, 8192, 8193, 8205,
+    ] {
         let input = fixture(count);
         let mut expected = input.clone();
         cpu.try_apply_rgb_pixels(&mut expected, count as i64, 4)
