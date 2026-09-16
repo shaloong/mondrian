@@ -185,7 +185,11 @@ jobs:
       - name: 安装 FFmpeg 与系统依赖 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg pkg-config dylibbundler
+          brew install ffmpeg@8 pkg-config dylibbundler
+          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ────────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)

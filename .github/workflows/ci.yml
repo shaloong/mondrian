@@ -180,7 +180,12 @@ jobs:
       # ── macOS ─────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config
+        run: |
+          brew install ffmpeg@8 pkg-config
+          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ───────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)
@@ -264,6 +269,13 @@ jobs:
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
 
+      # Distribution package retains Noto's OFL-1.1 notices; no font is vendored.
+      - name: Install and verify Linux title font
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
+          bash scripts/validation/verify-linux-title-font.sh
+
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
 
@@ -310,6 +322,12 @@ jobs:
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
+
+      # Distribution package retains Noto's OFL-1.1 notices; no font is vendored.
+      - name: Install and verify Linux title font
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
+          bash scripts/validation/verify-linux-title-font.sh
 
       - name: 运行完整 app 产品测试
         run: cargo test -p mondrian-app --all-targets
