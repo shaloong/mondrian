@@ -1,5 +1,10 @@
 # Media Pipeline
 
+Source builds use FFmpeg 6.1 through 8.x headers with the 8.x Rust bindings.
+Professional codec probe mapping uses the stable `AV_PROFILE_*` names rather
+than removed legacy aliases. CI native dependency and font provisioning are
+documented in [CI native dependencies](../dev/ci-native-dependencies.md).
+
 Preview worker resources may bind a lifecycle waker before the family is shared.
 The last logical native output releases its Session and family charges before
 waking the existing worker transport. Renderer clones share the original lease;

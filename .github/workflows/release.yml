@@ -185,7 +185,11 @@ jobs:
       - name: 安装 FFmpeg 与系统依赖 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg pkg-config dylibbundler
+          brew install ffmpeg@8 pkg-config dylibbundler
+          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
 
       # ── Windows ────────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)
@@ -391,6 +395,7 @@ jobs:
             Copy-Item -LiteralPath $source -Destination $stageDir -Force
           }
           Copy-Item -LiteralPath 'LICENSE' -Destination $stageDir -Force
+          Copy-Item -LiteralPath 'LICENSES' -Destination $stageDir -Recurse -Force
           Copy-Item -LiteralPath 'RELEASE_PROVENANCE.json' -Destination $stageDir -Force
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -version |
             Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8
@@ -428,6 +433,7 @@ jobs:
           cp -L "$(command -v ffmpeg)" "$stage_dir/ffmpeg"
           cp -L "$(command -v ffprobe)" "$stage_dir/ffprobe"
           cp LICENSE "$stage_dir/LICENSE"
+          cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
 
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
@@ -497,6 +503,7 @@ jobs:
           cp -L "$(command -v ffmpeg)" "$executable_dir/ffmpeg"
           cp -L "$(command -v ffprobe)" "$executable_dir/ffprobe"
           cp LICENSE "$stage_dir/LICENSE"
+          cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
           # One invocation is required: `-od` recreates the destination, so
           # invoking it once per executable would leave only the final tool's

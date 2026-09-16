@@ -55,7 +55,7 @@ fn cancellation_returns_while_native_startup_is_blocked_and_reaps_late_child() {
     assert_eq!(canceled, Some(true));
     assert_eq!(physical_while_blocked, 1);
     assert_eq!(evidence.child_processes_observed, 1);
-    assert_eq!(evidence.child_processes_terminated, 1);
+    assert_eq!(evidence.child_processes_terminated, 1, "{evidence:?}");
     assert!(evidence.all_resources_released(), "{evidence:?}");
     assert_eq!(decoder.session_permits.diagnostics().0, 0);
     assert_eq!(evidence.startup.workers_started, 1);
@@ -84,6 +84,7 @@ fn deadline_receipt_stays_dirty_after_late_native_startup_is_reaped() {
         ),
     );
     let lane = Arc::clone(&decoder.startup);
+    let late_decoder = Arc::clone(&decoder);
     let reading = Arc::clone(&decoder);
     let cache = crate::AudioSourceCache::with_decoder(48_000, 1, 1, 8192, 1, decoder);
     let reader = std::thread::spawn(move || {
@@ -101,6 +102,9 @@ fn deadline_receipt_stays_dirty_after_late_native_startup_is_reaped() {
     let read = reader.join();
     let receipt = cache.shutdown_until(Instant::now() + Duration::from_millis(20));
     let frozen = receipt;
+    // Hold native creation beyond the background worker's initial batch budget.
+    // Late owners still need real cleanup, but must not repair this frozen timeout.
+    std::thread::sleep(DECODER_SHUTDOWN_SLOT_WAIT + Duration::from_millis(10));
     let _ = release_tx.send(());
     let deadline = Instant::now() + Duration::from_secs(2);
     while !lane.join(None).all_resources_released() && Instant::now() < deadline {
@@ -112,6 +116,16 @@ fn deadline_receipt_stays_dirty_after_late_native_startup_is_reaped() {
         lane.join(None).all_resources_released(),
         "late startup really joined"
     );
+    let late_evidence = late_decoder.shutdown_sessions();
+    assert_eq!(
+        late_evidence.child_processes_observed, 1,
+        "{late_evidence:?}"
+    );
+    assert_eq!(
+        late_evidence.child_processes_terminated, 1,
+        "{late_evidence:?}"
+    );
+    assert!(late_evidence.all_resources_released(), "{late_evidence:?}");
     assert_eq!(receipt, frozen);
     assert_eq!(receipt.shutdown_coordinator_timeouts, 1);
     assert_eq!(receipt.shutdown_coordinator_detachments, 1);
@@ -177,7 +191,7 @@ fn queued_cancellation_never_starts_a_second_child_or_releases_inflight_capacity
     assert!(second_result.is_ok_and(|result| result.is_err()));
     assert_eq!(physical_before_release, 2);
     assert_eq!(evidence.child_processes_observed, 1);
-    assert_eq!(evidence.child_processes_terminated, 1);
+    assert_eq!(evidence.child_processes_terminated, 1, "{evidence:?}");
     assert_eq!(evidence.startup.requests_admitted, 2);
     assert_eq!(evidence.startup.requests_retired, 2);
     assert_eq!(evidence.startup.canceled_before_spawn, 1);
@@ -251,7 +265,7 @@ fn partial_native_result_is_transferred_to_actual_teardown() {
     let evidence = decoder.shutdown_sessions();
     assert!(result.is_err_and(|error| error.to_string().contains("did not expose stdout")));
     assert_eq!(evidence.child_processes_observed, 1);
-    assert_eq!(evidence.child_processes_terminated, 1);
+    assert_eq!(evidence.child_processes_terminated, 1, "{evidence:?}");
     assert_eq!(evidence.stdout_pump_threads_observed, 0);
     assert_eq!(evidence.startup.requests_claimed, 1);
     assert!(evidence.all_resources_released(), "{evidence:?}");
@@ -302,7 +316,7 @@ fn ready_unclaimed_completion_keeps_teardown_open_until_actual_retirement() {
     assert!(!queue_closed_early);
     assert_eq!(physical_before_drop, 1);
     assert_eq!(evidence.child_processes_observed, 1);
-    assert_eq!(evidence.child_processes_terminated, 1);
+    assert_eq!(evidence.child_processes_terminated, 1, "{evidence:?}");
     assert_eq!(evidence.startup.requests_retired, 1);
     assert!(evidence.all_resources_released(), "{evidence:?}");
 }
@@ -410,7 +424,7 @@ fn shutdown_retires_independent_owner(installed: bool) {
     assert!(entered && accepted);
     assert!(read.is_ok_and(|result| result.is_err()));
     assert_eq!(evidence.child_processes_observed, 2);
-    assert_eq!(evidence.child_processes_terminated, 2);
+    assert_eq!(evidence.child_processes_terminated, 2, "{evidence:?}");
     assert!(evidence.all_resources_released(), "{evidence:?}");
     assert_eq!(
         physical_while_startup_blocked, 1,

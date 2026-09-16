@@ -23,7 +23,7 @@ pub enum GraphicsProcessBootstrapError {
 /// Call this from process `main`, before threads, tracing, media workers, or
 /// graphics initialization. On Linux this reexecutes the running image once
 /// with the Vulkan loader's dynamic-library unloading disabled. It preserves
-/// PID, arguments (including non-Unicode argv[0]), environment, working directory
+/// PID, arguments (including non-Unicode `argv[0]`), environment, working directory
 /// and standard streams; it never mutates the current process environment or
 /// leaves a supervisor child behind. An explicit conflicting value fails closed.
 /// Other platforms do nothing.

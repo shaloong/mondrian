@@ -1,6 +1,6 @@
 # Mondrian
 
-[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later%20%2F%20Commercial-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
@@ -160,4 +160,6 @@ cargo test -p mondrian-renderer golden
 
 ## 📄 许可证
 
-本项目采用 **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** 协议。
+Mondrian 提供 **AGPL-3.0-or-later 开源许可**及另行协商的**商业许可**。独立插件和扩展可依[插件附加许可](LICENSES/PLUGIN-EXCEPTION.md)自主选择许可条款并决定是否收费，包括改变或替换 Mondrian 功能；复制或改编的 Mondrian 实现不因此豁免。
+
+完整条款见 [LICENSE](LICENSE)。商业许可仅覆盖有权授权的内容，不替代第三方许可。商业授权联系 **contact@shaloong.com**。

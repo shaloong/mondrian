@@ -1,5 +1,8 @@
 //! Real GPU + public decoder/runtime seam, independent of the large unit target.
 
+#[path = "support/gpu_availability.rs"]
+mod gpu_availability;
+
 use mondrian_core::{
     types::BlendMode, ColorEngine, ColorSpace, SourceSampleTarget, TimelineTime, WorkingColorSpace,
 };
@@ -100,7 +103,12 @@ fn finish(
 
 #[test]
 fn real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers() {
-    let context = pollster::block_on(GpuContext::new()).expect("real local GPU required");
+    if !gpu_availability::gpu_is_available(
+        "real_gpu_upload_retirement_observes_idle_pending_and_panicked_workers",
+    ) {
+        return;
+    }
+    let context = pollster::block_on(GpuContext::new()).expect("available GPU must initialize");
     let runtime = ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
         .expect("idle runtime");
     let mut idle = runtime.into_retirement();

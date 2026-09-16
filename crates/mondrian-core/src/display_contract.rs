@@ -96,8 +96,8 @@ impl std::fmt::Display for DisplayPlatform {
 /// Status of the OS monitor ICC profile for the current display.
 ///
 /// If the user requests device calibration through
-/// [`DisplayCalibrationPolicy::OsDefault`] or
-/// [`DisplayCalibrationPolicy::IccProfilePath`] and the profile cannot be
+/// [`crate::color_models::DisplayCalibrationPolicy::OsDefault`] or
+/// [`crate::color_models::DisplayCalibrationPolicy::IccProfilePath`] and the profile cannot be
 /// resolved, the contract **must not** silently fall back to Rec.709 / sRGB.
 /// Instead it records one of the failure statuses below and emits a
 /// `DisplayOutputBlocker::MonitorIccProfileUnsupported` or

@@ -63,8 +63,11 @@ Program Output frame. The public-Interface regression in
 compares pixels, alpha, stage evidence, and immutable input with the retained
 reference path, both with and without an actual monitor conversion.
 
-The Core CPU apply seam schedules the same OCIO processor over fixed 1,024-pixel
-packed tiles. One 16 KiB stack buffer replaces the whole-raster RGB scanline
+The Core CPU apply seam schedules the same OCIO processor over packed tiles of
+at most 1,024 pixels. A bulk raster never ends in a one-pixel call: the previous
+tile gives one pixel to the tail so that OCIO retains its bulk LUT kernel rather
+than switching to a numerically different scalar kernel. A one-pixel raster
+still uses the scalar path. One 16 KiB stack buffer replaces the whole-raster RGB scanline
 that the pinned OCIO bridge otherwise expands into three frame-sized temporary
 buffers. Each tile copies RGB into packed lanes, resets synthetic alpha to zero
 (the existing OCIO RGB ImageDesc convention), executes stock OCIO, and writes

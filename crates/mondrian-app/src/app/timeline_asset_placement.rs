@@ -180,9 +180,15 @@ mod tests {
             .save(&path)
             .expect("write actual PNG");
         let path = path.canonicalize().expect("canonical fixture");
-        let probe = mondrian_media::probe_media_info(&path).expect("probe actual PNG");
-        assert!(probe.duration.is_zero());
-        assert!(probe.primary_video().is_some());
+        let mut probe = mondrian_media::probe_media_info(&path).expect("probe actual PNG");
+        assert_eq!(
+            probe.primary_video().and_then(|video| video.total_frames),
+            Some(1)
+        );
+        // Demuxers may report a nominal one-frame duration for a still. This
+        // placement regression specifically exercises an admitted zero-duration
+        // snapshot, independent of that FFmpeg-version-dependent estimate.
+        probe.duration = std::time::Duration::ZERO;
         let fingerprint = mondrian_media::MediaFileFingerprint::capture(&path);
         let candidate = mondrian_assets::AssetMediaProbeCandidate::new(path, fingerprint, probe)
             .expect("admitted picture probe");

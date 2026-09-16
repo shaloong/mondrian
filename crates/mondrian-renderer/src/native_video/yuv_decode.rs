@@ -1406,6 +1406,27 @@ mod tests {
                 wgpu::TextureFormat::Rg16Unorm,
             ),
         ] {
+            if bytes == 2 {
+                let supported =
+                    context.adapter.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+                if !policy
+                    .admit_capability(
+                        "native-yuv-buffer-parity",
+                        "16-bit normalized planes",
+                        supported,
+                    )
+                    .expect("16-bit plane admission")
+                {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr(),
+                        "SKIP native-yuv-buffer-parity P010: adapter lacks TEXTURE_FORMAT_16BIT_NORM");
+                    continue;
+                }
+                assert!(
+                    context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+                    "supported 16-bit planes must be enabled on the production device"
+                );
+            }
             let row = 32usize;
             let offset = row * 3 + 16;
             let mut storage = vec![0xa5u8; offset + row * 2];
