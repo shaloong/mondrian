@@ -1374,6 +1374,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         &machine_plan_path,
         serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version":2,"plan_id":"test-machine-plan",
+            "timeouts":{"startup_ms":120_000},
             "exports":exports,
             "verifier_tools": {
                 "preloader": {"path":temporary.path().join("synthetic-launcher.exe"),"sha256":SHA},

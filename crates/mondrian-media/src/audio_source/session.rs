@@ -1023,14 +1023,14 @@ fn run_decoder_teardown_worker(
     shutdown_signal.register_worker();
     let mut evidence = AudioWindowDecoderShutdownEvidence::default();
     let mut initial_sweep_pending = true;
-    let mut shutdown_deadline = None;
     loop {
         let owners = queue.wait_for_work(shutdown_signal, startup, initial_sweep_pending);
-        let deadline = if shutdown_signal.is_requested() {
-            *shutdown_deadline.get_or_insert_with(|| Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT)
-        } else {
-            Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT
-        };
+        // This background owner can receive a child after native startup has
+        // outlived the caller's deadline. Give each received batch one bounded
+        // retirement budget; waiting for a producer must not consume it. The
+        // outer shutdown coordinator independently freezes the caller's receipt
+        // at its original deadline, even when late cleanup subsequently succeeds.
+        let deadline = Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT;
         let retired = terminate_teardown_owners_until(owners, deadline);
         if teardown_retirement_failed(retired) {
             teardown_faulted.store(true, Ordering::Release);

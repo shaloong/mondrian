@@ -191,7 +191,7 @@ jobs:
       - name: 缓存 vcpkg (Windows)
         if: runner.os == 'Windows'
         id: vcpkg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             C:\vcpkg\downloads
@@ -268,6 +268,19 @@ jobs:
           pkg-config --modversion libavdevice
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
+
+      # Preserve successfully installed native dependencies even if a later
+      # product test fails. Never cache a partial/failed installation.
+      - name: Save installed vcpkg runtime (Windows)
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            C:\vcpkg\downloads
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+            C:\vcpkg\triplets\community
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       # Distribution package retains Noto's OFL-1.1 notices; no font is vendored.
       - name: Install and verify Linux title font

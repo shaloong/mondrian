@@ -1335,7 +1335,14 @@ mod tests {
             .expect_err("closed child stdin must fail");
         let detail = error.to_string();
 
-        assert!(detail.contains("exit status: 17"), "{detail}");
+        // ExitStatus uses a platform-specific Display label; the retained
+        // numeric exit code and stderr must agree on every platform.
+        let expected_status = if cfg!(windows) {
+            "exit code: 17"
+        } else {
+            "exit status: 17"
+        };
+        assert!(detail.contains(expected_status), "{detail}");
         assert!(detail.contains("fatal encoder detail"), "{detail}");
     }
 
