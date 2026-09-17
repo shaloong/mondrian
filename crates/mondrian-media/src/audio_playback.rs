@@ -3114,6 +3114,13 @@ mod tests {
             device_id: crate::RealtimeAudioOutputDeviceId::new("test:test-output")
                 .expect("test device identity"),
             selection: crate::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            access_policy: crate::RealtimeAudioOutputAccessPolicy::Shared,
+            share_mode: crate::RealtimeAudioOutputShareMode::Shared,
+            exclusive_fallback_reason: None,
+            stream_container_bits: None,
+            stream_valid_bits: None,
+            buffer_frames: None,
+            period_100ns: None,
             was_system_default: true,
             device_name: Some("test-output".to_owned()),
             device_name_error: None,

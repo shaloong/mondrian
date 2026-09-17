@@ -48,11 +48,12 @@ pub use audio::{
 };
 pub use audio_device::{
     discover_realtime_audio_output_devices, RealtimeAudioCandidateCounts,
-    RealtimeAudioChannelSemantics, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceCatalog,
-    RealtimeAudioOutputDeviceDescriptor, RealtimeAudioOutputDeviceEvidence,
-    RealtimeAudioOutputDeviceId, RealtimeAudioOutputDeviceIdError,
-    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputDiscoveryFailure,
-    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    RealtimeAudioChannelSemantics, RealtimeAudioOutputAccessPolicy, RealtimeAudioOutputContract,
+    RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceDescriptor,
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceId,
+    RealtimeAudioOutputDeviceIdError, RealtimeAudioOutputDeviceSelection,
+    RealtimeAudioOutputDiscoveryFailure, RealtimeAudioOutputOpenFailure,
+    RealtimeAudioOutputOpenFailureCode, RealtimeAudioOutputShareMode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
 pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
