@@ -635,6 +635,11 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read_write> counts: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
+const LOCAL_SLOT_COUNT: u32 = 128u;
+const LOCAL_PROBE_COUNT: u32 = 16u;
+var<workgroup> local_keys: array<atomic<u32>, 128>;
+var<workgroup> local_counts: array<atomic<u32>, 128>;
+
 fn signal_bin(value: f32) -> u32 {
     return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
 }
@@ -699,7 +704,27 @@ fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
 
 const INVALID_KEY: u32 = 0xffffffffu;
 
-fn add_grouped(keys: array<u32, 4>) {
+fn add_local(key: u32, occurrences: u32) {
+    var slot = (key * 2654435761u) & (LOCAL_SLOT_COUNT - 1u);
+    for (var probe = 0u; probe < LOCAL_PROBE_COUNT; probe += 1u) {
+        let observed = atomicLoad(&local_keys[slot]);
+        if observed == key {
+            atomicAdd(&local_counts[slot], occurrences);
+            return;
+        }
+        if observed == INVALID_KEY {
+            let exchange = atomicCompareExchangeWeak(&local_keys[slot], INVALID_KEY, key);
+            if exchange.exchanged || exchange.old_value == key {
+                atomicAdd(&local_counts[slot], occurrences);
+                return;
+            }
+        }
+        slot = (slot + 1u) & (LOCAL_SLOT_COUNT - 1u);
+    }
+    atomicAdd(&counts[key], occurrences);
+}
+
+fn add_grouped_local(keys: array<u32, 4>) {
     for (var i = 0u; i < 4u; i += 1u) {
         let key = keys[i];
         if key == INVALID_KEY {
@@ -720,16 +745,22 @@ fn add_grouped(keys: array<u32, 4>) {
                 occurrences += 1u;
             }
         }
-        atomicAdd(&counts[key], occurrences);
+        add_local(key, occurrences);
     }
 }
 
 @compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let first_x = gid.x * 4u;
-    if first_x >= uniforms.input_width || gid.y >= uniforms.input_height {
-        return;
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    for (var slot = local_index; slot < LOCAL_SLOT_COUNT; slot += 256u) {
+        atomicStore(&local_keys[slot], INVALID_KEY);
+        atomicStore(&local_counts[slot], 0u);
     }
+    workgroupBarrier();
+    let first_x = gid.x * 4u;
+    let active_row = first_x < uniforms.input_width && gid.y < uniforms.input_height;
     var red_histogram: array<u32, 4>;
     var green_histogram: array<u32, 4>;
     var blue_histogram: array<u32, 4>;
@@ -759,7 +790,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let plane = uniforms.waveform_width * uniforms.bins;
     for (var i = 0u; i < 4u; i += 1u) {
         let x = first_x + i;
-        if x >= uniforms.input_width {
+        if !active_row || x >= uniforms.input_width {
             continue;
         }
         let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
@@ -797,18 +828,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         blue_excursion[i] = select(INVALID_KEY, select(5u, 4u, rgb.b < 0.0), rgb.b < 0.0 || rgb.b > 1.0);
         luma_excursion[i] = select(INVALID_KEY, select(7u, 6u, y < 0.0), y < 0.0 || y > 1.0);
     }
-    add_grouped(red_histogram);
-    add_grouped(green_histogram);
-    add_grouped(blue_histogram);
-    add_grouped(luma_histogram);
-    add_grouped(waveform_red_or_luma);
-    add_grouped(waveform_green);
-    add_grouped(waveform_blue);
-    add_grouped(vectorscope);
-    add_grouped(red_excursion);
-    add_grouped(green_excursion);
-    add_grouped(blue_excursion);
-    add_grouped(luma_excursion);
+    add_grouped_local(red_histogram);
+    add_grouped_local(green_histogram);
+    add_grouped_local(blue_histogram);
+    add_grouped_local(luma_histogram);
+    add_grouped_local(waveform_red_or_luma);
+    add_grouped_local(waveform_green);
+    add_grouped_local(waveform_blue);
+    add_grouped_local(vectorscope);
+    add_grouped_local(red_excursion);
+    add_grouped_local(green_excursion);
+    add_grouped_local(blue_excursion);
+    add_grouped_local(luma_excursion);
+    workgroupBarrier();
+    for (var slot = local_index; slot < LOCAL_SLOT_COUNT; slot += 256u) {
+        let occurrences = atomicLoad(&local_counts[slot]);
+        if occurrences != 0u {
+            atomicAdd(&counts[atomicLoad(&local_keys[slot])], occurrences);
+        }
+    }
 }
 "#;
 
@@ -1055,6 +1093,129 @@ mod tests {
         assert_eq!(runtime.diagnostics().frames_recorded, 2);
     }
 
+    #[tokio::test]
+    async fn workgroup_hash_overflow_preserves_exact_high_entropy_counts() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU scopes test: no adapter available");
+            return;
+        };
+        const WIDTH: u32 = 256;
+        const HEIGHT: u32 = 4;
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                pixels.extend_from_slice(&[
+                    x as u8,
+                    (x.wrapping_mul(73) + y.wrapping_mul(41)) as u8,
+                    (x.wrapping_mul(151) + y.wrapping_mul(97)) as u8,
+                    255,
+                ]);
+            }
+        }
+        let input = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("program-scopes-overflow-test-input"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 4),
+                rows_per_image: Some(HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        let request =
+            GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::RgbParade, 256, WIDTH)
+                .expect("high-entropy scope request");
+        let mut runtime = GpuProgramScopesRuntime::default();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("program-scopes-overflow-test-encoder"),
+        });
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &input.create_view(&wgpu::TextureViewDescriptor::default()),
+                WIDTH,
+                HEIGHT,
+                request,
+            )
+            .expect("record high-entropy GPU scopes");
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("program-scopes-overflow-test-readback"),
+            size: record.buffer_layout.byte_size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(
+            record.counts(),
+            0,
+            &readback,
+            0,
+            record.buffer_layout.byte_size(),
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let bytes = map_test_readback(&context.device, &readback);
+        let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+        let cpu = compute_program_color_scopes_rgba8_with_scale(
+            &pixels,
+            WIDTH,
+            HEIGHT,
+            ColorSpace::Rec709,
+            WaveformMode::RgbParade,
+            ProgramScopeScale::Ire,
+            256,
+        )
+        .expect("CPU high-entropy scopes reference");
+
+        assert_eq!(&actual[..8], &[0; 8]);
+        let histogram = record.buffer_layout.histogram_offset as usize;
+        assert_eq!(&actual[histogram..histogram + 256], cpu.histogram.red);
+        assert_eq!(
+            &actual[histogram + 256..histogram + 512],
+            cpu.histogram.green
+        );
+        assert_eq!(
+            &actual[histogram + 512..histogram + 768],
+            cpu.histogram.blue
+        );
+        assert_eq!(
+            &actual[histogram + 768..histogram + 1024],
+            cpu.histogram.luma
+        );
+        let waveform = record.buffer_layout.waveform_offset as usize;
+        let vectorscope = record.buffer_layout.vectorscope_offset as usize;
+        assert_eq!(&actual[waveform..vectorscope], cpu.waveform.values);
+        let mut expected_vectorscope = vec![0_u32; 64 * 64];
+        for sample in cpu.vectorscope {
+            let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+            let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+            expected_vectorscope[y * 64 + x] = sample.weight;
+        }
+        assert_eq!(&actual[vectorscope..], expected_vectorscope);
+    }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
         let Ok(context) = GpuContext::new().await else {
