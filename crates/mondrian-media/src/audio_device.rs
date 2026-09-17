@@ -677,7 +677,13 @@ fn prove_channel_semantics(
 ) -> Result<RealtimeAudioChannelSemantics, &'static str> {
     match channel_layout {
         AudioChannelLayout::Mono => Ok(RealtimeAudioChannelSemantics::MonoConvention),
-        AudioChannelLayout::Stereo => Ok(RealtimeAudioChannelSemantics::StereoConvention),
+        AudioChannelLayout::Stereo => {
+            #[cfg(target_os = "windows")]
+            if host_id == cpal::HostId::Wasapi {
+                return Ok(RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask);
+            }
+            Ok(RealtimeAudioChannelSemantics::StereoConvention)
+        }
         AudioChannelLayout::Discrete(_) => Ok(RealtimeAudioChannelSemantics::OrdinalDiscrete),
         AudioChannelLayout::Speakers(_) => named_speaker_semantics(channel_layout, host_id),
     }
@@ -912,6 +918,16 @@ mod tests {
             error.code,
             RealtimeAudioOutputOpenFailureCode::SampleFormatUnsupported
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wasapi_stereo_uses_the_explicit_windows_speaker_mask_adapter() {
+        assert_eq!(
+            prove_channel_semantics(AudioChannelLayout::Stereo, cpal::HostId::Wasapi),
+            Ok(RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask)
+        );
+        assert_eq!(windows_speaker_mask(AudioChannelLayout::Stereo), Some(0x3));
     }
 
     #[cfg(target_os = "windows")]
