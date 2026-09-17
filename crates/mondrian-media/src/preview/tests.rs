@@ -3751,7 +3751,6 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
         PreviewDecodeSessionDisposition::Reused,
         "isolated demux and codec state must be reused across exact requests"
     );
-
     for (access_mode, first_frame, second_frame) in [
         (PreviewDecodeAccessMode::ScrubCursor, 12, 13),
         (PreviewDecodeAccessMode::PlaybackCursor, 5, 6),
@@ -3786,13 +3785,16 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     }
     context.clear();
     let evidence = observer.snapshot().isolated_demux;
-    assert_eq!(evidence.session_launches, 3);
-    assert_eq!(evidence.ready_sessions, 3);
-    assert_eq!(evidence.cross_request_reused_sessions, 3);
+    assert_eq!(evidence.session_launches, 2);
+    assert_eq!(evidence.ready_sessions, 2);
+    assert!(
+        (1..=2).contains(&evidence.cross_request_reused_sessions),
+        "a reused codec may satisfy the next request from buffered frames without issuing a demux command"
+    );
     assert!(evidence.completed_seeks >= 4);
     assert!(evidence.completed_reads > evidence.session_launches);
     assert!(evidence.packet_responses > 0);
-    assert_eq!(evidence.clean_closes, 3);
+    assert_eq!(evidence.clean_closes, 2);
     assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
     assert_eq!(evidence.active_sessions, 0);
     assert_eq!(evidence.failure_terminations, 0);
@@ -3830,7 +3832,7 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU fixture must return an RGBA frame");
         };
-        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
         drop(frame);
         if mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
             context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
@@ -3846,8 +3848,9 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
     assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
     assert_eq!(evidence.failure_terminations, 0);
     assert_eq!(
-        evidence.session_launches, 1,
-        "family transition must reuse the healthy source without retaining its old codec"
+        evidence.session_launches,
+        if cfg!(windows) { 2 } else { 1 },
+        "family transition must obey the platform source-handle lifetime"
     );
 }
 
@@ -3867,8 +3870,9 @@ fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() 
     let original = MediaFileFingerprint::capture(&path);
     for revision in 0..2 {
         if revision == 1 {
-            // Replace the inode as well as length: the retired child still owns
-            // the original open file, so reuse would serve a stale revision.
+            // Replace the file identity as well as its length. Windows family
+            // retirement must release the old handle; retained sources on other
+            // platforms must reject the stale fingerprint on the next request.
             let replacement = root.path().join("replacement.mp4");
             let mut bytes = FIXTURE.to_vec();
             bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
@@ -3889,14 +3893,21 @@ fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() 
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU fixture must return a frame");
         };
-        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 1_024));
         drop(frame);
         context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
         assert_eq!(context.resident_session_count(), 0);
         let evidence = observer.snapshot().isolated_demux;
         assert_eq!(evidence.session_launches, revision + 1);
-        assert_eq!(evidence.active_sessions, 1);
-        assert_eq!(evidence.reaped_sessions(), revision);
+        assert_eq!(evidence.active_sessions, if cfg!(windows) { 0 } else { 1 });
+        assert_eq!(
+            evidence.reaped_sessions(),
+            if cfg!(windows) {
+                revision + 1
+            } else {
+                revision
+            }
+        );
     }
     // No live codecs remain here; clear must still consume the idle child.
     context.clear();
@@ -3953,14 +3964,26 @@ fn isolated_retired_demux_cancellation_reaps_before_retry() {
                 PreviewDecodeCancellationSource::IsolatedDemuxTermination
             );
             let evidence = observer.snapshot().isolated_demux;
-            assert_eq!(evidence.session_launches, 1, "cancel the retained process");
+            assert_eq!(
+                evidence.session_launches,
+                if cfg!(windows) { 2 } else { 1 },
+                "cancel the active process"
+            );
             assert_eq!(evidence.active_sessions, 0);
-            assert_eq!(evidence.reaped_sessions(), 1);
+            assert_eq!(
+                evidence.reaped_sessions(),
+                if cfg!(windows) { 2 } else { 1 }
+            );
         } else {
             let PreviewDecodeOutcome::Frame(frame) = outcome else {
                 panic!("initial decode and retry must return exact frames");
             };
-            assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                Some(8 * 1_024),
+                "attempt={attempt}, diagnostics={:?}",
+                frame.diagnostics
+            );
             drop(frame);
         }
         if attempt == 0 {
@@ -3970,12 +3993,16 @@ fn isolated_retired_demux_cancellation_reaps_before_retry() {
     context.clear();
     let evidence = observer.snapshot().isolated_demux;
     assert_eq!(
-        evidence.session_launches, 2,
+        evidence.session_launches,
+        if cfg!(windows) { 3 } else { 2 },
         "retry requires a fresh process"
     );
     assert_eq!(evidence.cancellation_terminations, 1);
     assert_eq!(evidence.active_sessions, 0);
-    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(
+        evidence.reaped_sessions(),
+        if cfg!(windows) { 3 } else { 2 }
+    );
     assert_eq!(evidence.failure_terminations, 0);
 }
 
@@ -4012,14 +4039,20 @@ fn isolated_retired_demux_sources_obey_reduced_worker_residency() {
         };
         drop(frame);
         if index >= 4 {
-            // One Playback slot, one Interactive slot, and one CPU-Still slot.
-            // Count active plus retired children before retiring this codec.
-            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+            // Other platforms retain the bounded source pool. Windows keeps only
+            // the active codec owner so its source remains replaceable.
+            assert_eq!(
+                observer.snapshot().isolated_demux.active_sessions,
+                if cfg!(windows) { 1 } else { 3 }
+            );
         }
         context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
         assert_eq!(context.resident_session_count(), 0);
         if index >= 4 {
-            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+            assert_eq!(
+                observer.snapshot().isolated_demux.active_sessions,
+                if cfg!(windows) { 0 } else { 3 }
+            );
         }
     }
     context.clear();

@@ -416,8 +416,9 @@ impl PreviewDecodeSessionContext {
     /// A shared App worker may own a cold Playback source and interactive
     /// Sessions at different times. Family transitions therefore retire the
     /// obsolete codecs rather than destroying unrelated source locality. Healthy
-    /// isolated packet sources may remain within the existing source-slot budget;
-    /// full clearing consumes those sources and their child processes.
+    /// isolated packet sources may remain within the existing source-slot budget on
+    /// platforms whose file I/O permits replacement of an open source. Windows
+    /// closes them here so family retirement also releases the source file handle.
     /// Immutable device roots retain only the pool's existing idle allowance;
     /// full context clearing and explicit pressure trimming release those roots.
     pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
@@ -425,10 +426,16 @@ impl PreviewDecodeSessionContext {
         if !self.sessions.family_is_empty(family) {
             self.execution_observer
                 .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-            self.sessions.clear_family(
-                family,
-                self.resources.session_residency_config().source_capacity(),
-            );
+            // FFmpeg's default Windows file I/O does not grant delete sharing.
+            // Retaining an idle demux child would therefore prevent proxy rebuilds
+            // and atomic source replacement after the codec family is retired.
+            // Other platforms keep the bounded source-locality optimization.
+            let source_capacity = if cfg!(windows) {
+                0
+            } else {
+                self.resources.session_residency_config().source_capacity()
+            };
+            self.sessions.clear_family(family, source_capacity);
             self.execution_observer.finish_idle();
         }
     }

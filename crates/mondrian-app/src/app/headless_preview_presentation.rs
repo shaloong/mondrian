@@ -1514,12 +1514,14 @@ mod tests {
         let before = preview.diagnostics().resource_decision_applications;
 
         let viewer = advance_headless_execution_resource_policy(&preview, &state);
+        let repeated = advance_headless_execution_resource_policy(&preview, &state);
 
         assert_eq!(
             preview.diagnostics().resource_decision_applications,
-            before + 1,
+            before + 2,
             "every Headless candidate turn must apply the complete Preview projection"
         );
+        assert_eq!(repeated, viewer);
         assert_eq!(
             viewer,
             state.execution_resource_decision().preview.viewer_gpu,

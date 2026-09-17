@@ -25,6 +25,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         PreviewDiagnostics {
             work_callbacks: self.work_watch.callback_evidence(),
             resource_decision_applications: self.metrics.resource_decision_applications.get(),
+            resource_decision_reconfigurations: self
+                .metrics
+                .resource_decision_reconfigurations
+                .get(),
             visual_program_cache: self.visual_programs.borrow().diagnostics(),
             future_media_window: self.future_media_window.borrow().diagnostics(),
             visual_execution_health_failed: self.visual_execution_health_failed.get(),

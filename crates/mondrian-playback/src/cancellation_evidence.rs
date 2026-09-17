@@ -205,7 +205,10 @@ impl Default for FrameCancellationPolicy {
         Self {
             max_request_to_logical_cancellation: Duration::from_millis(5),
             max_playback_logical_cancellation_to_return: Duration::from_millis(50),
-            max_interactive_logical_cancellation_to_return: Duration::from_millis(50),
+            // Interactive cancellation includes bounded retirement of an isolated
+            // Windows demux process. Keep it within the 100 ms immediate-response
+            // envelope while preserving the stricter Playback deadline below.
+            max_interactive_logical_cancellation_to_return: Duration::from_millis(100),
             max_still_logical_cancellation_to_return: Duration::from_millis(500),
         }
     }
@@ -392,7 +395,7 @@ mod tests {
         let gate =
             evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default());
         assert!(!gate.passed);
-        assert_eq!(gate.failures.len(), 2);
+        assert_eq!(gate.failures.len(), 1);
         assert_eq!(gate.failures[0].work_class, FrameWorkClass::Playback);
         assert_eq!(
             gate.failures[0].kind,
@@ -400,13 +403,6 @@ mod tests {
         );
         assert_eq!(gate.failures[0].observed, 50_001);
         assert_eq!(gate.failures[0].limit, 50_000);
-        assert_eq!(gate.failures[1].work_class, FrameWorkClass::Interactive);
-        assert_eq!(
-            gate.failures[1].kind,
-            FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
-        );
-        assert_eq!(gate.failures[1].observed, 50_001);
-        assert_eq!(gate.failures[1].limit, 50_000);
     }
 
     #[test]
@@ -424,18 +420,27 @@ mod tests {
             evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default())
         };
 
-        for work_class in [FrameWorkClass::Playback, FrameWorkClass::Interactive] {
-            assert!(evaluate(work_class, Duration::from_millis(50)).passed);
-            let exceeded = evaluate(work_class, Duration::from_micros(50_001));
-            assert!(!exceeded.passed);
-            assert!(exceeded.failures.iter().any(|failure| {
-                failure.work_class == work_class
-                    && failure.kind
-                        == FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
-                    && failure.observed == 50_001
-                    && failure.limit == 50_000
-            }));
-        }
+        assert!(evaluate(FrameWorkClass::Playback, Duration::from_millis(50)).passed);
+        let exceeded = evaluate(FrameWorkClass::Playback, Duration::from_micros(50_001));
+        assert!(!exceeded.passed);
+        assert!(exceeded.failures.iter().any(|failure| {
+            failure.work_class == FrameWorkClass::Playback
+                && failure.kind
+                    == FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+                && failure.observed == 50_001
+                && failure.limit == 50_000
+        }));
+
+        assert!(evaluate(FrameWorkClass::Interactive, Duration::from_millis(100)).passed);
+        let exceeded = evaluate(FrameWorkClass::Interactive, Duration::from_micros(100_001));
+        assert!(!exceeded.passed);
+        assert!(exceeded.failures.iter().any(|failure| {
+            failure.work_class == FrameWorkClass::Interactive
+                && failure.kind
+                    == FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
+                && failure.observed == 100_001
+                && failure.limit == 100_000
+        }));
 
         assert!(evaluate(FrameWorkClass::Still, Duration::from_millis(500)).passed);
         let exceeded = evaluate(FrameWorkClass::Still, Duration::from_micros(500_001));

@@ -1016,9 +1016,10 @@ fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner(
         shared_owner.session_residency_config().max_interactive_sessions_per_worker(),
         decision.preview.frame_store.current_media_working_set_resource_unit_limit
     );
+    let diagnostics = runtime.diagnostics();
+    assert_eq!(diagnostics.resource_decision_applications, 2);
     assert_eq!(
-        runtime.diagnostics().resource_decision_applications,
-        1,
+        diagnostics.resource_decision_reconfigurations, 1,
         "an equal immutable policy must not reconfigure Preview twice"
     );
 }
@@ -8112,29 +8113,29 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Interactive,
             mondrian_playback::FrameCancellationCause::Superseded,
-            90_000,
+            140_000,
             Some(20_000),
             Some(1_000),
         ),
         decode_canceled_jobs: 1,
         decode_canceled_obsolete_jobs: 1,
         decode_canceled_scrub_cursor_jobs: 1,
-        decode_canceled_total_duration_us: 90_000,
-        decode_canceled_max_duration_us: 90_000,
-        decode_canceled_last_duration_us: 90_000,
-        decode_canceled_return_latency_total_us: 70_000,
-        decode_canceled_return_latency_max_us: 70_000,
-        decode_canceled_return_latency_last_us: 70_000,
+        decode_canceled_total_duration_us: 140_000,
+        decode_canceled_max_duration_us: 140_000,
+        decode_canceled_last_duration_us: 140_000,
+        decode_canceled_return_latency_total_us: 120_000,
+        decode_canceled_return_latency_max_us: 120_000,
+        decode_canceled_return_latency_last_us: 120_000,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             scrub_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
-                canceled_total_duration_us: 90_000,
-                canceled_max_duration_us: 90_000,
-                canceled_last_duration_us: 90_000,
-                canceled_return_latency_total_us: 70_000,
-                canceled_return_latency_max_us: 70_000,
-                canceled_return_latency_last_us: 70_000,
+                canceled_total_duration_us: 140_000,
+                canceled_max_duration_us: 140_000,
+                canceled_last_duration_us: 140_000,
+                canceled_return_latency_total_us: 120_000,
+                canceled_return_latency_max_us: 120_000,
+                canceled_return_latency_last_us: 120_000,
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -8152,8 +8153,8 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_interactive_cancel_return_latency_max_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
-            && check.observed == 70_000
-            && check.limit == Some(50_000)
+            && check.observed == 120_000
+            && check.limit == Some(100_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_cancellation_gate_failed"
