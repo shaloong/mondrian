@@ -651,8 +651,12 @@ impl RealtimeAudioOutput {
         (Self, RealtimeAudioOutputHandle, RealtimeAudioOutputObserver),
         RealtimeAudioOutputCreateError,
     > {
-        let mut prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
-        let mut contract = prepared.evidence.contract;
+        let prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
+        #[cfg(target_os = "windows")]
+        let mut prepared = prepared;
+        let contract = prepared.evidence.contract;
+        #[cfg(target_os = "windows")]
+        let mut contract = contract;
         let channels = contract.channels();
 
         let queue_capacity = usize::try_from(sample_rate)
