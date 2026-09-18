@@ -635,10 +635,6 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read_write> counts: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
-const LOCAL_SLOT_COUNT: u32 = 128u;
-const LOCAL_PROBE_COUNT: u32 = 16u;
-var<workgroup> local_keys: array<atomic<u32>, 128>;
-var<workgroup> local_counts: array<atomic<u32>, 128>;
 
 fn signal_bin(value: f32) -> u32 {
     return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
@@ -704,27 +700,7 @@ fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
 
 const INVALID_KEY: u32 = 0xffffffffu;
 
-fn add_local(key: u32, occurrences: u32) {
-    var slot = (key * 2654435761u) & (LOCAL_SLOT_COUNT - 1u);
-    for (var probe = 0u; probe < LOCAL_PROBE_COUNT; probe += 1u) {
-        let observed = atomicLoad(&local_keys[slot]);
-        if observed == key {
-            atomicAdd(&local_counts[slot], occurrences);
-            return;
-        }
-        if observed == INVALID_KEY {
-            let exchange = atomicCompareExchangeWeak(&local_keys[slot], INVALID_KEY, key);
-            if exchange.exchanged || exchange.old_value == key {
-                atomicAdd(&local_counts[slot], occurrences);
-                return;
-            }
-        }
-        slot = (slot + 1u) & (LOCAL_SLOT_COUNT - 1u);
-    }
-    atomicAdd(&counts[key], occurrences);
-}
-
-fn add_grouped_local(keys: array<u32, 4>) {
+fn add_grouped_global(keys: array<u32, 4>) {
     for (var i = 0u; i < 4u; i += 1u) {
         let key = keys[i];
         if key == INVALID_KEY {
@@ -745,20 +721,12 @@ fn add_grouped_local(keys: array<u32, 4>) {
                 occurrences += 1u;
             }
         }
-        add_local(key, occurrences);
+        atomicAdd(&counts[key], occurrences);
     }
 }
 
 @compute @workgroup_size(16, 16, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_index) local_index: u32,
-) {
-    for (var slot = local_index; slot < LOCAL_SLOT_COUNT; slot += 256u) {
-        atomicStore(&local_keys[slot], INVALID_KEY);
-        atomicStore(&local_counts[slot], 0u);
-    }
-    workgroupBarrier();
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let first_x = gid.x * 4u;
     let active_row = first_x < uniforms.input_width && gid.y < uniforms.input_height;
     var red_histogram: array<u32, 4>;
@@ -828,25 +796,18 @@ fn main(
         blue_excursion[i] = select(INVALID_KEY, select(5u, 4u, rgb.b < 0.0), rgb.b < 0.0 || rgb.b > 1.0);
         luma_excursion[i] = select(INVALID_KEY, select(7u, 6u, y < 0.0), y < 0.0 || y > 1.0);
     }
-    add_grouped_local(red_histogram);
-    add_grouped_local(green_histogram);
-    add_grouped_local(blue_histogram);
-    add_grouped_local(luma_histogram);
-    add_grouped_local(waveform_red_or_luma);
-    add_grouped_local(waveform_green);
-    add_grouped_local(waveform_blue);
-    add_grouped_local(vectorscope);
-    add_grouped_local(red_excursion);
-    add_grouped_local(green_excursion);
-    add_grouped_local(blue_excursion);
-    add_grouped_local(luma_excursion);
-    workgroupBarrier();
-    for (var slot = local_index; slot < LOCAL_SLOT_COUNT; slot += 256u) {
-        let occurrences = atomicLoad(&local_counts[slot]);
-        if occurrences != 0u {
-            atomicAdd(&counts[atomicLoad(&local_keys[slot])], occurrences);
-        }
-    }
+    add_grouped_global(red_histogram);
+    add_grouped_global(green_histogram);
+    add_grouped_global(blue_histogram);
+    add_grouped_global(luma_histogram);
+    add_grouped_global(waveform_red_or_luma);
+    add_grouped_global(waveform_green);
+    add_grouped_global(waveform_blue);
+    add_grouped_global(vectorscope);
+    add_grouped_global(red_excursion);
+    add_grouped_global(green_excursion);
+    add_grouped_global(blue_excursion);
+    add_grouped_global(luma_excursion);
 }
 "#;
 
@@ -1094,7 +1055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workgroup_hash_overflow_preserves_exact_high_entropy_counts() {
+    async fn grouped_global_atomics_preserve_exact_high_entropy_counts() {
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping GPU scopes test: no adapter available");
             return;
@@ -1113,7 +1074,7 @@ mod tests {
             }
         }
         let input = context.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("program-scopes-overflow-test-input"),
+            label: Some("program-scopes-high-entropy-test-input"),
             size: wgpu::Extent3d {
                 width: WIDTH,
                 height: HEIGHT,
@@ -1150,7 +1111,7 @@ mod tests {
                 .expect("high-entropy scope request");
         let mut runtime = GpuProgramScopesRuntime::default();
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("program-scopes-overflow-test-encoder"),
+            label: Some("program-scopes-high-entropy-test-encoder"),
         });
         let record = runtime
             .record(
