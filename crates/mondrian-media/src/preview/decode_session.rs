@@ -1095,6 +1095,20 @@ pub(super) fn select_decoded_temporal_candidate(
     }
 }
 
+pub(super) fn duration_only_selection_is_unconfirmed(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+    allow_unconfirmed_terminal_duration: bool,
+) -> bool {
+    access_mode != PreviewDecodeAccessMode::ScrubCursor
+        && !allow_unconfirmed_terminal_duration
+        && after.is_none()
+        && before
+            .is_some_and(|extent| requested_pts > extent.start_pts && extent.covers(requested_pts))
+}
+
 pub(super) fn decoded_temporal_candidate_within_selection_distance(
     selected_extent: DecodedTemporalExtent,
     requested_pts: i64,
@@ -2680,7 +2694,8 @@ impl PreviewDecodeSession {
                                   target_height: u32,
                                   path: &Path,
                                   before: Option<&RetainedDecodedCandidate>,
-                                  after: Option<&RetainedDecodedCandidate>|
+                                  after: Option<&RetainedDecodedCandidate>,
+                                  allow_unconfirmed_terminal_duration: bool|
          -> Result<
             Option<(
                 DecodedTemporalExtent,
@@ -2693,6 +2708,15 @@ impl PreviewDecodeSession {
             }
             let before_extent = before.map(|candidate| candidate.extent);
             let after_extent = after.map(|candidate| candidate.extent);
+            if duration_only_selection_is_unconfirmed(
+                target_pts,
+                policy.access_mode,
+                before_extent,
+                after_extent,
+                allow_unconfirmed_terminal_duration,
+            ) {
+                return Ok(None);
+            }
             let Some((candidate, selected_extent)) = select_decoded_temporal_candidate(
                 target_pts,
                 policy.access_mode,
@@ -2759,6 +2783,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )?
             else {
                 return Err(MondrianError::DecodeFailed {
@@ -2819,6 +2844,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            false,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -2948,6 +2974,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )? {
                 if should_cancel() {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -3028,6 +3055,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            true,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));

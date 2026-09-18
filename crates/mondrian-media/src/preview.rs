@@ -1685,7 +1685,7 @@ use decode_session::{
 };
 #[cfg(test)]
 use decode_session::{
-    decoded_temporal_candidate_within_selection_distance,
+    decoded_temporal_candidate_within_selection_distance, duration_only_selection_is_unconfirmed,
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     select_decoded_temporal_candidate, DecodedTemporalCandidate,
 };

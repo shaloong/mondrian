@@ -4,7 +4,7 @@ use super::{
     convert_decoded_to_rgba, decode_preview_frame_cancellable,
     decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
     decoded_temporal_candidate_within_selection_distance, decoded_video_sampling_from_frame,
-    default_decoder_threads_for_access_mode, duration_us,
+    default_decoder_threads_for_access_mode, duration_only_selection_is_unconfirmed, duration_us,
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
@@ -316,6 +316,53 @@ fn positive_frame_duration_is_mode_independent_without_a_successor() {
         assert_eq!(selected.1, frame_extent);
         assert!(!temporal_selection_is_approximate(150, Some(selected.1)));
     }
+}
+
+#[test]
+fn exact_decode_waits_for_a_successor_before_trusting_intermediate_frame_duration() {
+    let declared = DecodedTemporalExtent::from_duration(100, 100);
+    let successor = DecodedTemporalExtent::from_duration(140, 20);
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        assert!(duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            None,
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            100,
+            access_mode,
+            Some(declared),
+            None,
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            Some(successor),
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            None,
+            true,
+        ));
+    }
+    assert!(!duration_only_selection_is_unconfirmed(
+        150,
+        PreviewDecodeAccessMode::ScrubCursor,
+        Some(declared),
+        None,
+        false,
+    ));
 }
 
 #[test]
