@@ -1010,8 +1010,7 @@ fn validate_cache_pressure_policy_transition(
     pressure: &EnduranceCachePressureObservation,
     recovered: &EnduranceCachePressureObservation,
 ) -> Result<(), String> {
-    if before.pressure != ExecutionResourcePressure::Nominal
-        || pressure.pressure != ExecutionResourcePressure::Critical
+    if pressure.pressure != ExecutionResourcePressure::Critical
         || pressure.trim != ResourceTrimRequest::Aggressive
         || recovered.pressure != ExecutionResourcePressure::Nominal
         || recovered.trim != ResourceTrimRequest::None
@@ -1401,12 +1400,18 @@ mod tests {
         assert!(validate_cache_pressure_policy_transition(&before, &pressure, &recovered).is_ok());
         let mut elevated_before = before.clone();
         elevated_before.pressure = ExecutionResourcePressure::Elevated;
-        let diagnostic =
+        elevated_before.trim = ResourceTrimRequest::Speculative;
+        assert!(
             validate_cache_pressure_policy_transition(&elevated_before, &pressure, &recovered)
-                .expect_err("an already pressured baseline must remain a failure");
-        assert!(diagnostic.contains("before=(pressure=Elevated"));
-        assert!(diagnostic.contains("critical=(pressure=Critical"));
-        assert!(diagnostic.contains("recovered=(pressure=Nominal"));
+                .is_ok(),
+            "an adaptive baseline must not invalidate an explicit Critical-to-Nominal recovery"
+        );
+
+        let mut noncritical = pressure.clone();
+        noncritical.pressure = ExecutionResourcePressure::Elevated;
+        assert!(
+            validate_cache_pressure_policy_transition(&before, &noncritical, &recovered).is_err()
+        );
         assert!(
             validate_cache_pressure_terminal_health(&before, &recovered, &after_exact_picture)
                 .is_ok()
