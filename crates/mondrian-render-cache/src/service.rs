@@ -258,7 +258,12 @@ impl TimelineRenderCacheService {
     ) -> Result<Self, std::io::Error> {
         let capacity = config.queue_capacity;
         let (command_tx, command_rx) = mpsc::sync_channel(capacity);
-        let (result_tx, result_rx) = mpsc::sync_channel(capacity);
+        // The command bound covers work waiting behind the worker. One more
+        // command can be executing concurrently, so every admitted operation
+        // needs a terminal-result slot even when the consumer has not polled
+        // between completions.
+        let result_capacity = capacity.saturating_add(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(result_capacity);
         let pending = Arc::new(Mutex::new(HashSet::new()));
         let diagnostics = Arc::new(SharedDiagnostics::default());
         let worker_pending = Arc::clone(&pending);
@@ -693,6 +698,44 @@ mod tests {
             TimelineRenderCacheSubmission::AlreadyPending
         );
         let _ = wait_result(&service);
+    }
+
+    #[test]
+    fn result_queue_holds_active_operation_plus_all_queued_operations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service = service(temp.path().to_path_buf());
+        let identities = [
+            TimelineRenderCacheIdentity::from_digest([1; 32]),
+            TimelineRenderCacheIdentity::from_digest([2; 32]),
+            TimelineRenderCacheIdentity::from_digest([3; 32]),
+        ];
+
+        for identity in identities {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match service.lookup(identity, WorkingColorSpace::LinearRec709) {
+                    TimelineRenderCacheSubmission::Scheduled => break,
+                    TimelineRenderCacheSubmission::Busy => {
+                        assert!(Instant::now() < deadline, "cache admission timed out");
+                        std::thread::yield_now();
+                    }
+                    outcome => panic!("unexpected cache admission outcome: {outcome:?}"),
+                }
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while service.diagnostics().misses < identities.len() as u64 {
+            assert!(Instant::now() < deadline, "cache completion timed out");
+            std::thread::yield_now();
+        }
+        assert_eq!(service.diagnostics().dropped_results, 0);
+        for _ in identities {
+            assert!(matches!(
+                wait_result(&service),
+                TimelineRenderCacheResult::Lookup { result: TimelineRenderCacheLookup::Miss, .. }
+            ));
+        }
     }
 
     #[test]

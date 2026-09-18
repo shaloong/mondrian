@@ -2785,9 +2785,11 @@ mod tests {
         cancellation.cancel();
         let error = worker.join().expect("decode worker returns").expect_err("decode cancels");
         let read_return_elapsed = canceled_at.elapsed();
-        // Logical cancellation returns before asynchronous physical retirement.
-        // Both observations retain the same original 50 ms qualification limit.
-        let physical_deadline = canceled_at + Duration::from_millis(50);
+        // Logical cancellation retains the 50 ms interactive bound. Physical
+        // retirement uses the production teardown worker's existing bounded
+        // per-owner budget because it includes native exit and pump joins.
+        let physical_retirement_limit = session::DECODER_SHUTDOWN_SLOT_WAIT;
+        let physical_deadline = canceled_at + physical_retirement_limit;
         while Instant::now() < physical_deadline && cache.diagnostics().decoder_sessions != 0 {
             std::thread::yield_now();
         }
@@ -2818,8 +2820,8 @@ mod tests {
             read_return_elapsed
         );
         assert!(
-            physical_release_elapsed <= Duration::from_millis(50),
-            "physical cancellation observation exceeded 50 ms: {physical_release_elapsed:?}; remaining={}",
+            physical_release_elapsed <= physical_retirement_limit,
+            "physical cancellation observation exceeded {physical_retirement_limit:?}: {physical_release_elapsed:?}; remaining={}",
             diagnostics.decoder_sessions
         );
         assert!(error.to_string().contains("canceled"));

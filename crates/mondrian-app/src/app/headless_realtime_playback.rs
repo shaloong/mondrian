@@ -1742,23 +1742,15 @@ impl HeadlessRealtimePlaybackSession {
                 );
             }
             if !sample.current_gpu_ready
-                && headless_recovery_may_finish_without_ready(
+                && let Some(resolved_sample) = resolved_headless_terminal_sample(
                     require_audio,
                     target_intent,
                     sampled_intent,
+                    self.preview.has_retained_gpu_output(),
+                    driver.candidate_status,
                 )
             {
-                let output_published = self.preview.has_retained_gpu_output();
-                return Ok((
-                    HeadlessPreviewSample {
-                        current_gpu_ready: output_published,
-                        stale_output_available: output_published,
-                        unavailable: driver.candidate_status
-                            == HeadlessGpuCandidateStatus::Unavailable,
-                    },
-                    original_picture_proven,
-                    deadline,
-                ));
+                return Ok((resolved_sample, original_picture_proven, deadline));
             }
             // Consuming a demand can precede callback reconciliation. It is
             // neither a Ready proof nor a failure proof. AV recovery keeps
@@ -1998,6 +1990,22 @@ fn headless_recovery_may_finish_without_ready(
     current: HeadlessGpuCandidateIntent,
 ) -> bool {
     !require_audio && headless_demand_resolved_without_ready(target, current)
+}
+
+fn resolved_headless_terminal_sample(
+    require_audio: bool,
+    target: HeadlessGpuCandidateIntent,
+    current: HeadlessGpuCandidateIntent,
+    retained_output_available: bool,
+    terminal_status: HeadlessGpuCandidateStatus,
+) -> Option<HeadlessPreviewSample> {
+    headless_recovery_may_finish_without_ready(require_audio, target, current).then_some(
+        HeadlessPreviewSample {
+            current_gpu_ready: retained_output_available,
+            stale_output_available: retained_output_available,
+            unavailable: terminal_status == HeadlessGpuCandidateStatus::Unavailable,
+        },
+    )
 }
 
 fn dropped_picture_recovery_deadline(
@@ -2274,45 +2282,66 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                     driver.reset_candidate_reconciliation();
                     continue;
                 }
+                let resolved_intent = HeadlessGpuCandidateIntent::from_state(state);
                 anyhow::ensure!(
-                    !matches!(
-                        driver.candidate_status,
-                        HeadlessGpuCandidateStatus::DroppedLate
-                            | HeadlessGpuCandidateStatus::Unavailable
-                    ),
-                    "Headless realtime pre-clock picture was terminally rejected: {}",
-                    headless_recovery_diagnostics(
-                        driver,
-                        preview_service,
-                        gpu_adapter,
-                        state,
-                        sampled_intent,
+                    resolved_intent.epoch == sampled_intent.epoch
+                        && resolved_intent.frame == sampled_intent.frame,
+                    "Headless realtime terminal delivery changed the pre-clock picture coordinate"
+                );
+                if let Some(resolved_sample) = resolved_headless_terminal_sample(
+                    pump_audio,
+                    sampled_intent,
+                    resolved_intent,
+                    preview_service.has_retained_gpu_output(),
+                    driver.candidate_status,
+                ) {
+                    // The exact video demand reached a terminal delivery after
+                    // its one bounded retry. Preserve the physical stale picture
+                    // and let the acceptance report count this dropped interval;
+                    // it is not a Ready presentation. Audio-qualified playback
+                    // must still hold the clock until an exact picture resolves.
+                    presented_sample = Some(resolved_sample);
+                } else {
+                    anyhow::ensure!(
+                        !matches!(
+                            driver.candidate_status,
+                            HeadlessGpuCandidateStatus::DroppedLate
+                                | HeadlessGpuCandidateStatus::Unavailable
+                        ),
+                        "Headless realtime pre-clock picture was terminally rejected: {}",
+                        headless_recovery_diagnostics(
+                            driver,
+                            preview_service,
+                            gpu_adapter,
+                            state,
+                            sampled_intent,
+                            safety_deadline_instant,
+                        )
+                    );
+                    let wait_observed_at = Instant::now();
+                    anyhow::ensure!(
+                        wait_observed_at < safety_deadline_instant,
+                        "Headless realtime pre-clock picture exceeded its safety deadline: {}",
+                        headless_recovery_diagnostics(
+                            driver,
+                            preview_service,
+                            gpu_adapter,
+                            state,
+                            sampled_intent,
+                            safety_deadline_instant,
+                        )
+                    );
+                    let wait_started = Instant::now();
+                    wait_for_headless_preview_revision(
+                        &work_watch,
+                        drain_target_revision,
                         safety_deadline_instant,
-                    )
-                );
-                let wait_observed_at = Instant::now();
-                anyhow::ensure!(
-                    wait_observed_at < safety_deadline_instant,
-                    "Headless realtime pre-clock picture exceeded its safety deadline: {}",
-                    headless_recovery_diagnostics(
-                        driver,
-                        preview_service,
-                        gpu_adapter,
-                        state,
-                        sampled_intent,
-                        safety_deadline_instant,
-                    )
-                );
-                let wait_started = Instant::now();
-                wait_for_headless_preview_revision(
-                    &work_watch,
-                    drain_target_revision,
-                    safety_deadline_instant,
-                    pump_outcome.needs_follow_up_poll
-                        && !driver.candidate_status.requires_bounded_wait(),
-                );
-                interval_timing.wait.observe(wait_started.elapsed());
-                continue;
+                        pump_outcome.needs_follow_up_poll
+                            && !driver.candidate_status.requires_bounded_wait(),
+                    );
+                    interval_timing.wait.observe(wait_started.elapsed());
+                    continue;
+                }
             }
         }
         // Maintain the same bounded successor/lookahead owner before the
@@ -3014,6 +3043,53 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_only_terminal_demand_records_retained_stale_without_fabricating_ready() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(9);
+        let target = HeadlessGpuCandidateIntent::from_state(&state);
+        let current = HeadlessGpuCandidateIntent { pending_demand: None, ..target };
+
+        let sample = resolved_headless_terminal_sample(
+            false,
+            target,
+            current,
+            true,
+            HeadlessGpuCandidateStatus::DroppedLate,
+        )
+        .expect("resolved video demand may complete as an observed stale interval");
+        assert_eq!(
+            sample,
+            HeadlessPreviewSample {
+                current_gpu_ready: true,
+                stale_output_available: true,
+                unavailable: false,
+            }
+        );
+        assert!(
+            resolved_headless_terminal_sample(
+                true,
+                target,
+                current,
+                true,
+                HeadlessGpuCandidateStatus::DroppedLate,
+            )
+            .is_none(),
+            "audio-qualified playback must not advance without exact picture readiness"
+        );
+        assert!(
+            resolved_headless_terminal_sample(
+                false,
+                target,
+                target,
+                true,
+                HeadlessGpuCandidateStatus::DroppedLate,
+            )
+            .is_none(),
+            "an unresolved exact demand must retain its bounded presentation opportunity"
+        );
+    }
+
     #[test]
     fn dropped_picture_recovery_has_one_short_nonrenewable_deadline() {
         let observed_at = Instant::now();

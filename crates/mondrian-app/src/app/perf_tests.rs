@@ -39,6 +39,7 @@ use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
     HeadlessViewerGpuOutput,
 };
+use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
 use crate::app::preview_runtime::{
     build_preview_color_health_report, build_preview_decode_performance_report,
@@ -75,7 +76,7 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -85,7 +86,8 @@ use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_media::AudioPlaybackSnapshot;
 use mondrian_media::{
     probe_media_info, MediaInfo, PreviewDecodeAccessMode, PreviewDecodeExecutionStage,
-    PreviewDecodeStageDurations, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
+    PreviewDecodeStageDurations, PreviewHardwareDecodeRequest, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
 use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
@@ -4425,6 +4427,16 @@ fn run_preview_media_resolution_scale_decode_stability_probe(
                 &root_dir.join("resolution-scale-render-cache"),
             )?;
             configure_headless_gpu_decode_admission(preview_service, gpu_adapter)?;
+            // This probe measures reusable CPU-addressable decoded-frame
+            // residency. Native decoder surfaces are deliberately retired
+            // after a settled still frame so they cannot pin the hardware
+            // decoder pool. Keep the qualified renderer/device observation,
+            // but select Auto decode so real GPU composition still consumes
+            // the reusable CPU representation.
+            let mut decode_admission =
+                resolve_playback_hardware_decode_admission(&gpu_adapter.native_import_support());
+            decode_admission.request = PreviewHardwareDecodeRequest::Auto;
+            preview_service.set_playback_hardware_decode_admission(decode_admission);
             let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
             let sequence_id = state
                 .active_sequence_id()
@@ -7388,29 +7400,65 @@ fn run_headless_cancellation_recovery_probe(
     let superseded_target_frame = frame_count.saturating_mul(3).saturating_div(4);
     let recovery_target_frame = frame_count.saturating_div(4);
 
+    // Observe the short FFmpeg calls concurrently with candidate submission. On
+    // Windows, sleeping even for a nominal 50 us can resume after an entire
+    // local demux request has completed. The execution watch is explicitly
+    // detached from Runtime ownership so qualification can sample it from a
+    // separate thread without changing production scheduling.
+    let execution_watch = preview_service.decode_execution_watch();
+    let (stage_tx, stage_rx) = mpsc::sync_channel(1);
+    let (observer_ready_tx, observer_ready_rx) = mpsc::sync_channel(0);
+    let stage_observer = thread::spawn(move || {
+        let deadline = Instant::now() + timeout;
+        observer_ready_tx
+            .send(())
+            .map_err(|_| "cancellation probe stopped before observer startup".to_owned())?;
+        let mut polls = 0_u32;
+        loop {
+            let snapshot = execution_watch.snapshot();
+            let progress = interactive_decode_progress(snapshot).ok_or_else(|| {
+                "Interactive Preview worker disappeared during cancellation probe".to_owned()
+            })?;
+            let active_demux_call = progress.request_sequence > worker_before.request_sequence
+                && progress.isolated_demux.active_sessions > 0
+                && matches!(
+                    progress.stage,
+                    PreviewDecodeExecutionStage::Seek | PreviewDecodeExecutionStage::PacketRead
+                );
+            if active_demux_call {
+                return stage_tx
+                    .send(Ok(progress.stage))
+                    .map_err(|_| "cancellation probe stopped before stage publication".to_owned());
+            }
+            if Instant::now() >= deadline {
+                let _ = stage_tx.send(Err(format!(
+                    "timed out observing a real isolated-demux Seek/PacketRead before supersession; progress={progress:?}"
+                )));
+                return Ok(());
+            }
+            polls = polls.wrapping_add(1);
+            if polls % 1024 == 0 {
+                thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    });
+
+    observer_ready_rx
+        .recv_timeout(timeout)
+        .context("isolated-demux stage observer did not start before its deadline")?;
     state.seek_with_source(superseded_target_frame as i64, TimelineSeekSource::Settled)?;
     let _ =
         preview_service.gpu_preview_frame(state.preview_frame_execution_request(Instant::now()));
-    let stage_deadline = Instant::now() + timeout;
-    let stage_before_supersession = loop {
-        let snapshot = preview_service.decode_execution_watch().snapshot();
-        let progress = interactive_decode_progress(snapshot)
-            .context("Interactive Preview worker disappeared during cancellation probe")?;
-        let active_demux_call = progress.request_sequence > worker_before.request_sequence
-            && progress.isolated_demux.active_sessions > 0
-            && matches!(
-                progress.stage,
-                PreviewDecodeExecutionStage::Seek | PreviewDecodeExecutionStage::PacketRead
-            );
-        if active_demux_call {
-            break progress.stage;
-        }
-        anyhow::ensure!(
-            Instant::now() < stage_deadline,
-            "timed out observing a real isolated-demux Seek/PacketRead before supersession; progress={progress:?}"
-        );
-        thread::sleep(Duration::from_micros(50));
-    };
+    let stage_before_supersession = stage_rx
+        .recv_timeout(timeout)
+        .context("isolated-demux stage observer did not publish before its deadline")?
+        .map_err(anyhow::Error::msg)?;
+    stage_observer
+        .join()
+        .map_err(|_| anyhow::anyhow!("isolated-demux stage observer panicked"))?
+        .map_err(anyhow::Error::msg)?;
 
     state.seek_with_source(recovery_target_frame as i64, TimelineSeekSource::Settled)?;
     // Recovery must enter through the production Presentation Coordinator.
@@ -8444,9 +8492,13 @@ fn generate_preview_media_fixture_with_size(
         ))
         .arg("-an")
         .arg("-c:v")
-        .arg("mpeg4")
-        .arg("-q:v")
-        .arg("5")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("ultrafast")
+        .arg("-crf")
+        .arg("18")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
         .arg("-color_range")
         .arg("tv")
         .arg("-colorspace")
