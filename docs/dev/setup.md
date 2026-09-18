@@ -22,10 +22,13 @@ Mondrian depends on:
 - OCIO runtime support through `ocio-rs`
 
 On Windows, install a toolchain capable of building native Rust crates and use
-`vcpkg install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows"
+`vcpkg install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows"
 --recurse --overlay-ports=vcpkg-overlay`. This is the product profile: `zlib`
 closes PNG/OpenEXR decode, `ffmpeg`/`ffprobe` provide supervised CLI adapters,
-and the explicit encoder features match Export's current software backends.
+the explicit encoder features match Export's current software backends, and
+`nvcodec` enables dynamically loaded NVENC/NVDEC support when a compatible
+NVIDIA driver is present. It does not require the CUDA SDK or replace the
+primary Windows D3D12 decode/render path.
 Release verification also requires the resulting CLI runtime to expose DNxHR
 LB/SQ/HQ/HQX/444 with `yuv422p10le`/`gbrp10le`, libx264's
 `avcintra-class` with `yuv422p10le`, and the `rawvideo`, `v210`, and `r210`
