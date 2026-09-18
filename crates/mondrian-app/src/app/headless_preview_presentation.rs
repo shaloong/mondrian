@@ -632,7 +632,12 @@ pub(crate) fn prepare_headless_preview_successor(
         .unwrap_or_else(|| preview.gpu_preview_frame(request));
     let candidate_elapsed = successor_started.elapsed();
     match candidate {
-        PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
+        PreviewGpuFrameState::Prepared => {
+            if publish_preroll_readiness {
+                observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
+            }
+            Ok(Some(playback_intent))
+        }
         PreviewGpuFrameState::Ready(frame) => {
             ensure!(
                 frame.is_successor_preparation() && frame.presentation_ticket().is_none(),

@@ -338,6 +338,43 @@ fn viewer_gpu_failure_executes_bounded_cpu_fallback_off_thread() {
 }
 
 #[test]
+fn cached_cpu_fallback_successor_reports_semantic_preparation() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    state.play().expect("start playback fixture");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.request_viewer_cpu_fallback("test speculative CPU preparation");
+
+    let request = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing fixture has an immediate successor");
+    assert!(matches!(
+        runtime.gpu_preview_frame(request),
+        PreviewGpuFrameState::Loading
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let poll = runtime.pump_cpu_fallback_results();
+        if poll.visible_change {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "speculative CPU fallback worker did not complete"
+        );
+        std::thread::yield_now();
+    }
+
+    let request = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing fixture retains its immediate successor");
+    assert!(matches!(
+        runtime.gpu_preview_frame(request),
+        PreviewGpuFrameState::Prepared
+    ));
+}
+
+#[test]
 fn cpu_fallback_rejects_non_default_display_policy_instead_of_showing_srgb() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     state.set_viewer_display_management(

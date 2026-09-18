@@ -480,7 +480,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         preserve_current_output: bool,
     ) -> PreviewGpuFrameState {
         if self.frame_store.borrow_mut().viewer_frame(&resolved.cpu_cache_key).is_some() {
-            return PreviewGpuFrameState::Loading;
+            return if preserve_current_output {
+                PreviewGpuFrameState::Prepared
+            } else {
+                PreviewGpuFrameState::Loading
+            };
         }
         if self
             .cpu_fallback_failure
