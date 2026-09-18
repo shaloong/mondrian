@@ -2241,7 +2241,7 @@ fn prepare_initial_window_candidate(
             .map_err(|error| format!("could not create startup Device/Queue: {error}"))?;
         *last_stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         host.observe_viewer_gpu_device_local_bytes(
             mondrian_renderer::query_gpu_device_memory_capacity(&device)
                 .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes),
@@ -2424,7 +2424,7 @@ fn reopen_window_surface_and_device(
         let (next_device, next_queue) =
             request_app_ui_device(adapter).map_err(|error| error.to_string())?;
         *stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         host.observe_viewer_gpu_device_local_bytes(
             mondrian_renderer::query_gpu_device_memory_capacity(&next_device)
                 .map(mondrian_renderer::GpuDeviceMemoryCapacity::device_local_bytes),

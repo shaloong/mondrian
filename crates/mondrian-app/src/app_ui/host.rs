@@ -545,7 +545,7 @@ impl AppUiHost {
 
     /// Publish immutable capacity from the exact Window Viewer GPU generation
     /// through the App's single execution-resource authority.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn observe_viewer_gpu_device_local_bytes(&self, device_local_bytes: Option<u64>) {
         self.app_state
             .borrow()

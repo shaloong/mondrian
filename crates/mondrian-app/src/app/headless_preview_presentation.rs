@@ -584,9 +584,9 @@ pub(crate) fn apply_headless_gpu_resource_facts(
     state: &AppState,
     gpu: &mut HeadlessViewerGpuAdapter,
 ) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let decision = state.observe_viewer_gpu_device_local_bytes(gpu.device_local_memory_bytes());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let decision = state.execution_resource_decision();
     preview.apply_resource_decision(&decision.preview);
     if !gpu.has_submission_in_flight() {

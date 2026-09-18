@@ -32,16 +32,17 @@ use super::windows_d3d12_texture::{
     D3D12NativeTextureError, D3D12TransitionCommands, WGPU_RESOURCE_STATE,
 };
 use crate::{
-    ColorFrameResidency, GpuColorFrameIdAllocationError, GpuColorFrameResource,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
-    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent,
-    GpuNativeYuvDecodePlan, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
-    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
-    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
-    RenderColorTransformGpuOptions, RenderGpuInputStageRuntimeRecordError,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameIdAllocationError,
+    GpuColorFrameResource, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
+    GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, RenderColorTransformGpuOptions,
+    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
 };
 
 /// Error creating the Windows same-device native decoded-frame backend.
@@ -535,10 +536,13 @@ impl D3D12NativeVideoImportBackend {
 
         let completed = unsafe { self.completion_fence.GetCompletedValue() };
         if completed == u64::MAX {
+            let removed_reason = unsafe { self.raw_device.GetDeviceRemovedReason() };
             self.pending_sources.clear();
             return Err(GpuNativeDecodedFrameImportError::NativeDeviceRemoved {
-                reason: "same-device native import completion fence reported device removal"
-                    .to_owned(),
+                reason: format!(
+                    "same-device native import completion fence reported device removal; \
+                     ID3D12Device::GetDeviceRemovedReason={removed_reason:?}"
+                ),
             });
         }
         let before = self.pending_sources.len();
@@ -604,10 +608,11 @@ impl D3D12NativeVideoImportBackend {
             &yuv_plan,
             GpuNativeYuvPlaneViews { luma: &luma, chroma: &chroma, chroma_v: &chroma },
         );
-        let (_, encoded_payload) =
-            GpuNativeYuvDecoder::allocate_output(&self.device, &yuv_plan).into_parts();
-        let encoded_resource =
-            GpuColorFrameResource::new(plan.encoded_source_frame.clone(), encoded_payload);
+        let resource_pool = self.color_runtime.resource_pool();
+        let encoded_resource = resource_pool.acquire(
+            &self.device,
+            &GpuColorFrameAllocationPlan::for_handle(plan.encoded_source_frame.clone()),
+        );
         let mut acquire_commands =
             D3D12TransitionCommands::new(&self.raw_device).map_err(native_texture_error)?;
         let mut release_commands =
@@ -709,42 +714,57 @@ impl D3D12NativeVideoImportBackend {
                 .frame_table_mut()
                 .remove(plan.working_frame.id())
                 .ok_or_else(|| "OCIO input stage did not retain its working output".to_owned())?;
-            self.color_runtime
+            let encoded = self
+                .color_runtime
                 .frame_table_mut()
                 .remove(plan.encoded_source_frame.id())
                 .ok_or_else(|| "OCIO input stage lost its encoded source".to_owned())?;
             Ok((
                 working,
+                encoded,
                 yuv_record_us,
                 color_stage_us,
                 elapsed_us(extract_started),
             ))
         })();
 
-        let (working, yuv_record_us, color_stage_us, resource_extract_us) = match record_result {
-            Ok(result) => result,
-            Err(reason) => {
-                self.gpu_timing.abandon_before_submit(timing_probe);
-                self.color_runtime.frame_table_mut().remove(plan.working_frame.id());
-                self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
-                if let Err(release_error) = self.release_and_retain_source(
-                    completion_value,
-                    source.texture.clone(),
-                    native_frame.handle.clone(),
-                    acquire_commands,
-                    release_commands,
-                ) {
-                    return Err(rejected(format!(
-                        "{reason}; source release also failed: {release_error}"
-                    )));
+        let (working, encoded, yuv_record_us, color_stage_us, resource_extract_us) =
+            match record_result {
+                Ok(result) => result,
+                Err(reason) => {
+                    self.gpu_timing.abandon_before_submit(timing_probe);
+                    if let Some(resource) =
+                        self.color_runtime.frame_table_mut().remove(plan.working_frame.id())
+                    {
+                        resource_pool.release(resource);
+                    }
+                    if let Some(resource) =
+                        self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id())
+                    {
+                        resource_pool.release(resource);
+                    }
+                    if let Err(release_error) = self.release_and_retain_source(
+                        completion_value,
+                        source.texture.clone(),
+                        native_frame.handle.clone(),
+                        acquire_commands,
+                        release_commands,
+                    ) {
+                        return Err(rejected(format!(
+                            "{reason}; source release also failed: {release_error}"
+                        )));
+                    }
+                    return Err(rejected(reason));
                 }
-                return Err(rejected(reason));
-            }
-        };
+            };
         self.gpu_timing.finish_recording(&mut encoder, &mut timing_probe);
 
         let submit_started = Instant::now();
         let _submission = self.queue.submit(std::iter::once(encoder.finish()));
+        // The encoded intermediate is consumed only by commands on this ordered
+        // queue. Return it after submission so the next frame can reuse the
+        // exact texture instead of allocating a full-resolution float target.
+        resource_pool.release(encoded);
         self.retain_until_wgpu_completion(
             completion_value,
             source.texture.clone(),
