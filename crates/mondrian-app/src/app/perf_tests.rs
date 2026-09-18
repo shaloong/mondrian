@@ -7437,7 +7437,7 @@ fn run_headless_cancellation_recovery_probe(
                 return Ok(());
             }
             polls = polls.wrapping_add(1);
-            if polls % 1024 == 0 {
+            if polls.is_multiple_of(1024) {
                 thread::yield_now();
             } else {
                 std::hint::spin_loop();
