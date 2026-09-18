@@ -4586,6 +4586,16 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
         std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
             .expect("explicit packaged demux worker is required"),
     );
+    let input = ffmpeg::format::input(&path).expect("open interlaced fixture metadata");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("interlaced fixture video stream");
+    let stream_time_base = stream.time_base();
+    let stream_start_pts = match stream.start_time() {
+        value if value == ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+        value => value,
+    };
     let fingerprint = MediaFileFingerprint::capture(&path);
     for field_processing in [
         super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
@@ -4598,6 +4608,22 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
         let mut decoder = bootstrap.build();
         for field_index in 0..16 {
             let source_time = TimelineTime::new(field_index, 50).expect("exact 25i field time");
+            let next_source_time =
+                TimelineTime::new(field_index + 1, 50).expect("exact next 25i field time");
+            let expected_pts = super::source_sample_to_selection_pts(
+                SourceSampleTarget::covering(source_time),
+                stream_time_base,
+                stream_start_pts,
+                2,
+            )
+            .expect("exact field-rate selection target");
+            let expected_next_pts = super::source_sample_to_selection_pts(
+                SourceSampleTarget::covering(next_source_time),
+                stream_time_base,
+                stream_start_pts,
+                2,
+            )
+            .expect("exact next field-rate selection target");
             let mut request = covering_decode_request(
                 &path,
                 source_time,
@@ -4614,9 +4640,12 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
                 panic!("interlaced software decode must retain compact YUV");
             };
             let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
-            assert_eq!(selection.requested_pts, field_index);
-            assert_eq!(selection.selected_pts, field_index);
-            assert_eq!(selection.selected_duration_pts, 1);
+            assert_eq!(selection.requested_pts, expected_pts);
+            assert_eq!(selection.selected_pts, expected_pts);
+            assert_eq!(
+                selection.selected_duration_pts,
+                expected_next_pts - expected_pts
+            );
             assert!(!selection.temporal_approximation);
         }
 
