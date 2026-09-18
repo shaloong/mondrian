@@ -164,7 +164,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-golden-editorial-video.ps1",
-        "recipe_sha256": "f09415c289612df59d4f1963218593463070e1e757cff068486c70d17a8d0bbe",
+        "recipe_sha256": "ba2a77b18510c709bb02b31d93a1e335da49c464e176e123baf5b2777ab03a15",
         "profile": "ProxyRelinkEditorial",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -205,7 +205,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-golden-vfr-retime-video.ps1",
-        "recipe_sha256": "f0255c7d817c3b9ca05365dafa0522adb38a54a177ce34244dbfafa92eded804",
+        "recipe_sha256": "8ad25f58c08f3b40a5247f64316065f334b659609c6184ddf3971c1f5b48cefc",
         "profile": "SignedRetimeVfr",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
