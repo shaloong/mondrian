@@ -5432,6 +5432,7 @@ mod tests {
         output_texture_format: &'static str,
         health_report: RenderGpuOutputHealthReport,
         stage: RenderGpuOutputStageDiagnosticsReport,
+        resident_stage: Option<RenderGpuOutputStageDiagnosticsReport>,
         runtime: RenderGpuOutputRuntimeDiagnosticsReport,
         readback_bytes: usize,
         max_rgba_delta: u8,
@@ -5690,6 +5691,7 @@ mod tests {
                 3,
             ),
             stage,
+            resident_stage: None,
             runtime,
             readback_bytes: 16,
             max_rgba_delta: 2,
@@ -6854,6 +6856,7 @@ mod tests {
                         tolerance,
                     ),
                     stage: stage_report,
+                    resident_stage: None,
                     runtime: runtime_report,
                     readback_bytes: 0,
                     max_rgba_delta: 0,
@@ -6877,6 +6880,48 @@ mod tests {
         );
         let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
             .expect("CPU display boundary should encode RGBA8");
+
+        let mut resident_runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(900).expect("GPU output runtime");
+        let mut resident_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mondrian-smoke-gpu-resident-output-boundary"),
+            });
+        let resident_record = resident_runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Gpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut resident_encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let resident_output_id = resident_record.materialized.output.id();
+        let resident_output_is_gpu =
+            resident_record.materialized.output.descriptor().residency == ColorFrameResidency::Gpu;
+        let resident_has_no_readback = resident_record.readback_buffer.is_none();
+        let resident_stage_diagnostics = resident_record.stage_diagnostics;
+        context.queue.submit(std::iter::once(resident_encoder.finish()));
+        let resident_output = resident_runtime
+            .frame_table_mut()
+            .remove(resident_output_id)
+            .expect("GPU-resident output missing from resource table");
+        resident_runtime.resource_pool().release(resident_output);
+        let resident_ready = resident_output_is_gpu
+            && resident_has_no_readback
+            && resident_stage_diagnostics.total_stages == 2
+            && resident_stage_diagnostics.upload_stages == 1
+            && resident_stage_diagnostics.gpu_color_stages == 1
+            && resident_stage_diagnostics.readback_stages == 0;
+
         let mut runtime =
             RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -6940,7 +6985,7 @@ mod tests {
             max_rgba_delta,
             tolerance,
         );
-        let passed = health_report.verdict == RenderGpuOutputHealthVerdict::Pass;
+        let passed = health_report.verdict == RenderGpuOutputHealthVerdict::Pass && resident_ready;
         let report = GpuOutputBoundarySmokeReport {
             scenario: "renderer_gpu_output_boundary",
             skipped: None,
@@ -6955,6 +7000,7 @@ mod tests {
             output_texture_format: "Rgba8Unorm",
             health_report,
             stage: stage_report,
+            resident_stage: Some(resident_stage_diagnostics.into()),
             runtime: runtime_report,
             readback_bytes: actual.rgba().len(),
             max_rgba_delta,
@@ -6966,7 +7012,14 @@ mod tests {
             &context.adapter.get_info(),
             &[
                 ("native_gpu_output_ready", if passed { 1.0 } else { 0.0 }),
-                ("readback_stages", report.stage.readback_stages as f64),
+                (
+                    "readback_stages",
+                    report
+                        .resident_stage
+                        .as_ref()
+                        .expect("executed GPU-resident stage")
+                        .readback_stages as f64,
+                ),
             ],
         )?;
 
