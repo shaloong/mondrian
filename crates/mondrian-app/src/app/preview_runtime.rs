@@ -1117,6 +1117,32 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     self.scheduler.prune_obsolete();
                     return PreviewGpuFrameState::Prepared;
                 }
+                let prepared_content = if cache_reusable && !transport.is_speculative_preparation()
+                {
+                    self.execution.borrow_mut().promote_prepared_output_for_key(&cache_key)
+                } else {
+                    None
+                };
+                if let Some(PreviewPreparedPromotion::Gpu { already_visible, .. }) =
+                    prepared_content
+                {
+                    self.schedule_media_prefetches(
+                        snapshot,
+                        proxy_demands,
+                        sequence,
+                        frame,
+                        width,
+                        height,
+                    );
+                    self.scheduler.prune_obsolete();
+                    bump(&self.metrics.gpu_preview_candidate_current);
+                    let ticket = self.playback_presentation_ticket(snapshot);
+                    return PreviewGpuFrameState::Current(if already_visible {
+                        PreviewPresentationCandidate::already_visible((), ticket)
+                    } else {
+                        PreviewPresentationCandidate::new((), ticket)
+                    });
+                }
                 if cache_reusable && self.execution.borrow_mut().output_for(&cache_key).is_some() {
                     self.schedule_media_prefetches(
                         snapshot,
