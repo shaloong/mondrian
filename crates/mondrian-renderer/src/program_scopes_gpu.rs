@@ -295,7 +295,11 @@ impl GpuProgramScopesRuntime {
                 label: Some("program-scopes-aggregate-pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipelines.aggregate_pipeline);
+            let aggregate_pipeline = match request.waveform_mode {
+                WaveformMode::Luma => &pipelines.aggregate_luma_pipeline,
+                WaveformMode::RgbParade => &pipelines.aggregate_rgb_pipeline,
+            };
+            pass.set_pipeline(aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
             pass.dispatch_workgroups(
                 input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
@@ -492,7 +496,8 @@ fn create_display_texture(
 struct ScopesPipelines {
     aggregate_bind_group_layout: wgpu::BindGroupLayout,
     display_bind_group_layout: wgpu::BindGroupLayout,
-    aggregate_pipeline: wgpu::ComputePipeline,
+    aggregate_luma_pipeline: wgpu::ComputePipeline,
+    aggregate_rgb_pipeline: wgpu::ComputePipeline,
     display_pipeline: wgpu::ComputePipeline,
 }
 
@@ -547,14 +552,24 @@ impl ScopesPipelines {
                 bind_group_layouts: &[Some(&display_bind_group_layout)],
                 immediate_size: 0,
             });
-        let aggregate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("program-scopes-aggregate-pipeline"),
-            layout: Some(&aggregate_pipeline_layout),
-            module: &aggregate_module,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let aggregate_luma_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-aggregate-luma-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("main_luma"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        let aggregate_rgb_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-aggregate-rgb-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("main_rgb"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let display_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("program-scopes-display-pipeline"),
             layout: Some(&display_pipeline_layout),
@@ -566,7 +581,8 @@ impl ScopesPipelines {
         Self {
             aggregate_bind_group_layout,
             display_bind_group_layout,
-            aggregate_pipeline,
+            aggregate_luma_pipeline,
+            aggregate_rgb_pipeline,
             display_pipeline,
         }
     }
@@ -700,61 +716,50 @@ fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
 
 const INVALID_KEY: u32 = 0xffffffffu;
 
-fn add_grouped_global(keys: array<u32, 4>) {
-    for (var i = 0u; i < 4u; i += 1u) {
-        let key = keys[i];
-        if key == INVALID_KEY {
-            continue;
-        }
-        var is_first = true;
-        for (var previous = 0u; previous < i; previous += 1u) {
-            if keys[previous] == key {
-                is_first = false;
-            }
-        }
-        if !is_first {
-            continue;
-        }
-        var occurrences = 1u;
-        for (var following = i + 1u; following < 4u; following += 1u) {
-            if keys[following] == key {
-                occurrences += 1u;
-            }
-        }
-        atomicAdd(&counts[key], occurrences);
+fn add_grouped_global(keys: vec4<u32>) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    if k0 != INVALID_KEY {
+        atomicAdd(
+            &counts[k0],
+            1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        );
+    }
+    if k1 != INVALID_KEY && k1 != k0 {
+        atomicAdd(
+            &counts[k1],
+            1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        );
+    }
+    if k2 != INVALID_KEY && k2 != k0 && k2 != k1 {
+        atomicAdd(&counts[k2], 1u + select(0u, 1u, k3 == k2));
+    }
+    if k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2 {
+        atomicAdd(&counts[k3], 1u);
     }
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
     let first_x = gid.x * 4u;
     let active_row = first_x < uniforms.input_width && gid.y < uniforms.input_height;
-    var red_histogram: array<u32, 4>;
-    var green_histogram: array<u32, 4>;
-    var blue_histogram: array<u32, 4>;
-    var luma_histogram: array<u32, 4>;
-    var waveform_red_or_luma: array<u32, 4>;
-    var waveform_green: array<u32, 4>;
-    var waveform_blue: array<u32, 4>;
-    var vectorscope: array<u32, 4>;
-    var red_excursion: array<u32, 4>;
-    var green_excursion: array<u32, 4>;
-    var blue_excursion: array<u32, 4>;
-    var luma_excursion: array<u32, 4>;
-    for (var i = 0u; i < 4u; i += 1u) {
-        red_histogram[i] = INVALID_KEY;
-        green_histogram[i] = INVALID_KEY;
-        blue_histogram[i] = INVALID_KEY;
-        luma_histogram[i] = INVALID_KEY;
-        waveform_red_or_luma[i] = INVALID_KEY;
-        waveform_green[i] = INVALID_KEY;
-        waveform_blue[i] = INVALID_KEY;
-        vectorscope[i] = INVALID_KEY;
-        red_excursion[i] = INVALID_KEY;
-        green_excursion[i] = INVALID_KEY;
-        blue_excursion[i] = INVALID_KEY;
-        luma_excursion[i] = INVALID_KEY;
-    }
+    var red_histogram = vec4<u32>(INVALID_KEY);
+    var green_histogram = vec4<u32>(INVALID_KEY);
+    var blue_histogram = vec4<u32>(INVALID_KEY);
+    var luma_histogram = vec4<u32>(INVALID_KEY);
+    var waveform_red_or_luma = vec4<u32>(INVALID_KEY);
+    var waveform_green = vec4<u32>(INVALID_KEY);
+    var waveform_blue = vec4<u32>(INVALID_KEY);
+    var vectorscope = vec4<u32>(INVALID_KEY);
+    var red_low = 0u;
+    var red_high = 0u;
+    var green_low = 0u;
+    var green_high = 0u;
+    var blue_low = 0u;
+    var blue_high = 0u;
+    var luma_low = 0u;
+    var luma_high = 0u;
     let plane = uniforms.waveform_width * uniforms.bins;
     for (var i = 0u; i < 4u; i += 1u) {
         let x = first_x + i;
@@ -778,8 +783,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
 
         let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
-        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, uniforms.waveform_channels != 1u);
-        if uniforms.waveform_channels != 1u {
+        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, rgb_waveform);
+        if rgb_waveform {
             waveform_green[i] = uniforms.waveform_offset + plane + wx * uniforms.bins + gb;
             waveform_blue[i] = uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb;
         }
@@ -791,23 +796,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let vy = min(u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 63u);
         vectorscope[i] = uniforms.vectorscope_offset + vy * 64u + ux;
 
-        red_excursion[i] = select(INVALID_KEY, select(1u, 0u, rgb.r < 0.0), rgb.r < 0.0 || rgb.r > 1.0);
-        green_excursion[i] = select(INVALID_KEY, select(3u, 2u, rgb.g < 0.0), rgb.g < 0.0 || rgb.g > 1.0);
-        blue_excursion[i] = select(INVALID_KEY, select(5u, 4u, rgb.b < 0.0), rgb.b < 0.0 || rgb.b > 1.0);
-        luma_excursion[i] = select(INVALID_KEY, select(7u, 6u, y < 0.0), y < 0.0 || y > 1.0);
+        red_low += select(0u, 1u, rgb.r < 0.0);
+        red_high += select(0u, 1u, rgb.r > 1.0);
+        green_low += select(0u, 1u, rgb.g < 0.0);
+        green_high += select(0u, 1u, rgb.g > 1.0);
+        blue_low += select(0u, 1u, rgb.b < 0.0);
+        blue_high += select(0u, 1u, rgb.b > 1.0);
+        luma_low += select(0u, 1u, y < 0.0);
+        luma_high += select(0u, 1u, y > 1.0);
     }
     add_grouped_global(red_histogram);
     add_grouped_global(green_histogram);
     add_grouped_global(blue_histogram);
     add_grouped_global(luma_histogram);
     add_grouped_global(waveform_red_or_luma);
-    add_grouped_global(waveform_green);
-    add_grouped_global(waveform_blue);
+    if rgb_waveform {
+        add_grouped_global(waveform_green);
+        add_grouped_global(waveform_blue);
+    }
     add_grouped_global(vectorscope);
-    add_grouped_global(red_excursion);
-    add_grouped_global(green_excursion);
-    add_grouped_global(blue_excursion);
-    add_grouped_global(luma_excursion);
+    if red_low != 0u { atomicAdd(&counts[0u], red_low); }
+    if red_high != 0u { atomicAdd(&counts[1u], red_high); }
+    if green_low != 0u { atomicAdd(&counts[2u], green_low); }
+    if green_high != 0u { atomicAdd(&counts[3u], green_high); }
+    if blue_low != 0u { atomicAdd(&counts[4u], blue_low); }
+    if blue_high != 0u { atomicAdd(&counts[5u], blue_high); }
+    if luma_low != 0u { atomicAdd(&counts[6u], luma_low); }
+    if luma_high != 0u { atomicAdd(&counts[7u], luma_high); }
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main_luma(@builtin(global_invocation_id) gid: vec3<u32>) {
+    aggregate(gid, false);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {
+    aggregate(gid, true);
 }
 "#;
 
