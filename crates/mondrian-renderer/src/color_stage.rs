@@ -676,6 +676,32 @@ pub(crate) struct RenderGpuFusedInputBackend {
     pub(crate) objects: std::sync::Arc<crate::ocio_gpu::OcioGpuWgpuPreparedBackendObjects>,
 }
 
+impl RenderGpuFusedInputBackend {
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::BindGroup,
+        output: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.native-video.fused-working-input"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.objects.ocio_bind_group.bind_group, &[]);
+        pass.set_bind_group(1, input, &[]);
+        pass.draw(0..4, 0..1);
+    }
+}
 /// Error returned when a runtime-owned in-graph GPU OCIO pass cannot record.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RenderGpuColorTransformRuntimeRecordError {
