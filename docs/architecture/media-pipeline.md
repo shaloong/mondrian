@@ -1593,7 +1593,9 @@ observed, that timestamp is the authoritative exclusive boundary: it truncates
 overlapping duration metadata and extends a shorter packet duration through a
 VFR cadence gap, matching continuous video presentation's predecessor hold.
 For an interior request the exact decoder keeps one-frame lookahead whenever a
-successor can still arrive; at EOF a positive duration remains sufficient.
+successor can still arrive; a retained candidate cannot take the early
+materialization path until that same lookahead rule confirms its interval. At
+EOF a positive duration remains sufficient.
 Without a positive duration or successor, only equality with `selected_pts` is
 exact. A duration or successor proves the same interval for Playback, Scrub,
 and Still; access mode changes only the permitted fallback when no interval

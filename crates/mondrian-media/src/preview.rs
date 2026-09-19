@@ -1687,7 +1687,8 @@ use decode_session::{
 use decode_session::{
     decoded_temporal_candidate_within_selection_distance, duration_only_selection_is_unconfirmed,
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
-    select_decoded_temporal_candidate, DecodedTemporalCandidate,
+    retained_selection_is_exact_and_confirmed, select_decoded_temporal_candidate,
+    DecodedTemporalCandidate,
 };
 use hardware_decode::{preview_hardware_frame_format, PreviewHardwareDecodePlan};
 #[cfg(test)]

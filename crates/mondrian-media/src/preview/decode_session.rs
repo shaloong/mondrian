@@ -1109,6 +1109,17 @@ pub(super) fn duration_only_selection_is_unconfirmed(
             .is_some_and(|extent| requested_pts > extent.start_pts && extent.covers(requested_pts))
 }
 
+pub(super) fn retained_selection_is_exact_and_confirmed(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+) -> bool {
+    !duration_only_selection_is_unconfirmed(requested_pts, access_mode, before, after, false)
+        && select_decoded_temporal_candidate(requested_pts, access_mode, before, after)
+            .is_some_and(|(_, extent)| extent.covers(requested_pts))
+}
+
 pub(super) fn decoded_temporal_candidate_within_selection_distance(
     selected_extent: DecodedTemporalExtent,
     requested_pts: i64,
@@ -1454,19 +1465,6 @@ impl RetainedDecodedCandidateWindow {
             selected_pts: Some(duplicate_pts),
             selected_duration_pts: None,
         })
-    }
-
-    fn selected_extent(
-        &self,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> Option<DecodedTemporalExtent> {
-        select_decoded_temporal_candidate(
-            self.target_pts,
-            access_mode,
-            self.before().map(|candidate| candidate.extent),
-            self.after().map(|candidate| candidate.extent),
-        )
-        .map(|(_, extent)| extent)
     }
 
     fn take_successor(
@@ -2767,9 +2765,12 @@ impl PreviewDecodeSession {
             Ok(Some((selected_extent, frame, retained_selected_frame)))
         };
 
-        let retained_selection_is_exact = candidates
-            .selected_extent(policy.access_mode)
-            .is_some_and(|extent| extent.covers(target_pts));
+        let retained_selection_is_exact = retained_selection_is_exact_and_confirmed(
+            target_pts,
+            policy.access_mode,
+            candidates.before().map(|candidate| candidate.extent),
+            candidates.after().map(|candidate| candidate.extent),
+        );
         if retained_selection_is_exact {
             self.duplicate_decoded_pts = candidates.duplicate_pts();
             candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;

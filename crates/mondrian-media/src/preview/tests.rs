@@ -8,9 +8,10 @@ use super::{
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
-    resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
-    select_decoded_temporal_candidate, temporal_selection_is_approximate, CpuYuvChromaPlaneLayout,
-    CpuYuvChromaPlanes, DecodedRgbaFrameContract, DecodedTemporalCandidate, DecodedTemporalExtent,
+    resolve_cpu_rgba_contract, retained_selection_is_exact_and_confirmed,
+    run_external_decode_command_cancellable, select_decoded_temporal_candidate,
+    temporal_selection_is_approximate, CpuYuvChromaPlaneLayout, CpuYuvChromaPlanes,
+    DecodedRgbaFrameContract, DecodedTemporalCandidate, DecodedTemporalExtent,
     FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp,
     MediaFileFingerprint, MediaFileObjectIdentity, PreviewDecodeAccessMode,
     PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints, PreviewDecodeBackend,
@@ -390,6 +391,28 @@ fn successor_boundary_closes_a_short_declared_vfr_gap_for_every_access_mode() {
             Some(selected.1)
         ));
     }
+}
+
+#[test]
+fn exact_retained_selection_waits_for_successor_confirmation() {
+    let declared = DecodedTemporalExtent::from_duration(80, 40);
+    let requested_pts = 83;
+
+    assert!(declared.covers(requested_pts));
+    assert!(!retained_selection_is_exact_and_confirmed(
+        requested_pts,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        Some(declared),
+        None,
+    ));
+
+    let successor = DecodedTemporalExtent::from_duration(120, 40);
+    assert!(retained_selection_is_exact_and_confirmed(
+        requested_pts,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        Some(declared),
+        Some(successor),
+    ));
 }
 
 #[test]
