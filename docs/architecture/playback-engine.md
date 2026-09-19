@@ -800,14 +800,29 @@ from an explicit key/binding removal without sampling private queue state.
 Cancellation acceptance measures two non-overlapping intervals from the same
 execution: authority request to `LogicalCancellationObserved`, then that
 logical observation to worker return. Product policy requires the first
-interval to be at most 5 ms for every work class, the second to be at most
-50 ms for Playback and Interactive work, and at most 500 ms for deterministic
-Still work. The bounds are inclusive. Total execution lifetime remains
-diagnostic because work completed before cancellation authority existed cannot
-be charged as cancellation latency. A logical observation is scheduler
-evidence only; the media Adapter must separately report a concrete codec/demux
-checkpoint, and publication remains forbidden until the execution lease has
-returned and resolved.
+interval to be at most 5 ms for every work class. Cooperative work must return
+within 50 ms for Playback and Interactive work and within 500 ms for
+deterministic Still work. The bounds are inclusive.
+
+One narrower ownership class exists for an admitted native startup call that
+provides no interruption API. FFmpeg `avcodec_open2` is such a call:
+`AVIOInterruptCB` interrupts protocol and demux I/O, not codec construction.
+A cancellation first observed immediately after an Opened/Replaced Session with
+a nonzero Session-open duration is therefore recorded as
+`UninterruptibleNativeStartup`, not as cooperative cleanup. Its owner must
+return within 500 ms, remains counted in the raw cancellation latency, cannot
+publish, and does not release its execution or residency lease early. The
+separate logical observer still authorizes the bounded cross-lane Current
+replacement described below. No other codec, seek, decode, copy, demux, process
+retirement, or output-lease path may use this classification.
+
+Total execution lifetime remains diagnostic because work completed before
+cancellation authority existed cannot be charged as cancellation latency. The
+Broker stamps physical worker return before observer/channel teardown; later
+sampling uses that completion stamp and cannot extend return latency. A logical
+observation is scheduler evidence only; the media Adapter must separately
+report a concrete codec/demux checkpoint, and publication remains forbidden
+until the execution lease has returned and resolved.
 
 `wait_for_execution_terminal_state` waits under the same lifecycle lock and
 Condvar for `Canceled`, `Completed`, `Missing`, or caller-bounded `Timeout`.

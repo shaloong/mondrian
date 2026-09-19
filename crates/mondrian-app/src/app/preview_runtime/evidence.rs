@@ -2,6 +2,26 @@
 
 use super::*;
 
+fn preview_frame_cancellation_return_constraint(
+    cancellation: Option<mondrian_media::PreviewDecodeCancellation>,
+) -> mondrian_playback::FrameCancellationReturnConstraint {
+    match cancellation {
+        Some(cancellation)
+            if cancellation.session_open_us > 0
+                && cancellation.checkpoint
+                    == mondrian_media::PreviewDecodeCancellationCheckpoint::BeforeInputOpen
+                && matches!(
+                    cancellation.session_disposition,
+                    mondrian_media::PreviewDecodeSessionDisposition::Opened
+                        | mondrian_media::PreviewDecodeSessionDisposition::Replaced
+                ) =>
+        {
+            mondrian_playback::FrameCancellationReturnConstraint::UninterruptibleNativeStartup
+        }
+        _ => mondrian_playback::FrameCancellationReturnConstraint::Cooperative,
+    }
+}
+
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Clone read-only worker progress authority for independent acceptance sampling.
     #[cfg(test)]
@@ -632,10 +652,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             profiles.record_session_cancellation(access_mode, concrete_media_checkpoint);
             self.metrics.decode_access_mode_profiles.set(profiles);
         }
+        let return_constraint =
+            preview_frame_cancellation_return_constraint(concrete_media_checkpoint);
         self.metrics.decode_cancellation.borrow_mut().observe(
             mondrian_playback::FrameCancellationObservation {
                 work_class: media_preview_frame_work_class(access_mode),
                 cause: reason.playback_cause(),
+                return_constraint,
                 execution_duration: Duration::from_micros(elapsed_us),
                 execution_to_logical_cancellation: logical_cancellation_observed
                     .map(|observation| Duration::from_micros(observation.execution_elapsed_us)),
@@ -1005,5 +1028,65 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return;
         }
         self.metrics.gpu_compositing.borrow_mut().accumulate(diagnostics);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_return_constraint_tests {
+    use super::*;
+
+    fn cancellation(
+        checkpoint: mondrian_media::PreviewDecodeCancellationCheckpoint,
+        disposition: mondrian_media::PreviewDecodeSessionDisposition,
+        session_open_us: u64,
+    ) -> mondrian_media::PreviewDecodeCancellation {
+        mondrian_media::PreviewDecodeCancellation {
+            checkpoint,
+            source: mondrian_media::PreviewDecodeCancellationSource::CooperativeCheckpoint,
+            session_disposition: disposition,
+            session_open_us,
+        }
+    }
+
+    #[test]
+    fn only_post_open_first_checkpoint_uses_the_native_startup_constraint() {
+        use mondrian_media::{
+            PreviewDecodeCancellationCheckpoint as Checkpoint,
+            PreviewDecodeSessionDisposition as Disposition,
+        };
+        use mondrian_playback::FrameCancellationReturnConstraint as Constraint;
+
+        assert_eq!(
+            preview_frame_cancellation_return_constraint(Some(cancellation(
+                Checkpoint::BeforeInputOpen,
+                Disposition::Opened,
+                131_419,
+            ))),
+            Constraint::UninterruptibleNativeStartup
+        );
+        assert_eq!(
+            preview_frame_cancellation_return_constraint(Some(cancellation(
+                Checkpoint::BeforeInputOpen,
+                Disposition::Replaced,
+                159_474,
+            ))),
+            Constraint::UninterruptibleNativeStartup
+        );
+        assert_eq!(
+            preview_frame_cancellation_return_constraint(Some(cancellation(
+                Checkpoint::Seek,
+                Disposition::Opened,
+                131_419,
+            ))),
+            Constraint::Cooperative
+        );
+        assert_eq!(
+            preview_frame_cancellation_return_constraint(Some(cancellation(
+                Checkpoint::BeforeInputOpen,
+                Disposition::Reused,
+                0,
+            ))),
+            Constraint::Cooperative
+        );
     }
 }

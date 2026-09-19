@@ -2373,7 +2373,7 @@ where
 {
     if let Some(closed_at) = state.closed_at {
         let execution_age = state.in_flight.get(&id).map_or(Duration::ZERO, |execution| {
-            elapsed_since(now, execution.started_at)
+            elapsed_since(execution.completed_at.unwrap_or(now), execution.started_at)
         });
         return Some(crate::FrameExecutionCancellationEvidence {
             cancellation: FrameExecutionCancellation::BrokerClosed {
@@ -2388,7 +2388,10 @@ where
             execution_age: Duration::ZERO,
         });
     };
-    let execution_age = elapsed_since(now, execution.started_at);
+    // The worker return stamp is the physical completion boundary. Sampling
+    // cancellation after observer/channel teardown must not extend execution
+    // age and manufacture a late physical-return observation.
+    let execution_age = elapsed_since(execution.completed_at.unwrap_or(now), execution.started_at);
     let mut candidate = None;
     let publication_binding_missing = execution.presentation_binding_expired
         || current_pending_binding(state.latest_generation, &state.pending, execution).is_none();

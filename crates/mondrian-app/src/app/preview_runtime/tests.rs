@@ -969,6 +969,7 @@ fn cancellation_evidence(
     collector.observe(mondrian_playback::FrameCancellationObservation {
         work_class,
         cause,
+        return_constraint: mondrian_playback::FrameCancellationReturnConstraint::Cooperative,
         execution_duration: Duration::from_micros(execution_us),
         execution_to_logical_cancellation: execution_to_logical_cancellation_us
             .map(Duration::from_micros),
