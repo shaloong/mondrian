@@ -707,11 +707,41 @@ impl ViewerGpuExecutionRuntime {
         request: ViewerGpuExecutionRequest<'_>,
         stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
-        let _turnover = if let Some(submission) = self.current_frame_submission.take() {
-            if !submission.load(Ordering::Acquire) {
-                self.current_frame_submission = Some(submission);
-                return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
-            }
+        if self
+            .current_frame_submission
+            .as_ref()
+            .is_some_and(|submission| !submission.load(Ordering::Acquire))
+        {
+            return Err(ViewerGpuExecutionError::PreviousFrameNotSubmitted);
+        }
+        // Reject unavailable capacity before consuming the submitted working set.
+        validate_output_precision(
+            request.output_precision,
+            request.display_calibration.is_some(),
+        )?;
+        validate_program_monitor_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+        )?;
+        validate_program_scopes_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+            request.program_scopes,
+        )?;
+        validate_signal_monitor_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+            request.signal_monitoring,
+        )?;
+        let active_working_set = self.admit_active_request(&request)?;
+        self.last_active_working_set = Some(active_working_set);
+        if !self.prepare_admitted_cpu_yuv_uploads(request.layers)? {
+            return Err(ViewerGpuExecutionError::Backpressure(
+                "compact CPU YUV transfer preparation is still running".to_owned(),
+            ));
+        }
+
+        let _turnover = if self.current_frame_submission.take().is_some() {
             let guard = self.resource_pool.begin_ordered_turnover();
             self.cpu_yuv_upload.begin_frame();
             self.working_compositor.clear_frame_resources();
@@ -756,32 +786,6 @@ impl ViewerGpuExecutionRuntime {
         mut request: ViewerGpuExecutionRequest<'_>,
         mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
-        validate_output_precision(
-            request.output_precision,
-            request.display_calibration.is_some(),
-        )?;
-        validate_program_monitor_contract(
-            request.program_output_boundary,
-            request.monitor_adaptation,
-        )?;
-        validate_program_scopes_contract(
-            request.program_output_boundary,
-            request.monitor_adaptation,
-            request.program_scopes,
-        )?;
-        validate_signal_monitor_contract(
-            request.program_output_boundary,
-            request.monitor_adaptation,
-            request.signal_monitoring,
-        )?;
-        let active_working_set = self.admit_active_request(&request)?;
-        self.last_active_working_set = Some(active_working_set);
-        if !self.prepare_admitted_cpu_yuv_uploads(request.layers)? {
-            return Err(ViewerGpuExecutionError::Backpressure(
-                "compact CPU YUV transfer preparation is still running".to_owned(),
-            ));
-        }
-
         let input_prepare_started = Instant::now();
         let mut heterogeneous_inputs = std::mem::take(&mut request.heterogeneous_inputs)
             .into_iter()
@@ -2781,7 +2785,7 @@ mod tests {
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-presentation-output-lease-test"),
         });
-        let record = runtime.record(
+        let mut record = runtime.record(
             &context.device,
             &context.queue,
             &mut encoder,
@@ -2804,7 +2808,8 @@ mod tests {
                 signal_monitoring: None,
             },
         )?;
-        context.queue.submit(std::iter::once(encoder.finish()));
+        let submission = context.queue.submit(std::iter::once(encoder.finish()));
+        let _submitted = record.assert_adapter_submission(submission);
         Ok(record)
     }
 
@@ -3456,7 +3461,8 @@ mod tests {
         let second_lease = runtime
             .take_presentation_output(&mut second)
             .expect("detach second output to simulate a broken multi-slot Adapter");
-        runtime.clear_frame_resources();
+        let before = runtime.color_output_diagnostics();
+        assert!(runtime.current_frame_submission.is_some());
         assert_eq!(
             runtime.color_output_diagnostics().resource_pool.detached_presentation_resources,
             2
@@ -3467,6 +3473,15 @@ mod tests {
             Err(ViewerGpuExecutionError::Backpressure(reason))
                 if reason.contains("2 live outputs")
         ));
+
+        let after = runtime.color_output_diagnostics();
+        assert!(runtime.current_frame_submission.is_some());
+        assert_eq!(after.frame_table_entries, before.frame_table_entries);
+        assert_eq!(after.resource_pool.releases, before.resource_pool.releases);
+        assert_eq!(
+            after.resource_pool.evictions,
+            before.resource_pool.evictions
+        );
 
         drop(second_lease);
         let recovered = try_record_empty_viewer_frame(&context, &mut runtime, 33, None)
