@@ -9,7 +9,7 @@ use cpal::{FromSample, SizedSample};
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) fn build_and_start(
     device: &cpal::Device,
@@ -151,6 +151,7 @@ where
     device.build_output_stream(
         *config,
         move |data: &mut [T], info| {
+            let observed_at = Instant::now();
             let frames = data.len() / channels;
             let playback_delay = match super::callback_tail_playback_delay(
                 callback_playback_delay(info),
@@ -167,7 +168,7 @@ where
             let active_block = callback_control.begin_callback_block(&telemetry);
             if !active_block {
                 data.fill(T::EQUILIBRIUM);
-                telemetry.record_callback(false, frames, 0, playback_delay);
+                telemetry.record_callback(observed_at, false, frames, 0, playback_delay);
                 callback_control.finish_callback_block(false, &telemetry);
                 return;
             }
@@ -182,7 +183,13 @@ where
                     .clamp(-1.0, 1.0);
                 *sample = T::from_sample(value);
             }
-            telemetry.record_callback(true, frames, missing_samples / channels, playback_delay);
+            telemetry.record_callback(
+                observed_at,
+                true,
+                frames,
+                missing_samples / channels,
+                playback_delay,
+            );
             callback_control.finish_callback_block(true, &telemetry);
         },
         err_fn,

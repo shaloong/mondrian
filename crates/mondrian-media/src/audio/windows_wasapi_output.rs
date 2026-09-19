@@ -15,7 +15,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::{Audio, KernelStreaming, Multimedia};
@@ -565,6 +565,7 @@ fn write_frames(
     encoding: WasapiSampleEncoding,
     scratch: &mut [f32],
 ) -> Result<(), String> {
+    let observed_at = Instant::now();
     let padding = unsafe { audio_client.GetCurrentPadding() }
         .map_err(|error| format!("failed to sample WASAPI playback padding: {error}"))?;
     let queued_frames = usize::try_from(u64::from(padding) + u64::from(frames))
@@ -586,6 +587,7 @@ fn write_frames(
         // SAFETY: the negotiated format is f32 and the pointer covers all samples.
         let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), samples) };
         render_f32_output_block(
+            observed_at,
             output,
             context.channels,
             &context.queue,
@@ -598,6 +600,7 @@ fn write_frames(
             "WASAPI render scratch buffer is smaller than the callback".to_owned()
         })?;
         render_f32_output_block(
+            observed_at,
             staging,
             context.channels,
             &context.queue,

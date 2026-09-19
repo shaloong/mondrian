@@ -576,8 +576,11 @@ impl RealtimeAudioOutputTelemetry {
         })
     }
 
+    // Bind the tail-delay estimate to the instant at which its source was sampled.
+    // Buffer filling and sample conversion must not shift that clock origin.
     fn record_callback(
         &self,
+        observed_at: Instant,
         active_block: bool,
         frames: usize,
         underrun_frames: usize,
@@ -621,7 +624,8 @@ impl RealtimeAudioOutputTelemetry {
             playback_delay.as_nanos().min(u64::MAX as u128) as u64,
             Ordering::Relaxed,
         );
-        let elapsed_ns = self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let elapsed_ns =
+            observed_at.duration_since(self.origin).as_nanos().min(u64::MAX as u128) as u64;
         self.last_callback_elapsed_ns.store(elapsed_ns, Ordering::Release);
         let advanced = self
             .snapshot_revision
@@ -1070,6 +1074,7 @@ fn capture_output_snapshot(
 
 #[cfg(target_os = "windows")]
 fn render_f32_output_block(
+    observed_at: Instant,
     data: &mut [f32],
     channels: usize,
     queue: &ArrayQueue<f32>,
@@ -1081,7 +1086,7 @@ fn render_f32_output_block(
     let active_block = callback_control.begin_callback_block(telemetry);
     if !active_block {
         data.fill(0.0);
-        telemetry.record_callback(false, frames, 0, playback_delay);
+        telemetry.record_callback(observed_at, false, frames, 0, playback_delay);
         callback_control.finish_callback_block(false, telemetry);
         return;
     }
@@ -1096,6 +1101,7 @@ fn render_f32_output_block(
             .clamp(-1.0, 1.0);
     }
     telemetry.record_callback(
+        observed_at,
         true,
         frames,
         missing_samples / channels.max(1),
@@ -1245,12 +1251,38 @@ mod tests {
     }
 
     #[test]
+    fn callback_age_includes_work_after_delay_sampling() {
+        let mut telemetry =
+            RealtimeAudioOutputTelemetry::new().expect("allocate test stream generation");
+        telemetry.origin = Instant::now() - Duration::from_millis(30);
+        let sampled_at = telemetry.origin + Duration::from_millis(10);
+        telemetry.record_callback(sampled_at, true, 480, 0, Duration::from_millis(50));
+        let queue = ArrayQueue::new(2);
+        let callback_control = RealtimeAudioCallbackControl::new();
+        let snapshot = capture_output_snapshot(
+            output_contract(48_000, AudioChannelLayout::Stereo),
+            &queue,
+            &callback_control,
+            &AtomicU64::new(0),
+            &telemetry,
+            &Mutex::new(None),
+        );
+        let age = snapshot.last_callback_age.expect("sampled callback age");
+        assert!(age >= Duration::from_millis(20));
+        assert_eq!(
+            snapshot.last_callback_playback_delay,
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(snapshot.captured_at - age, sampled_at);
+    }
+
+    #[test]
     fn callback_telemetry_accumulates_consumption_and_underrun_without_locking() {
         let telemetry =
             RealtimeAudioOutputTelemetry::new().expect("allocate test stream generation");
 
-        telemetry.record_callback(false, 480, 0, Duration::from_millis(10));
-        telemetry.record_callback(true, 480, 32, Duration::from_millis(12));
+        telemetry.record_callback(Instant::now(), false, 480, 0, Duration::from_millis(10));
+        telemetry.record_callback(Instant::now(), true, 480, 32, Duration::from_millis(12));
 
         assert_eq!(
             telemetry.callback_consumed_frames.load(Ordering::Relaxed),
@@ -1289,7 +1321,13 @@ mod tests {
         let writer_telemetry = Arc::clone(&telemetry);
         let writer = std::thread::spawn(move || {
             for _ in 0..100_000 {
-                writer_telemetry.record_callback(true, 2, 1, Duration::from_millis(3));
+                writer_telemetry.record_callback(
+                    Instant::now(),
+                    true,
+                    2,
+                    1,
+                    Duration::from_millis(3),
+                );
                 // A physical backend always has a non-callback interval. Yield
                 // explicitly so this stress test preserves that contract while
                 // still exercising far more updates than realtime playback.
@@ -1350,7 +1388,7 @@ mod tests {
         let deactivation = handle.deactivate().expect("checked deactivation");
         assert!(!handle.is_quiescent(deactivation).expect("query quiescence"));
 
-        handle.telemetry.record_callback(true, 4, 0, Duration::ZERO);
+        handle.telemetry.record_callback(Instant::now(), true, 4, 0, Duration::ZERO);
         handle.callback_control.finish_callback_block(true, &handle.telemetry);
         assert!(handle.is_quiescent(deactivation).expect("query quiescence"));
         assert_eq!(
@@ -1364,7 +1402,7 @@ mod tests {
         let telemetry =
             RealtimeAudioOutputTelemetry::new().expect("allocate test stream generation");
 
-        telemetry.record_callback(false, 512, 0, Duration::ZERO);
+        telemetry.record_callback(Instant::now(), false, 512, 0, Duration::ZERO);
 
         assert_eq!(
             telemetry.callback_consumed_frames.load(Ordering::Acquire),
@@ -1382,7 +1420,7 @@ mod tests {
             RealtimeAudioOutputTelemetry::new().expect("allocate test stream generation");
         telemetry.active_callback_consumed_frames.store(u64::MAX - 1, Ordering::Release);
 
-        telemetry.record_callback(true, 2, 0, Duration::ZERO);
+        telemetry.record_callback(Instant::now(), true, 2, 0, Duration::ZERO);
 
         assert_eq!(
             telemetry.active_callback_consumed_frames.load(Ordering::Acquire),
