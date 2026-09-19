@@ -129,7 +129,11 @@ pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeRe
 fn display_device_name_for_target(
     target: DisplayProfileProbeTarget,
 ) -> Result<Option<String>, String> {
-    let mut search = MonitorSearch { target, matched_name: None };
+    let mut search = MonitorSearch {
+        target,
+        matched_name: None,
+        monitor_info_failed: false,
+    };
     let ok = unsafe {
         EnumDisplayMonitors(
             ptr::null_mut(),
@@ -141,12 +145,16 @@ fn display_device_name_for_target(
     if ok == 0 {
         return Err("EnumDisplayMonitors failed".to_owned());
     }
+    if search.matched_name.is_none() && search.monitor_info_failed {
+        return Err("GetMonitorInfoW failed while resolving the display target".to_owned());
+    }
     Ok(search.matched_name)
 }
 
 struct MonitorSearch {
     target: DisplayProfileProbeTarget,
     matched_name: Option<String>,
+    monitor_info_failed: bool,
 }
 
 unsafe extern "system" fn enum_monitor_proc(
@@ -160,7 +168,7 @@ unsafe extern "system" fn enum_monitor_proc(
     // duration of this callback enumeration.
     let search = unsafe { &mut *(lparam as *mut MonitorSearch) };
     if search.matched_name.is_some() {
-        return 0;
+        return 1;
     }
 
     let mut info = MONITORINFOEXW::default();
@@ -174,12 +182,13 @@ unsafe extern "system" fn enum_monitor_proc(
         )
     };
     if ok == 0 {
+        search.monitor_info_failed = true;
         return 1;
     }
 
     if monitor_matches_target(&info.monitorInfo.rcMonitor, search.target) {
         search.matched_name = utf16z_to_string(&info.szDevice);
-        return 0;
+        return 1;
     }
 
     1
