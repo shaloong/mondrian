@@ -1879,6 +1879,21 @@ lookups perform no generation lock or filesystem check.
 
 ## Cross-Application Reference Qualification
 
+The product builds Mondrian Standard display views in memory, so its embedded
+base config alone is not a usable external-host contract. The SDR interchange
+export resolves the authoritative Linear Rec.2020 to Mondrian Standard SDR v2
+display processor, materializes that processor as a GroupTransform, and writes
+the exact graph as CTF beside a minimal OCIO config and hash manifest. A sampled
+cube is not used. An exhaustive 13 by 13 by 13 test domain from -0.125 through
+16 verifies the reloaded external processor against the authoritative processor
+to at most 1e-7 RGB error and bit-exact alpha.
+
+Cross-application capture preserves export intent. Scene-linear interchange
+uses a direct `Colorimetric(LinearRec2020)` target. SDR and PQ presentation
+artifacts use `RenderingView`, which resolves the selected Project engine view;
+rewriting those presets as direct colorimetric encodings would bypass Mondrian's
+display transform and invalidate the comparison.
+
 Renderer's `cross_application_qualification` Module deepens the existing
 `color_reference` import and `color_accuracy` Interfaces; App and validation
 scripts do not own a second color interpretation. A strict schema-v1 profile

@@ -90,6 +90,10 @@ fn capture(
     report["stimulus_manifest_sha256"] = json!(sha256_file(&manifest_path)?);
     let executable = std::env::current_exe()?;
     report["executable"] = json!({"path":executable,"sha256":sha256_file(&executable)?});
+    let media_probe_helper = crate::app::packaged_worker::discover_media_probe_worker()
+        .context("cross-application capture requires the packaged Mondrian media Probe Helper; build the product binary in the same Cargo profile")?;
+    report["media_probe_helper"] =
+        json!({"path":media_probe_helper,"sha256":sha256_file(&media_probe_helper)?});
     let mut paths = Vec::with_capacity(120);
     // Retain read handles throughout the actual import/decode/export operation.
     let mut leases = Vec::with_capacity(120);
@@ -145,12 +149,12 @@ fn capture(
         report["authored_project"] = json!({"path":output.join("capture.mdp"),"sha256":sha256_file(&output.join("capture.mdp"))?,"persistence_request_id":persistence.get()});
         report["author_checkpoint"] = serde_json::to_value(super::harness::author_checkpoint(workflow.app())?)?;
         let viewer = GoldenHeadlessPreview::run_with_until(deadline,|viewer| {
-            for (frame, id, mut preset, color, extension) in [
-                (0, "scene-linear-rec2020-f32", ExportPreset::open_exr_float_sequence(), ColorSpace::LinearRec2020, "exr"),
-                (17, "sdr-srgb-alpha-rgba8", ExportPreset::png_sequence(), ColorSpace::Srgb, "png"),
-                (119, "bt2100-pq-rgba-f32", ExportPreset::tiff16_sequence(), ColorSpace::Rec2100Pq, "tiff"),
+            for (frame, id, mut preset, color_target, extension) in [
+                (0, "scene-linear-rec2020-f32", ExportPreset::open_exr_float_sequence(), ExportColorTarget::Colorimetric(ColorSpace::LinearRec2020), "exr"),
+                (17, "sdr-srgb-alpha-rgba8", ExportPreset::png_sequence(), ExportColorTarget::RenderingView(ColorSpace::Srgb), "png"),
+                (119, "bt2100-pq-rgba-f32", ExportPreset::tiff16_sequence(), ExportColorTarget::RenderingView(ColorSpace::Rec2100Pq), "tiff"),
             ] {
-                preset.color_target = ExportColorTarget::Colorimetric(color);
+                preset.color_target = color_target;
                 preset.alpha_mode = if frame == 119 {ExportAlphaMode::FlattenBlack} else {ExportAlphaMode::Preserve};
                 let state = workflow.app_mut();
                 let rate = state.active_sequence().context("capture Sequence")?.time_base();

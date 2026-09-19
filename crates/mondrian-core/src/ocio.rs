@@ -1817,9 +1817,9 @@ pub fn init_mondrian_default_ocio() -> Result<(), String> {
     init_mondrian_standard_ocio_locked(MondrianStandardPackageIdentity::V3)
 }
 
-fn init_mondrian_standard_ocio_locked(
+fn build_verified_mondrian_standard_ocio(
     package: MondrianStandardPackageIdentity,
-) -> Result<(), String> {
+) -> Result<(MondrianDefaultOcioContract, Config), String> {
     let contract = mondrian_standard_ocio_contract(package)?;
     let actual_digest = sha256_hex(MONDRIAN_DEFAULT_OCIO_CONFIG.as_bytes());
     if actual_digest != contract.content_sha256 {
@@ -1831,9 +1831,9 @@ fn init_mondrian_standard_ocio_locked(
         ));
     }
     let config = build_mondrian_default_ocio_config(MONDRIAN_DEFAULT_OCIO_CONFIG, package)
-        .map_err(|e| {
+        .map_err(|error| {
             format!(
-                "failed to load embedded Mondrian OCIO package '{}': {e}",
+                "failed to build embedded Mondrian OCIO package '{}': {error}",
                 contract.config_name
             )
         })?;
@@ -1847,6 +1847,114 @@ fn init_mondrian_standard_ocio_locked(
             actual_package_digest
         ));
     }
+    Ok((contract, config))
+}
+
+pub const MONDRIAN_STANDARD_SDR_INTERCHANGE_CONFIG_FILE: &str = "config.ocio";
+pub const MONDRIAN_STANDARD_SDR_INTERCHANGE_TRANSFORM_FILE: &str = "mondrian-standard-sdr-v2.ctf";
+const MONDRIAN_STANDARD_SDR_INTERCHANGE_OUTPUT_SPACE: &str = "Mondrian Standard SDR v2 - sRGB";
+
+/// Self-contained OCIO files for reproducing the current Mondrian Standard SDR
+/// display transform in an external OCIO host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MondrianStandardSdrInterchangePackage {
+    /// OCIO config text. The config expects [`Self::transform`] beside it
+    /// under `mondrian-standard-sdr-v2.ctf`.
+    pub config: String,
+    /// OCIO Color Transform Format transform generated from the authoritative
+    /// processor graph without a sampled 3D-LUT approximation.
+    pub transform: String,
+}
+
+/// Serialize the current Mondrian Standard SDR display processor for an external
+/// OCIO host without replacing the processor graph with an approximate cube.
+pub fn build_mondrian_standard_sdr_interchange_package(
+) -> Result<MondrianStandardSdrInterchangePackage, String> {
+    let _lease = lock_ocio_config_operation()?;
+    let (_, config) = build_verified_mondrian_standard_ocio(MondrianStandardPackageIdentity::V3)?;
+    let processor = config
+        .processor_display(
+            "Linear Rec.2020",
+            "sRGB - Display",
+            MONDRIAN_STANDARD_SDR_V2_VIEW_NAME,
+            ocio_rs::TransformDirection::Forward,
+        )
+        .map_err(|error| format!("build Mondrian Standard SDR display processor: {error}"))?;
+    let group = processor
+        .try_create_group_transform()
+        .map_err(|error| format!("materialize Mondrian Standard SDR processor graph: {error}"))?;
+    let ctf_writer = (0..GroupTransform::num_write_formats())
+        .find_map(|index| {
+            (GroupTransform::format_extension_by_index(index).as_deref() == Some("ctf"))
+                .then(|| GroupTransform::format_name_by_index(index))
+                .flatten()
+        })
+        .ok_or_else(|| "OCIO does not provide a CTF GroupTransform writer".to_owned())?;
+    let transform = group
+        .write_to_string(&config, &ctf_writer)
+        .map_err(|error| format!("serialize Mondrian Standard SDR processor as CTF: {error}"))?
+        .ok_or_else(|| {
+            "OCIO returned no CTF serialization for the Mondrian Standard SDR processor".to_owned()
+        })?;
+    let config = format!(
+        r#"ocio_profile_version: 2.1
+search_path: .
+strictparsing: true
+name: mondrian_standard_sdr_interchange_v1
+roles:
+  default: Raw
+  scene_linear: Linear Rec.2020
+  compositing_linear: Linear Rec.2020
+  color_picking: {output_space}
+  texture_paint: {output_space}
+  default_byte: {output_space}
+  default_float: Linear Rec.2020
+  data: Raw
+file_rules:
+  - !<Rule> {{name: Default, colorspace: Raw}}
+displays:
+  sRGB - Display:
+    - !<View> {{name: {view}, colorspace: {output_space}}}
+    - !<View> {{name: Raw, colorspace: Raw}}
+active_displays: [sRGB - Display]
+active_views: [{view}, Raw]
+colorspaces:
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    aliases: [lin_rec2020, lin_rec2020_scene, Utility - Linear - Rec.2020]
+    family: Utility
+    bitdepth: 32f
+    isdata: false
+    encoding: scene-linear
+    allocation: uniform
+  - !<ColorSpace>
+    name: {output_space}
+    aliases: [sRGB]
+    family: Display
+    bitdepth: 32f
+    isdata: false
+    encoding: sdr-video
+    allocation: uniform
+    from_scene_reference: !<FileTransform> {{src: {transform_file}}}
+  - !<ColorSpace>
+    name: Raw
+    family: Utility
+    bitdepth: 32f
+    isdata: true
+    encoding: data
+    allocation: uniform
+"#,
+        output_space = MONDRIAN_STANDARD_SDR_INTERCHANGE_OUTPUT_SPACE,
+        view = MONDRIAN_STANDARD_SDR_V2_VIEW_NAME,
+        transform_file = MONDRIAN_STANDARD_SDR_INTERCHANGE_TRANSFORM_FILE,
+    );
+    Ok(MondrianStandardSdrInterchangePackage { config, transform })
+}
+
+fn init_mondrian_standard_ocio_locked(
+    package: MondrianStandardPackageIdentity,
+) -> Result<(), String> {
+    let (contract, config) = build_verified_mondrian_standard_ocio(package)?;
     let source = OcioConfigSource::MondrianStandard { package };
     OCIO_STATE
         .lock()
@@ -4156,6 +4264,95 @@ mod tests {
                 None => std::env::remove_var("OCIO"),
             }
         }
+    }
+
+    #[test]
+    fn standard_sdr_interchange_package_tracks_authoritative_display_processor() {
+        let package = build_mondrian_standard_sdr_interchange_package()
+            .expect("Mondrian Standard SDR interchange package");
+        let directory = tempfile::tempdir().expect("interchange package directory");
+        let config_path = directory.path().join(MONDRIAN_STANDARD_SDR_INTERCHANGE_CONFIG_FILE);
+        std::fs::write(&config_path, &package.config).expect("write interchange config");
+        std::fs::write(
+            directory.path().join(MONDRIAN_STANDARD_SDR_INTERCHANGE_TRANSFORM_FILE),
+            &package.transform,
+        )
+        .expect("write interchange transform");
+
+        let interchange = Config::from_file(config_path.to_string_lossy().as_ref())
+            .expect("load interchange config");
+        interchange.validate().expect("validate interchange config");
+        assert_eq!(
+            interchange.role_color_space("scene_linear").as_deref(),
+            Some("Linear Rec.2020")
+        );
+        assert_eq!(
+            interchange.default_view("sRGB - Display").as_deref(),
+            Some(MONDRIAN_STANDARD_SDR_V2_VIEW_NAME)
+        );
+
+        let (_, authoritative) =
+            build_verified_mondrian_standard_ocio(MondrianStandardPackageIdentity::V3)
+                .expect("authoritative Standard package");
+        let levels = [
+            -0.125_f32, -0.01, -0.001, 0.0, 0.000_1, 0.01, 0.18, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0,
+        ];
+        let mut reference = Vec::with_capacity(levels.len().pow(3) * 4);
+        for red in levels {
+            for green in levels {
+                for blue in levels {
+                    let alpha = [0.0_f32, 0.25, 0.5, 1.0][reference.len() / 4 % 4];
+                    reference.extend_from_slice(&[red, green, blue, alpha]);
+                }
+            }
+        }
+        let mut observed = reference.clone();
+        let pixel_count = (reference.len() / 4) as i64;
+        authoritative
+            .processor_display(
+                "Linear Rec.2020",
+                "sRGB - Display",
+                MONDRIAN_STANDARD_SDR_V2_VIEW_NAME,
+                ocio_rs::TransformDirection::Forward,
+            )
+            .expect("authoritative display processor")
+            .default_cpu_processor()
+            .expect("authoritative CPU processor")
+            .try_apply_rgba_pixels(&mut reference, pixel_count, 4)
+            .expect("apply authoritative display processor");
+        interchange
+            .processor(
+                "Linear Rec.2020",
+                MONDRIAN_STANDARD_SDR_INTERCHANGE_OUTPUT_SPACE,
+            )
+            .expect("interchange color-space processor")
+            .default_cpu_processor()
+            .expect("interchange CPU processor")
+            .try_apply_rgba_pixels(&mut observed, pixel_count, 4)
+            .expect("apply interchange processor");
+
+        let mut maximum = 0.0_f32;
+        for (pixel_index, (expected, actual)) in
+            reference.chunks_exact(4).zip(observed.chunks_exact(4)).enumerate()
+        {
+            for channel in 0..3 {
+                let error = (expected[channel] - actual[channel]).abs();
+                assert!(
+                    error.is_finite(),
+                    "non-finite interchange error at pixel {pixel_index}, channel {channel}"
+                );
+                maximum = maximum.max(error);
+            }
+            assert_eq!(
+                actual[3].to_bits(),
+                expected[3].to_bits(),
+                "interchange processor changed alpha at pixel {pixel_index}"
+            );
+        }
+        assert!(
+            maximum <= 1.0e-7,
+            "serialized CTF diverged from the authoritative processor by {maximum}"
+        );
     }
 
     #[test]
