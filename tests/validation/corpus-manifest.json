@@ -205,7 +205,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-golden-vfr-retime-video.ps1",
-        "recipe_sha256": "8ad25f58c08f3b40a5247f64316065f334b659609c6184ddf3971c1f5b48cefc",
+        "recipe_sha256": "628b7d1dcadc7af413f12aedf70bf293413bfcb912c23028b6810088cfccc8e4",
         "profile": "SignedRetimeVfr",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"

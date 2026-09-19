@@ -186,13 +186,15 @@ $artifactPath = Join-Path $outputDirectory $FileName
 $shouldGenerate = $Force -or -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)
 if ($shouldGenerate) {
     $partialPath = "$artifactPath.partial.mp4"
-    Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+    $intermediatePath = "$artifactPath.partial.mkv"
+    Remove-Item -LiteralPath $partialPath, $intermediatePath -Force -ErrorAction SilentlyContinue
     try {
         Invoke-Checked $ffmpeg @(
             "-hide_banner", "-nostdin", "-loglevel", "warning", "-y",
-            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=50:duration=4",
+            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=50",
             "-an",
-            "-vf", "settb=1/12800,setpts='floor(N/2)*1024+mod(N\,2)*256',format=yuv420p",
+            "-vf", "settb=1/50,setpts='floor(N/2)*4+mod(N\,2)',format=yuv420p",
+            "-frames:v", "200",
             "-fps_mode", "vfr",
             "-c:v", "libx264",
             "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
@@ -204,17 +206,25 @@ if ($shouldGenerate) {
             "-g", "50",
             "-keyint_min", "50",
             "-sc_threshold", "0",
-            "-video_track_timescale", "12800",
             "-color_range", "tv",
             "-colorspace", "bt709",
             "-color_trc", "bt709",
             "-color_primaries", "bt709",
+            $intermediatePath
+        )
+        Invoke-Checked $ffmpeg @(
+            "-hide_banner", "-nostdin", "-loglevel", "warning", "-y",
+            "-i", $intermediatePath,
+            "-map", "0:v:0",
+            "-c:v", "copy",
+            "-video_track_timescale", "12800",
+            "-use_editlist", "0",
             "-movflags", "+faststart",
             $partialPath
         )
         Move-Item -LiteralPath $partialPath -Destination $artifactPath -Force
     } finally {
-        Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $partialPath, $intermediatePath -Force -ErrorAction SilentlyContinue
     }
 }
 
