@@ -127,6 +127,12 @@ fn sealed_gpu_color_profile_owns_complete_non_skippable_gate_set() {
         }
     }
     assert_eq!(report_environments.len(), 3);
+    let standard_input_report = gates
+        .iter()
+        .find(|gate| gate["id"] == "standard-input-4k-performance")
+        .and_then(|gate| gate.get("report"))
+        .expect("standard input performance report contract");
+    assert_eq!(standard_input_report["schema_version"], 2);
     for invariant in [
         "all_gates_must_run",
         "all_gate_processes_must_pass",

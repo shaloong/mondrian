@@ -94,7 +94,7 @@
         "environment": "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT",
         "file": "standard-input-4k.jsonl",
         "schema_path": "schema_version",
-        "schema_version": 1,
+        "schema_version": 2,
         "scenario": "renderer_color_transform_4k_gpu_timestamp"
       }
     }
