@@ -31,7 +31,8 @@ use crate::{
 };
 use mondrian_core::types::{Color, ColorEngine, ColorSpace};
 use mondrian_core::{
-    OutputTransformIntent, OutputTransformIntentResolutionError, WorkingColorSpace,
+    OcioColorSpaceIdentity, OutputTransformIntent, OutputTransformIntentResolutionError,
+    WorkingColorSpace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -1146,7 +1147,31 @@ impl RenderGpuOutputBoundaryRuntime {
         })
     }
 
-    /// Plan and record one GPU-resident OCIO identity transform between graph nodes.
+    fn intermediate_transform_is_exact_passthrough(
+        transform: &RenderIntermediateColorTransform,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_residency: ColorFrameResidency,
+    ) -> bool {
+        let descriptor = input.descriptor();
+        let identity_matches = match transform.output_identity {
+            OcioColorSpaceIdentity::Color(space) => descriptor.color_space.color() == Some(space),
+            OcioColorSpaceIdentity::Working(space) => {
+                descriptor.color_space.working() == Some(space)
+            }
+        };
+        descriptor.residency == ColorFrameResidency::Gpu
+            && output_residency == ColorFrameResidency::Gpu
+            && input.texture_format() == output_texture_format
+            && descriptor.domain == transform.output_domain
+            && descriptor.encoding == transform.output_encoding
+            && identity_matches
+    }
+
+    /// Record one GPU-resident OCIO transform between graph nodes.
+    ///
+    /// An exact match of identity, domain, encoding, residency, and texture format
+    /// aliases the input handle and records no pass or resource allocation.
     pub fn record_wgpu_intermediate_color_transform_owned_backend(
         &mut self,
         transform: &RenderIntermediateColorTransform,
@@ -1156,6 +1181,20 @@ impl RenderGpuOutputBoundaryRuntime {
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        if Self::intermediate_transform_is_exact_passthrough(
+            transform,
+            input,
+            output_texture_format,
+            gpu_options.output_residency,
+        ) {
+            return Ok(RenderGpuColorTransformRecord {
+                materialized: RenderGpuOutputStageMaterializedResources {
+                    input: input.clone(),
+                    output: input.clone(),
+                },
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            });
+        }
         let transform_plan = {
             let mut planner =
                 RenderColorTransformGpuPlanner::new(&mut self.shader_cache, gpu_options);
@@ -2780,9 +2819,9 @@ impl RenderGpuColorTransformResourcePlan {
 
 /// Result of recording one GPU-resident OCIO transform between graph nodes.
 pub struct RenderGpuColorTransformRecord {
-    /// Existing input and newly materialized output handles.
+    /// Existing input and output handles. Exact passthrough records alias these handles.
     pub materialized: RenderGpuOutputStageMaterializedResources,
-    /// Single-pass diagnostics with no upload/readback stages.
+    /// Stage diagnostics; exact passthrough records contain zero stages.
     pub stage_diagnostics: RenderColorStageDiagnostics,
 }
 
@@ -7680,6 +7719,66 @@ mod tests {
         assert_eq!(diagnostics.upload_stages, 0);
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 0);
+    }
+
+    #[test]
+    fn exact_intermediate_contract_is_passthrough_only_without_representation_change() {
+        let input = gpu_handle_with_format(
+            649,
+            ColorFrameDescriptor {
+                width: 3840,
+                height: 2160,
+                color_space: WorkingColorSpace::LinearRec2020.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "working-input",
+        );
+        let exact = RenderIntermediateColorTransform {
+            output_identity: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            output_domain: ColorFrameDomain::Working,
+            output_encoding: ColorFrameEncoding::LinearFloat,
+            engine: ColorEngine::mondrian_standard(),
+        };
+
+        assert!(
+            RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &RenderIntermediateColorTransform {
+                    output_domain: ColorFrameDomain::Effect,
+                    ..exact.clone()
+                },
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Cpu,
+            )
+        );
     }
 
     #[test]

@@ -129,6 +129,7 @@ struct TransformCase {
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
     execution: TransformExecution,
+    exact_passthrough: bool,
 }
 
 impl TransformCase {
@@ -241,7 +242,8 @@ struct TransformReport {
     cold_record_cpu_us: u64,
     warm_record_cpu_us: QuantilesUs,
     warm_gpu_us: QuantilesUs,
-    shader: ShaderReport,
+    shader: Option<ShaderReport>,
+    exact_passthrough: bool,
     fullscreen_passes: u32,
     output_texture_writes: u32,
     input_uploads_in_measured_region: u32,
@@ -773,7 +775,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         eprintln!(
             "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
             serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "scenario": "renderer_color_transform_4k_gpu_timestamp",
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
@@ -798,7 +800,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     );
     let identity = TransformCase {
         mode: "identity",
-        operation_class: "OCIO optimized identity",
+        operation_class: "exact frame-contract passthrough",
         src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
         dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
         execution: TransformExecution::Intermediate {
@@ -806,6 +808,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
             output_encoding: ColorFrameEncoding::LinearFloat,
             output_texture_format: GpuColorFrameTextureFormat::Rgba32Float,
         },
+        exact_passthrough: true,
     };
     let matrix_oetf = TransformCase {
         mode: "matrix_oetf",
@@ -817,6 +820,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
             output_encoding: ColorFrameEncoding::EncodedFloat,
             output_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
         },
+        exact_passthrough: false,
     };
     let rec709_to_working = TransformCase {
         mode: "rec709_to_working",
@@ -824,6 +828,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         src: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
         dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
         execution: TransformExecution::InputToWorking,
+        exact_passthrough: false,
     };
     let camera_log_to_working = TransformCase {
         mode: "sony_slog3_sgamut3cine_to_working",
@@ -831,6 +836,7 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
         src: OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
         dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
         execution: TransformExecution::InputToWorking,
+        exact_passthrough: false,
     };
 
     let compositor = GpuFrameCompositor::new(&context.device)?;
@@ -870,22 +876,25 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     }
 
     let shaders = [
-        runtime
-            .shader_cache_mut()
-            .get_or_extract(identity.shader_request())
-            .context("extract cached identity GPU shader")?,
-        runtime
-            .shader_cache_mut()
-            .get_or_extract(matrix_oetf.shader_request())
-            .context("extract cached matrix + OETF GPU shader")?,
-        runtime
-            .shader_cache_mut()
-            .get_or_extract(rec709_to_working.shader_request())
-            .context("extract cached Rec.709 input GPU shader")?,
-        runtime
-            .shader_cache_mut()
-            .get_or_extract(camera_log_to_working.shader_request())
-            .context("extract cached camera-log input GPU shader")?,
+        None,
+        Some(
+            runtime
+                .shader_cache_mut()
+                .get_or_extract(matrix_oetf.shader_request())
+                .context("extract cached matrix + OETF GPU shader")?,
+        ),
+        Some(
+            runtime
+                .shader_cache_mut()
+                .get_or_extract(rec709_to_working.shader_request())
+                .context("extract cached Rec.709 input GPU shader")?,
+        ),
+        Some(
+            runtime
+                .shader_cache_mut()
+                .get_or_extract(camera_log_to_working.shader_request())
+                .context("extract cached camera-log input GPU shader")?,
+        ),
     ];
     let runtime_before_measurement = RuntimeCacheActivity::from_runtime(runtime.diagnostics());
     let mut samples = std::array::from_fn::<ViewSamples, 4, _>(|_| ViewSamples::default());
@@ -905,9 +914,10 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     let runtime_diagnostics = runtime.diagnostics();
     let measured_cache_activity = RuntimeCacheActivity::from_runtime(runtime_diagnostics)
         .delta_since(runtime_before_measurement);
+    let executed_case_count = cases.iter().filter(|(case, _)| !case.exact_passthrough).count();
     let expected_samples = u64::try_from(sample_count)
         .expect("bounded sample count fits u64")
-        .saturating_mul(u64::try_from(cases.len()).expect("case count fits u64"));
+        .saturating_mul(u64::try_from(executed_case_count).expect("case count fits u64"));
     let warm_path_gate =
         TransformWarmPathReuseGate::evaluate(measured_cache_activity, expected_samples);
     let [identity_samples, matrix_samples, rec709_samples, camera_log_samples] = samples;
@@ -916,25 +926,25 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
             &identity,
             cold_record_cpu_us[0],
             identity_samples,
-            &shaders[0],
+            shaders[0].as_deref(),
         ),
         build_transform_report(
             &matrix_oetf,
             cold_record_cpu_us[1],
             matrix_samples,
-            &shaders[1],
+            shaders[1].as_deref(),
         ),
         build_transform_report(
             &rec709_to_working,
             cold_record_cpu_us[2],
             rec709_samples,
-            &shaders[2],
+            shaders[2].as_deref(),
         ),
         build_transform_report(
             &camera_log_to_working,
             cold_record_cpu_us[3],
             camera_log_samples,
-            &shaders[3],
+            shaders[3].as_deref(),
         ),
     ];
     let all_transforms_within_budget =
@@ -942,14 +952,14 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     let [identity, matrix_oetf, rec709_to_working, camera_log_to_working] = reports;
     let info = context.adapter.get_info();
     let report = ColorTransformGpuPerfReport {
-        schema_version: 1,
+        schema_version: 2,
         scenario: "renderer_color_transform_4k_gpu_timestamp",
         width: WIDTH,
         height: HEIGHT,
         samples_per_transform: sample_count,
         warmups_per_transform: WARMUP_COUNT,
         measured_region:
-            "one production OCIO fullscreen pass only; source initialization, upload, and timestamp readback excluded",
+            "production transform dispatch; exact identity contracts alias the input with zero passes; executed OCIO passes exclude source initialization, upload, and timestamp readback",
         adapter: AdapterReport {
             name: info.name,
             backend: format!("{:?}", info.backend),
@@ -1271,7 +1281,16 @@ fn record_transform_sample(
     if let Some(timer) = timer {
         timer.finish(&mut encoder);
     }
-    assert_eq!(stage_diagnostics.gpu_color_stages, 1);
+    let exact_passthrough = output_id == input.id();
+    assert_eq!(
+        exact_passthrough, case.exact_passthrough,
+        "{} passthrough shape did not match its contract",
+        case.mode
+    );
+    assert_eq!(
+        stage_diagnostics.gpu_color_stages,
+        u64::from(!exact_passthrough)
+    );
     assert_eq!(stage_diagnostics.upload_stages, 0);
     assert_eq!(stage_diagnostics.readback_stages, 0);
     let submission = context.queue.submit(std::iter::once(encoder.finish()));
@@ -1282,11 +1301,13 @@ fn record_transform_sample(
                 .context("read color-transform hardware timestamp")
         })
         .transpose()?;
-    let output = runtime
-        .frame_table_mut()
-        .remove(output_id)
-        .context("recorded transform output missing from resource table")?;
-    runtime.resource_pool().release(output);
+    if !exact_passthrough {
+        let output = runtime
+            .frame_table_mut()
+            .remove(output_id)
+            .context("recorded transform output missing from resource table")?;
+        runtime.resource_pool().release(output);
+    }
     assert_eq!(runtime.frame_table().len(), retained_input_count);
     Ok(RecordedSample { gpu_us, record_cpu_us })
 }
@@ -1372,7 +1393,7 @@ fn build_transform_report(
     case: &TransformCase,
     cold_record_cpu_us: u64,
     samples: ViewSamples,
-    shader: &OcioGpuShaderPlan,
+    shader: Option<&OcioGpuShaderPlan>,
 ) -> TransformReport {
     TransformReport {
         mode: case.mode,
@@ -1382,9 +1403,10 @@ fn build_transform_report(
         cold_record_cpu_us,
         warm_record_cpu_us: quantiles(samples.record_cpu_us),
         warm_gpu_us: quantiles(samples.gpu_us),
-        shader: shader_report(shader),
-        fullscreen_passes: 1,
-        output_texture_writes: 1,
+        shader: shader.map(shader_report),
+        exact_passthrough: case.exact_passthrough,
+        fullscreen_passes: u32::from(!case.exact_passthrough),
+        output_texture_writes: u32::from(!case.exact_passthrough),
         input_uploads_in_measured_region: 0,
         gpu_readbacks_in_measured_region: 0,
     }
