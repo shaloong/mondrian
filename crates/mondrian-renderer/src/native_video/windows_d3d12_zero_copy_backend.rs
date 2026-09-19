@@ -550,6 +550,26 @@ impl D3D12NativeVideoImportBackend {
         Ok(before.saturating_sub(self.pending_sources.len()))
     }
 
+    /// Check existing source ownership before a Viewer candidate consumes its
+    /// predecessor textures. This does not acquire a surface or submit imports;
+    /// each import still validates its own capacity and device contract.
+    pub(crate) fn check_source_reuse(
+        &mut self,
+        frames: &[&PreviewNativeDecodedFrame],
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.retire_completed_source_residency()?;
+        for frame in frames {
+            let source =
+                validated_d3d12_native_decoded_frame_for_luid(self.renderer_adapter_luid, frame)
+                    .map_err(|error| rejected(error.to_string()))?;
+            if self.resource_in_flight(&source.texture) {
+                return Err(GpuNativeDecodedFrameImportError::Backpressure {
+                    reason: "the same D3D12VA decoder surface already has a renderer submission in flight".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
     fn import_frame(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,

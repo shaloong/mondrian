@@ -553,6 +553,16 @@ impl ViewerNativeVideoImportRuntime {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn check_source_reuse(
+        &mut self,
+        frames: &[&PreviewNativeDecodedFrame],
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        if let Some(backend) = self.backend.as_mut() {
+            backend.check_source_reuse(frames)?;
+        }
+        Ok(())
+    }
     /// Import one native decoder payload into a renderer-owned working resource.
     pub fn import(
         &mut self,

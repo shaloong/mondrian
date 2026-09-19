@@ -741,6 +741,16 @@ impl ViewerGpuExecutionRuntime {
             ));
         }
 
+        #[cfg(target_os = "windows")]
+        self.native_video_import
+            .check_source_reuse(&visible_native_video_frames(request.layers))
+            .map_err(|error| {
+                if error.is_backpressure() {
+                    ViewerGpuExecutionError::Backpressure(error.to_string())
+                } else {
+                    ViewerGpuExecutionError::InputPreparation(error.to_string())
+                }
+            })?;
         let _turnover = if self.current_frame_submission.take().is_some() {
             let guard = self.resource_pool.begin_ordered_turnover();
             self.cpu_yuv_upload.begin_frame();
@@ -2276,6 +2286,48 @@ fn collect_source_cpu_yuv_upload(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn visible_native_video_frames(
+    layers: &[ViewerGpuExecutionLayer],
+) -> Vec<&mondrian_media::PreviewNativeDecodedFrame> {
+    fn source_frame(
+        source: &crate::ViewerGpuSourceLayer,
+    ) -> Option<&mondrian_media::PreviewNativeDecodedFrame> {
+        if source_layer_has_zero_contribution(source) {
+            return None;
+        }
+        match source {
+            crate::ViewerGpuSourceLayer::Media { native_source: Some(source), .. } => {
+                Some(source.native_frame.as_ref())
+            }
+            _ => None,
+        }
+    }
+    let mut frames = Vec::new();
+    for layer in layers {
+        match layer {
+            ViewerGpuExecutionLayer::Source(source) => frames.extend(source_frame(source)),
+            ViewerGpuExecutionLayer::Adjustment { .. } => {}
+            ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+                if !transition.progress.is_finite() {
+                    continue;
+                }
+                let progress = transition.progress.clamp(0.0, 1.0);
+                for (input, weight) in [
+                    (&transition.left, 1.0 - progress),
+                    (&transition.right, progress),
+                ] {
+                    if weight > 0.0
+                        && let crate::ViewerGpuTransitionInput::Source(source) = input
+                    {
+                        frames.extend(source_frame(source));
+                    }
+                }
+            }
+        }
+    }
+    frames
+}
 fn prepare_source_native_video_import(
     layer: &crate::ViewerGpuSourceLayer,
     runtime: &mut crate::ViewerNativeVideoImportRuntime,
