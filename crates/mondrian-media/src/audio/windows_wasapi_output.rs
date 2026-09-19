@@ -285,9 +285,12 @@ fn run_stream_inner(
 
     write_frames(
         context,
-        &audio_client,
         &render_client,
-        buffer_frames,
+        RenderPacket {
+            observed_at: Instant::now(),
+            frames: buffer_frames,
+            queued_before: 0,
+        },
         stream_latency,
         encoding,
         &mut scratch,
@@ -324,15 +327,15 @@ fn run_stream_inner(
         if context.stop.load(Ordering::Acquire) {
             break;
         }
-        let padding = unsafe { audio_client.GetCurrentPadding() }
-            .map_err(|error| format!("failed to query WASAPI render padding: {error}"))?;
-        let available = buffer_frames.saturating_sub(padding);
-        if available > 0 {
+        let packet = sample_render_packet(share_mode, buffer_frames, || {
+            unsafe { audio_client.GetCurrentPadding() }
+                .map_err(|error| format!("failed to query WASAPI render padding: {error}"))
+        })?;
+        if packet.frames > 0 {
             write_frames(
                 context,
-                &audio_client,
                 &render_client,
-                available,
+                packet,
                 stream_latency,
                 encoding,
                 &mut scratch,
@@ -556,19 +559,41 @@ fn aligned_buffer_duration_100ns(frames: u32, sample_rate: u32) -> Result<i64, S
     i64::try_from(numerator / u64::from(sample_rate))
         .map_err(|_| "WASAPI exclusive aligned duration exceeded i64".to_owned())
 }
+struct RenderPacket {
+    observed_at: Instant,
+    frames: u32,
+    queued_before: u32,
+}
+
+fn sample_render_packet(
+    share_mode: RealtimeAudioOutputShareMode,
+    buffer_frames: u32,
+    read_padding: impl FnOnce() -> Result<u32, String>,
+) -> Result<RenderPacket, String> {
+    let observed_at = Instant::now();
+    // Exclusive event-driven streams transfer one complete buffer per event.
+    // Shared streams bind capacity and delay to the same padding observation.
+    let queued_before = if share_mode == RealtimeAudioOutputShareMode::Exclusive {
+        0
+    } else {
+        read_padding()?
+    };
+    let frames = buffer_frames
+        .checked_sub(queued_before)
+        .ok_or_else(|| "WASAPI padding exceeds the negotiated buffer extent".to_owned())?;
+    Ok(RenderPacket { observed_at, frames, queued_before })
+}
+
 fn write_frames(
     context: &RenderContext,
-    audio_client: &Audio::IAudioClient,
     render_client: &Audio::IAudioRenderClient,
-    frames: u32,
+    packet: RenderPacket,
     stream_latency: Duration,
     encoding: WasapiSampleEncoding,
     scratch: &mut [f32],
 ) -> Result<(), String> {
-    let observed_at = Instant::now();
-    let padding = unsafe { audio_client.GetCurrentPadding() }
-        .map_err(|error| format!("failed to sample WASAPI playback padding: {error}"))?;
-    let queued_frames = usize::try_from(u64::from(padding) + u64::from(frames))
+    let RenderPacket { observed_at, frames, queued_before } = packet;
+    let queued_frames = usize::try_from(u64::from(queued_before) + u64::from(frames))
         .map_err(|_| "WASAPI callback endpoint frame extent overflowed".to_owned())?;
     let playback_delay =
         super::callback_tail_playback_delay(stream_latency, queued_frames, context.sample_rate)
@@ -766,6 +791,43 @@ impl Drop for EventOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_packet_binds_capacity_and_latency_to_one_padding_sample() {
+        let samples = std::cell::Cell::new(0);
+        let before = Instant::now();
+        let packet = sample_render_packet(RealtimeAudioOutputShareMode::Shared, 4_800, || {
+            samples.set(samples.get() + 1);
+            Ok(4_320)
+        })
+        .expect("shared packet");
+        assert_eq!(samples.get(), 1);
+        assert_eq!(packet.frames, 480);
+        assert_eq!(packet.queued_before + packet.frames, 4_800);
+        assert!(packet.observed_at >= before && packet.observed_at <= Instant::now());
+        let full = sample_render_packet(RealtimeAudioOutputShareMode::Shared, 480, || Ok(480))
+            .expect("full endpoint buffer");
+        assert_eq!(full.frames, 0);
+        assert!(
+            sample_render_packet(RealtimeAudioOutputShareMode::Shared, 480, || Ok(481)).is_err()
+        );
+        assert!(
+            sample_render_packet(RealtimeAudioOutputShareMode::Shared, 480, || Err(
+                "device lost".into()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exclusive_event_packet_transfers_full_buffer_without_padding_query() {
+        let packet = sample_render_packet(RealtimeAudioOutputShareMode::Exclusive, 480, || {
+            panic!("exclusive event mode must not depend on padding")
+        })
+        .expect("exclusive event packet");
+        assert_eq!(packet.frames, 480);
+        assert_eq!(packet.queued_before, 0);
+    }
 
     #[test]
     fn professional_pcm_formats_preserve_container_and_valid_bit_contracts() {
