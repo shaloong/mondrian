@@ -115,10 +115,22 @@ pub(super) fn source_rgba(
     let source = frame.gpu_source().context("decoded media did not retain a CPU source frame")?;
     match source.source.as_ref() {
         CpuSourceColorFrame::EncodedRgba8(frame) => Ok(frame.rgba().to_vec()),
-        CpuSourceColorFrame::EncodedFloat(_) => {
-            bail!("8-bit color fixture unexpectedly decoded as encoded float")
+        CpuSourceColorFrame::EncodedFloat(frame) => {
+            let mut rgba = Vec::with_capacity(frame.rgba_f32().data.len().saturating_mul(4));
+            for pixel in &frame.rgba_f32().data {
+                for channel in pixel {
+                    ensure!(
+                        channel.is_finite(),
+                        "encoded float source contains a non-finite sample"
+                    );
+                    rgba.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+            }
+            Ok(rgba)
         }
-        CpuSourceColorFrame::LinearFloat(_) => bail!("color fixture unexpectedly decoded as float"),
+        CpuSourceColorFrame::LinearFloat(_) => {
+            bail!("color fixture unexpectedly decoded as working float")
+        }
     }
 }
 

@@ -3727,8 +3727,9 @@ only when the GPU input stage cannot be recorded. CPU outcomes still require
 one host-to-device upload; native decoder surfaces use the separate zero-copy
 import contract and never masquerade as one of these CPU source types. Here
 zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
-sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
-encoded and working textures.
+sampling. Fused YUV reconstruction and OCIO allocate one Renderer-owned Working
+texture; no encoded RGB intermediate is allocated. Linux CUDA imports additionally
+charge their padded interop storage buffer to the active working-set budget.
 
 An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
 semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
@@ -3907,10 +3908,11 @@ working space.
 
 Physical endurance admission now calls
 `probe_realtime_audio_output_contract` to use the same exact device selection,
-sample rate, channel-layout and platform negotiation as the real Audio output
-owner. The probe creates no running stream and cannot prove later callback
-progress; stream-open/runtime evidence still belongs to the phase owner. A
-missing device or unsupported exact contract produces missing pre-start
+sample rate, channel-layout, platform negotiation and bounded stream owner as
+the real Audio output path. The probe must create and start that production
+stream, capture its concrete device evidence, and close it before admission
+returns; later callback progress still belongs to the phase owner. A missing
+device or unsupported exact stream contract produces missing pre-start
 capability and NotRun, while a later device loss is a startup/runtime failure.
 
 ### Qualified CLI capsule and native process closure

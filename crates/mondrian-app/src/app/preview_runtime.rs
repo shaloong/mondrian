@@ -480,7 +480,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         preserve_current_output: bool,
     ) -> PreviewGpuFrameState {
         if self.frame_store.borrow_mut().viewer_frame(&resolved.cpu_cache_key).is_some() {
-            return PreviewGpuFrameState::Loading;
+            return if preserve_current_output {
+                PreviewGpuFrameState::Prepared
+            } else {
+                PreviewGpuFrameState::Loading
+            };
         }
         if self
             .cpu_fallback_failure
@@ -2764,11 +2768,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         decision: &crate::app::execution_resource_coordination::PreviewExecutionDecision,
     ) {
+        // Count every complete policy projection so qualification can prove that
+        // headless fast paths did not bypass resource coordination. Identical
+        // decisions remain cheap and do not reconfigure any owned resource.
+        bump(&self.metrics.resource_decision_applications);
         if self.applied_resource_decision.get() == Some(*decision) {
             return;
         }
         self.applied_resource_decision.set(Some(*decision));
-        bump(&self.metrics.resource_decision_applications);
+        bump(&self.metrics.resource_decision_reconfigurations);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);
         self.decode_worker_resources.reconfigure_session_residency(
@@ -2921,6 +2929,7 @@ pub fn preview_input_color_resolution_counts_for_frame(
 #[derive(Default)]
 struct PreviewMetrics {
     resource_decision_applications: Cell<u64>,
+    resource_decision_reconfigurations: Cell<u64>,
     render_requests: Cell<u64>,
     ready_frames: Cell<u64>,
     loading_frames: Cell<u64>,

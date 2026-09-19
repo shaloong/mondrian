@@ -4,7 +4,7 @@ use super::{
     convert_decoded_to_rgba, decode_preview_frame_cancellable,
     decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
     decoded_temporal_candidate_within_selection_distance, decoded_video_sampling_from_frame,
-    default_decoder_threads_for_access_mode, duration_us,
+    default_decoder_threads_for_access_mode, duration_only_selection_is_unconfirmed, duration_us,
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
@@ -319,6 +319,53 @@ fn positive_frame_duration_is_mode_independent_without_a_successor() {
 }
 
 #[test]
+fn exact_decode_waits_for_a_successor_before_trusting_intermediate_frame_duration() {
+    let declared = DecodedTemporalExtent::from_duration(100, 100);
+    let successor = DecodedTemporalExtent::from_duration(140, 20);
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        assert!(duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            None,
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            100,
+            access_mode,
+            Some(declared),
+            None,
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            Some(successor),
+            false,
+        ));
+        assert!(!duration_only_selection_is_unconfirmed(
+            150,
+            access_mode,
+            Some(declared),
+            None,
+            true,
+        ));
+    }
+    assert!(!duration_only_selection_is_unconfirmed(
+        150,
+        PreviewDecodeAccessMode::ScrubCursor,
+        Some(declared),
+        None,
+        false,
+    ));
+}
+
+#[test]
 fn successor_boundary_closes_a_short_declared_vfr_gap_for_every_access_mode() {
     let before = DecodedTemporalExtent::from_duration(100, 5);
     let after = DecodedTemporalExtent::from_duration(120, 5);
@@ -529,11 +576,13 @@ fn synthetic_d3d12_frame(
         let native = (*descriptor).data.cast::<FfmpegAvD3D12VaFrame>();
         native.write(FfmpegAvD3D12VaFrame {
             texture: std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
+            subresource_index: 0,
             sync_ctx: FfmpegAvD3D12VaSyncContext {
                 fence: std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>(),
                 event: std::ptr::null_mut(),
                 fence_value: 9,
             },
+            flags: 0,
         });
         (*raw).buf[0] = descriptor;
         (*raw).data[0] = native.cast::<u8>();
@@ -2269,11 +2318,13 @@ fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     let fence = std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>();
     let native = Box::new(FfmpegAvD3D12VaFrame {
         texture,
+        subresource_index: 0,
         sync_ctx: FfmpegAvD3D12VaSyncContext {
             fence,
             event: std::ptr::null_mut(),
             fence_value: 42,
         },
+        flags: 0,
     });
     // SAFETY: the synthetic native descriptor remains alive until after
     // every parsed view is consumed. The AVBufferRef only exercises the
@@ -3747,7 +3798,6 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
         PreviewDecodeSessionDisposition::Reused,
         "isolated demux and codec state must be reused across exact requests"
     );
-
     for (access_mode, first_frame, second_frame) in [
         (PreviewDecodeAccessMode::ScrubCursor, 12, 13),
         (PreviewDecodeAccessMode::PlaybackCursor, 5, 6),
@@ -3782,13 +3832,16 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     }
     context.clear();
     let evidence = observer.snapshot().isolated_demux;
-    assert_eq!(evidence.session_launches, 3);
-    assert_eq!(evidence.ready_sessions, 3);
-    assert_eq!(evidence.cross_request_reused_sessions, 3);
+    assert_eq!(evidence.session_launches, 2);
+    assert_eq!(evidence.ready_sessions, 2);
+    assert!(
+        (1..=2).contains(&evidence.cross_request_reused_sessions),
+        "a reused codec may satisfy the next request from buffered frames without issuing a demux command"
+    );
     assert!(evidence.completed_seeks >= 4);
     assert!(evidence.completed_reads > evidence.session_launches);
     assert!(evidence.packet_responses > 0);
-    assert_eq!(evidence.clean_closes, 3);
+    assert_eq!(evidence.clean_closes, 2);
     assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
     assert_eq!(evidence.active_sessions, 0);
     assert_eq!(evidence.failure_terminations, 0);
@@ -3826,7 +3879,7 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU fixture must return an RGBA frame");
         };
-        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 1_024));
         drop(frame);
         if mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
             context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
@@ -3842,8 +3895,9 @@ fn isolated_demux_survives_codec_family_retirement_until_full_clear() {
     assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
     assert_eq!(evidence.failure_terminations, 0);
     assert_eq!(
-        evidence.session_launches, 1,
-        "family transition must reuse the healthy source without retaining its old codec"
+        evidence.session_launches,
+        if cfg!(windows) { 2 } else { 1 },
+        "family transition must obey the platform source-handle lifetime"
     );
 }
 
@@ -3863,8 +3917,9 @@ fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() 
     let original = MediaFileFingerprint::capture(&path);
     for revision in 0..2 {
         if revision == 1 {
-            // Replace the inode as well as length: the retired child still owns
-            // the original open file, so reuse would serve a stale revision.
+            // Replace the file identity as well as its length. Windows family
+            // retirement must release the old handle; retained sources on other
+            // platforms must reject the stale fingerprint on the next request.
             let replacement = root.path().join("replacement.mp4");
             let mut bytes = FIXTURE.to_vec();
             bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
@@ -3885,14 +3940,21 @@ fn isolated_retired_demux_invalidates_revision_and_closes_without_live_codecs() 
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("CPU fixture must return a frame");
         };
-        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(8 * 1_024));
         drop(frame);
         context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
         assert_eq!(context.resident_session_count(), 0);
         let evidence = observer.snapshot().isolated_demux;
         assert_eq!(evidence.session_launches, revision + 1);
-        assert_eq!(evidence.active_sessions, 1);
-        assert_eq!(evidence.reaped_sessions(), revision);
+        assert_eq!(evidence.active_sessions, if cfg!(windows) { 0 } else { 1 });
+        assert_eq!(
+            evidence.reaped_sessions(),
+            if cfg!(windows) {
+                revision + 1
+            } else {
+                revision
+            }
+        );
     }
     // No live codecs remain here; clear must still consume the idle child.
     context.clear();
@@ -3949,14 +4011,26 @@ fn isolated_retired_demux_cancellation_reaps_before_retry() {
                 PreviewDecodeCancellationSource::IsolatedDemuxTermination
             );
             let evidence = observer.snapshot().isolated_demux;
-            assert_eq!(evidence.session_launches, 1, "cancel the retained process");
+            assert_eq!(
+                evidence.session_launches,
+                if cfg!(windows) { 2 } else { 1 },
+                "cancel the active process"
+            );
             assert_eq!(evidence.active_sessions, 0);
-            assert_eq!(evidence.reaped_sessions(), 1);
+            assert_eq!(
+                evidence.reaped_sessions(),
+                if cfg!(windows) { 2 } else { 1 }
+            );
         } else {
             let PreviewDecodeOutcome::Frame(frame) = outcome else {
                 panic!("initial decode and retry must return exact frames");
             };
-            assert_eq!(frame.diagnostics.selected_pts, Some(8 * 512));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                Some(8 * 1_024),
+                "attempt={attempt}, diagnostics={:?}",
+                frame.diagnostics
+            );
             drop(frame);
         }
         if attempt == 0 {
@@ -3966,12 +4040,16 @@ fn isolated_retired_demux_cancellation_reaps_before_retry() {
     context.clear();
     let evidence = observer.snapshot().isolated_demux;
     assert_eq!(
-        evidence.session_launches, 2,
+        evidence.session_launches,
+        if cfg!(windows) { 3 } else { 2 },
         "retry requires a fresh process"
     );
     assert_eq!(evidence.cancellation_terminations, 1);
     assert_eq!(evidence.active_sessions, 0);
-    assert_eq!(evidence.reaped_sessions(), 2);
+    assert_eq!(
+        evidence.reaped_sessions(),
+        if cfg!(windows) { 3 } else { 2 }
+    );
     assert_eq!(evidence.failure_terminations, 0);
 }
 
@@ -4008,14 +4086,20 @@ fn isolated_retired_demux_sources_obey_reduced_worker_residency() {
         };
         drop(frame);
         if index >= 4 {
-            // One Playback slot, one Interactive slot, and one CPU-Still slot.
-            // Count active plus retired children before retiring this codec.
-            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+            // Other platforms retain the bounded source pool. Windows keeps only
+            // the active codec owner so its source remains replaceable.
+            assert_eq!(
+                observer.snapshot().isolated_demux.active_sessions,
+                if cfg!(windows) { 1 } else { 3 }
+            );
         }
         context.clear_family(crate::PreviewDecodeSessionFamily::Interactive);
         assert_eq!(context.resident_session_count(), 0);
         if index >= 4 {
-            assert_eq!(observer.snapshot().isolated_demux.active_sessions, 3);
+            assert_eq!(
+                observer.snapshot().isolated_demux.active_sessions,
+                if cfg!(windows) { 0 } else { 3 }
+            );
         }
     }
     context.clear();
@@ -4549,6 +4633,16 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
         std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
             .expect("explicit packaged demux worker is required"),
     );
+    let input = ffmpeg::format::input(&path).expect("open interlaced fixture metadata");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("interlaced fixture video stream");
+    let stream_time_base = stream.time_base();
+    let stream_start_pts = match stream.start_time() {
+        value if value == ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+        value => value,
+    };
     let fingerprint = MediaFileFingerprint::capture(&path);
     for field_processing in [
         super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
@@ -4561,6 +4655,22 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
         let mut decoder = bootstrap.build();
         for field_index in 0..16 {
             let source_time = TimelineTime::new(field_index, 50).expect("exact 25i field time");
+            let next_source_time =
+                TimelineTime::new(field_index + 1, 50).expect("exact next 25i field time");
+            let expected_pts = super::source_sample_to_selection_pts(
+                SourceSampleTarget::covering(source_time),
+                stream_time_base,
+                stream_start_pts,
+                2,
+            )
+            .expect("exact field-rate selection target");
+            let expected_next_pts = super::source_sample_to_selection_pts(
+                SourceSampleTarget::covering(next_source_time),
+                stream_time_base,
+                stream_start_pts,
+                2,
+            )
+            .expect("exact next field-rate selection target");
             let mut request = covering_decode_request(
                 &path,
                 source_time,
@@ -4577,9 +4687,12 @@ fn interlaced_field_rate_decode_preserves_half_picture_coverage() {
                 panic!("interlaced software decode must retain compact YUV");
             };
             let selection = frame.diagnostics.temporal_selection().expect("proven temporal extent");
-            assert_eq!(selection.requested_pts, field_index);
-            assert_eq!(selection.selected_pts, field_index);
-            assert_eq!(selection.selected_duration_pts, 1);
+            assert_eq!(selection.requested_pts, expected_pts);
+            assert_eq!(selection.selected_pts, expected_pts);
+            assert_eq!(
+                selection.selected_duration_pts,
+                expected_next_pts - expected_pts
+            );
             assert!(!selection.temporal_approximation);
         }
 

@@ -26,7 +26,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const IPC_POLL_INTERVAL: Duration = Duration::from_micros(250);
 const IPC_QUEUE_CAPACITY: usize = 1;
 const MAX_STDERR_EVIDENCE_BYTES: usize = 64 * 1024;
-const CLEAN_CLOSE_GRACE: Duration = Duration::from_millis(100);
+// Closing a large local MP4 can spend hundreds of milliseconds releasing the
+// Windows FFmpeg/CRT file stack after the helper has acknowledged Close. Keep
+// this bounded, but leave enough time to observe the native process exit and
+// join both pipe readers before escalating to forced termination.
+const CLEAN_CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 static NEXT_LAUNCH_NONCE: AtomicU64 = AtomicU64::new(1);
 

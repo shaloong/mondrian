@@ -32,7 +32,7 @@ use super::windows_d3d12_texture::{
     D3D12NativeTextureError, D3D12TransitionCommands, WGPU_RESOURCE_STATE,
 };
 use crate::{
-    ColorFrameResidency, GpuColorFrameIdAllocationError, GpuColorFrameResource,
+    GpuColorFrameAllocationPlan, GpuColorFrameIdAllocationError, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent,
@@ -40,8 +40,7 @@ use crate::{
     NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
     NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
     NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
-    RenderColorTransformGpuOptions, RenderGpuInputStageRuntimeRecordError,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntime,
 };
 
 /// Error creating the Windows same-device native decoded-frame backend.
@@ -380,22 +379,16 @@ impl D3D12NativeVideoImportBackend {
         plan: &GpuNativeDecodedFrameImportPlan,
     ) -> Result<(), GpuNativeDecodedFrameImportError> {
         self.color_runtime
-            .prepare_wgpu_input_stage_gpu_frame_backend_objects(
+            .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
                 &plan.working_frame,
-                RenderColorTransformGpuOptions {
-                    output_residency: ColorFrameResidency::Gpu,
-                    ..RenderColorTransformGpuOptions::default()
-                },
+                self.yuv_decoder.fused_texture_input(),
                 &self.device,
                 &self.queue,
             )
-            .map_err(|error| {
-                rejected(format!(
-                    "source-to-working color backend preparation failed: {error:?}"
-                ))
-            })
+            .map(|_| ())
+            .map_err(|error| rejected(format!("native fused input preparation failed: {error}")))
     }
 
     /// Collect timestamp callbacks after device polling.
@@ -535,10 +528,13 @@ impl D3D12NativeVideoImportBackend {
 
         let completed = unsafe { self.completion_fence.GetCompletedValue() };
         if completed == u64::MAX {
+            let removed_reason = unsafe { self.raw_device.GetDeviceRemovedReason() };
             self.pending_sources.clear();
             return Err(GpuNativeDecodedFrameImportError::NativeDeviceRemoved {
-                reason: "same-device native import completion fence reported device removal"
-                    .to_owned(),
+                reason: format!(
+                    "same-device native import completion fence reported device removal; \
+                     ID3D12Device::GetDeviceRemovedReason={removed_reason:?}"
+                ),
             });
         }
         let before = self.pending_sources.len();
@@ -546,6 +542,26 @@ impl D3D12NativeVideoImportBackend {
         Ok(before.saturating_sub(self.pending_sources.len()))
     }
 
+    /// Check existing source ownership before a Viewer candidate consumes its
+    /// predecessor textures. This does not acquire a surface or submit imports;
+    /// each import still validates its own capacity and device contract.
+    pub(crate) fn check_source_reuse(
+        &mut self,
+        frames: &[&PreviewNativeDecodedFrame],
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.retire_completed_source_residency()?;
+        for frame in frames {
+            let source =
+                validated_d3d12_native_decoded_frame_for_luid(self.renderer_adapter_luid, frame)
+                    .map_err(|error| rejected(error.to_string()))?;
+            if self.resource_in_flight(&source.texture) {
+                return Err(GpuNativeDecodedFrameImportError::Backpressure {
+                    reason: "the same D3D12VA decoder surface already has a renderer submission in flight".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
     fn import_frame(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
@@ -604,10 +620,22 @@ impl D3D12NativeVideoImportBackend {
             &yuv_plan,
             GpuNativeYuvPlaneViews { luma: &luma, chroma: &chroma, chroma_v: &chroma },
         );
-        let (_, encoded_payload) =
-            GpuNativeYuvDecoder::allocate_output(&self.device, &yuv_plan).into_parts();
-        let encoded_resource =
-            GpuColorFrameResource::new(plan.encoded_source_frame.clone(), encoded_payload);
+        let backend = self
+            .color_runtime
+            .prepare_fused_yuv_input(
+                &plan.input_transform,
+                &plan.encoded_source_frame,
+                &plan.working_frame,
+                self.yuv_decoder.fused_texture_input(),
+                &self.device,
+                &self.queue,
+            )
+            .map_err(|error| rejected(format!("native fused input preparation failed: {error}")))?;
+        let resource_pool = self.color_runtime.resource_pool();
+        let working = resource_pool.acquire(
+            &self.device,
+            &GpuColorFrameAllocationPlan::for_handle(plan.working_frame.clone()),
+        );
         let mut acquire_commands =
             D3D12TransitionCommands::new(&self.raw_device).map_err(native_texture_error)?;
         let mut release_commands =
@@ -667,80 +695,19 @@ impl D3D12NativeVideoImportBackend {
         }
         let bridge_acquire_us = elapsed_us(acquire_started);
 
-        let record_result = (|| {
-            let yuv_started = Instant::now();
-            self.yuv_decoder
-                .record(&mut encoder, &yuv_plan, &prepared_yuv, &encoded_resource)
-                .map_err(|error| error.to_string())?;
-            self.gpu_timing.mark_after_yuv(&mut encoder, &mut timing_probe);
-            let yuv_record_us = elapsed_us(yuv_started);
-            let color_started = Instant::now();
-            if self
-                .color_runtime
-                .frame_table_mut()
-                .insert(encoded_resource)
-                .map_err(|error| format!("encoded source insertion failed: {error:?}"))?
-                .is_some()
-            {
-                return Err("encoded source id replaced a live resource".to_owned());
-            }
-            self.color_runtime
-                .record_wgpu_input_stage_gpu_frame_owned_backend(
-                    &plan.input_transform,
-                    &plan.encoded_source_frame,
-                    &plan.working_frame,
-                    RenderColorTransformGpuOptions {
-                        output_residency: ColorFrameResidency::Gpu,
-                        ..RenderColorTransformGpuOptions::default()
-                    },
-                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                        device: &self.device,
-                        queue: &self.queue,
-                        encoder: &mut encoder,
-                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    },
-                )
-                .map_err(format_input_stage_error)?;
-            self.gpu_timing.mark_after_input_color(&mut encoder, &mut timing_probe);
-            let color_stage_us = elapsed_us(color_started);
-            let extract_started = Instant::now();
-            let working = self
-                .color_runtime
-                .frame_table_mut()
-                .remove(plan.working_frame.id())
-                .ok_or_else(|| "OCIO input stage did not retain its working output".to_owned())?;
-            self.color_runtime
-                .frame_table_mut()
-                .remove(plan.encoded_source_frame.id())
-                .ok_or_else(|| "OCIO input stage lost its encoded source".to_owned())?;
-            Ok((
-                working,
-                yuv_record_us,
-                color_stage_us,
-                elapsed_us(extract_started),
-            ))
-        })();
-
-        let (working, yuv_record_us, color_stage_us, resource_extract_us) = match record_result {
-            Ok(result) => result,
-            Err(reason) => {
-                self.gpu_timing.abandon_before_submit(timing_probe);
-                self.color_runtime.frame_table_mut().remove(plan.working_frame.id());
-                self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
-                if let Err(release_error) = self.release_and_retain_source(
-                    completion_value,
-                    source.texture.clone(),
-                    native_frame.handle.clone(),
-                    acquire_commands,
-                    release_commands,
-                ) {
-                    return Err(rejected(format!(
-                        "{reason}; source release also failed: {release_error}"
-                    )));
-                }
-                return Err(rejected(reason));
-            }
-        };
+        let yuv_started = Instant::now();
+        backend.record(
+            &mut encoder,
+            &prepared_yuv.bind_group,
+            &working.resource().texture_view,
+        );
+        // The first marker bracket now contains fused YUV sampling and OCIO.
+        // The second remains empty; no intermediate color pass is submitted.
+        self.gpu_timing.mark_after_yuv(&mut encoder, &mut timing_probe);
+        self.gpu_timing.mark_after_input_color(&mut encoder, &mut timing_probe);
+        let yuv_record_us = elapsed_us(yuv_started);
+        let color_stage_us = 0;
+        let resource_extract_us = 0;
         self.gpu_timing.finish_recording(&mut encoder, &mut timing_probe);
 
         let submit_started = Instant::now();
@@ -815,10 +782,6 @@ fn native_texture_error(error: D3D12NativeTextureError) -> GpuNativeDecodedFrame
 
 fn rejected(reason: String) -> GpuNativeDecodedFrameImportError {
     GpuNativeDecodedFrameImportError::BackendRejected { reason }
-}
-
-fn format_input_stage_error(error: RenderGpuInputStageRuntimeRecordError) -> String {
-    format!("OCIO native input stage failed: {error:?}")
 }
 
 fn elapsed_us(started: Instant) -> u64 {

@@ -465,7 +465,8 @@ fn decode_sampled_frame(
         )?),
         target_resolution: resolution,
         input_color,
-        cpu_working_required: false,
+        // Long-work-area validation samples decoded RGBA pixels below.
+        cpu_working_required: true,
     };
     let decoded = decode_media(state, &request, asset, decode_context)?;
     let rgba = source_rgba(&decoded.frame)?;

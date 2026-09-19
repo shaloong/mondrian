@@ -95,6 +95,73 @@ pub enum RealtimeAudioOutputDeviceSelection {
     Specific {
         device_id: RealtimeAudioOutputDeviceId,
     },
+    /// Follow the operating system's current default output device and require
+    /// an exact-format WASAPI exclusive stream.
+    SystemDefaultExclusive,
+    /// Reopen only the exact stable device identity and require an exact-format
+    /// WASAPI exclusive stream.
+    SpecificExclusive {
+        device_id: RealtimeAudioOutputDeviceId,
+    },
+    /// Prefer an exact-format exclusive stream on the current default device,
+    /// falling back to shared mode only with structured evidence.
+    SystemDefaultPreferExclusive,
+    /// Prefer an exact-format exclusive stream on the selected device, falling
+    /// back to shared mode only with structured evidence.
+    SpecificPreferExclusive {
+        device_id: RealtimeAudioOutputDeviceId,
+    },
+}
+
+/// User/runtime policy for endpoint sharing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeAudioOutputAccessPolicy {
+    /// Open through the operating-system audio engine.
+    #[default]
+    Shared,
+    /// Try exact-format exclusive mode, then fall back to shared with evidence.
+    PreferExclusive,
+    /// Require exact-format exclusive mode and fail closed when unavailable.
+    RequireExclusive,
+}
+
+/// Physical sharing contract selected by the realtime audio backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeAudioOutputShareMode {
+    /// The operating-system audio engine may mix and convert the stream.
+    #[default]
+    Shared,
+    /// The application owns the endpoint and the device must accept the exact
+    /// authored format without engine conversion.
+    Exclusive,
+}
+
+impl RealtimeAudioOutputDeviceSelection {
+    /// Requested endpoint sharing policy.
+    pub const fn access_policy(&self) -> RealtimeAudioOutputAccessPolicy {
+        match self {
+            Self::SystemDefault | Self::Specific { .. } => RealtimeAudioOutputAccessPolicy::Shared,
+            Self::SystemDefaultPreferExclusive | Self::SpecificPreferExclusive { .. } => {
+                RealtimeAudioOutputAccessPolicy::PreferExclusive
+            }
+            Self::SystemDefaultExclusive | Self::SpecificExclusive { .. } => {
+                RealtimeAudioOutputAccessPolicy::RequireExclusive
+            }
+        }
+    }
+
+    fn requested_device_id(&self) -> Option<&RealtimeAudioOutputDeviceId> {
+        match self {
+            Self::SystemDefault
+            | Self::SystemDefaultExclusive
+            | Self::SystemDefaultPreferExclusive => None,
+            Self::Specific { device_id }
+            | Self::SpecificExclusive { device_id }
+            | Self::SpecificPreferExclusive { device_id } => Some(device_id),
+        }
+    }
 }
 
 /// One output device visible to the current default CPAL host.
@@ -138,6 +205,8 @@ pub enum RealtimeAudioSampleFormat {
     I8,
     /// Signed 16-bit integer PCM.
     I16,
+    /// Signed 24-bit integer PCM (packed or in a wider native container).
+    I24,
     /// Signed 32-bit integer PCM.
     I32,
     /// Signed 64-bit integer PCM.
@@ -178,13 +247,14 @@ impl RealtimeAudioSampleFormat {
             Self::F32 => 0,
             Self::F64 => 1,
             Self::I32 => 2,
-            Self::I16 => 3,
-            Self::I64 => 4,
-            Self::U32 => 5,
-            Self::U16 => 6,
-            Self::U64 => 7,
-            Self::I8 => 8,
-            Self::U8 => 9,
+            Self::I24 => 3,
+            Self::I16 => 4,
+            Self::I64 => 5,
+            Self::U32 => 6,
+            Self::U16 => 7,
+            Self::U64 => 8,
+            Self::I8 => 9,
+            Self::U8 => 10,
         }
     }
 }
@@ -258,6 +328,20 @@ pub struct RealtimeAudioOutputDeviceEvidence {
     pub device_id: RealtimeAudioOutputDeviceId,
     /// Selection intent resolved by this open attempt.
     pub selection: RealtimeAudioOutputDeviceSelection,
+    /// Policy that governed exclusive negotiation and fallback.
+    pub access_policy: RealtimeAudioOutputAccessPolicy,
+    /// Sharing contract actually opened by the backend.
+    pub share_mode: RealtimeAudioOutputShareMode,
+    /// Exact reason preferred-exclusive negotiation fell back to shared mode.
+    pub exclusive_fallback_reason: Option<String>,
+    /// Scalar container width of the application-facing stream format.
+    pub stream_container_bits: Option<u16>,
+    /// Valid signal bits within the application-facing stream container.
+    pub stream_valid_bits: Option<u16>,
+    /// Negotiated endpoint buffer size in sample frames.
+    pub buffer_frames: Option<u32>,
+    /// Negotiated endpoint period in 100-nanosecond units.
+    pub period_100ns: Option<i64>,
     /// Whether the selected device was the system default at open time.
     pub was_system_default: bool,
     /// Human-readable device name, when the backend could provide it.
@@ -377,6 +461,7 @@ pub(crate) enum PreparedRealtimeAudioOutputBackend {
     WindowsWasapiNamed {
         endpoint_id: String,
         channel_mask: u32,
+        access_policy: RealtimeAudioOutputAccessPolicy,
     },
 }
 
@@ -438,21 +523,6 @@ pub(crate) fn current_default_realtime_audio_output_device_id(
         .map_err(|error| error.to_string())
 }
 
-/// Resolve one device intent and select an exact executable stream contract.
-/// Inspect the exact production output negotiation without creating a stream.
-///
-/// This uses the same device selection, rate, scalar-format and channel-semantics
-/// authority as Playback. The returned evidence is a preflight observation;
-/// stream creation must negotiate again and prove the live device identity.
-pub fn probe_realtime_audio_output_contract(
-    selection: &RealtimeAudioOutputDeviceSelection,
-    sample_rate: u32,
-    channel_layout: AudioChannelLayout,
-) -> Result<RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure> {
-    let prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
-    Ok(prepared.evidence)
-}
-
 pub(crate) fn prepare_realtime_audio_output(
     selection: &RealtimeAudioOutputDeviceSelection,
     sample_rate: u32,
@@ -461,8 +531,8 @@ pub(crate) fn prepare_realtime_audio_output(
     let host = cpal::default_host();
     let host_name = host.id().name().to_owned();
     let default = host.default_output_device();
-    let device = match selection {
-        RealtimeAudioOutputDeviceSelection::SystemDefault => default.clone().ok_or_else(|| {
+    let device = match selection.requested_device_id() {
+        None => default.clone().ok_or_else(|| {
             RealtimeAudioOutputOpenFailure::before_selection(
                 RealtimeAudioOutputOpenFailureCode::NoDefaultDevice,
                 sample_rate,
@@ -471,7 +541,7 @@ pub(crate) fn prepare_realtime_audio_output(
                 "the selected CPAL host reported no default output device",
             )
         })?,
-        RealtimeAudioOutputDeviceSelection::Specific { device_id } => {
+        Some(device_id) => {
             let parsed = device_id.to_cpal().map_err(|error| {
                 RealtimeAudioOutputOpenFailure::before_selection(
                     RealtimeAudioOutputOpenFailureCode::InvalidDeviceId,
@@ -587,6 +657,7 @@ pub(crate) fn prepare_realtime_audio_output(
             PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed {
                 endpoint_id: backend_device_id,
                 channel_mask,
+                access_policy: selection.access_policy(),
             }
         }
         _ => PreparedRealtimeAudioOutputBackend::Cpal {
@@ -595,12 +666,42 @@ pub(crate) fn prepare_realtime_audio_output(
             sample_format: supported.sample_format(),
         },
     };
+    let exclusive_backend_available = match &backend {
+        #[cfg(target_os = "windows")]
+        PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed { .. } => true,
+        _ => false,
+    };
+    let exclusive_fallback_reason = if exclusive_backend_available {
+        None
+    } else {
+        match selection.access_policy() {
+            RealtimeAudioOutputAccessPolicy::Shared => None,
+            RealtimeAudioOutputAccessPolicy::PreferExclusive => Some(
+                "exclusive output is unavailable for this platform/channel-semantics backend"
+                    .to_owned(),
+            ),
+            RealtimeAudioOutputAccessPolicy::RequireExclusive => {
+                return Err(RealtimeAudioOutputOpenFailure::after_selection(
+                    RealtimeAudioOutputOpenFailureCode::StreamBuildFailed,
+                    selected.contract,
+                    "exclusive output is unavailable for this platform/channel-semantics backend",
+                ));
+            }
+        }
+    };
     Ok(PreparedRealtimeAudioOutputDevice {
         backend,
         evidence: RealtimeAudioOutputDeviceEvidence {
             host_name,
             device_id,
             selection: selection.clone(),
+            access_policy: selection.access_policy(),
+            share_mode: RealtimeAudioOutputShareMode::Shared,
+            exclusive_fallback_reason,
+            stream_container_bits: None,
+            stream_valid_bits: None,
+            buffer_frames: None,
+            period_100ns: None,
             was_system_default,
             device_name,
             device_name_error,
@@ -692,7 +793,13 @@ fn prove_channel_semantics(
 ) -> Result<RealtimeAudioChannelSemantics, &'static str> {
     match channel_layout {
         AudioChannelLayout::Mono => Ok(RealtimeAudioChannelSemantics::MonoConvention),
-        AudioChannelLayout::Stereo => Ok(RealtimeAudioChannelSemantics::StereoConvention),
+        AudioChannelLayout::Stereo => {
+            #[cfg(target_os = "windows")]
+            if host_id == cpal::HostId::Wasapi {
+                return Ok(RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask);
+            }
+            Ok(RealtimeAudioChannelSemantics::StereoConvention)
+        }
         AudioChannelLayout::Discrete(_) => Ok(RealtimeAudioChannelSemantics::OrdinalDiscrete),
         AudioChannelLayout::Speakers(_) => named_speaker_semantics(channel_layout, host_id),
     }
@@ -810,12 +917,17 @@ mod tests {
 
     #[test]
     fn device_selection_serialization_preserves_default_and_specific_intent() {
+        let device_id =
+            RealtimeAudioOutputDeviceId::new("coreaudio:42").expect("specific identity");
         let selections = [
             RealtimeAudioOutputDeviceSelection::SystemDefault,
-            RealtimeAudioOutputDeviceSelection::Specific {
-                device_id: RealtimeAudioOutputDeviceId::new("coreaudio:42")
-                    .expect("specific identity"),
+            RealtimeAudioOutputDeviceSelection::Specific { device_id: device_id.clone() },
+            RealtimeAudioOutputDeviceSelection::SystemDefaultPreferExclusive,
+            RealtimeAudioOutputDeviceSelection::SpecificPreferExclusive {
+                device_id: device_id.clone(),
             },
+            RealtimeAudioOutputDeviceSelection::SystemDefaultExclusive,
+            RealtimeAudioOutputDeviceSelection::SpecificExclusive { device_id },
         ];
         for selection in selections {
             let encoded = serde_json::to_vec(&selection).expect("serialize selection");
@@ -927,6 +1039,16 @@ mod tests {
             error.code,
             RealtimeAudioOutputOpenFailureCode::SampleFormatUnsupported
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wasapi_stereo_uses_the_explicit_windows_speaker_mask_adapter() {
+        assert_eq!(
+            prove_channel_semantics(AudioChannelLayout::Stereo, cpal::HostId::Wasapi),
+            Ok(RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask)
+        );
+        assert_eq!(windows_speaker_mask(AudioChannelLayout::Stereo), Some(0x3));
     }
 
     #[cfg(target_os = "windows")]

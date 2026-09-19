@@ -807,7 +807,21 @@ mod native_job_tests {
             while !watcher_path.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(2));
             }
+            let pid: u32 = std::fs::read_to_string(&watcher_path)
+                .expect("actual descendant PID")
+                .parse()
+                .expect("PID");
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(
+                !raw.is_null(),
+                "open the live descendant before cancellation: {}",
+                io::Error::last_os_error()
+            );
+            let process = unsafe { std::fs::File::from_raw_handle(raw) };
             watcher_token.cancel();
+            (pid, process)
         });
         let result = run_supervised_command(
             &mut command,
@@ -818,35 +832,22 @@ mod native_job_tests {
             },
             &cancellation,
         );
-        watcher.join().expect("bounded cancellation observer");
+        let (pid, process) = watcher.join().expect("bounded cancellation observer");
         let error = result.expect_err("root-only exit must not claim the process tree ended");
         assert!(error.is_canceled(), "{error:?}");
         let SupervisedProcessError::Cleanup { cleanup, .. } = error else {
             panic!("raw native cleanup missing")
         };
         assert!(cleanup.all_resources_released(), "{cleanup:?}");
-        let pid: u32 = std::fs::read_to_string(pid_file)
-            .expect("actual descendant PID")
-            .parse()
-            .expect("PID");
-        use std::os::windows::io::FromRawHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-        };
-        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-        if !raw.is_null() {
-            let _process = unsafe { std::fs::File::from_raw_handle(raw) };
-            assert_eq!(
-                unsafe { WaitForSingleObject(raw, 0) },
-                0,
-                "owned descendant must actually be exited"
-            );
-        } else {
-            assert_eq!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(87),
-                "only an already-gone process proves exit"
-            );
-        }
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining_ms = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle(), remaining_ms) },
+            WAIT_OBJECT_0,
+            "owned descendant {pid} must exit within the original test deadline"
+        );
     }
 }

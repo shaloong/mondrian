@@ -1120,7 +1120,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Immutable device-local capacity for this exact GPU generation.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn device_local_memory_bytes(&self) -> Option<u64> {
         self.adapter_info.device_local_memory_bytes
     }

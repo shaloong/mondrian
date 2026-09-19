@@ -781,7 +781,7 @@ impl ExecutionResourceCoordinator {
     }
 
     /// Publish immutable capacity for the exact active Viewer GPU generation.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     pub(crate) fn observe_viewer_gpu_device_local_bytes(
         &self,
         device_local_bytes: Option<u64>,
@@ -1195,7 +1195,7 @@ impl Default for ExecutionResourceCoordinator {
 impl AppState {
     /// Bind immutable capacity from the exact active Viewer GPU generation to
     /// the existing product resource authority.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn observe_viewer_gpu_device_local_bytes(
         &self,
         device_local_bytes: Option<u64>,

@@ -31,6 +31,23 @@ enum RealtimeAudioOutputStream {
     },
 }
 
+/// Prove that the selected physical output can create and start the exact
+/// production stream contract, then close that same bounded owner.
+pub fn probe_realtime_audio_output_contract(
+    selection: &RealtimeAudioOutputDeviceSelection,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+) -> std::result::Result<RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure> {
+    let (output, handle, observer) =
+        RealtimeAudioOutput::try_new(selection, sample_rate, channel_layout)
+            .map_err(|error| error.into_open_failure(sample_rate, channel_layout))?;
+    let evidence = output.device_evidence.as_ref().clone();
+    drop(observer);
+    drop(handle);
+    drop(output);
+    Ok(evidence)
+}
+
 // Native timestamps name the first frame; callback counters name the end.
 fn callback_tail_playback_delay(
     first_frame_delay: Duration,
@@ -635,7 +652,11 @@ impl RealtimeAudioOutput {
         RealtimeAudioOutputCreateError,
     > {
         let prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
+        #[cfg(target_os = "windows")]
+        let mut prepared = prepared;
         let contract = prepared.evidence.contract;
+        #[cfg(target_os = "windows")]
+        let mut contract = contract;
         let channels = contract.channels();
 
         let queue_capacity = usize::try_from(sample_rate)
@@ -680,28 +701,39 @@ impl RealtimeAudioOutput {
             PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed {
                 endpoint_id,
                 channel_mask,
+                access_policy,
             } => {
-                let stream = windows_wasapi_output::WindowsWasapiNamedOutputStream::start(
-                    endpoint_id,
-                    contract.sample_rate,
-                    usize::from(contract.channels()),
-                    channel_mask,
-                    Arc::clone(&queue),
-                    Arc::clone(&callback_control),
-                    Arc::clone(&telemetry),
-                )
-                .map_err(|error| {
-                    let (start_failed, detail) = error.into_stage_and_detail();
-                    RealtimeAudioOutputOpenFailure::after_selection(
-                        if start_failed {
-                            RealtimeAudioOutputOpenFailureCode::StreamStartFailed
-                        } else {
-                            RealtimeAudioOutputOpenFailureCode::StreamBuildFailed
-                        },
-                        contract,
-                        detail,
+                let (stream, negotiation) =
+                    windows_wasapi_output::WindowsWasapiNamedOutputStream::start(
+                        endpoint_id,
+                        contract.sample_rate,
+                        usize::from(contract.channels()),
+                        channel_mask,
+                        access_policy,
+                        Arc::clone(&queue),
+                        Arc::clone(&callback_control),
+                        Arc::clone(&telemetry),
                     )
-                })?;
+                    .map_err(|error| {
+                        let (start_failed, detail) = error.into_stage_and_detail();
+                        RealtimeAudioOutputOpenFailure::after_selection(
+                            if start_failed {
+                                RealtimeAudioOutputOpenFailureCode::StreamStartFailed
+                            } else {
+                                RealtimeAudioOutputOpenFailureCode::StreamBuildFailed
+                            },
+                            contract,
+                            detail,
+                        )
+                    })?;
+                contract.sample_format = negotiation.sample_format;
+                prepared.evidence.contract = contract;
+                prepared.evidence.share_mode = negotiation.share_mode;
+                prepared.evidence.exclusive_fallback_reason = negotiation.exclusive_fallback_reason;
+                prepared.evidence.stream_container_bits = Some(negotiation.container_bits);
+                prepared.evidence.stream_valid_bits = Some(negotiation.valid_bits);
+                prepared.evidence.buffer_frames = Some(negotiation.buffer_frames);
+                prepared.evidence.period_100ns = Some(negotiation.period_100ns);
                 RealtimeAudioOutputStream::WindowsWasapiNamed { _stream: stream }
             }
         };
@@ -1179,6 +1211,13 @@ mod tests {
             device_id: crate::RealtimeAudioOutputDeviceId::new("test:test-output")
                 .expect("test device identity"),
             selection: crate::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            access_policy: crate::RealtimeAudioOutputAccessPolicy::Shared,
+            share_mode: crate::RealtimeAudioOutputShareMode::Shared,
+            exclusive_fallback_reason: None,
+            stream_container_bits: None,
+            stream_valid_bits: None,
+            buffer_frames: None,
+            period_100ns: None,
             was_system_default: true,
             device_name: Some("test-output".to_owned()),
             device_name_error: None,

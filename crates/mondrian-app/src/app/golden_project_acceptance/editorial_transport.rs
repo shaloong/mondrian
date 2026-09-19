@@ -1064,6 +1064,11 @@ pub(super) fn execute_editorial_stage(
         let play_before = state.playback_evidence_report();
         state.dispatch_action(Action::Play)?;
         let play_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
+        viewer.wait_for_playback_preroll(
+            state,
+            play_presentation.output,
+            VIEWER_PRESENTATION_TIMEOUT,
+        )?;
         ensure!(
             !state.is_playback_priming(),
             "production Preview preroll did not release the Playback clock anchor"

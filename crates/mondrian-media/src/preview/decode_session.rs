@@ -416,8 +416,9 @@ impl PreviewDecodeSessionContext {
     /// A shared App worker may own a cold Playback source and interactive
     /// Sessions at different times. Family transitions therefore retire the
     /// obsolete codecs rather than destroying unrelated source locality. Healthy
-    /// isolated packet sources may remain within the existing source-slot budget;
-    /// full clearing consumes those sources and their child processes.
+    /// isolated packet sources may remain within the existing source-slot budget on
+    /// platforms whose file I/O permits replacement of an open source. Windows
+    /// closes them here so family retirement also releases the source file handle.
     /// Immutable device roots retain only the pool's existing idle allowance;
     /// full context clearing and explicit pressure trimming release those roots.
     pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
@@ -425,10 +426,16 @@ impl PreviewDecodeSessionContext {
         if !self.sessions.family_is_empty(family) {
             self.execution_observer
                 .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-            self.sessions.clear_family(
-                family,
-                self.resources.session_residency_config().source_capacity(),
-            );
+            // FFmpeg's default Windows file I/O does not grant delete sharing.
+            // Retaining an idle demux child would therefore prevent proxy rebuilds
+            // and atomic source replacement after the codec family is retired.
+            // Other platforms keep the bounded source-locality optimization.
+            let source_capacity = if cfg!(windows) {
+                0
+            } else {
+                self.resources.session_residency_config().source_capacity()
+            };
+            self.sessions.clear_family(family, source_capacity);
             self.execution_observer.finish_idle();
         }
     }
@@ -1086,6 +1093,20 @@ pub(super) fn select_decoded_temporal_candidate(
         PreviewDecodeAccessMode::PlaybackCursor
         | PreviewDecodeAccessMode::RandomAccessStillFrame => None,
     }
+}
+
+pub(super) fn duration_only_selection_is_unconfirmed(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+    allow_unconfirmed_terminal_duration: bool,
+) -> bool {
+    access_mode != PreviewDecodeAccessMode::ScrubCursor
+        && !allow_unconfirmed_terminal_duration
+        && after.is_none()
+        && before
+            .is_some_and(|extent| requested_pts > extent.start_pts && extent.covers(requested_pts))
 }
 
 pub(super) fn decoded_temporal_candidate_within_selection_distance(
@@ -2673,7 +2694,8 @@ impl PreviewDecodeSession {
                                   target_height: u32,
                                   path: &Path,
                                   before: Option<&RetainedDecodedCandidate>,
-                                  after: Option<&RetainedDecodedCandidate>|
+                                  after: Option<&RetainedDecodedCandidate>,
+                                  allow_unconfirmed_terminal_duration: bool|
          -> Result<
             Option<(
                 DecodedTemporalExtent,
@@ -2686,6 +2708,15 @@ impl PreviewDecodeSession {
             }
             let before_extent = before.map(|candidate| candidate.extent);
             let after_extent = after.map(|candidate| candidate.extent);
+            if duration_only_selection_is_unconfirmed(
+                target_pts,
+                policy.access_mode,
+                before_extent,
+                after_extent,
+                allow_unconfirmed_terminal_duration,
+            ) {
+                return Ok(None);
+            }
             let Some((candidate, selected_extent)) = select_decoded_temporal_candidate(
                 target_pts,
                 policy.access_mode,
@@ -2752,6 +2783,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )?
             else {
                 return Err(MondrianError::DecodeFailed {
@@ -2812,6 +2844,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            false,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -2941,6 +2974,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )? {
                 if should_cancel() {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -3021,6 +3055,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            true,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));

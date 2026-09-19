@@ -8,7 +8,8 @@ use anyhow::{bail, ensure, Context};
 use serde::Serialize;
 
 use crate::app::headless_preview_presentation::{
-    present_headless_preview_output, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
+    prepare_headless_preview_successor, present_headless_preview_output,
+    stage_headless_preview_lookahead, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
     HeadlessPreviewCandidate, HeadlessPreviewRuntime,
 };
 use crate::app::headless_realtime_playback::HeadlessRealtimePlaybackSession;
@@ -330,6 +331,43 @@ impl GoldenHeadlessPreview {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Drive the production successor and bounded lookahead paths until the
+    /// Playback Engine releases its initial video-preroll clock anchor.
+    pub(super) fn wait_for_playback_preroll(
+        &mut self,
+        state: &mut AppState,
+        current_output: GoldenViewerOutputKind,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .context("Golden playback-preroll deadline overflow")?;
+        let (runtime, gpu) = self.session.bound_resources()?;
+        if current_output == GoldenViewerOutputKind::CpuRaster {
+            runtime.request_viewer_cpu_fallback(
+                "Golden Headless current output requires bounded CPU successor preparation",
+            );
+        }
+        while state.is_playback_priming() {
+            ensure!(
+                Instant::now() < deadline,
+                "timed out waiting for Golden playback video preroll; diagnostics: {:?}",
+                runtime.diagnostics()
+            );
+            pump_playback_preview(state, runtime);
+            let _ = prepare_headless_preview_successor(
+                runtime,
+                state,
+                gpu,
+                HeadlessGpuCompletionDeadline::at(deadline),
+                true,
+            )?;
+            let _ = stage_headless_preview_lookahead(runtime, state, gpu)?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
     }
 
     pub(super) fn evidence(&self) -> anyhow::Result<GoldenHeadlessViewerEvidence> {

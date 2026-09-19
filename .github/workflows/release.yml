@@ -202,9 +202,9 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v4-${{ env.VCPKG_REF }}-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-
+            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v4-${{ env.VCPKG_REF }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -226,9 +226,10 @@ jobs:
           Write-Host "Cache hit: $cacheHit"
 
           # Always reconcile the complete product runtime. A cached libavcodec.pc
-          # does not prove CLI tools or Export's software encoders are present.
+          # does not prove CLI tools, Export's software encoders, or dynamically
+          # loaded NVIDIA NVENC/NVDEC support are present.
           $install = {
-            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
+            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
           }
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             & $install

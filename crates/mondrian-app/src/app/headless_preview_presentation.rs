@@ -584,9 +584,9 @@ pub(crate) fn apply_headless_gpu_resource_facts(
     state: &AppState,
     gpu: &mut HeadlessViewerGpuAdapter,
 ) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let decision = state.observe_viewer_gpu_device_local_bytes(gpu.device_local_memory_bytes());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let decision = state.execution_resource_decision();
     preview.apply_resource_decision(&decision.preview);
     if !gpu.has_submission_in_flight() {
@@ -632,7 +632,12 @@ pub(crate) fn prepare_headless_preview_successor(
         .unwrap_or_else(|| preview.gpu_preview_frame(request));
     let candidate_elapsed = successor_started.elapsed();
     match candidate {
-        PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
+        PreviewGpuFrameState::Prepared => {
+            if publish_preroll_readiness {
+                observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
+            }
+            Ok(Some(playback_intent))
+        }
         PreviewGpuFrameState::Ready(frame) => {
             ensure!(
                 frame.is_successor_preparation() && frame.presentation_ticket().is_none(),
@@ -1514,12 +1519,14 @@ mod tests {
         let before = preview.diagnostics().resource_decision_applications;
 
         let viewer = advance_headless_execution_resource_policy(&preview, &state);
+        let repeated = advance_headless_execution_resource_policy(&preview, &state);
 
         assert_eq!(
             preview.diagnostics().resource_decision_applications,
-            before + 1,
+            before + 2,
             "every Headless candidate turn must apply the complete Preview projection"
         );
+        assert_eq!(repeated, viewer);
         assert_eq!(
             viewer,
             state.execution_resource_decision().preview.viewer_gpu,

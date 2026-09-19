@@ -284,6 +284,13 @@ mod tests {
             device_id: mondrian_media::RealtimeAudioOutputDeviceId::new("test:test-device")
                 .expect("test device identity"),
             selection: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            access_policy: mondrian_media::RealtimeAudioOutputAccessPolicy::Shared,
+            share_mode: mondrian_media::RealtimeAudioOutputShareMode::Shared,
+            exclusive_fallback_reason: None,
+            stream_container_bits: None,
+            stream_valid_bits: None,
+            buffer_frames: None,
+            period_100ns: None,
             was_system_default: true,
             device_name: Some("test-device".to_owned()),
             device_name_error: None,

@@ -213,6 +213,8 @@ pub struct PreviewFutureMediaWindowDiagnostics {
 pub struct PreviewDiagnostics {
     /// Complete Preview resource decisions applied at the Host policy Seam.
     pub resource_decision_applications: u64,
+    /// Resource owners physically reconfigured after a changed decision.
+    pub resource_decision_reconfigurations: u64,
     /// Bounded prepared visual Program residency and author-binding evidence.
     pub visual_program_cache: PreparedVisualProgramCacheDiagnostics,
     /// Bounded future-media lowering and source-revalidation evidence.

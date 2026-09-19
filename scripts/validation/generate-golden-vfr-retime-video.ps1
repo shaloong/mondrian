@@ -39,7 +39,7 @@ function Read-JsonProbe([string]$Ffprobe, [string]$ArtifactPath) {
         "-v", "error",
         "-select_streams", "v:0",
         "-show_frames",
-        "-show_entries", "format=duration:stream=index,codec_name,profile,pix_fmt,width,height,r_frame_rate,avg_frame_rate,time_base,color_range,color_space,color_transfer,color_primaries,duration,nb_frames:frame=best_effort_timestamp,pkt_duration",
+        "-show_entries", "format=duration:stream=index,codec_name,profile,pix_fmt,width,height,r_frame_rate,avg_frame_rate,time_base,color_range,color_space,color_transfer,color_primaries,duration,nb_frames:frame=best_effort_timestamp,pkt_duration,duration",
         "-of", "json",
         $ArtifactPath
     )
@@ -75,7 +75,7 @@ function Assert-Probe([object]$Probe) {
     $deltas = for ($index = 1; $index -lt $timestamps.Count; $index++) {
         $timestamps[$index] - $timestamps[$index - 1]
     }
-    $durations = @($frames | ForEach-Object { [int64]$_.pkt_duration })
+    $durations = @($frames | ForEach-Object { [int64]($_.duration ?? $_.pkt_duration) })
     if (@($deltas | Where-Object { $_ -le 0 }).Count -ne 0) {
         throw "Generated Golden VFR fixture PTS must be strictly monotonic."
     }
@@ -195,6 +195,7 @@ if ($shouldGenerate) {
             "-vf", "settb=1/12800,setpts='floor(N/2)*1024+mod(N\,2)*256',format=yuv420p",
             "-fps_mode", "vfr",
             "-c:v", "libx264",
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
             "-bf", "0",
             "-preset", "veryfast",
             "-crf", "18",
