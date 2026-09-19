@@ -8192,7 +8192,7 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
         check.code == "preview_decode_interactive_cancel_return_latency_max_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 120_000
-            && check.limit == Some(100_000)
+            && check.limit == Some(50_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_cancellation_gate_failed"
