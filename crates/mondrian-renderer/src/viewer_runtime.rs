@@ -251,7 +251,8 @@ impl ViewerGpuExecutionRuntime {
             );
         let color_output =
             RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(&resource_pool))?;
-        let spatial = GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool));
+        let mut spatial = GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool));
+        spatial.prepare_backend(device);
         let display_calibration =
             GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(&resource_pool))?;
         let program_scopes = GpuProgramScopesRuntime::default();
@@ -655,6 +656,11 @@ impl ViewerGpuExecutionRuntime {
     /// Point-in-time evidence for creative-LUT device residency and reuse.
     pub fn compositor_creative_lut_diagnostics(&self) -> crate::GpuCreativeLutCacheDiagnostics {
         self.working_compositor.creative_lut_diagnostics()
+    }
+
+    /// Point-in-time evidence for Viewer spatial pipeline and pass reuse.
+    pub const fn spatial_diagnostics(&self) -> GpuViewerSpatialRuntimeDiagnostics {
+        self.spatial.diagnostics()
     }
 
     /// Point-in-time evidence that hidden scopes perform no work and visible
@@ -2865,6 +2871,19 @@ mod tests {
         Ok(record)
     }
 
+    #[tokio::test]
+    async fn viewer_runtime_prepares_spatial_backend_before_first_frame() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer spatial prewarm test: no GPU adapter available");
+            return;
+        };
+        let runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                .expect("Viewer GPU runtime");
+
+        assert_eq!(runtime.spatial_diagnostics().pipeline_builds, 1);
+        assert_eq!(runtime.spatial_diagnostics().records, 0);
+    }
     #[tokio::test]
     async fn viewer_startup_prewarm_populates_the_production_output_cache() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
