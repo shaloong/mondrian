@@ -322,8 +322,9 @@ LUT/uniform uploads and refresh remain owned by the same color runtime. Its
 bounded device-owned pipeline cache keys the fused shader by the complete OCIO
 identity and input source, and retires with that runtime. The GLSL frontend's
 required dummy entry is removed from validated IR before callable WGSL emission;
-no custom transfer function or color-engine fallback is introduced. The Windows
-D3D12-specific import backend retains its explicit two-pass physical path.
+no custom transfer function or color-engine fallback is introduced. Windows
+D3D12 imports use the same fused callable while retaining their native queue,
+fence, and decoder-surface ownership contracts.
 
 The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
 observes exact UHD frames through the production decoder and Viewer using the

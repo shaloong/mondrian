@@ -3727,8 +3727,9 @@ only when the GPU input stage cannot be recorded. CPU outcomes still require
 one host-to-device upload; native decoder surfaces use the separate zero-copy
 import contract and never masquerade as one of these CPU source types. Here
 zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
-sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
-encoded and working textures.
+sampling. Fused YUV reconstruction and OCIO allocate one Renderer-owned Working
+texture; no encoded RGB intermediate is allocated. Linux CUDA imports additionally
+charge their padded interop storage buffer to the active working-set budget.
 
 An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
 semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
