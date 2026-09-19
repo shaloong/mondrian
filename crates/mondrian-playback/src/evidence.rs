@@ -1035,6 +1035,7 @@ mod tests {
             quality_revision: 1,
             audio_clock_observation: None::<AudioDeviceClockObservation>,
             audio_handoff: None,
+            audio_clock_fallback: None,
         }
     }
 
@@ -1099,6 +1100,7 @@ mod tests {
                 quality_revision: 1,
                 audio_clock_observation: None,
                 audio_handoff: None,
+                audio_clock_fallback: None,
             },
             target: Some(target),
             clock_phase: master_and_phase.map(|(master, phase_ns, uncertainty_ns)| {

@@ -153,13 +153,18 @@ where
         move |data: &mut [T], info| {
             let observed_at = Instant::now();
             let frames = data.len() / channels;
-            let playback_delay = match super::callback_tail_playback_delay(
-                callback_playback_delay(info),
-                frames,
-                sample_rate,
-            ) {
-                Ok(delay) => delay,
-                Err(_) => {
+            let callback_span =
+                match super::callback_tail_playback_delay(Duration::ZERO, frames, sample_rate) {
+                    Ok(span) => span,
+                    Err(_) => {
+                        data.fill(T::EQUILIBRIUM);
+                        telemetry.stream_failed.store(true, Ordering::Release);
+                        return;
+                    }
+                };
+            let playback_delay = match callback_playback_delay(info).checked_add(callback_span) {
+                Some(delay) => delay,
+                None => {
                     data.fill(T::EQUILIBRIUM);
                     telemetry.stream_failed.store(true, Ordering::Release);
                     return;
@@ -168,7 +173,14 @@ where
             let active_block = callback_control.begin_callback_block(&telemetry);
             if !active_block {
                 data.fill(T::EQUILIBRIUM);
-                telemetry.record_callback(observed_at, false, frames, 0, playback_delay);
+                telemetry.record_callback(
+                    observed_at,
+                    false,
+                    frames,
+                    0,
+                    playback_delay,
+                    callback_span,
+                );
                 callback_control.finish_callback_block(false, &telemetry);
                 return;
             }
@@ -189,6 +201,7 @@ where
                 frames,
                 missing_samples / channels,
                 playback_delay,
+                callback_span,
             );
             callback_control.finish_callback_block(true, &telemetry);
         },

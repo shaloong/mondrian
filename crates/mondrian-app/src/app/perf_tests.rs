@@ -1403,6 +1403,65 @@ fn professional_frame_count_covers_duration_terminal_and_measurement_guard() {
 }
 
 #[test]
+fn professional_cpal_sequence_uses_proven_source_headroom_without_reaching_eof() {
+    let interval_ns = 33_366_666;
+    let sequence_frames =
+        source_backed_sequence_frame_count(1_840_000_000, interval_ns).expect("1840-second source");
+    let observation_frames = professional_min_frame_count_for_interval(interval_ns)
+        .expect("professional observation")
+        .saturating_add(
+            usize::try_from(30_000_000_000u64.div_ceil(interval_ns))
+                .expect("bounded evidence extension"),
+        );
+
+    assert_eq!(sequence_frames, 55_143);
+    // The failed physical run reached its observation window at frame 71.
+    // Reproduce that boundary so future fixture planning cannot silently trim
+    // the source back to the old 30-second nominal guard.
+    assert!(
+        sequence_frames.saturating_sub(71) > observation_frames,
+        "the measured startup offset must still leave the complete bounded observation window"
+    );
+    assert!(
+        (sequence_frames as u128).saturating_mul(u128::from(interval_ns)) < 1_840_000_000_000,
+        "the authored mark-out must stay within the probe-proven source duration"
+    );
+}
+
+#[test]
+fn professional_cpal_completion_requires_both_authoritative_durations() {
+    let nominal_frames = professional_min_frame_count_for_interval(33_366_666)
+        .expect("professional observation frame count");
+    assert!(!professional_cpal_observation_complete(
+        nominal_frames,
+        nominal_frames.saturating_add(900),
+        1_792_633_416,
+        Some(Duration::from_micros(1_792_255_950)),
+    ));
+    assert!(!professional_cpal_observation_complete(
+        nominal_frames,
+        nominal_frames,
+        PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+        Some(Duration::from_micros(
+            PROFESSIONAL_MIN_OBSERVED_DURATION_US - 1,
+        )),
+    ));
+    assert!(professional_cpal_observation_complete(
+        nominal_frames,
+        nominal_frames,
+        PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+        Some(Duration::from_micros(PROFESSIONAL_MIN_OBSERVED_DURATION_US)),
+    ));
+}
+
+#[test]
+fn source_backed_sequence_rejects_missing_safe_frame_headroom() {
+    let error = source_backed_sequence_frame_count(1, 1_000_000_000)
+        .expect_err("sub-frame source must fail closed");
+    assert!(error.to_string().contains("two safe complete timeline frames"));
+}
+
+#[test]
 fn external_playback_does_not_author_unproven_startup_headroom() {
     assert_eq!(
         default_external_playback_sequence_frame_count(
@@ -4877,7 +4936,8 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                 anyhow::ensure!(
                     state.playback_clock_master()
                         == Some(mondrian_playback::ClockMaster::AudioDevice),
-                    "CPAL smoke did not retain Audio Device Clock Master"
+                    "CPAL smoke did not retain Audio Device Clock Master: {:?}",
+                    state.playback_diagnostic_snapshot(),
                 );
                 anyhow::ensure!(
                     gpu_summary.presented_unique_frame_completions > 0,
@@ -4983,15 +5043,21 @@ fn playback_professional_cpal_av_gate() -> anyhow::Result<()> {
             .unwrap_or(u64::MAX),
     )
     .unwrap_or(usize::MAX);
-    let sequence_frame_count =
+    let minimum_sequence_frame_count =
         frame_count.saturating_add(qualification_guard_frames).saturating_add(2);
-    let required_source_duration_us = (sequence_frame_count as u128)
+    let required_source_duration_us = (minimum_sequence_frame_count as u128)
         .saturating_mul(u128::from(frame_interval_ns))
         .saturating_add(999)
         .checked_div(1_000)
         .unwrap_or(u128::MAX)
         .min(u128::from(u64::MAX)) as u64;
     media_probe.ensure_observation_coverage(required_source_duration_us)?;
+    let sequence_frame_count =
+        source_backed_sequence_frame_count(media_probe.proven_duration_us()?, frame_interval_ns)?;
+    anyhow::ensure!(
+        sequence_frame_count >= minimum_sequence_frame_count,
+        "professional CPAL source provides {sequence_frame_count} safe complete frames, fewer than the required {minimum_sequence_frame_count}"
+    );
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_cpal_av_gate_{uniq}"));
     fs::create_dir_all(&root_dir)?;
@@ -5002,7 +5068,6 @@ fn playback_professional_cpal_av_gate() -> anyhow::Result<()> {
         media_probe,
         frame_count,
         sequence_frame_count,
-        frame_interval_ns,
     );
     let _ = fs::remove_dir_all(&root_dir);
     result
@@ -5016,7 +5081,6 @@ fn run_professional_cpal_av_probe(
     media_probe: AudioPlaybackMediaProbeReport,
     frame_count: usize,
     sequence_frame_count: usize,
-    frame_interval_ns: u64,
 ) -> anyhow::Result<()> {
     let state =
         build_professional_cpal_av_state(root_dir, media_path, media_info, sequence_frame_count)?;
@@ -5076,49 +5140,70 @@ fn run_professional_cpal_av_probe(
                 recovery_started,
             )?;
             gpu_summary = HeadlessViewerGpuExecutionSummary {
-                adapter: Some(realtime.gpu()?.adapter_info().clone()),
+                adapter: gpu_summary.adapter.clone(),
                 ..HeadlessViewerGpuExecutionSummary::default()
             };
+            realtime.begin_realtime_timing_window()?;
             let mut readiness = PreviewReadinessCounts::default();
-            // Qualification proves a healthy starting point, while this bounded tail
-            // guarantees that a short startup reactivation cannot shorten the required
-            // uninterrupted callback interval. The evaluator still requires a complete
-            // 30-minute active interval; the extension grants no missing evidence.
+            // Qualification proves a healthy starting point. The absolute wall deadline
+            // bounds the harness while authoritative playback and callback durations,
+            // rather than a nominal loop count, decide when evidence is complete.
             const MAX_EVIDENCE_EXTENSION_SECONDS: u64 = 30;
-            let max_frame_count = frame_count.saturating_add(
-                usize::try_from(
-                    MAX_EVIDENCE_EXTENSION_SECONDS
-                        .saturating_mul(1_000_000_000)
-                        .div_ceil(frame_interval_ns),
+            let observation_deadline = observation_started
+                .checked_add(
+                    Duration::from_micros(PROFESSIONAL_MIN_OBSERVED_DURATION_US)
+                        + Duration::from_secs(MAX_EVIDENCE_EXTENSION_SECONDS),
                 )
-                .unwrap_or(usize::MAX),
+                .context("derive professional CPAL observation deadline")?;
+            let observation_start_frame =
+                usize::try_from(state.current_frame()).with_context(|| {
+                    format!(
+                        "professional CPAL observation started at a negative timeline frame {}",
+                        state.current_frame()
+                    )
+                })?;
+            let remaining_sequence_frames =
+                sequence_frame_count.saturating_sub(observation_start_frame);
+            anyhow::ensure!(
+                remaining_sequence_frames > frame_count,
+                "professional CPAL fixture gap: observation starts at frame {observation_start_frame} with {remaining_sequence_frames} source-backed frames remaining, but the complete evidence window requires more than {frame_count} frames"
             );
             let mut observed_frame_count = 0usize;
 
-            for frame_index in 0..max_frame_count {
+            loop {
+                let frame_index = observed_frame_count;
+                anyhow::ensure!(
+                    Instant::now() < observation_deadline,
+                    "professional CPAL observation exceeded its 30-second bounded extension; observed_frames={observed_frame_count}, playback_duration_us={}, audio={:?}",
+                    state.playback_evidence_report().observed_duration_us,
+                    state.audio_playback_snapshot(),
+                );
                 let sample =
                     realtime.run_production_av_interval(state, &mut gpu_summary, ready_timeout)?;
                 record_headless_preview_readiness(&mut readiness, sample);
-                observed_frame_count = frame_index.saturating_add(1);
-                anyhow::ensure!(
-            state.is_playing(),
-            "production A/V transport ended before the 30-minute observation completed at frame {frame_index}"
-        );
-                if observed_frame_count >= frame_count {
-                    let playback_duration_ready =
-                        state.playback_evidence_report().observed_duration_us
-                            >= PROFESSIONAL_MIN_OBSERVED_DURATION_US;
-                    let callback_duration_ready = state
-                        .audio_playback_snapshot()
-                        .output
-                        .and_then(|output| output.active_duration)
-                        .is_some_and(|duration| {
-                            duration.as_micros()
-                                >= u128::from(PROFESSIONAL_MIN_OBSERVED_DURATION_US)
-                        });
-                    if playback_duration_ready && callback_duration_ready {
-                        break;
-                    }
+                observed_frame_count = observed_frame_count
+                    .checked_add(1)
+                    .context("professional CPAL observation count overflowed")?;
+                if !state.is_playing() {
+                    let playback_evidence = state.playback_evidence_report();
+                    let audio = state.audio_playback_snapshot();
+                    anyhow::bail!(
+                        "production A/V transport ended before the 30-minute observation completed at frame {frame_index}; observed_frames={observed_frame_count}, playback_duration_us={}, audio={audio:?}",
+                        playback_evidence.observed_duration_us,
+                    );
+                }
+                let playback_duration_us = state.playback_evidence_report().observed_duration_us;
+                let callback_duration = state
+                    .audio_playback_snapshot()
+                    .output
+                    .and_then(|output| output.active_duration);
+                if professional_cpal_observation_complete(
+                    frame_count,
+                    observed_frame_count,
+                    playback_duration_us,
+                    callback_duration,
+                ) {
+                    break;
                 }
             }
             process_memory_evidence.observe_playback_duration(
@@ -6980,6 +7065,41 @@ fn professional_min_frame_count_for_interval(interval_ns: u64) -> anyhow::Result
         // observation jitter.
         .saturating_add(2);
     usize::try_from(frames).context("professional playback frame count exceeds usize")
+}
+
+fn professional_cpal_observation_complete(
+    required_frame_count: usize,
+    observed_frame_count: usize,
+    playback_duration_us: u64,
+    callback_duration: Option<Duration>,
+) -> bool {
+    observed_frame_count >= required_frame_count
+        && playback_duration_us >= PROFESSIONAL_MIN_OBSERVED_DURATION_US
+        && callback_duration.is_some_and(|duration| {
+            duration.as_micros() >= u128::from(PROFESSIONAL_MIN_OBSERVED_DURATION_US)
+        })
+}
+
+fn source_backed_sequence_frame_count(
+    proven_duration_us: u64,
+    interval_ns: u64,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        interval_ns > 0,
+        "source-backed frame interval must be positive"
+    );
+    let complete_frames = u128::from(proven_duration_us)
+        .saturating_mul(1_000)
+        .checked_div(u128::from(interval_ns))
+        .unwrap_or(0);
+    let safe_frames = complete_frames
+        .checked_sub(1)
+        .context("source duration does not cover two safe complete timeline frames")?;
+    anyhow::ensure!(
+        safe_frames >= 2,
+        "source duration does not cover two safe complete timeline frames"
+    );
+    usize::try_from(safe_frames).context("source-backed frame count exceeds usize")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

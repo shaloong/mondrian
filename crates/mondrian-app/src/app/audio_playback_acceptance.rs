@@ -87,6 +87,16 @@ impl AudioPlaybackMediaProbeReport {
         );
         Ok(())
     }
+
+    /// Duration jointly proven by the container and primary-audio stream.
+    pub(crate) fn proven_duration_us(&self) -> anyhow::Result<u64> {
+        let audio_stream_duration_us = self.audio_stream_duration_us.ok_or_else(|| {
+            anyhow::anyhow!(
+                "professional CPAL playback requires a proven primary-audio stream duration"
+            )
+        })?;
+        Ok(self.duration_us.min(audio_stream_duration_us))
+    }
 }
 
 pub(crate) struct ProfessionalAudioPlaybackObservation<'a> {
@@ -945,6 +955,7 @@ mod tests {
             underrun_frames: 0,
             last_callback_frames: 480,
             last_callback_playback_delay: Some(Duration::from_millis(10)),
+            last_callback_playback_delay_uncertainty: Some(Duration::from_millis(10)),
             last_callback_age: Some(Duration::from_millis(1)),
             buffered_frames: 9_600,
             stream_failed: false,

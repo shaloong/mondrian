@@ -457,6 +457,11 @@ pub(crate) struct HeadlessRealtimeCoordinatorTiming {
 }
 
 impl HeadlessRealtimeCoordinatorTiming {
+    #[cfg(test)]
+    fn begin_observation_window(&mut self) {
+        *self = Self::default();
+    }
+
     fn record_interval(
         &mut self,
         sample: HeadlessPreviewSample,
@@ -1371,6 +1376,19 @@ impl HeadlessRealtimePlaybackSession {
         self.driver.as_ref().map(|driver| driver.timing)
     }
 
+    /// Start a fresh telemetry window without changing realtime ownership or
+    /// transport state. Qualification uses this after device recovery so its
+    /// readiness samples and coordinator intervals cover the same boundary.
+    #[cfg(all(test, feature = "validation"))]
+    pub(crate) fn begin_realtime_timing_window(&mut self) -> anyhow::Result<()> {
+        let driver = self
+            .driver
+            .as_mut()
+            .context("Headless realtime playback residency is not active")?;
+        driver.timing.begin_observation_window();
+        Ok(())
+    }
+
     /// Execute one video-only interval through the paired coordinator.
     pub(crate) fn run_video_interval<O: HeadlessGpuExecutionObserver>(
         &mut self,
@@ -1510,7 +1528,7 @@ impl HeadlessRealtimePlaybackSession {
                         // PCM horizon filling while video cold preparation is
                         // incomplete, but withhold every Audio Device clock
                         // observation until that video gate is satisfied.
-                        pump_headless_realtime_audio_without_clock_commit(
+                        pump_headless_realtime_audio_before_picture(
                             state,
                             true,
                             &mut recovery_timing,
@@ -1742,7 +1760,7 @@ impl HeadlessRealtimePlaybackSession {
                 );
             }
             if !sample.current_gpu_ready
-                && let Some(resolved_sample) = resolved_headless_terminal_sample(
+                && let Some(resolved_sample) = resolved_headless_recovery_terminal_sample(
                     require_audio,
                     target_intent,
                     sampled_intent,
@@ -1992,7 +2010,7 @@ fn headless_recovery_may_finish_without_ready(
     !require_audio && headless_demand_resolved_without_ready(target, current)
 }
 
-fn resolved_headless_terminal_sample(
+fn resolved_headless_recovery_terminal_sample(
     require_audio: bool,
     target: HeadlessGpuCandidateIntent,
     current: HeadlessGpuCandidateIntent,
@@ -2001,11 +2019,38 @@ fn resolved_headless_terminal_sample(
 ) -> Option<HeadlessPreviewSample> {
     headless_recovery_may_finish_without_ready(require_audio, target, current).then_some(
         HeadlessPreviewSample {
-            current_gpu_ready: retained_output_available,
+            current_gpu_ready: false,
             stale_output_available: retained_output_available,
             unavailable: terminal_status == HeadlessGpuCandidateStatus::Unavailable,
         },
     )
+}
+
+fn headless_terminal_picture_recovery_required(
+    require_audio: bool,
+    terminal_status: HeadlessGpuCandidateStatus,
+    terminal_quality_transition: bool,
+    already_reissued: bool,
+) -> bool {
+    !already_reissued
+        && (terminal_quality_transition
+            || (!require_audio && terminal_status == HeadlessGpuCandidateStatus::DroppedLate))
+}
+
+fn resolved_headless_realtime_terminal_sample(
+    target: HeadlessGpuCandidateIntent,
+    current: HeadlessGpuCandidateIntent,
+    retained_output_available: bool,
+    terminal_status: HeadlessGpuCandidateStatus,
+) -> Option<HeadlessPreviewSample> {
+    (retained_output_available
+        && terminal_status == HeadlessGpuCandidateStatus::DroppedLate
+        && headless_demand_resolved_without_ready(target, current))
+    .then_some(HeadlessPreviewSample {
+        current_gpu_ready: false,
+        stale_output_available: true,
+        unavailable: false,
+    })
 }
 
 fn dropped_picture_recovery_deadline(
@@ -2163,7 +2208,12 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
     let sampled_late_presentation_grace_ns = state
         .playback_engine
         .frame_demand()
-        .filter(|demand| Some(demand.identity()) == sampled_intent.pending_demand)
+        .filter(|demand| {
+            demand.kind == mondrian_playback::FrameDemandKind::TimedPlayback
+                && demand.epoch == sampled_intent.epoch
+                && demand.identity().target_frame == sampled_intent.frame
+                && demand.quality_revision <= sampled_intent.quality_revision
+        })
         .map_or(0, |demand| demand.late_presentation_grace_ns);
     let mut dropped_picture_reissued = false;
     let mut presented_sample = None;
@@ -2185,15 +2235,13 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
             //
             // Once AudioDevice already owns the clock, its bounded render queue
             // must still be serviced while that picture resolves. Decoder and
-            // GPU work are asynchronous, so pumping Audio here fills callback
-            // buffers without ticking transport past the unresolved picture.
-            // Omitting this pump converts an ordinary cold decode into a long
-            // physical underrun and then makes that underrun hold the clock.
-            pump_headless_realtime_audio_without_clock_commit(
-                state,
-                pump_audio,
-                &mut interval_timing,
-            )?;
+            // GPU work are asynchronous, so pumping Audio here refreshes the
+            // live device clock; a terminally late picture is then classified
+            // stale while the transport follows that authority. Before handoff,
+            // the same operation fills PCM without committing a device clock.
+            // Omitting it converts an ordinary cold decode into a long physical
+            // underrun and then makes that underrun hold the clock.
+            pump_headless_realtime_audio_before_picture(state, pump_audio, &mut interval_timing)?;
             let pump_outcome = pump_playback_preview(state, preview_service);
             let accepted_terminal =
                 accepted_headless_terminal_status(sampled_intent, pump_outcome.accepted_delivery);
@@ -2252,9 +2300,24 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 presented_sample = None;
             }
             if presented_sample.is_none() {
-                if driver.candidate_status == HeadlessGpuCandidateStatus::DroppedLate
-                    && !dropped_picture_reissued
-                {
+                // A terminal delivery can rotate spatial quality before the
+                // next clock tick. This pre-clock wait then needs one current
+                // demand at that quality instead of waiting for a tick it owns.
+                // The Engine validates terminal ownership and the exact target.
+                let terminal_quality_transition =
+                    state.playback_engine.frame_demand().is_some_and(|demand| {
+                        demand.kind == mondrian_playback::FrameDemandKind::TimedPlayback
+                            && current_intent.pending_demand.is_none()
+                            && demand.epoch == current_intent.epoch
+                            && demand.identity().target_frame == current_intent.frame
+                            && demand.quality_revision < current_intent.quality_revision
+                    });
+                if headless_terminal_picture_recovery_required(
+                    pump_audio,
+                    driver.candidate_status,
+                    terminal_quality_transition,
+                    dropped_picture_reissued,
+                ) {
                     let observed_at = Instant::now();
                     let recovery_deadline = dropped_picture_recovery_deadline(
                         observed_at,
@@ -2288,18 +2351,17 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                         && resolved_intent.frame == sampled_intent.frame,
                     "Headless realtime terminal delivery changed the pre-clock picture coordinate"
                 );
-                if let Some(resolved_sample) = resolved_headless_terminal_sample(
-                    pump_audio,
+                if let Some(resolved_sample) = resolved_headless_realtime_terminal_sample(
                     sampled_intent,
                     resolved_intent,
                     preview_service.has_retained_gpu_output(),
                     driver.candidate_status,
                 ) {
-                    // The exact video demand reached a terminal delivery after
-                    // its one bounded retry. Preserve the physical stale picture
-                    // and let the acceptance report count this dropped interval;
-                    // it is not a Ready presentation. Audio-qualified playback
-                    // must still hold the clock until an exact picture resolves.
+                    // The exact video demand is terminal. Preserve the prior
+                    // physical picture and count a stale interval; it is not a
+                    // Ready presentation. Audio-master playback advances from
+                    // the live device observation instead of renewing a frame
+                    // whose presentation phase has already expired.
                     presented_sample = Some(resolved_sample);
                 } else {
                     anyhow::ensure!(
@@ -2776,7 +2838,7 @@ fn pump_headless_realtime_audio(
     Ok(())
 }
 
-fn pump_headless_realtime_audio_without_clock_commit(
+fn pump_headless_realtime_audio_before_picture(
     state: &mut AppState,
     pump_audio: bool,
     timing: &mut HeadlessRealtimeIntervalTiming,
@@ -2785,7 +2847,12 @@ fn pump_headless_realtime_audio_without_clock_commit(
         return Ok(());
     }
     let audio_started = Instant::now();
-    state.pump_audio_output_without_clock_commit()?;
+    match headless_av_audio_pump_mode(state.playback_clock_master(), false) {
+        HeadlessAvAudioPumpMode::ObserveClock => state.pump_audio_output()?,
+        HeadlessAvAudioPumpMode::PrerollWithoutClockCommit => {
+            state.pump_audio_output_without_clock_commit()?;
+        }
+    }
     timing.audio_pump.observe(audio_started.elapsed());
     Ok(())
 }
@@ -3050,7 +3117,7 @@ mod tests {
         let target = HeadlessGpuCandidateIntent::from_state(&state);
         let current = HeadlessGpuCandidateIntent { pending_demand: None, ..target };
 
-        let sample = resolved_headless_terminal_sample(
+        let sample = resolved_headless_recovery_terminal_sample(
             false,
             target,
             current,
@@ -3061,13 +3128,13 @@ mod tests {
         assert_eq!(
             sample,
             HeadlessPreviewSample {
-                current_gpu_ready: true,
+                current_gpu_ready: false,
                 stale_output_available: true,
                 unavailable: false,
             }
         );
         assert!(
-            resolved_headless_terminal_sample(
+            resolved_headless_recovery_terminal_sample(
                 true,
                 target,
                 current,
@@ -3078,7 +3145,7 @@ mod tests {
             "audio-qualified playback must not advance without exact picture readiness"
         );
         assert!(
-            resolved_headless_terminal_sample(
+            resolved_headless_recovery_terminal_sample(
                 false,
                 target,
                 target,
@@ -3087,6 +3154,76 @@ mod tests {
             )
             .is_none(),
             "an unresolved exact demand must retain its bounded presentation opportunity"
+        );
+    }
+
+    #[test]
+    fn audio_master_does_not_renew_a_terminally_late_picture() {
+        assert!(!headless_terminal_picture_recovery_required(
+            true,
+            HeadlessGpuCandidateStatus::DroppedLate,
+            false,
+            false,
+        ));
+        assert!(headless_terminal_picture_recovery_required(
+            false,
+            HeadlessGpuCandidateStatus::DroppedLate,
+            false,
+            false,
+        ));
+        assert!(headless_terminal_picture_recovery_required(
+            true,
+            HeadlessGpuCandidateStatus::Ready,
+            true,
+            false,
+        ));
+        assert!(!headless_terminal_picture_recovery_required(
+            false,
+            HeadlessGpuCandidateStatus::DroppedLate,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn audio_master_runtime_drop_retains_stale_picture_without_fabricating_ready() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(9);
+        let target = HeadlessGpuCandidateIntent::from_state(&state);
+        let resolved = HeadlessGpuCandidateIntent { pending_demand: None, ..target };
+
+        assert_eq!(
+            resolved_headless_realtime_terminal_sample(
+                target,
+                resolved,
+                true,
+                HeadlessGpuCandidateStatus::DroppedLate,
+            ),
+            Some(HeadlessPreviewSample {
+                current_gpu_ready: false,
+                stale_output_available: true,
+                unavailable: false,
+            })
+        );
+        assert!(
+            resolved_headless_realtime_terminal_sample(
+                target,
+                resolved,
+                false,
+                HeadlessGpuCandidateStatus::DroppedLate,
+            )
+            .is_none(),
+            "runtime A/V playback cannot advance a dropped picture without a retained physical output"
+        );
+        assert!(
+            resolved_headless_realtime_terminal_sample(
+                target,
+                resolved,
+                true,
+                HeadlessGpuCandidateStatus::Unavailable,
+            )
+            .is_none(),
+            "a decode failure is not an ordinary video deadline drop"
         );
     }
 
@@ -3343,6 +3480,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn professional_timing_window_drops_recovery_interval_history() {
+        let mut timing = HeadlessRealtimeCoordinatorTiming {
+            intervals: 74,
+            stale_intervals: 3,
+            candidate_attempts: 81,
+            advanced_frames: 74,
+            non_unit_frame_advances: 1,
+            maximum_frame_advance: 2,
+            stale_bursts: 2,
+            max_consecutive_stale: 2,
+            current_consecutive_stale: 1,
+            ..Default::default()
+        };
+
+        timing.begin_observation_window();
+
+        assert_eq!(timing.intervals, 0);
+        assert_eq!(timing.stale_intervals, 0);
+        assert_eq!(timing.candidate_attempts, 0);
+        assert_eq!(timing.advanced_frames, 0);
+        assert_eq!(timing.non_unit_frame_advances, 0);
+        assert_eq!(timing.maximum_frame_advance, 0);
+        assert_eq!(timing.stale_bursts, 0);
+        assert_eq!(timing.max_consecutive_stale, 0);
+        assert_eq!(timing.current_consecutive_stale, 0);
+    }
     #[test]
     fn av_audio_start_waits_for_immediate_successor_and_cold_media_residency() {
         assert!(!headless_av_startup_horizon_ready(false, false));
@@ -3766,11 +3930,11 @@ mod tests {
     }
 
     #[test]
-    fn video_only_pre_clock_fill_does_not_fabricate_an_audio_stage_observation() {
+    fn video_only_before_picture_pump_does_not_fabricate_an_audio_stage_observation() {
         let mut state = AppState::new();
         let mut timing = HeadlessRealtimeIntervalTiming::default();
 
-        pump_headless_realtime_audio_without_clock_commit(&mut state, false, &mut timing)
+        pump_headless_realtime_audio_before_picture(&mut state, false, &mut timing)
             .expect("video-only pre-clock fill");
 
         assert_eq!(timing.audio_pump.observations, 0);

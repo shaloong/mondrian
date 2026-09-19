@@ -21,6 +21,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::{Audio, KernelStreaming, Multimedia};
 use windows::Win32::System::{
     Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED},
+    Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
     Threading::{
         AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, SetEvent,
         WaitForSingleObject, INFINITE,
@@ -273,6 +274,21 @@ fn run_stream_inner(
         .map_err(|error| format!("failed to query WASAPI stream latency: {error}"))?;
     let render_client: Audio::IAudioRenderClient = unsafe { audio_client.GetService() }
         .map_err(|error| format!("failed to obtain WASAPI render client: {error}"))?;
+    let audio_clock: Audio::IAudioClock = unsafe { audio_client.GetService() }
+        .map_err(|error| format!("failed to obtain WASAPI audio clock: {error}"))?;
+    let audio_clock_frequency = unsafe { audio_clock.GetFrequency() }
+        .map_err(|error| format!("failed to query WASAPI audio-clock frequency: {error}"))?;
+    if audio_clock_frequency == 0 {
+        return Err("WASAPI audio clock reported a zero frequency".to_owned().into());
+    }
+    let mut qpc_frequency = 0_i64;
+    // SAFETY: the output pointer remains valid for the complete call.
+    unsafe { QueryPerformanceFrequency(&mut qpc_frequency) }
+        .map_err(|error| format!("failed to query QPC frequency: {error}"))?;
+    let qpc_frequency = u64::try_from(qpc_frequency)
+        .ok()
+        .filter(|frequency| *frequency > 0)
+        .ok_or_else(|| "QPC reported a non-positive frequency".to_owned())?;
     let scratch_samples = usize::try_from(buffer_frames)
         .ok()
         .and_then(|frames| frames.checked_mul(context.channels))
@@ -283,15 +299,29 @@ fn run_stream_inner(
         vec![0.0_f32; scratch_samples]
     };
 
+    let initial_observed_at = Instant::now();
+    let initial_playback_delay = super::callback_tail_playback_delay(
+        stream_latency,
+        buffer_frames as usize,
+        context.sample_rate,
+    )
+    .map_err(|error| format!("invalid initial WASAPI endpoint delay: {error}"))?;
+    let initial_uncertainty = super::callback_tail_playback_delay(
+        Duration::ZERO,
+        buffer_frames as usize,
+        context.sample_rate,
+    )
+    .map_err(|error| format!("invalid initial WASAPI buffer span: {error}"))?;
     write_frames(
         context,
         &render_client,
         RenderPacket {
-            observed_at: Instant::now(),
+            observed_at: initial_observed_at,
             frames: buffer_frames,
             queued_before: 0,
         },
-        stream_latency,
+        initial_playback_delay,
+        initial_uncertainty,
         encoding,
         &mut scratch,
     )?;
@@ -317,6 +347,7 @@ fn run_stream_inner(
         })
         .map_err(|error| format!("WASAPI owner disappeared during startup: {error}"))?;
     event_owner.0 = None;
+    let mut last_audio_clock_correlation = None;
 
     while !context.stop.load(Ordering::Acquire) {
         // SAFETY: the event remains owned by the parent stream until this worker joins.
@@ -332,11 +363,23 @@ fn run_stream_inner(
                 .map_err(|error| format!("failed to query WASAPI render padding: {error}"))
         })?;
         if packet.frames > 0 {
+            let sampled = sample_wasapi_audio_clock(
+                &audio_clock,
+                audio_clock_frequency,
+                qpc_frequency,
+                context.telemetry.callback_consumed_frames.load(Ordering::Acquire),
+                packet.frames,
+                context.sample_rate,
+                last_audio_clock_correlation,
+            )?;
+            last_audio_clock_correlation = Some(sampled.correlation);
+
             write_frames(
                 context,
                 &render_client,
-                packet,
-                stream_latency,
+                RenderPacket { observed_at: sampled.observed_at, ..packet },
+                sampled.playback_delay,
+                sampled.uncertainty,
                 encoding,
                 &mut scratch,
             )?;
@@ -559,6 +602,201 @@ fn aligned_buffer_duration_100ns(frames: u32, sample_rate: u32) -> Result<i64, S
     i64::try_from(numerator / u64::from(sample_rate))
         .map_err(|_| "WASAPI exclusive aligned duration exceeded i64".to_owned())
 }
+struct WasapiAudioClockSample {
+    correlation: WasapiAudioClockCorrelation,
+    observed_at: Instant,
+    playback_delay: Duration,
+    uncertainty: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct WasapiAudioClockCorrelation {
+    raw_position: u64,
+    qpc_position_100ns: u64,
+}
+
+fn sample_wasapi_audio_clock(
+    audio_clock: &Audio::IAudioClock,
+    frequency: u64,
+    qpc_frequency: u64,
+    submitted_before: u64,
+    packet_frames: u32,
+    sample_rate: u32,
+    previous_correlation: Option<WasapiAudioClockCorrelation>,
+) -> Result<WasapiAudioClockSample, String> {
+    let query_started = Instant::now();
+    let mut raw_position = 0_u64;
+    let mut position_qpc_100ns = 0_u64;
+    // SAFETY: the clock belongs to this COM worker and both output pointers
+    // remain valid for the complete call.
+    unsafe { audio_clock.GetPosition(&mut raw_position, Some(&mut position_qpc_100ns)) }
+        .map_err(|error| format!("failed to query WASAPI audio-clock position: {error}"))?;
+    let qpc_now_100ns = qpc_now_100ns(qpc_frequency)?;
+    let observed_at = Instant::now();
+    if previous_correlation.is_some_and(|previous| raw_position < previous.raw_position) {
+        return Err(format!(
+            "WASAPI audio clock regressed from {} to {raw_position}",
+            previous_correlation.map(|sample| sample.raw_position).unwrap_or_default()
+        ));
+    }
+    let projected_position = project_wasapi_audio_clock_position(
+        raw_position,
+        frequency,
+        position_qpc_100ns,
+        qpc_now_100ns,
+        submitted_before,
+        sample_rate,
+    )?;
+    let (playback_delay, quantization_uncertainty) = wasapi_audio_clock_tail_timing(
+        projected_position,
+        frequency,
+        submitted_before,
+        packet_frames,
+        sample_rate,
+    )?;
+    let cross_clock_residual = wasapi_cross_clock_residual_uncertainty(
+        previous_correlation,
+        WasapiAudioClockCorrelation {
+            raw_position,
+            qpc_position_100ns: position_qpc_100ns,
+        },
+        frequency,
+    )?;
+    let uncertainty = observed_at
+        .saturating_duration_since(query_started)
+        .checked_add(quantization_uncertainty)
+        .and_then(|value| value.checked_add(cross_clock_residual))
+        .ok_or_else(|| "WASAPI audio-clock uncertainty overflowed Duration".to_owned())?;
+    Ok(WasapiAudioClockSample {
+        correlation: WasapiAudioClockCorrelation {
+            raw_position,
+            qpc_position_100ns: position_qpc_100ns,
+        },
+        observed_at,
+        playback_delay,
+        uncertainty,
+    })
+}
+
+fn wasapi_cross_clock_residual_uncertainty(
+    previous: Option<WasapiAudioClockCorrelation>,
+    current: WasapiAudioClockCorrelation,
+    frequency: u64,
+) -> Result<Duration, String> {
+    let Some(previous) = previous else {
+        return Ok(Duration::ZERO);
+    };
+    if frequency == 0 {
+        return Err("WASAPI cross-clock residual requires a positive frequency".to_owned());
+    }
+    let device_ticks = current
+        .raw_position
+        .checked_sub(previous.raw_position)
+        .ok_or_else(|| "WASAPI audio-clock position regressed".to_owned())?;
+    let qpc_100ns = current
+        .qpc_position_100ns
+        .checked_sub(previous.qpc_position_100ns)
+        .ok_or_else(|| "WASAPI audio-clock QPC position regressed".to_owned())?;
+    let device_100ns = u128::from(device_ticks)
+        .checked_mul(10_000_000)
+        .and_then(|value| value.checked_div(u128::from(frequency)))
+        .ok_or_else(|| "WASAPI cross-clock residual conversion overflowed".to_owned())?;
+    let residual_100ns = device_100ns.abs_diff(u128::from(qpc_100ns));
+    let residual_ns = residual_100ns
+        .checked_mul(100)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| "WASAPI cross-clock residual exceeded Duration".to_owned())?;
+    Ok(Duration::from_nanos(residual_ns))
+}
+
+fn qpc_now_100ns(frequency: u64) -> Result<u64, String> {
+    if frequency == 0 {
+        return Err("QPC conversion requires a positive frequency".to_owned());
+    }
+    let mut counter = 0_i64;
+    // SAFETY: the output pointer remains valid for the complete call.
+    unsafe { QueryPerformanceCounter(&mut counter) }
+        .map_err(|error| format!("failed to query QPC position: {error}"))?;
+    let counter =
+        u64::try_from(counter).map_err(|_| "QPC reported a negative position".to_owned())?;
+    let units_100ns = u128::from(counter)
+        .checked_mul(10_000_000)
+        .and_then(|value| value.checked_div(u128::from(frequency)))
+        .ok_or_else(|| "QPC 100ns conversion overflowed".to_owned())?;
+    u64::try_from(units_100ns).map_err(|_| "QPC 100ns position exceeded u64".to_owned())
+}
+
+fn project_wasapi_audio_clock_position(
+    raw_position: u64,
+    frequency: u64,
+    position_qpc_100ns: u64,
+    qpc_now_100ns: u64,
+    submitted_before: u64,
+    sample_rate: u32,
+) -> Result<u64, String> {
+    if frequency == 0 || sample_rate == 0 {
+        return Err("WASAPI audio-clock projection requires positive rates".to_owned());
+    }
+    if position_qpc_100ns > qpc_now_100ns.saturating_add(1) {
+        return Err(format!(
+            "WASAPI audio-clock QPC position {position_qpc_100ns} is newer than local QPC {qpc_now_100ns}"
+        ));
+    }
+    let elapsed_100ns = qpc_now_100ns.saturating_sub(position_qpc_100ns);
+    let projected_ticks = u128::from(elapsed_100ns)
+        .checked_mul(u128::from(frequency))
+        .and_then(|value| value.checked_div(10_000_000))
+        .ok_or_else(|| "WASAPI audio-clock QPC projection overflowed".to_owned())?;
+    let submitted_tail_position = u128::from(submitted_before)
+        .checked_mul(u128::from(frequency))
+        .and_then(|value| value.checked_div(u128::from(sample_rate)))
+        .ok_or_else(|| "WASAPI submitted-tail clock conversion overflowed".to_owned())?;
+    let projected_position = u128::from(raw_position)
+        .checked_add(projected_ticks)
+        .ok_or_else(|| "WASAPI audio-clock projected position overflowed".to_owned())?
+        .min(submitted_tail_position);
+    u64::try_from(projected_position)
+        .map_err(|_| "WASAPI audio-clock projected position exceeded u64".to_owned())
+}
+
+fn wasapi_audio_clock_tail_timing(
+    raw_position: u64,
+    frequency: u64,
+    submitted_before: u64,
+    packet_frames: u32,
+    sample_rate: u32,
+) -> Result<(Duration, Duration), String> {
+    if frequency == 0 || sample_rate == 0 {
+        return Err("WASAPI audio-clock timing requires positive rates".to_owned());
+    }
+    let device_frames = u128::from(raw_position)
+        .checked_mul(u128::from(sample_rate))
+        .and_then(|value| value.checked_div(u128::from(frequency)))
+        .ok_or_else(|| "WASAPI audio-clock position conversion overflowed".to_owned())?;
+    let device_frames = u64::try_from(device_frames)
+        .map_err(|_| "WASAPI audio-clock position exceeded u64 frames".to_owned())?;
+    if device_frames > submitted_before {
+        return Err(format!(
+            "WASAPI audio clock advanced to {device_frames} frames beyond {submitted_before} submitted frames"
+        ));
+    }
+    let submitted_after = submitted_before
+        .checked_add(u64::from(packet_frames))
+        .ok_or_else(|| "WASAPI submitted-frame position overflowed".to_owned())?;
+    let queued_to_tail = submitted_after
+        .checked_sub(device_frames)
+        .ok_or_else(|| "WASAPI device position exceeded the callback tail".to_owned())?;
+    let queued_to_tail = usize::try_from(queued_to_tail)
+        .map_err(|_| "WASAPI callback-tail delay exceeded usize frames".to_owned())?;
+    let playback_delay =
+        super::callback_tail_playback_delay(Duration::ZERO, queued_to_tail, sample_rate)
+            .map_err(|error| format!("invalid WASAPI audio-clock tail delay: {error}"))?;
+    let quantization_uncertainty =
+        super::callback_tail_playback_delay(Duration::ZERO, 1, sample_rate)
+            .map_err(|error| format!("invalid WASAPI audio-clock quantization: {error}"))?;
+    Ok((playback_delay, quantization_uncertainty))
+}
+
 struct RenderPacket {
     observed_at: Instant,
     frames: u32,
@@ -572,7 +810,7 @@ fn sample_render_packet(
 ) -> Result<RenderPacket, String> {
     let observed_at = Instant::now();
     // Exclusive event-driven streams transfer one complete buffer per event.
-    // Shared streams bind capacity and delay to the same padding observation.
+    // Shared streams bind writable capacity to one coherent padding observation.
     let queued_before = if share_mode == RealtimeAudioOutputShareMode::Exclusive {
         0
     } else {
@@ -588,16 +826,13 @@ fn write_frames(
     context: &RenderContext,
     render_client: &Audio::IAudioRenderClient,
     packet: RenderPacket,
-    stream_latency: Duration,
+    playback_delay: Duration,
+    playback_delay_uncertainty: Duration,
     encoding: WasapiSampleEncoding,
     scratch: &mut [f32],
 ) -> Result<(), String> {
     let RenderPacket { observed_at, frames, queued_before } = packet;
-    let queued_frames = usize::try_from(u64::from(queued_before) + u64::from(frames))
-        .map_err(|_| "WASAPI callback endpoint frame extent overflowed".to_owned())?;
-    let playback_delay =
-        super::callback_tail_playback_delay(stream_latency, queued_frames, context.sample_rate)
-            .map_err(|error| format!("invalid WASAPI callback endpoint delay: {error}"))?;
+    let _ = queued_before;
     let samples = usize::try_from(frames)
         .ok()
         .and_then(|frames| frames.checked_mul(context.channels))
@@ -619,6 +854,7 @@ fn write_frames(
             &context.callback_control,
             &context.telemetry,
             playback_delay,
+            playback_delay_uncertainty,
         );
     } else {
         let staging = scratch.get_mut(..samples).ok_or_else(|| {
@@ -632,6 +868,7 @@ fn write_frames(
             &context.callback_control,
             &context.telemetry,
             playback_delay,
+            playback_delay_uncertainty,
         );
         // SAFETY: storage matches the negotiated container and remains writable.
         unsafe { encode_pcm_samples(data, staging, encoding) };
@@ -793,7 +1030,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_packet_binds_capacity_and_latency_to_one_padding_sample() {
+    fn shared_packet_binds_capacity_to_one_padding_sample() {
         let samples = std::cell::Cell::new(0);
         let before = Instant::now();
         let packet = sample_render_packet(RealtimeAudioOutputShareMode::Shared, 4_800, || {
@@ -816,6 +1053,74 @@ mod tests {
                 "device lost".into()
             ))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn audio_clock_qpc_projection_advances_a_stale_device_position() {
+        let projected = project_wasapi_audio_clock_position(
+            48_000, 384_000, 1_000_000, 1_100_000, 60_000, 48_000,
+        )
+        .expect("project correlated audio clock");
+        assert_eq!(projected, 51_840);
+    }
+
+    #[test]
+    fn audio_clock_qpc_projection_stops_at_the_submitted_tail() {
+        let projected = project_wasapi_audio_clock_position(
+            390_000, 384_000, 1_000_000, 2_000_000, 50_000, 48_000,
+        )
+        .expect("bound projection by submitted samples");
+        assert_eq!(projected, 400_000);
+    }
+
+    #[test]
+    fn audio_clock_qpc_projection_rejects_an_uncorrelated_future_timestamp() {
+        let error = project_wasapi_audio_clock_position(
+            48_000, 384_000, 1_000_002, 1_000_000, 50_000, 48_000,
+        )
+        .expect_err("future clock timestamp must fail closed");
+        assert!(error.contains("newer than local QPC"));
+    }
+
+    #[test]
+    fn audio_clock_maps_device_position_to_the_submitted_callback_tail() {
+        let (delay, uncertainty) = wasapi_audio_clock_tail_timing(480, 48_000, 960, 480, 48_000)
+            .expect("client-frame clock");
+        assert_eq!(delay, Duration::from_millis(20));
+        assert_eq!(uncertainty, Duration::from_nanos(20_834));
+
+        let (scaled_delay, scaled_uncertainty) =
+            wasapi_audio_clock_tail_timing(100_000, 10_000_000, 960, 480, 48_000)
+                .expect("100ns-unit clock");
+        assert_eq!(scaled_delay, delay);
+        assert_eq!(scaled_uncertainty, uncertainty);
+    }
+
+    #[test]
+    fn audio_clock_rejects_position_beyond_submitted_frames() {
+        let error = wasapi_audio_clock_tail_timing(961, 48_000, 960, 480, 48_000)
+            .expect_err("future device position must fail closed");
+        assert!(error.contains("beyond 960 submitted frames"));
+    }
+
+    #[test]
+    fn audio_clock_uncertainty_includes_measured_device_to_qpc_residual() {
+        let previous = WasapiAudioClockCorrelation {
+            raw_position: 384_000,
+            qpc_position_100ns: 1_000_000,
+        };
+        let current = WasapiAudioClockCorrelation {
+            raw_position: 387_840,
+            qpc_position_100ns: 1_100_500,
+        };
+        let uncertainty = wasapi_cross_clock_residual_uncertainty(Some(previous), current, 384_000)
+            .expect("derive measured cross-clock residual");
+        assert_eq!(uncertainty, Duration::from_micros(50));
+        assert_eq!(
+            wasapi_cross_clock_residual_uncertainty(None, current, 384_000)
+                .expect("first correlated sample"),
+            Duration::ZERO
         );
     }
 

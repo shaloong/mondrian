@@ -307,6 +307,7 @@ mod tests {
             underrun_frames: 0,
             last_callback_frames: 0,
             last_callback_playback_delay: None,
+            last_callback_playback_delay_uncertainty: None,
             last_callback_age: None,
             buffered_frames: 0,
             stream_failed: false,

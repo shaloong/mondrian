@@ -1896,6 +1896,41 @@ fn running_demand_deadline_uses_remaining_synthetic_clock_phase() {
 }
 
 #[test]
+fn audio_phase_budget_overrides_generic_late_grace_at_commit() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    engine
+        .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+        .expect("aligned audio handoff");
+    let demand = engine.pending_frame_demand().expect("audio demand");
+    let ticket = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+
+    assert_eq!(ticket.delivery_kind_at(ts(9)), FrameDeliveryKind::Degraded);
+    assert_eq!(
+        engine
+            .frame_presentation_delivery_kind(ticket, ts(9))
+            .expect("phase classification"),
+        Some(FrameDeliveryKind::Late),
+        "generic late grace cannot authorize a frame beyond the A/V phase budget"
+    );
+    assert!(matches!(
+        engine
+            .frame_presentation_delivery_kind(ticket, ts(5))
+            .expect("on-time phase classification"),
+        Some(FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded)
+    ));
+
+    let mut stale = ticket;
+    stale.identity.sequence = FrameDemandSequence(stale.identity.sequence.get() + 1);
+    assert_eq!(
+        engine
+            .frame_presentation_delivery_kind(stale, ts(5))
+            .expect("stale authority classification"),
+        None
+    );
+}
+#[test]
 fn audio_clock_demand_deadline_uses_observed_media_phase() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
