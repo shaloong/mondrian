@@ -7522,7 +7522,12 @@ fn run_headless_cancellation_recovery_probe(
     observer_ready_rx
         .recv_timeout(timeout)
         .context("isolated-demux stage observer did not start before its deadline")?;
-    state.seek_with_source(superseded_target_frame as i64, TimelineSeekSource::Settled)?;
+    // Observe the same Interactive family that PointerDrag routes to.
+    // Settled targets Still and cannot prove this worker was interrupted.
+    state.seek_with_source(
+        superseded_target_frame as i64,
+        TimelineSeekSource::PointerDrag,
+    )?;
     let _ =
         preview_service.gpu_preview_frame(state.preview_frame_execution_request(Instant::now()));
     let stage_before_supersession = stage_rx
