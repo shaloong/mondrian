@@ -156,6 +156,16 @@ Output Transform. The exact upstream commit, blob and byte digests, domain,
 resolution, authored luminance contract, and BSD-3-Clause notice are recorded
 in `assets/ocio/MONDRIAN_STANDARD_HDR_V1_NOTICE.md`.
 
+For the package-pinned PQ View, OCIO represents the HLG-to-display-reference
+inverse OETF as a half-domain 1D texture. The wgpu compiler replaces only that
+fingerprinted texture operation with the normative inverse HLG expression after
+proving the selected package, View, shader language, LUT identity, and the
+preceding formation LUT's normalized output domain. The PQ OETF remains the
+OCIO-authored LUT. A changed package, custom config, resource payload, source
+identity, or domain retains the unmodified OCIO program. This removes three
+texture fetches per output pixel without moving the nonlinear operation across
+the tetrahedral formation LUT.
+
 Output-target resolution maps Rec.2100 HLG and PQ to that HDR View while SDR
 targets map to the SDR View. A display without its target-class Standard View
 fails closed; it must never borrow the sRGB Standard View or an inactive ACES
