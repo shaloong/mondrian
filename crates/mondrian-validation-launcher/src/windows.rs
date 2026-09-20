@@ -482,7 +482,7 @@ impl Capsule {
         self.objects.extend([input, staged]);
         Ok(evidence)
     }
-    fn close(&mut self, errors: &mut Vec<String>) -> bool {
+    fn close(&mut self, errors: &mut Vec<String>, deadline: Instant) -> bool {
         if let Some(mut seal) = self.seal.take() {
             if let Err(error) = seal.validate() {
                 errors.push(format!("namespace readback: {error}"));
@@ -494,13 +494,25 @@ impl Capsule {
         }
         self.objects.clear();
         let removed = match self.root.take() {
-            Some(root) => match root.close() {
-                Ok(()) => true,
-                Err(error) => {
-                    errors.push(format!("capsule removal: {error}"));
-                    false
+            Some(root) => {
+                let path = root.keep();
+                loop {
+                    match std::fs::remove_dir_all(&path) {
+                        Ok(()) => break true,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => break true,
+                        Err(_) if Instant::now() < deadline => {
+                            // A Job can report zero active processes before Windows releases the
+                            // final executable image mapping. Keep the capsule identity fixed and
+                            // retry only inside the caller's original bounded deadline.
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => {
+                            errors.push(format!("capsule removal: {error} at path {:?}", path));
+                            break false;
+                        }
+                    }
                 }
-            },
+            }
             None => false,
         };
         self.ancestors.clear();
@@ -511,7 +523,7 @@ impl Drop for Capsule {
     fn drop(&mut self) {
         if self.root.is_some() {
             let mut errors = Vec::new();
-            self.close(&mut errors);
+            self.close(&mut errors, Instant::now() + Duration::from_secs(1));
             for error in errors {
                 tracing::error!(%error, "unconsumed launcher capsule cleanup");
             }
@@ -794,7 +806,7 @@ pub fn launch(plan: &LaunchPlan) -> Result<LaunchReport, LaunchError> {
         drop(child);
         drop(pipe);
         drop(job);
-        report.capsule_removed = capsule.close(&mut report.errors);
+        report.capsule_removed = capsule.close(&mut report.errors, deadline);
         match direct(&manifest_path).and_then(|mut file| hash(&mut file)) {
             Ok(sha256) => {
                 report.child_manifest = Some(FileBinding { path: manifest_path, sha256 });
@@ -1083,7 +1095,7 @@ mod tests {
             "actual pre-spawn rejection: {error}"
         );
         let mut errors = Vec::new();
-        assert!(capsule.close(&mut errors));
+        assert!(capsule.close(&mut errors, Instant::now() + Duration::from_secs(1)));
         assert!(errors.is_empty());
     }
     #[test]

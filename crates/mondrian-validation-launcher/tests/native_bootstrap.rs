@@ -67,7 +67,10 @@ fn root_exit_with_live_descendant_is_failed_then_reaped() {
     let (status, report) = campaign("descendant");
     assert!(!status.success());
     assert!(report.errors.iter().any(|error| error.contains("live native descendants")));
-    assert!(report.descendants_reaped && report.capsule_removed);
+    assert!(
+        report.descendants_reaped && report.capsule_removed,
+        "launcher cleanup report: {report:#?}"
+    );
 }
 
 #[test]
