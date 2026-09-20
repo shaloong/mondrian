@@ -69,12 +69,54 @@ The Windows development bootstrap also now imports the VsDevCmd environment
 case-insensitively while preferring its activated `PATH`; this prevents an
 inherited `Path` entry from erasing the MSVC directories in a fresh shell.
 
+Additional locally executable qualification on 2026-09-21 passed native audio
+device enumeration through both the App validation host and the actual discovery
+protocol, four real-adapter Export tests, the two-case Release audio load matrix,
+eight packaged isolated-demux lifecycle cases, and six real-media decode,
+cancellation, seek, and independent-session cases. The audio load matrix had no
+realtime deadline misses. Its heaviest reported cases were 64 tracks plus 16
+buses at a 64-frame block (153 us p99 against 1,334 us) and 64 tracks plus 64
+lookahead limiters at a 1,024-frame block (5,934 us p99 against 21,334 us).
+The JSONL evidence SHA-256 is
+`496AF7A99841126355AAB4C80D0C628723D6E0FCF018B24A660711118FC3B0C0`.
+The real-media cancellation case returned logical cancellation in 6.502 ms and
+observed physical child termination in 87.160 ms with all owners closed. The
+packaged demux worker SHA-256 is
+`3E281D0A24A38DCFEDABA48C63F7E15004992AF1CA7361770DCF20B56E25A264`.
+These generated media fixtures remain outside the repository.
+
+The Release Export simulation batch passed its existing gates. Two-layer
+1080p29.97 reached 29.97 fps with 13 ms p95, while single-layer 4K60 identity
+passthrough reached 60 fps without a missed frame budget. The fixed two-layer
+4K60 case reached 23.399 fps with 46 ms p95 and missed all 120 nominal realtime
+budgets, while passing the existing 12 fps offline-fallback floor. Source review
+confirms that this simulation directly exercises the CPU float-linear compositor;
+it does not measure the production GPU visual executor. Separate real-adapter
+tests prove construction, nested GPU residency through one final readback, and
+NVENC admission, but there is not yet an equivalent two-layer 4K60 GPU
+performance gate. Therefore this result is neither a 4K60 realtime pass nor a
+GPU hardware-limit finding. The simulation JSONL SHA-256 is
+`945937A055099275B12CB2E457495A289CD053B520787F484D24084FB3962DD6`.
+
+The Release product-host startup qualification also passed. It exercised every
+published startup checkpoint, Waveform substage, Preview substage, and an opaque
+panic injection, and proved complete partial-owner return in all cases. A manual
+Preview diagnostic exposed a test-harness cleanup defect: assertion failure
+could leave its thread-local FFmpeg session alive and hang the test process. A
+scope guard now clears that session on success, early return, and unwind. Both
+the negative failure case and the 140-request forward/reverse Main10 open-GOP
+coverage case exit cleanly; Media all-target/all-feature Clippy, format, and
+diff checks pass.
+
 DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
 but its documented external scripting API is unavailable: the local API returns
 no Resolve object and no scripting service listens. The UI automation helper
 also cannot start from this UNC-hosted task (`CreateProcessWithLogonW` error
-267). No Resolve project or output was created, so its cross-application rows
-remain NotRun rather than inferred from installation. The existing Blender 5.2
+267). The installation contains Resolve 21.1.0.17 plus its OCIO 2.5,
+OpenImageIO, Fusion scripting, and codec runtime components, but component
+presence is not an execution result. No Resolve project or output was created,
+so its cross-application rows remain NotRun rather than inferred from installation. The
+existing Blender 5.2
 process was not terminated and still prevents an uncontended sealed GPU run.
 DeckLink/AJA/Genlock, physical ANC wire capture, instruments, macOS/Linux, direct
 operator Viewer attestation, and the 72-hour campaign remain NotRun.
