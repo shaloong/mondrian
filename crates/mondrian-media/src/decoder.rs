@@ -106,6 +106,12 @@ pub struct RendererHwAccelDeviceContext {
     owner: Arc<SharedHwAccelDeviceContext>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HwAccelDeviceIdentity {
+    pub(crate) vendor_id: u32,
+    pub(crate) device_id: u32,
+}
+
 impl std::fmt::Debug for RendererHwAccelDeviceContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -175,6 +181,7 @@ impl RendererHwAccelDeviceContext {
             owner: Arc::new(SharedHwAccelDeviceContext {
                 backend: HwAccelBackend::Cuda,
                 ptr: device_context,
+                identity: None,
             }),
         })
     }
@@ -189,6 +196,8 @@ impl RendererHwAccelDeviceContext {
         device: ID3D12Device,
     ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
         let _ = ffmpeg::init();
+        let identity = query_d3d12_device_identity(&device)
+            .ok_or(RendererHwAccelDeviceContextCreateError::AdapterIdentityUnavailable)?;
         let device_context = unsafe {
             ffmpeg::ffi::av_hwdevice_ctx_alloc(
                 ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
@@ -207,9 +216,36 @@ impl RendererHwAccelDeviceContext {
             owner: Arc::new(SharedHwAccelDeviceContext {
                 backend: HwAccelBackend::D3D12VA,
                 ptr: device_context,
+                identity: Some(identity),
             }),
         })
     }
+}
+
+#[cfg(target_os = "windows")]
+fn query_d3d12_device_identity(device: &ID3D12Device) -> Option<HwAccelDeviceIdentity> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ERROR_NOT_FOUND};
+
+    // SAFETY: the borrowed COM device remains live for this immutable identity query.
+    let target_luid = unsafe { device.GetAdapterLuid() };
+    // SAFETY: the factory owns each adapter reference returned during enumeration.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    for index in 0..u32::MAX {
+        let adapter = match unsafe { factory.EnumAdapters1(index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(_) => return None,
+        };
+        // SAFETY: the owned adapter remains live for this descriptor query.
+        let descriptor = unsafe { adapter.GetDesc1() }.ok()?;
+        if descriptor.AdapterLuid == target_luid {
+            return Some(HwAccelDeviceIdentity {
+                vendor_id: descriptor.VendorId,
+                device_id: descriptor.DeviceId,
+            });
+        }
+    }
+    None
 }
 
 /// Failure to bind an FFmpeg hardware-device root to the renderer device.
@@ -221,6 +257,9 @@ pub enum RendererHwAccelDeviceContextCreateError {
     /// A renderer-selected native device identifier could not be represented.
     #[error("renderer-qualified hardware device selector is invalid")]
     InvalidDeviceSelector,
+    /// The renderer-owned D3D12 device could not be mapped to a physical DXGI adapter.
+    #[error("renderer-owned D3D12 device identity is unavailable")]
+    AdapterIdentityUnavailable,
     /// FFmpeg returned an incomplete generic device-context allocation.
     #[error("FFmpeg returned an incomplete D3D12VA device-context allocation")]
     InvalidAllocation,
@@ -660,6 +699,17 @@ impl HwDeviceContextPool {
         Ok(true)
     }
 
+    pub(crate) fn renderer_device_identity(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> Option<HwAccelDeviceIdentity> {
+        self.lock_state()
+            .entries
+            .get(&(backend, selector))
+            .and_then(|entry| entry.owner.identity)
+    }
+
     /// Retire the renderer-qualified root currently offered for one selector.
     ///
     /// Active codec Sessions and native outputs retain independent `Arc`
@@ -958,6 +1008,7 @@ impl HwDeviceContextPool {
             Ok(Arc::new(SharedHwAccelDeviceContext {
                 backend,
                 ptr: device_context,
+                identity: None,
             }))
         } else {
             let probe = HwAccelDeviceContextProbe {
@@ -1600,6 +1651,7 @@ pub(crate) struct HwAccelDeviceContext {
 struct SharedHwAccelDeviceContext {
     backend: HwAccelBackend,
     ptr: NonNull<ffmpeg::ffi::AVBufferRef>,
+    identity: Option<HwAccelDeviceIdentity>,
 }
 
 impl HwAccelDeviceContext {
@@ -2610,6 +2662,7 @@ mod tests {
         Arc::new(SharedHwAccelDeviceContext {
             backend: HwAccelBackend::Cuda,
             ptr: NonNull::new(ptr).expect("ownership fixture allocation"),
+            identity: None,
         })
     }
 
@@ -2687,6 +2740,7 @@ mod tests {
             Arc::new(SharedHwAccelDeviceContext {
                 backend: HwAccelBackend::Cuda,
                 ptr: NonNull::new(buffer).expect("checked AVBuffer allocation"),
+                identity: None,
             }),
             result,
         )

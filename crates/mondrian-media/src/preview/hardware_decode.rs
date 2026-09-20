@@ -5,6 +5,9 @@
 //! state. Observed native/CPU-transfer facts update the same plan; callers do
 //! not infer hardware success from requested capabilities.
 
+const NVIDIA_PCI_VENDOR_ID: u32 = 0x10de;
+const NVIDIA_GTX_1050_TI_DEVICE_ID: u32 = 0x1c82;
+
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +129,50 @@ impl PreviewHardwareDecodePlan {
         self.probe.reason = format!(
             "codec profile {profile:?} is outside Mondrian's hardware-decode admission contract"
         );
+    }
+
+    pub(super) fn requires_stream_geometry_probe(
+        &self,
+        identity: crate::decoder::HwAccelDeviceIdentity,
+        codec_id: ffmpeg::codec::Id,
+        profile: ffmpeg::codec::Profile,
+    ) -> bool {
+        self.probe.candidate_backend == Some(HwAccelBackend::D3D12VA)
+            && identity.vendor_id == NVIDIA_PCI_VENDOR_ID
+            && identity.device_id == NVIDIA_GTX_1050_TI_DEVICE_ID
+            && codec_id == ffmpeg::codec::Id::HEVC
+            && profile == ffmpeg::codec::Profile::HEVC(ffmpeg::codec::profile::HEVC::Main10)
+    }
+
+    pub(super) fn apply_stream_geometry(
+        &mut self,
+        identity: crate::decoder::HwAccelDeviceIdentity,
+        codec_id: ffmpeg::codec::Id,
+        profile: ffmpeg::codec::Profile,
+        coded_width: u32,
+        coded_height: u32,
+    ) -> bool {
+        if !self.requires_stream_geometry_probe(identity, codec_id, profile)
+            || coded_width != 3840
+            || coded_height <= 2160
+        {
+            return false;
+        }
+
+        self.ffmpeg_codec_config.ffmpeg_codec_config_available = false;
+        self.decision = PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
+        self.candidates.clear();
+        self.candidate_index = None;
+        self.native_decode_fallback =
+            Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected);
+        self.probe.reason = format!(
+            "D3D12VA was rejected before device attachment: NVIDIA adapter {:#06x}:{:#06x} has a qualified driver failure for HEVC Main10 coded extent {}x{}; using software decode",
+            identity.vendor_id,
+            identity.device_id,
+            coded_width,
+            coded_height
+        );
+        true
     }
 
     fn resolve_backend_probes(
@@ -545,5 +592,58 @@ pub(super) fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConf
         Some(HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
         Some(HwAccelPixelFormat::Vaapi | HwAccelPixelFormat::Cuda) => cfg!(target_os = "linux"),
         _ => false,
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod stream_capability_tests {
+    use super::*;
+
+    fn plan() -> PreviewHardwareDecodePlan {
+        PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Auto,
+            ffmpeg::codec::Id::HEVC,
+            Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(0)),
+        )
+    }
+
+    #[test]
+    fn qualified_pascal_hevc_padding_is_rejected_before_device_attachment() {
+        let mut plan = plan();
+        let rejected = plan.apply_stream_geometry(
+            crate::decoder::HwAccelDeviceIdentity { vendor_id: 0x10de, device_id: 0x1c82 },
+            ffmpeg::codec::Id::HEVC,
+            ffmpeg::codec::Profile::HEVC(ffmpeg::codec::profile::HEVC::Main10),
+            3840,
+            2176,
+        );
+
+        assert!(rejected);
+        assert!(!plan.should_configure_hardware_decoder(PreviewDecodeAccessMode::PlaybackCursor));
+        assert_eq!(
+            plan.native_decode_fallback,
+            Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected)
+        );
+        assert!(plan.probe.reason.contains("3840x2176"));
+    }
+
+    #[test]
+    fn capability_rule_preserves_supported_extents_and_other_adapters() {
+        for (device_id, height) in [(0x1c82, 2160), (0x2684, 2176)] {
+            let mut plan = plan();
+            assert!(!plan.apply_stream_geometry(
+                crate::decoder::HwAccelDeviceIdentity { vendor_id: 0x10de, device_id },
+                ffmpeg::codec::Id::HEVC,
+                ffmpeg::codec::Profile::HEVC(ffmpeg::codec::profile::HEVC::Main10),
+                3840,
+                height,
+            ));
+            assert_ne!(
+                plan.native_decode_fallback,
+                Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected)
+            );
+        }
     }
 }

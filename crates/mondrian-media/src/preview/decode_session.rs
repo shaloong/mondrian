@@ -1793,6 +1793,52 @@ impl PreviewDecodeSession {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
         };
+        let mut preopened_software_decoder = None;
+        if let Some(candidate_backend) = hardware_decode_plan.probe.candidate_backend
+            && let Some(identity) = hardware_device_context_pool
+                .renderer_device_identity(candidate_backend, hardware_decode_device_selector)
+            && hardware_decode_plan.requires_stream_geometry_probe(
+                identity,
+                codec_id,
+                stream_profile,
+            )
+        {
+            let probe_context =
+                preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
+            let probe_decoder =
+                probe_context.decoder().video().map_err(|error| MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: format!(
+                        "software decoder geometry probe failed before hardware admission: {error}"
+                    ),
+                })?;
+            let (coded_width, coded_height) = unsafe {
+                let raw = probe_decoder.as_ptr();
+                (
+                    (*raw).coded_width.max(0) as u32,
+                    (*raw).coded_height.max(0) as u32,
+                )
+            };
+            if hardware_decode_plan.apply_stream_geometry(
+                identity,
+                codec_id,
+                stream_profile,
+                coded_width,
+                coded_height,
+            ) {
+                if hardware_decode_request.requires_gpu_residency() {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: hardware_decode_plan.probe.reason.clone(),
+                    });
+                }
+                preview_trace(format!(
+                    "[preview] {}, fallback software",
+                    hardware_decode_plan.probe.reason
+                ));
+                preopened_software_decoder = Some(probe_decoder);
+            }
+        }
 
         let mut hardware_decode_context_state = None;
         let mut hardware_device_context = None;
@@ -1887,13 +1933,18 @@ impl PreviewDecodeSession {
             Some(decoder) => decoder,
             None => {
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
-                preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
-                    .decoder()
-                    .video()
-                    .map_err(|error| MondrianError::DecodeFailed {
-                        asset_id: path.display().to_string(),
-                        reason: error.to_string(),
-                    })?
+                match preopened_software_decoder {
+                    Some(decoder) => decoder,
+                    None => {
+                        preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
+                            .decoder()
+                            .video()
+                            .map_err(|error| MondrianError::DecodeFailed {
+                                asset_id: path.display().to_string(),
+                                reason: error.to_string(),
+                            })?
+                    }
+                }
             }
         };
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);

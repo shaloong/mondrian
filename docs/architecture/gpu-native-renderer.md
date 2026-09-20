@@ -506,6 +506,15 @@ handle alone can never imply zero-copy. D3D11VA remains a media
 hardware-decode CPU-transfer
 fallback; the renderer does not advertise the rejected D3D11-to-D3D12
 cross-API sharing experiment.
+A renderer-qualified Windows device root retains the physical DXGI vendor and
+device identity. A narrowly qualified driver/stream incompatibility may require
+a software codec open to read SPS-derived coded geometry before attaching a
+hardware decoder to that device. A preferred hardware request then reports
+`DeviceStreamCapabilityRejected` and falls back to software; a required
+GPU-resident request fails closed with the same device, codec, profile, and
+coded-extent evidence. The policy must name an observed physical adapter and
+must leave other adapters and qualified extents on D3D12VA. Runtime decode is
+never used as a probe when failure can remove the renderer-owned device.
 There is deliberately no independent platform graphics-device probe. Such a
 probe can select a different physical adapter and cannot prove feature,
 allocation, queue, or synchronization compatibility with the active Renderer

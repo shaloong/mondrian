@@ -469,6 +469,9 @@ pub enum PreviewNativeDecodeFallback {
     /// A hardware-preferred Session failed during runtime decode and the same
     /// semantic request was recovered through a fresh software Session.
     RuntimeHardwareFailure,
+    /// A device/codec/stream combination with a qualified driver failure was
+    /// rejected before the decoder could touch the renderer-owned GPU device.
+    DeviceStreamCapabilityRejected,
 }
 
 impl PreviewHardwareDecodeBlocker {

@@ -42,7 +42,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "recipe_sha256": "1472bc0bb0afd5e66e23b4ec17f1aed44339d582c83f424a4224be065dfdcaec",
         "profile": "Video",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -84,7 +84,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "recipe_sha256": "1472bc0bb0afd5e66e23b4ec17f1aed44339d582c83f424a4224be065dfdcaec",
         "profile": "Audio",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -123,7 +123,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-realtime-performance-media.ps1",
-        "recipe_sha256": "50feb61dfbfd5c9def405b92daf1af34022798fe01d3ca0be6e960647b0fcc84",
+        "recipe_sha256": "258998886251321b5319759679ad8ae80f2097a41e9de4ebe98ace63684da59a",
         "profile": "Realtime4k60",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
