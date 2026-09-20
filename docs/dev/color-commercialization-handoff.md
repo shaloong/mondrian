@@ -5,6 +5,80 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
+## Current Windows physical follow-on, 2026-09-21
+
+The current host now reports exactly 32 GiB installed physical memory and passes
+the `professional-large-project` reference-machine profile without baseline
+clean-tree admission. The cross-platform exact-capacity qualification test was
+previously Linux-only; it is now executable on Windows and passed against the
+independent 34,359,738,368-byte inventory. This establishes machine-class
+eligibility, not a sealed performance result for the still-dirty candidate.
+
+Native DisplayConfig capture resolved two physical outputs. `DISPLAY1` is active
+HDR/WCG, 10-bit RGB, with 120-nit SDR reference white. `DISPLAY2` supports
+HDR/WCG but is currently 8-bit RGB SDR with 80-nit reference white. An installed
+Windows HDR calibration ICC profile builds Mondrian calibration processors for
+sRGB, Rec.2020, and PQ source spaces. It is not the active default association
+for either current display mode: `DISPLAY1` selects the system-wide association
+scope while the profile exists in a per-user legacy association, and `DISPLAY2`
+selects current-user scope without a standard-mode default. Windows ICC lookup
+now obeys `ColorProfileGetDisplayUserScope`; it cannot borrow a stale profile
+from the inactive scope. Physical Viewer observation and a sealed same-run ICC
+row remain open.
+
+On the observed NVIDIA GeForce GTX 1050 Ti driver, HEVC Main10 3840x2160 streams
+with SPS coded height 2176 remove the shared D3D12 device after the first frame.
+The same adapter decodes coded-height 2160 Main10 through D3D12VA/P010. Preview
+admission now probes SPS-derived coded geometry before hardware attachment only
+for that exact adapter/codec/profile combination. Preferred hardware falls back
+with `DeviceStreamCapabilityRejected`; required GPU residency fails closed.
+Physical 4K24/25 rejection and 4K60 native-path controls completed without a
+device removal. Full workspace all-feature tests and strict all-target Clippy
+passed after the decode and display-scope fixes. The normally ignored real-GPU
+library set also passed all 13 tests on DX12, including device-local-memory
+reporting, persistent YUV upload reuse, fused SDR/PQ/HLG input, texture turnover,
+and a byte-exact GPU output-boundary readback. Both ignored viewer-retirement
+resource tests passed on the same adapter. The native alpha/UNORM boundary
+diagnostic passed, and the short 4K scopes timestamp gate measured 2,997 us GPU
+p95 and 136 us CPU-record p95 against 5,000/500 us limits. The scopes result is
+useful physical evidence but is not a sealed uncontended performance row while
+Blender remains active.
+
+The 4K Standard View timestamp gate initially isolated a real PQ shader cost:
+5,732-5,776 us p95 against the unchanged 5,000 us limit, with all warm-path
+allocation and cache checks already passing. The package-pinned PQ compiler now
+replaces the fingerprinted inverse-HLG half-domain LUT with the normative
+analytic expression only after proving the exact View, resource identity, and
+normalized formation domain. It retains the OCIO PQ LUT and original
+tetrahedral ordering. The formal 60-sample rerun passed at 4,616 us PQ p95
+(4,512 us SDR, 3,501 us HLG); all-View float parity and PQ Delta E ITP tests
+passed against the CPU OCIO reference. The report SHA-256 is
+`2D509D8A507B2F2EC9B87E167193A1E560E52D6EAC4B6F612E89F57E0FAE07F1`.
+This is a valid physical short gate, while the sealed uncontended matrix remains
+open until the unrelated Blender process is no longer resident.
+
+The post-optimization full workspace/all-feature test run completed with exit
+code zero, followed by strict workspace/all-target/all-feature Clippy with
+warnings denied, format, and diff checks. Twelve explicitly selected App ignored
+hardware tests also passed on the real DX12 adapter: Viewer startup and partial
+construction failure ownership, Headless startup/binding and retirement,
+dependency retirement ordering, injected device-error closure, partial Waveform
+startup, active realtime-session closure, and Golden whole-Viewer operation
+closure. Injected panics were observed only in their expected fail-closed tests.
+The Windows development bootstrap also now imports the VsDevCmd environment
+case-insensitively while preferring its activated `PATH`; this prevents an
+inherited `Path` entry from erasing the MSVC directories in a fresh shell.
+
+DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
+but its documented external scripting API is unavailable: the local API returns
+no Resolve object and no scripting service listens. The UI automation helper
+also cannot start from this UNC-hosted task (`CreateProcessWithLogonW` error
+267). No Resolve project or output was created, so its cross-application rows
+remain NotRun rather than inferred from installation. The existing Blender 5.2
+process was not terminated and still prevents an uncontended sealed GPU run.
+DeckLink/AJA/Genlock, physical ANC wire capture, instruments, macOS/Linux, direct
+operator Viewer attestation, and the 72-hour campaign remain NotRun.
+
 ## Current local closure, 2026-09-09
 
 The current Windows source closes the locally executable COL-047 software loop.
@@ -117,8 +191,9 @@ on the real GPU). The independent endurance suite passed 17 tests, the external
 comparison contract suite passed 12 with one hardware case ignored, and the
 PowerShell phase corpus rejected 145 fully rehashed attacks across three clean
 baselines. Prior Window/pre-loader corpora rejected 645/12 malformed receipts.
-Official BMX 1.6 final-MXF round trips passed two actual native tests, including
-SCC/708 CDP transport. Strict workspace all-target/all-feature Clippy passed
+Official BMX 1.7 final-MXF round trips passed three actual native tests, including
+SCC/708 CDP transport, sparse ANC, complete canonical inventory rescans, and
+changed-word and missing-final-frame rejection. Strict workspace all-target/all-feature Clippy passed
 before the additional native-entrypoint corrections described below.
 
 A fresh ordinary Windows executable completed three actual Surface/device reopen
