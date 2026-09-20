@@ -955,6 +955,66 @@ fn subframe_aligned_audio_handoff_uses_continuous_synthetic_phase() {
 }
 
 #[test]
+fn behind_audio_handoff_cannot_rewind_forward_transport_on_the_next_tick() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    assert_eq!(engine.tick(ts(45)).unwrap().position.frame, 1);
+
+    // The measured device point is 39 ms: six milliseconds behind the
+    // authoritative Synthetic phase, with five milliseconds of sampled
+    // uncertainty. The proven 11 ms handoff error is inside the 20 ms policy.
+    let handed_off = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_872, ts(45)))
+        .expect("behind but qualified audio handoff");
+    assert_eq!(handed_off.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(handed_off.position.frame, 1);
+    assert_eq!(
+        handed_off.audio_handoff,
+        Some(AudioClockHandoffEvidence {
+            stream_generation: 7,
+            phase_error_ns: -6_000_000,
+            uncertainty_ns: 5_000_000,
+            proven_phase_error_ns: 11_000_000,
+            status: AudioClockHandoffStatus::Accepted,
+        })
+    );
+
+    assert_eq!(
+        engine.tick(ts(45)).unwrap().position.frame,
+        1,
+        "the accepted Audio Device anchor must preserve forward phase continuity"
+    );
+}
+
+#[test]
+fn handoff_phase_correction_cannot_exceed_clock_uncertainty_policy() {
+    let policy = PlaybackPolicy {
+        max_audio_clock_uncertainty: Duration::from_millis(10),
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    assert_eq!(engine.tick(ts(45)).unwrap().position.frame, 1);
+
+    let rejected = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_872, ts(45)))
+        .expect("bounded fail-closed handoff");
+
+    assert_eq!(rejected.position.frame, 1);
+    assert_eq!(rejected.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(
+        rejected.audio_handoff.map(|evidence| evidence.status),
+        Some(AudioClockHandoffStatus::PhaseRejected)
+    );
+    assert_eq!(
+        rejected.audio_clock_fallback,
+        Some(AudioClockFallbackReason::CorrectedUncertaintyLimitExceeded)
+    );
+}
+
+#[test]
 fn out_of_phase_new_stream_is_rejected_without_reanchoring_synthetic_time() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();

@@ -272,7 +272,7 @@ changing color/render code: high `packet_decode_us` usually points at codec/GOP
 or hardware-decode work, high `seek_us` points at random-access/indexing/proxy
 work, and high `swscale_us`/`rgba_copy_us` points at the CPU RGBA boundary.
 Preview media perf artifacts also include a versioned `preview_decode_report`
-with checks, root causes, actions, and the exact serialized policy. Schema 33
+with checks, root causes, actions, and the exact serialized policy. Schema 39
 does not gate one mixed access-mode latency aggregate. It first records the
 Session disposition (`Opened`, `Replaced`, `Reused`, or `BypassedCache`) and
 then partitions every successful result into exactly one work class:
@@ -292,9 +292,15 @@ invent a finite upper bound.
 
 Access-mode profiles include `queue_wait_max_us` and
 `queue_wait_total_us`; high values there point at worker-lane contention or
-stale prefetch/current admission before codec, color, or render work. The
-preview media smokes fail when the access modes exercised by that scenario have
-queue waits over the decode slow-frame budget.
+stale prefetch/current admission before codec, color, or render work. They also
+record `dispatch_wait_samples` and `dispatch_wait_over_4ms`. Dispatch wait starts
+when the single-owner semantic worker lane becomes available, so it excludes
+intentional serialization behind the preceding decode while retaining that
+occupancy in the end-to-end queue-wait histogram. A queue-wait tail with no
+matching dispatch-wait violation identifies lane service pressure; matching
+violations identify worker wake or runnable dispatch pressure. The preview
+media smokes fail when the access modes exercised by that scenario have queue
+waits over the decode slow-frame budget.
 For slowest-frame bottleneck attribution, use `max_frame_queue_wait_us` together
 with `max_frame_stage_durations` and `max_frame_bottleneck`; those fields come
 from the same decoded frame. `queue_wait_max_us` may come from another job and
@@ -304,7 +310,7 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema 37 records the media-layer policy contract
+`preview_decode_report` schema 39 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
@@ -358,7 +364,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema 37 also includes `playback_schedule`, the
+`preview_decode_report` schema 39 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. It also records `current_decode_decisions`,

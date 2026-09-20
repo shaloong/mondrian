@@ -90,7 +90,10 @@ use mondrian_media::{
     VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
-use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
+use mondrian_playback::{
+    PlaybackClockPhaseErrorSummary, PlaybackEvidenceEvent, PlaybackEvidenceEventKind,
+    PlaybackEvidenceReport,
+};
 use mondrian_render_cache::TimelineRenderCacheDiagnostics;
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
@@ -1970,6 +1973,9 @@ struct PreviewMediaPlaybackPerfReport {
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     /// GPU work owned by the uninterrupted playback window only.
     headless_gpu: HeadlessViewerGpuExecutionSummary,
+    /// Bounded real-clock work that proves a quality selected at the end of
+    /// the fixed window can materialize on the production GPU path.
+    headless_gpu_adaptive_scale: HeadlessViewerGpuExecutionSummary,
     /// Settled seek/cancellation/final-candidate work after the window froze.
     headless_gpu_post_window: HeadlessViewerGpuExecutionSummary,
     /// Real GPU work performed while the production Viewer layout changes size.
@@ -6566,8 +6572,10 @@ fn run_preview_media_continuous_playback_probe(
             let mut readiness = PreviewReadinessCounts::default();
             let mut headless_gpu_preroll = HeadlessViewerGpuExecutionSummary::default();
             let mut headless_gpu = HeadlessViewerGpuExecutionSummary::default();
+            let mut headless_gpu_adaptive_scale = HeadlessViewerGpuExecutionSummary::default();
             headless_gpu_preroll.adapter = Some(realtime.gpu()?.adapter_info().clone());
             headless_gpu.adapter = Some(realtime.gpu()?.adapter_info().clone());
+            headless_gpu_adaptive_scale.adapter = Some(realtime.gpu()?.adapter_info().clone());
             let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
             let process_memory_probe = SystemPlatformService;
             let mut process_memory_sampler = None;
@@ -6681,6 +6689,7 @@ fn run_preview_media_continuous_playback_probe(
                         playback_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                     process_memory_evidence.observe_playback_duration(wall_duration_us);
                     let terminal = state.playback_engine.snapshot();
+                    let window_playback = state.playback_evidence_report();
                     continuous_playback_window = Some(ContinuousPlaybackWindowEvidence {
                         target_observations: config.frame_count,
                         observed_observations: opportunity_ledger.observed_opportunities(),
@@ -6694,13 +6703,12 @@ fn run_preview_media_continuous_playback_probe(
                         reached_natural_end: terminal.state
                             == mondrian_playback::TransportState::Ended,
                         wall_duration_us,
-                        playback: state.playback_evidence_report(),
+                        playback: window_playback,
                     });
                     anyhow::ensure!(
                         opportunity_ledger.missed_opportunities() == readiness.missed_deadline,
                         "continuous playback opportunity ledger diverged from readiness evidence"
                     );
-                    let _ = realtime.finish_realtime()?;
                     Ok(())
                 },
             )?;
@@ -6712,6 +6720,18 @@ fn run_preview_media_continuous_playback_probe(
             for sample in process_memory_sampler.finish()? {
                 process_memory_evidence.observe_playback(sample.observed_at_us, sample.sample);
             }
+            let continuous_preview_diagnostics = realtime.realtime_preview_diagnostics()?;
+            materialize_adaptive_scale_gpu_evidence(
+                realtime,
+                state,
+                &mut headless_gpu_adaptive_scale,
+                &headless_gpu.output_extents,
+                &continuous_playback_window.playback,
+                authored_output.full_extent,
+                authored_output.runtime_minimum_scale,
+                config.ready_timeout,
+            )?;
+            let _ = realtime.finish_realtime()?;
             {
                 let (preview_service, gpu_adapter) = realtime.bound_resources()?;
                 drain_headless_gpu_submission(
@@ -6722,7 +6742,6 @@ fn run_preview_media_continuous_playback_probe(
                     config.ready_timeout,
                 )?;
             }
-            let continuous_preview_diagnostics = realtime.preview()?.diagnostics();
             let preview_decode_report =
                 build_preview_decode_performance_report_with_required_access_modes(
                     continuous_preview_diagnostics
@@ -6894,6 +6913,7 @@ fn run_preview_media_continuous_playback_probe(
                 &mut [
                     &mut headless_gpu_preroll,
                     &mut headless_gpu,
+                    &mut headless_gpu_adaptive_scale,
                     &mut headless_gpu_post_window,
                     &mut headless_gpu_resize,
                 ],
@@ -6909,6 +6929,7 @@ fn run_preview_media_continuous_playback_probe(
                 &[
                     &headless_gpu_preroll,
                     &headless_gpu,
+                    &headless_gpu_adaptive_scale,
                     &headless_gpu_post_window,
                     &headless_gpu_resize,
                 ],
@@ -6929,11 +6950,13 @@ fn run_preview_media_continuous_playback_probe(
             anyhow::ensure!(
         headless_gpu_preroll.native_import_retained_sources_peak == 0
             && headless_gpu.native_import_retained_sources_peak == 0
+            && headless_gpu_adaptive_scale.native_import_retained_sources_peak == 0
             && headless_gpu_post_window.native_import_retained_sources_peak == 0
             && headless_gpu_resize.native_import_retained_sources_peak == 0,
-        "completed headless GPU outputs retained decoder sources after copy completion: preroll={}, playback={}, post_window={}, resize={}",
+        "completed headless GPU outputs retained decoder sources after copy completion: preroll={}, playback={}, adaptive_scale={}, post_window={}, resize={}",
         headless_gpu_preroll.native_import_retained_sources_peak,
         headless_gpu.native_import_retained_sources_peak,
+        headless_gpu_adaptive_scale.native_import_retained_sources_peak,
         headless_gpu_post_window.native_import_retained_sources_peak,
         headless_gpu_resize.native_import_retained_sources_peak
     );
@@ -6947,6 +6970,36 @@ fn run_preview_media_continuous_playback_probe(
                 "headless Viewer GPU execution reported blockers: {:?}",
                 headless_gpu.stage_diagnostics
             );
+            anyhow::ensure!(
+                headless_gpu_adaptive_scale.stage_diagnostics.readback_stages == 0
+                    && headless_gpu_adaptive_scale.stage_diagnostics.gpu_blockers == 0
+                    && headless_gpu_adaptive_scale.fallback_count == 0,
+                "adaptive-scale GPU qualification introduced fallback or blocked stages: {:?}",
+                headless_gpu_adaptive_scale
+            );
+            if headless_gpu_adaptive_scale.rendered_frames > 0 {
+                let expected_adaptive_layers =
+                    u64::try_from(headless_gpu_adaptive_scale.rendered_frames)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(u64::from(config.video_layer_count));
+                anyhow::ensure!(
+                    headless_gpu_adaptive_scale
+                        .compositing_diagnostics
+                        .gpu_passthrough_frames
+                        == 0
+                        && headless_gpu_adaptive_scale
+                            .compositing_diagnostics
+                            .gpu_native_composites
+                            >= headless_gpu_adaptive_scale.rendered_frames as u64
+                        && u64::from(
+                            headless_gpu_adaptive_scale
+                                .rendered_decode_execution
+                                .media_layers,
+                        ) == expected_adaptive_layers,
+                    "adaptive-scale GPU qualification did not execute the complete native multilayer path: {:?}",
+                    headless_gpu_adaptive_scale
+                );
+            }
 
             let preview_diagnostics = realtime.preview()?.diagnostics();
             let media_color_issues = summarize_active_sequence_media_color_issues(state)?;
@@ -6997,6 +7050,7 @@ fn run_preview_media_continuous_playback_probe(
                 readiness,
                 headless_gpu_preroll,
                 headless_gpu,
+                headless_gpu_adaptive_scale,
                 headless_gpu_post_window,
                 headless_gpu_resize,
                 cancellation_recovery_probe,
@@ -7248,12 +7302,10 @@ fn run_headless_cross_region_seeks(
             .saturating_mul(target_span)
             .checked_div(seek_count.saturating_add(1))
             .unwrap_or(0);
-        let source = if index % 2 == 0 {
-            TimelineSeekSource::PointerDrag
-        } else {
-            TimelineSeekSource::Settled
-        };
-        state.seek_with_source(target as i64, source)?;
+        // Each cross-region observation is an accuracy probe. PointerDrag is
+        // allowed to stop at its bounded interactive decode budget, while the
+        // release edge must issue Settled authority for the exact frame.
+        state.seek_with_source(target as i64, TimelineSeekSource::Settled)?;
         wait_for_headless_gpu_ready(
             preview_service,
             state,
@@ -7279,10 +7331,10 @@ fn run_headless_cross_region_seeks(
             .saturating_mul(target_span)
             .checked_div(supersession_count.saturating_add(1))
             .unwrap_or(0);
-        let source = if index % 2 == 0 {
-            TimelineSeekSource::PointerDrag
-        } else {
+        let source = if index.saturating_add(1) == supersession_count {
             TimelineSeekSource::Settled
+        } else {
+            TimelineSeekSource::PointerDrag
         };
         state.seek_with_source(target as i64, source)?;
         let _ = preview_service
@@ -7861,28 +7913,26 @@ fn preview_idle_release_requires_worker_idle_and_post_reap_accounting() {
     ));
 }
 
-fn validate_executed_adaptive_scaling(
-    report: &PreviewMediaPlaybackPerfReport,
-) -> anyhow::Result<()> {
-    validate_executed_adaptive_scaling_for_window(
-        report.continuous_playback_window.playback.deliveries.degraded,
-        &report.headless_gpu.output_extents,
-        report.authored_output.full_extent,
-        report.authored_output.runtime_minimum_scale,
-    )
+fn adaptive_scale_gpu_extents_satisfied(
+    required: &[HeadlessViewerGpuExtent],
+    continuous: &[HeadlessViewerGpuExtent],
+    adaptive: &[HeadlessViewerGpuExtent],
+) -> bool {
+    required
+        .iter()
+        .all(|extent| continuous.contains(extent) || adaptive.contains(extent))
 }
 
-fn validate_executed_adaptive_scaling_for_window(
-    degraded: u64,
-    output_extents: &[HeadlessViewerGpuExtent],
+fn required_adaptive_scale_gpu_extents(
+    playback: &PlaybackEvidenceReport,
     authored_full_extent: HeadlessViewerGpuExtent,
     runtime_minimum_scale: mondrian_playback::PreviewResolutionScale,
-) -> anyhow::Result<()> {
-    let pressure_threshold = mondrian_playback::PlaybackPolicy::default().pressure_threshold as u64;
-    let quarter_evidence_threshold = pressure_threshold.saturating_mul(2);
-    if degraded < pressure_threshold {
-        return Ok(());
-    }
+) -> anyhow::Result<Vec<HeadlessViewerGpuExtent>> {
+    anyhow::ensure!(
+        playback.evicted_event_count == 0,
+        "continuous playback evicted {} detailed event(s), so adaptive scale transitions cannot be proven",
+        playback.evicted_event_count
+    );
     let extent_for_scale = |scale: mondrian_playback::PreviewResolutionScale| {
         let divisor = scale.dimension_divisor();
         HeadlessViewerGpuExtent {
@@ -7897,82 +7947,195 @@ fn validate_executed_adaptive_scaling_for_window(
             policy
         }
     };
-    let expected_half = extent_for_scale(coarser(mondrian_playback::PreviewResolutionScale::Half));
-    let expected_quarter =
-        extent_for_scale(coarser(mondrian_playback::PreviewResolutionScale::Quarter));
-    anyhow::ensure!(
-        output_extents.contains(&expected_half),
-        "sustained playback pressure did not execute its policy-selected GPU extent {:?}: {:?}",
-        expected_half,
-        output_extents
-    );
-    if degraded >= quarter_evidence_threshold {
-        anyhow::ensure!(
-            output_extents.contains(&expected_quarter),
-            "continued playback pressure did not execute its policy-selected GPU extent {:?}: {:?}",
-            expected_quarter,
-            output_extents
-        );
+    let mut required = Vec::new();
+    for event in &playback.events {
+        let PlaybackEvidenceEventKind::PreviewScaleChanged { from, to } = event.kind else {
+            continue;
+        };
+        if to.dimension_divisor() <= from.dimension_divisor() {
+            continue;
+        }
+        let extent = extent_for_scale(coarser(to));
+        if !required.contains(&extent) {
+            required.push(extent);
+        }
     }
+    Ok(required)
+}
+
+fn materialize_adaptive_scale_gpu_evidence(
+    realtime: &mut HeadlessRealtimePlaybackSession,
+    state: &mut AppState,
+    adaptive_gpu: &mut HeadlessViewerGpuExecutionSummary,
+    continuous_extents: &[HeadlessViewerGpuExtent],
+    playback: &PlaybackEvidenceReport,
+    authored_full_extent: HeadlessViewerGpuExtent,
+    runtime_minimum_scale: mondrian_playback::PreviewResolutionScale,
+    ready_timeout: Duration,
+) -> anyhow::Result<()> {
+    let required =
+        required_adaptive_scale_gpu_extents(playback, authored_full_extent, runtime_minimum_scale)?;
+    if adaptive_scale_gpu_extents_satisfied(
+        &required,
+        continuous_extents,
+        &adaptive_gpu.output_extents,
+    ) {
+        return Ok(());
+    }
+    let policy = mondrian_playback::PlaybackPolicy::default();
+    let interval_budget = policy
+        .healthy_deliveries_to_recover
+        .saturating_add(policy.pressure_window.saturating_mul(2))
+        .saturating_add(4);
+    for _ in 0..interval_budget {
+        match realtime.run_video_interval(state, adaptive_gpu, ready_timeout)? {
+            HeadlessRealtimeIntervalOutcome::Advanced { .. } => {}
+            HeadlessRealtimeIntervalOutcome::NaturalEnd { terminal_frame } => anyhow::bail!(
+                "adaptive-scale GPU materialization reached authored end at frame {terminal_frame} before executing {required:?}"
+            ),
+        }
+        if adaptive_scale_gpu_extents_satisfied(
+            &required,
+            continuous_extents,
+            &adaptive_gpu.output_extents,
+        ) {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "bounded adaptive-scale qualification did not execute required GPU extents {required:?}: continuous={continuous_extents:?}, adaptive={:?}",
+        adaptive_gpu.output_extents
+    )
+}
+
+fn validate_executed_adaptive_scaling(
+    report: &PreviewMediaPlaybackPerfReport,
+) -> anyhow::Result<()> {
+    validate_executed_adaptive_scaling_for_window(
+        &report.continuous_playback_window.playback,
+        &report.headless_gpu.output_extents,
+        &report.headless_gpu_adaptive_scale.output_extents,
+        report.authored_output.full_extent,
+        report.authored_output.runtime_minimum_scale,
+    )
+}
+
+fn validate_executed_adaptive_scaling_for_window(
+    playback: &PlaybackEvidenceReport,
+    continuous_extents: &[HeadlessViewerGpuExtent],
+    adaptive_extents: &[HeadlessViewerGpuExtent],
+    authored_full_extent: HeadlessViewerGpuExtent,
+    runtime_minimum_scale: mondrian_playback::PreviewResolutionScale,
+) -> anyhow::Result<()> {
+    let required =
+        required_adaptive_scale_gpu_extents(playback, authored_full_extent, runtime_minimum_scale)?;
+    anyhow::ensure!(
+        adaptive_scale_gpu_extents_satisfied(
+            &required,
+            continuous_extents,
+            adaptive_extents,
+        ),
+        "playback pressure did not execute its policy-selected GPU extents {:?}: continuous={:?}, adaptive={:?}",
+        required,
+        continuous_extents,
+        adaptive_extents,
+    );
     Ok(())
 }
 
 #[test]
-fn adaptive_scaling_validation_uses_the_continuous_window_pressure() {
-    let policy = mondrian_playback::PlaybackPolicy::default();
-    let threshold = u64::try_from(policy.pressure_threshold).expect("pressure threshold fits u64");
+fn adaptive_scaling_validation_uses_observed_scale_transitions_and_separate_gpu_evidence() {
     let full = HeadlessViewerGpuExtent { width: 3840, height: 2160 };
     let half = HeadlessViewerGpuExtent { width: 1920, height: 1080 };
     let quarter = HeadlessViewerGpuExtent { width: 960, height: 540 };
-
     let full_scale = mondrian_playback::PreviewResolutionScale::Full;
     let half_scale = mondrian_playback::PreviewResolutionScale::Half;
-    assert!(validate_executed_adaptive_scaling_for_window(0, &[full], full, full_scale).is_ok());
-    assert!(
-        validate_executed_adaptive_scaling_for_window(threshold, &[full], full, full_scale)
-            .is_err()
-    );
-    assert!(validate_executed_adaptive_scaling_for_window(
-        threshold,
-        &[full, half],
-        full,
-        full_scale,
-    )
-    .is_ok());
-    assert!(validate_executed_adaptive_scaling_for_window(
-        threshold.saturating_mul(2),
-        &[full, half],
-        full,
-        full_scale,
-    )
-    .is_err());
-    assert!(validate_executed_adaptive_scaling_for_window(
-        threshold.saturating_mul(2),
-        &[full, half, quarter],
-        full,
-        full_scale,
-    )
-    .is_ok());
-    assert!(
-        validate_executed_adaptive_scaling_for_window(threshold, &[half], full, half_scale,)
-            .is_ok()
-    );
-    assert!(validate_executed_adaptive_scaling_for_window(
-        threshold.saturating_mul(2),
-        &[half],
-        full,
-        half_scale,
-    )
-    .is_err());
-    assert!(validate_executed_adaptive_scaling_for_window(
-        threshold.saturating_mul(2),
-        &[half, quarter],
-        full,
-        half_scale,
-    )
-    .is_ok());
-}
+    let quarter_scale = mondrian_playback::PreviewResolutionScale::Quarter;
 
+    let mut playback = mondrian_playback::PlaybackEvidenceCollector::default().report();
+    playback.deliveries.degraded = 32;
+    assert!(
+        validate_executed_adaptive_scaling_for_window(
+            &playback,
+            &[full],
+            &[],
+            full,
+            full_scale,
+        )
+        .is_ok(),
+        "scattered degraded deliveries must not invent a scale transition the production policy never made"
+    );
+
+    playback.events.push(PlaybackEvidenceEvent {
+        sequence: 1,
+        observed_at_us: 1,
+        epoch: 1,
+        kind: PlaybackEvidenceEventKind::PreviewScaleChanged { from: full_scale, to: half_scale },
+    });
+    assert!(validate_executed_adaptive_scaling_for_window(
+        &playback,
+        &[full],
+        &[],
+        full,
+        full_scale,
+    )
+    .is_err());
+    assert!(
+        validate_executed_adaptive_scaling_for_window(
+            &playback,
+            &[full],
+            &[half],
+            full,
+            full_scale,
+        )
+        .is_ok(),
+        "the bounded extension may prove a policy-selected scale from the fixed window"
+    );
+
+    playback.events.push(PlaybackEvidenceEvent {
+        sequence: 2,
+        observed_at_us: 2,
+        epoch: 1,
+        kind: PlaybackEvidenceEventKind::PreviewScaleChanged {
+            from: half_scale,
+            to: quarter_scale,
+        },
+    });
+    assert!(validate_executed_adaptive_scaling_for_window(
+        &playback,
+        &[full, half],
+        &[],
+        full,
+        full_scale,
+    )
+    .is_err());
+    assert!(validate_executed_adaptive_scaling_for_window(
+        &playback,
+        &[full, half],
+        &[quarter],
+        full,
+        full_scale,
+    )
+    .is_ok());
+    assert!(validate_executed_adaptive_scaling_for_window(
+        &playback,
+        &[half, quarter],
+        &[],
+        full,
+        half_scale,
+    )
+    .is_ok());
+
+    playback.evicted_event_count = 1;
+    assert!(validate_executed_adaptive_scaling_for_window(
+        &playback,
+        &[full, half, quarter],
+        &[],
+        full,
+        full_scale,
+    )
+    .is_err());
+}
 #[test]
 fn submitted_current_frame_can_fill_the_bounded_successor_slot() {
     assert!(headless_candidate_may_prepare_successor(
@@ -8969,11 +9132,15 @@ fn test_complete_perf_decode_success_evidence(
     assert_eq!(lifecycle_frames, profile.frames);
 
     let queue_histogram_samples = [
+        profile.queue_wait_buckets.le_1ms,
+        profile.queue_wait_buckets.le_2ms,
+        profile.queue_wait_buckets.le_4ms,
         profile.queue_wait_buckets.le_10ms,
         profile.queue_wait_buckets.le_16ms,
         profile.queue_wait_buckets.le_25ms,
         profile.queue_wait_buckets.le_40ms,
         profile.queue_wait_buckets.le_50ms,
+        profile.queue_wait_buckets.le_60ms,
         profile.queue_wait_buckets.le_80ms,
         profile.queue_wait_buckets.gt_80ms,
     ]
@@ -8983,12 +9150,16 @@ fn test_complete_perf_decode_success_evidence(
         (0, 0) => {
             profile.queue_wait_samples = profile.frames;
             match profile.queue_wait_max_us {
-                0..=10_000 => profile.queue_wait_buckets.le_10ms = profile.frames,
+                0..=1_000 => profile.queue_wait_buckets.le_1ms = profile.frames,
+                1_001..=2_000 => profile.queue_wait_buckets.le_2ms = profile.frames,
+                2_001..=4_000 => profile.queue_wait_buckets.le_4ms = profile.frames,
+                4_001..=10_000 => profile.queue_wait_buckets.le_10ms = profile.frames,
                 10_001..=16_000 => profile.queue_wait_buckets.le_16ms = profile.frames,
                 16_001..=25_000 => profile.queue_wait_buckets.le_25ms = profile.frames,
                 25_001..=40_000 => profile.queue_wait_buckets.le_40ms = profile.frames,
                 40_001..=50_000 => profile.queue_wait_buckets.le_50ms = profile.frames,
-                50_001..=80_000 => profile.queue_wait_buckets.le_80ms = profile.frames,
+                50_001..=60_000 => profile.queue_wait_buckets.le_60ms = profile.frames,
+                60_001..=80_000 => profile.queue_wait_buckets.le_80ms = profile.frames,
                 _ => profile.queue_wait_buckets.gt_80ms = profile.frames,
             }
         }
@@ -9329,7 +9500,7 @@ fn preview_playback_decode_failures_ignore_prefetch_only_queue_residency() {
                 queue_wait_max_us: 84,
                 queue_wait_last_us: 84,
                 queue_wait_buckets: PreviewDecodeLatencyBuckets {
-                    le_10ms: 1,
+                    le_1ms: 1,
                     ..PreviewDecodeLatencyBuckets::default()
                 },
                 queue_wait_samples: 1,

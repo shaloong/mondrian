@@ -1983,7 +1983,7 @@ impl HeadlessViewerGpuAdapter {
         self.submission_lifecycle.is_occupied()
     }
 
-    /// Whether both bounded submitted-owner slots are occupied.
+    /// Whether the bounded submitted-owner cleanup horizon is occupied.
     pub(crate) fn submission_capacity_is_full(&self) -> bool {
         self.submission_lifecycle.is_at_capacity()
     }

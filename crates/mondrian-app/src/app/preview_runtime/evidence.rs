@@ -705,6 +705,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         queue_wait_us: u64,
+        dispatch_wait_us: u64,
         owns_current_presentation: bool,
     ) {
         add_cell(&self.metrics.decode_queue_wait_total_us, queue_wait_us);
@@ -726,7 +727,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         }
         let mut access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
-        access_mode_profiles.record_queue_wait(access_mode, queue_wait_us);
+        access_mode_profiles.record_queue_wait(access_mode, queue_wait_us, dispatch_wait_us);
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 

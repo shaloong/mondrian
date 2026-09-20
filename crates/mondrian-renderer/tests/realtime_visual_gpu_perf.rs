@@ -123,6 +123,7 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
         return Err(anyhow!("sealed realtime matrix requires {REPORT_ENV}"));
     }
 
+    let mut failed_scenarios = Vec::new();
     for scenario in RealtimeVisualScenarioId::ALL {
         let report = match run_scenario(&context, scenario).await {
             Ok(report) => report,
@@ -142,12 +143,14 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
             eprintln!("{json}");
         }
         if !report.report.passed {
-            return Err(anyhow!(
-                "realtime visual scenario {:?} failed: {:?}",
-                scenario,
-                report.report.root_causes
-            ));
+            failed_scenarios.push(format!("{scenario:?}: {:?}", report.report.root_causes));
         }
+    }
+    if !failed_scenarios.is_empty() {
+        return Err(anyhow!(
+            "realtime visual scenarios failed: {}",
+            failed_scenarios.join("; ")
+        ));
     }
     Ok(())
 }

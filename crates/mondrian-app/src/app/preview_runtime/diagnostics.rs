@@ -735,7 +735,13 @@ pub struct PreviewColorHealthSummary {
 /// Fixed latency buckets for compact preview decode distribution diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PreviewDecodeLatencyBuckets {
-    /// Samples at or below 10 ms.
+    /// Samples at or below 1 ms.
+    pub le_1ms: u64,
+    /// Samples above 1 ms and at or below 2 ms.
+    pub le_2ms: u64,
+    /// Samples above 2 ms and at or below 4 ms.
+    pub le_4ms: u64,
+    /// Samples above 4 ms and at or below 10 ms.
     pub le_10ms: u64,
     /// Samples above 10 ms and at or below 16 ms.
     pub le_16ms: u64,
@@ -756,7 +762,10 @@ pub struct PreviewDecodeLatencyBuckets {
 impl PreviewDecodeLatencyBuckets {
     fn record(&mut self, duration_us: u64) {
         match duration_us {
-            0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
+            0..=1_000 => self.le_1ms = self.le_1ms.saturating_add(1),
+            1_001..=2_000 => self.le_2ms = self.le_2ms.saturating_add(1),
+            2_001..=4_000 => self.le_4ms = self.le_4ms.saturating_add(1),
+            4_001..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
             10_001..=16_000 => self.le_16ms = self.le_16ms.saturating_add(1),
             16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
             25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
@@ -768,7 +777,10 @@ impl PreviewDecodeLatencyBuckets {
     }
 
     pub(super) fn total(self) -> u64 {
-        self.le_10ms
+        self.le_1ms
+            .saturating_add(self.le_2ms)
+            .saturating_add(self.le_4ms)
+            .saturating_add(self.le_10ms)
             .saturating_add(self.le_16ms)
             .saturating_add(self.le_25ms)
             .saturating_add(self.le_40ms)
@@ -790,6 +802,9 @@ impl PreviewDecodeLatencyBuckets {
         let rank = total.saturating_mul(percentile.min(100)).saturating_add(99) / 100;
         let mut cumulative = 0_u64;
         for (count, upper_bound_us) in [
+            (self.le_1ms, Some(1_000)),
+            (self.le_2ms, Some(2_000)),
+            (self.le_4ms, Some(4_000)),
             (self.le_10ms, Some(10_000)),
             (self.le_16ms, Some(16_000)),
             (self.le_25ms, Some(25_000)),
@@ -807,7 +822,6 @@ impl PreviewDecodeLatencyBuckets {
         None
     }
 }
-
 /// Queue-wait evidence for one broker dequeue disposition.
 ///
 /// `Ready` and `Expired` observations use separate instances so deadline
@@ -1106,6 +1120,10 @@ pub struct PreviewDecodeAccessModeProfile {
     pub queue_wait_buckets: PreviewDecodeLatencyBuckets,
     /// Jobs with explicit worker-queue wait evidence for this access mode.
     pub queue_wait_samples: u64,
+    /// Jobs with worker-dispatch evidence after their lane became runnable.
+    pub dispatch_wait_samples: u64,
+    /// Runnable jobs whose worker wake/dispatch latency exceeded 4 ms.
+    pub dispatch_wait_over_4ms: u64,
     /// Queue wait for jobs rejected as expired before codec execution.
     pub expired_queue_wait: PreviewDecodeQueueWaitProfile,
     /// Canceled decode jobs for this access mode.
@@ -1646,12 +1664,16 @@ impl PreviewDecodeAccessModeProfile {
         self.stage_durations.accumulate(diagnostics.stage_durations);
     }
 
-    fn record_queue_wait(&mut self, queue_wait_us: u64) {
+    fn record_queue_wait(&mut self, queue_wait_us: u64, dispatch_wait_us: u64) {
         self.queue_wait_samples = self.queue_wait_samples.saturating_add(1);
         self.queue_wait_total_us = self.queue_wait_total_us.saturating_add(queue_wait_us);
         self.queue_wait_max_us = self.queue_wait_max_us.max(queue_wait_us);
         self.queue_wait_last_us = queue_wait_us;
         self.queue_wait_buckets.record(queue_wait_us);
+        self.dispatch_wait_samples = self.dispatch_wait_samples.saturating_add(1);
+        if dispatch_wait_us > 4_000 {
+            self.dispatch_wait_over_4ms = self.dispatch_wait_over_4ms.saturating_add(1);
+        }
     }
 
     fn record_expired_queue_wait(
@@ -1794,16 +1816,17 @@ impl PreviewDecodeAccessModeProfiles {
         &mut self,
         access_mode: PreviewDecodeAccessMode,
         queue_wait_us: u64,
+        dispatch_wait_us: u64,
     ) {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => {
-                self.playback_cursor.record_queue_wait(queue_wait_us);
+                self.playback_cursor.record_queue_wait(queue_wait_us, dispatch_wait_us);
             }
             PreviewDecodeAccessMode::ScrubCursor => {
-                self.scrub_cursor.record_queue_wait(queue_wait_us);
+                self.scrub_cursor.record_queue_wait(queue_wait_us, dispatch_wait_us);
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                self.random_access_still.record_queue_wait(queue_wait_us);
+                self.random_access_still.record_queue_wait(queue_wait_us, dispatch_wait_us);
             }
         }
     }
@@ -2087,7 +2110,7 @@ pub enum PreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 37;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 39;
 
 /// Default steady-state Preview decode budget.
 pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;

@@ -86,11 +86,8 @@ pub async fn request_device_with_native_video_support(
         .map_err(|error| mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() })
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 const TEST_GPU_CONTEXT_CAPACITY: usize = 1;
-
-#[cfg(all(test, not(target_os = "linux")))]
-const TEST_GPU_CONTEXT_CAPACITY: usize = 2;
 
 #[cfg(test)]
 static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar) =
@@ -99,12 +96,12 @@ static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar)
 /// Process-local admission for unit tests that own independent native devices.
 ///
 /// The Rust test harness otherwise provisions dozens of native devices at
-/// once. That is not representative of product execution and can terminate the
-/// test process in the platform driver before an assertion is reported. Linux
-/// uses an exclusive owner because device destruction and the following device
-/// creation can overlap inside Vulkan drivers; other platforms admit two. The
-/// permit remains attached to the context so the owner, not test scheduling,
-/// releases capacity.
+/// once. That is not representative of product execution, which owns one
+/// shared device, and can terminate the test process in the platform driver
+/// before an assertion is reported. Device destruction and the following
+/// device creation may overlap inside native drivers, so every platform uses
+/// one exclusive owner. The permit remains attached to the context so the
+/// owner, not test scheduling, releases capacity.
 #[cfg(test)]
 pub(crate) struct TestGpuContextPermit;
 

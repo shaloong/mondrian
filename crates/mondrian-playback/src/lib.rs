@@ -1528,8 +1528,36 @@ impl PlaybackEngine {
             let proven_phase_error_ns = phase_error_abs
                 .checked_add(uncertainty_ns)
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-            let accepted =
+            let phase_accepted =
                 proven_phase_error_ns <= self.policy.max_audio_handoff_phase_error.as_nanos();
+            // A qualified device point can still sit slightly behind the
+            // continuous Synthetic phase while both positions overlap within
+            // the handoff uncertainty. Installing that raw point would make a
+            // later tick move a forward Timeline backwards. Preserve the
+            // transport-direction high-water phase and carry the displacement
+            // into the device clock's uncertainty instead.
+            let handoff_phase_ns = if self.rate.is_forward() {
+                candidate_ns.max(reference_ns)
+            } else {
+                candidate_ns.min(reference_ns)
+            };
+            let handoff_correction_ns = handoff_phase_ns
+                .checked_sub(candidate_ns)
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?
+                .unsigned_abs();
+            let handoff_correction_frames = handoff_correction_ns
+                .checked_mul(u128::from(observation.sample_rate))
+                .and_then(|value| value.checked_add(999_999_999))
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?
+                / 1_000_000_000;
+            let handoff_uncertainty_frames = u128::from(observation.uncertainty_frames)
+                .checked_add(handoff_correction_frames)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+            let corrected_uncertainty_accepted =
+                sample_frames_ns_ceil(u64::from(handoff_uncertainty_frames), observation_rate)?
+                    <= self.policy.max_audio_clock_uncertainty.as_nanos();
+            let accepted = phase_accepted && corrected_uncertainty_accepted;
             self.last_audio_handoff = Some(AudioClockHandoffEvidence {
                 stream_generation: observation.stream_generation,
                 phase_error_ns: i64::try_from(phase_error_ns)
@@ -1544,7 +1572,11 @@ impl PlaybackEngine {
             });
             if !accepted {
                 self.fallback_audio_clock(
-                    AudioClockFallbackReason::HandoffPhaseLimitExceeded,
+                    if phase_accepted {
+                        AudioClockFallbackReason::CorrectedUncertaintyLimitExceeded
+                    } else {
+                        AudioClockFallbackReason::HandoffPhaseLimitExceeded
+                    },
                     observation.observed_at,
                 )?;
                 return Ok(self.snapshot());
@@ -1555,11 +1587,11 @@ impl PlaybackEngine {
                 last_consumed_frames: observation.consumed_frames,
                 last_effective_consumed_frames: measured_effective_consumed,
                 last_observed_at: observation.observed_at,
-                last_media_position_ns: candidate_ns,
-                last_uncertainty_frames: observation.uncertainty_frames,
+                last_media_position_ns: handoff_phase_ns,
+                last_uncertainty_frames: handoff_uncertainty_frames,
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
-            self.reanchor_at_phase(observation.observed_at, candidate_ns);
+            self.reanchor_at_phase(observation.observed_at, handoff_phase_ns);
             self.refresh_frame_demand_for_clock_handoff(observation.observed_at)?;
             return Ok(self.snapshot());
         };

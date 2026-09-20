@@ -89,21 +89,42 @@ function Invoke-CargoGate(
     [string]$LogPrefix,
     [string]$MediaPath
 ) {
-    Remove-Item -LiteralPath $ReportPath, "$LogPrefix-build.log", "$LogPrefix-run.log" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ReportPath, "$LogPrefix-build.log", "$LogPrefix-run.log", "$LogPrefix-demux-worker-build.log" -Force -ErrorAction SilentlyContinue
     $saved = Set-GateEnvironment $Gate $ReportPath $MediaPath
+    $workerBuild = $null
+    $workerEvidence = $null
+    $oldDemuxWorker = [Environment]::GetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", "Process")
     try {
+        $demuxWorkerRequired = $null -ne $Gate.PSObject.Properties["packaged_demux_worker_required"] -and $Gate.packaged_demux_worker_required -eq $true
+        if ($demuxWorkerRequired) {
+            $workerBuild = Invoke-BoundedPlaybackGateProcess "cargo" @("build", "-p", "mondrian-app", "--release", "--features", "validation", "--bin", "mondrian") $script:repositoryRoot ([int]$Gate.build_timeout_seconds) "$LogPrefix-demux-worker-build.log"
+            if ($workerBuild.timed_out -or $workerBuild.exit_code -ne 0) {
+                return [pscustomobject]@{ passed = $false; phase = "demux-worker-build"; worker_build = $workerBuild; worker = $null; build = $null; run = $null }
+            }
+            $targetDirectory = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) { Join-Path $script:repositoryRoot "target" } else { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) }
+            $workerFileName = if ($IsWindows) { "mondrian.exe" } else { "mondrian" }
+            $workerPath = Join-Path (Join-Path $targetDirectory "release") $workerFileName
+            if (-not (Test-Path -LiteralPath $workerPath -PathType Leaf)) {
+                return [pscustomobject]@{ passed = $false; phase = "demux-worker-missing"; worker_build = $workerBuild; worker = $null; build = $null; run = $null }
+            }
+            $workerEvidence = Get-FileEvidence $workerPath
+            [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $workerPath, "Process")
+        }
         $build = Invoke-BoundedPlaybackGateProcess "cargo" $BuildArguments $script:repositoryRoot ([int]$Gate.build_timeout_seconds) "$LogPrefix-build.log"
         if ($build.timed_out -or $build.exit_code -ne 0) {
-            return [pscustomobject]@{ passed = $false; phase = "build"; build = $build; run = $null }
+            return [pscustomobject]@{ passed = $false; phase = "build"; worker_build = $workerBuild; worker = $workerEvidence; build = $build; run = $null }
         }
         $run = Invoke-BoundedPlaybackGateProcess "cargo" $RunArguments $script:repositoryRoot ([int]$Gate.process_timeout_seconds) "$LogPrefix-run.log"
         return [pscustomobject]@{
             passed = -not $run.timed_out -and $run.exit_code -eq 0
             phase = "run"
+            worker_build = $workerBuild
+            worker = $workerEvidence
             build = $build
             run = $run
         }
     } finally {
+        [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $oldDemuxWorker, "Process")
         Restore-GateEnvironment $saved
     }
 }

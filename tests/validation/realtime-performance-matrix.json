@@ -37,6 +37,7 @@
       "package": "mondrian-app",
       "cargo_test": "preview_media_realtime_4k60_dual_video_gate",
       "fixture_id": "generated-performance-4k60-hevc-main10-rec709-v1",
+      "packaged_demux_worker_required": true,
       "media_environment": "MONDRIAN_REALTIME_4K60_MEDIA_PATH",
       "report_environment": "MONDRIAN_PERF_OUTPUT",
       "build_timeout_seconds": 2700,

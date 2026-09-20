@@ -407,6 +407,55 @@ fn promoted_current_queue_wait_starts_at_latest_binding() {
 }
 
 #[test]
+fn dispatch_wait_excludes_preceding_same_lane_execution_time() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    broker.submit(request(1, generation, FrameWorkClass::Playback));
+    let first = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected first receive: {other:?}"),
+    };
+
+    clock.set(Duration::from_millis(12));
+    broker.submit(request(2, generation, FrameWorkClass::Playback));
+    clock.set(Duration::from_millis(20));
+    assert!(broker.mark_execution_completed(first.id));
+    clock.set(Duration::from_millis(23));
+
+    let second = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected second receive: {other:?}"),
+    };
+    assert_eq!(second.queue_wait, Duration::from_millis(11));
+    assert_eq!(second.dispatch_wait, Duration::from_millis(3));
+}
+
+#[test]
+fn dispatch_wait_starts_at_admission_when_lane_was_already_available() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    broker.submit(request(1, generation, FrameWorkClass::Playback));
+    let first = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected first receive: {other:?}"),
+    };
+    clock.set(Duration::from_millis(20));
+    assert!(broker.mark_execution_completed(first.id));
+    clock.set(Duration::from_millis(25));
+    broker.submit(request(2, generation, FrameWorkClass::Playback));
+    clock.set(Duration::from_millis(29));
+
+    let second = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected second receive: {other:?}"),
+    };
+    assert_eq!(second.queue_wait, Duration::from_millis(4));
+    assert_eq!(second.dispatch_wait, Duration::from_millis(4));
+}
+
+#[test]
 fn bind_existing_rebinds_compatible_in_flight_work() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();

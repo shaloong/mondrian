@@ -646,7 +646,11 @@ pub(crate) fn prepare_headless_preview_successor(
             if gpu.submission_capacity_is_full() {
                 gpu.stage_successor(frame)
                     .context("prewarm staged Headless successor uploads")?;
-                return Ok(Some(playback_intent));
+                // CPU staging reduces later record cost but does not create the
+                // queue-ordered physical output required at the next boundary.
+                // Preserve the frame for retry without claiming that the
+                // immediate successor is ready.
+                return Ok(None);
             }
             let submit_started = Instant::now();
             let submitted = match gpu.submit(*frame, gpu_completion_deadline) {

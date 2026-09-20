@@ -207,6 +207,13 @@ pub struct FrameWorkExecution<K, D, P> {
     /// so realtime evidence never charges intentional speculative residency to
     /// the later current request.
     pub queue_wait: Duration,
+    /// Time spent runnable after this worker lane last became available.
+    ///
+    /// Unlike `queue_wait`, this excludes time intentionally serialized behind
+    /// the preceding execution on the same single-owner semantic lane. It
+    /// therefore measures worker wake/dispatch latency without erasing the
+    /// end-to-end backlog evidence retained by `queue_wait`.
+    pub dispatch_wait: Duration,
     /// Opaque Adapter execution payload.
     pub payload: P,
 }
@@ -436,6 +443,12 @@ struct BrokerState<K, D, P> {
     pending: HashMap<K, PendingBinding<D>>,
     queue: VecDeque<QueuedWork<K, D, P>>,
     in_flight: HashMap<FrameExecutionId, InFlightWork<K>>,
+    /// Most recent worker-return timestamp for each semantic lane.
+    ///
+    /// Production owns one receiver per concrete lane. Keeping this timestamp
+    /// in the Broker lets dequeue evidence split intentional lane occupancy
+    /// from latency after work became runnable.
+    lane_completed_at: [Option<MonotonicTimestamp>; 5],
     last_observed_at: MonotonicTimestamp,
     clock_regression_active: bool,
     closed_at: Option<MonotonicTimestamp>,
@@ -539,6 +552,7 @@ where
                     pending: HashMap::new(),
                     queue: VecDeque::new(),
                     in_flight: HashMap::new(),
+                    lane_completed_at: [None; 5],
                     last_observed_at: MonotonicTimestamp::ZERO,
                     clock_regression_active: false,
                     closed_at: None,
@@ -1157,8 +1171,14 @@ where
         let Some(execution) = state.in_flight.get_mut(&id) else {
             return false;
         };
-        if execution.completed_at.is_none() {
+        let completed_lane = if execution.completed_at.is_none() {
             execution.completed_at = Some(now);
+            execution.worker_lane
+        } else {
+            None
+        };
+        if let Some(lane) = completed_lane {
+            state.lane_completed_at[worker_lane_index(lane)] = Some(now);
         }
         self.shared.changed.notify_all();
         true
@@ -1182,6 +1202,9 @@ where
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         if execution.completed_at.is_none() {
             execution.completed_at = Some(now);
+            if let Some(lane) = execution.worker_lane {
+                state.lane_completed_at[worker_lane_index(lane)] = Some(now);
+            }
         }
         let deadline =
             deadline_status(execution.deadline_at, execution.completed_at.unwrap_or(now));
@@ -2487,6 +2510,13 @@ where
     let queue_wait = state.pending.get(&queued.request.key).map_or(Duration::ZERO, |pending| {
         elapsed_since(now, pending.requested_at)
     });
+    let dispatch_wait = state.pending.get(&queued.request.key).map_or(Duration::ZERO, |pending| {
+        let runnable_at = state.lane_completed_at[worker_lane_index(lane)]
+            .map_or(pending.requested_at, |completed_at| {
+                completed_at.max(pending.requested_at)
+            });
+        elapsed_since(now, runnable_at)
+    });
     let request = queued.request;
     let id = FrameExecutionId(state.next_execution_id);
     state.next_execution_id = state.next_execution_id.saturating_add(1);
@@ -2532,6 +2562,7 @@ where
         demand_identity: request.demand_identity,
         deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
         queue_wait,
+        dispatch_wait,
         payload: request.payload,
     };
     Some(if expired {
@@ -2539,6 +2570,16 @@ where
     } else {
         FrameWorkReceive::Ready(execution)
     })
+}
+
+const fn worker_lane_index(lane: FrameWorkerLane) -> usize {
+    match lane {
+        FrameWorkerLane::Any => 0,
+        FrameWorkerLane::Playback => 1,
+        FrameWorkerLane::Interactive => 2,
+        FrameWorkerLane::Still => 3,
+        FrameWorkerLane::NonPlayback => 4,
+    }
 }
 
 fn refresh_in_flight_invalidations_locked<K, D, P>(

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::Serialize;
 
-#[cfg(all(test, feature = "validation"))]
+#[cfg(test)]
 use super::audio_playback_acceptance::ProfessionalVideoCoordinatorObservation;
 use super::endurance_shutdown::{AppBackgroundDomainSnapshot, AppBackgroundEnduranceSnapshot};
 use super::headless_preview_presentation::{
@@ -363,15 +363,6 @@ pub(crate) fn wait_for_headless_preview_revision(
     if let Some(max_wait) =
         headless_preview_wait_budget(deadline, Instant::now(), needs_follow_up_poll)
     {
-        #[cfg(windows)]
-        {
-            if watch.revision() != drain_target_revision {
-                return;
-            }
-            if super::viewer_gpu_device_progress::wait_with_high_resolution_timer(max_wait) {
-                return;
-            }
-        }
         let _ = watch.wait_for_change(drain_target_revision, max_wait);
     }
 }
@@ -505,7 +496,7 @@ impl HeadlessRealtimeCoordinatorTiming {
         self.wait.merge(interval.wait);
     }
 
-    #[cfg(all(test, feature = "validation"))]
+    #[cfg(test)]
     pub(crate) fn professional_observation(self) -> ProfessionalVideoCoordinatorObservation {
         ProfessionalVideoCoordinatorObservation {
             intervals: self.intervals,
@@ -562,8 +553,22 @@ struct HeadlessRealtimePlaybackDriver {
     candidate_binding: Option<HeadlessGpuCandidateBinding>,
     candidate_output_binding: Option<HeadlessGpuCandidateOutputBinding>,
     candidate_status: HeadlessGpuCandidateStatus,
+    boundary_picture: Option<HeadlessBoundaryPicture>,
     prepared_successor_intent: Option<super::preview_execution::PreviewPlaybackIntent>,
     timing: HeadlessRealtimeCoordinatorTiming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadlessBoundaryPicture {
+    epoch: mondrian_playback::PlaybackEpoch,
+    frame: i64,
+    outcome: HeadlessBoundaryPictureOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessBoundaryPictureOutcome {
+    Presented(HeadlessPreviewSample),
+    Terminal(HeadlessGpuCandidateStatus),
 }
 
 impl HeadlessRealtimePlaybackDriver {
@@ -585,6 +590,7 @@ impl HeadlessRealtimePlaybackDriver {
             candidate_binding: None,
             candidate_output_binding: None,
             candidate_status: HeadlessGpuCandidateStatus::Loading,
+            boundary_picture: None,
             prepared_successor_intent: None,
             timing: HeadlessRealtimeCoordinatorTiming::default(),
         })
@@ -610,6 +616,7 @@ impl HeadlessRealtimePlaybackDriver {
         self.candidate_binding = None;
         self.candidate_output_binding = None;
         self.candidate_status = HeadlessGpuCandidateStatus::Loading;
+        self.boundary_picture = None;
     }
 
     fn sample(
@@ -631,6 +638,64 @@ impl HeadlessRealtimePlaybackDriver {
             stale_output_available: preview.has_retained_gpu_output(),
             unavailable: self.candidate_status == HeadlessGpuCandidateStatus::Unavailable,
         }
+    }
+
+    fn retain_boundary_attempt(
+        &mut self,
+        attempted_intent: HeadlessGpuCandidateIntent,
+        attempt: &HeadlessGpuCandidateAttempt,
+        stale_output_available: bool,
+    ) {
+        if let Some(sample) =
+            completed_headless_candidate_sample(attempt, attempted_intent, stale_output_available)
+        {
+            self.boundary_picture = Some(HeadlessBoundaryPicture {
+                epoch: attempted_intent.epoch,
+                frame: attempted_intent.frame,
+                outcome: HeadlessBoundaryPictureOutcome::Presented(sample),
+            });
+            return;
+        }
+
+        if attempted_intent.pending_demand.is_some()
+            && matches!(
+                attempt.status,
+                HeadlessGpuCandidateStatus::DroppedLate | HeadlessGpuCandidateStatus::Unavailable
+            )
+        {
+            self.retain_boundary_terminal(attempted_intent, attempt.status, stale_output_available);
+        }
+    }
+
+    fn retain_boundary_terminal(
+        &mut self,
+        intent: HeadlessGpuCandidateIntent,
+        status: HeadlessGpuCandidateStatus,
+        stale_output_available: bool,
+    ) {
+        let outcome = if status == HeadlessGpuCandidateStatus::DroppedLate && stale_output_available
+        {
+            HeadlessBoundaryPictureOutcome::Presented(HeadlessPreviewSample {
+                current_gpu_ready: false,
+                stale_output_available: true,
+                unavailable: false,
+            })
+        } else {
+            HeadlessBoundaryPictureOutcome::Terminal(status)
+        };
+        self.boundary_picture =
+            Some(HeadlessBoundaryPicture { epoch: intent.epoch, frame: intent.frame, outcome });
+    }
+
+    fn take_boundary_picture(
+        &mut self,
+        epoch: mondrian_playback::PlaybackEpoch,
+        frame: i64,
+    ) -> Option<HeadlessBoundaryPictureOutcome> {
+        self.boundary_picture
+            .take()
+            .filter(|picture| picture.epoch == epoch && picture.frame == frame)
+            .map(|picture| picture.outcome)
     }
 }
 
@@ -1376,10 +1441,24 @@ impl HeadlessRealtimePlaybackSession {
         self.driver.as_ref().map(|driver| driver.timing)
     }
 
+    /// Snapshot read-only Preview execution evidence while realtime ownership
+    /// remains resident. This does not expose the setup surface or permit a
+    /// resource-policy mutation between coordinator intervals.
+    #[cfg(test)]
+    pub(crate) fn realtime_preview_diagnostics(
+        &self,
+    ) -> anyhow::Result<super::preview_runtime::PreviewDiagnostics> {
+        anyhow::ensure!(
+            self.driver.is_some(),
+            "Headless realtime playback residency is not active"
+        );
+        Ok(self.preview.diagnostics())
+    }
+
     /// Start a fresh telemetry window without changing realtime ownership or
     /// transport state. Qualification uses this after device recovery so its
     /// readiness samples and coordinator intervals cover the same boundary.
-    #[cfg(all(test, feature = "validation"))]
+    #[cfg(test)]
     pub(crate) fn begin_realtime_timing_window(&mut self) -> anyhow::Result<()> {
         let driver = self
             .driver
@@ -2216,7 +2295,30 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
         })
         .map_or(0, |demand| demand.late_presentation_grace_ns);
     let mut dropped_picture_reissued = false;
-    let mut presented_sample = None;
+    // A boundary presentation belongs to the newly current coordinate. Its
+    // Ready delivery may atomically select a different Preview quality while
+    // deliberately leaving that already-presented coordinate without another
+    // demand. Consume the exact receipt once here instead of pretending the
+    // old output satisfies the newer quality generation.
+    let boundary_picture = driver.take_boundary_picture(sampled_epoch, sampled_frame);
+    let mut presented_sample = match boundary_picture {
+        Some(HeadlessBoundaryPictureOutcome::Presented(sample)) => Some(sample),
+        Some(HeadlessBoundaryPictureOutcome::Terminal(status)) => {
+            driver.candidate_status = status;
+            anyhow::bail!(
+                "Headless realtime boundary picture was terminally rejected: {}",
+                headless_recovery_diagnostics(
+                    driver,
+                    preview_service,
+                    gpu_adapter,
+                    state,
+                    sampled_intent,
+                    safety_deadline_instant,
+                )
+            );
+        }
+        None => None,
+    };
     let last_content_frame = state
         .last_content_frame()
         .context("resolve exact Headless realtime terminal frame")?;
@@ -2474,6 +2576,11 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 )?;
                 interval_timing.candidate.observe(candidate_started.elapsed());
                 driver.candidate_status = attempt.status;
+                driver.retain_boundary_attempt(
+                    current_intent,
+                    &attempt,
+                    preview_service.has_retained_gpu_output(),
+                );
                 apply_headless_candidate_binding(
                     &mut driver.candidate_binding,
                     current_intent,
@@ -2486,6 +2593,11 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
             }
             if let Some(status) = accepted_terminal {
                 driver.candidate_status = status;
+                driver.retain_boundary_terminal(
+                    current_intent,
+                    status,
+                    preview_service.has_retained_gpu_output(),
+                );
             }
             // Start servicing the new coordinate's future horizon at the
             // boundary that created it. Waiting until the next interval can
@@ -2723,6 +2835,11 @@ fn promote_exact_headless_boundary_successor<O: HeadlessGpuExecutionObserver>(
     )?;
     timing.candidate.observe(candidate_started.elapsed());
     driver.candidate_status = attempt.status;
+    driver.retain_boundary_attempt(
+        current_intent,
+        &attempt,
+        preview_service.has_retained_gpu_output(),
+    );
     apply_headless_candidate_binding(
         &mut driver.candidate_binding,
         current_intent,
@@ -2749,6 +2866,39 @@ fn prepare_headless_realtime_successor<O: HeadlessGpuExecutionObserver>(
     publish_preroll_readiness: bool,
 ) -> anyhow::Result<bool> {
     if headless_candidate_may_prepare_successor(driver.candidate_status) {
+        // Callback-cleanup owners can fill the bounded submission lifecycle
+        // even though their GPU work is already complete. Reconcile one through
+        // the ordinary presentation path before deciding that the immediate
+        // successor has no physical submission capacity. This preserves the
+        // queue-ahead invariant instead of charging a full GPU render to the
+        // next frame boundary.
+        if gpu_adapter.submission_capacity_is_full() {
+            let current_intent = HeadlessGpuCandidateIntent::from_state(state);
+            let candidate_started = Instant::now();
+            let attempt = execute_headless_gpu_candidate(
+                preview_service,
+                state,
+                gpu_adapter,
+                observer,
+                safety_deadline,
+            )?;
+            timing.candidate.observe(candidate_started.elapsed());
+            driver.candidate_status = attempt.status;
+            driver.retain_boundary_attempt(
+                current_intent,
+                &attempt,
+                preview_service.has_retained_gpu_output(),
+            );
+            apply_headless_candidate_binding(
+                &mut driver.candidate_binding,
+                current_intent,
+                attempt.binding,
+            );
+            apply_headless_candidate_output_binding(
+                &mut driver.candidate_output_binding,
+                attempt.output_binding,
+            );
+        }
         let successor_intent = state
             .preview_successor_execution_request(Instant::now())
             .map(|request| request.snapshot().transport().playback_intent());
@@ -3110,6 +3260,19 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
 
 #[cfg(test)]
 mod tests {
+    fn test_realtime_driver() -> HeadlessRealtimePlaybackDriver {
+        HeadlessRealtimePlaybackDriver {
+            absolute_deadline: None,
+            thread_scheduling: PlaybackThreadScheduling::default(),
+            candidate_binding: None,
+            candidate_output_binding: None,
+            candidate_status: HeadlessGpuCandidateStatus::Loading,
+            boundary_picture: None,
+            prepared_successor_intent: None,
+            timing: HeadlessRealtimeCoordinatorTiming::default(),
+        }
+    }
+
     #[test]
     fn video_only_terminal_demand_records_retained_stale_without_fabricating_ready() {
         let mut state = AppState::new();
@@ -3614,6 +3777,130 @@ mod tests {
         retain_headless_interval_picture(&mut retained, presented);
         retain_headless_interval_picture(&mut retained, successor_loading);
         assert_eq!(retained, Some(presented));
+    }
+
+    #[test]
+    fn boundary_ready_receipt_survives_quality_rotation_once_for_the_same_coordinate() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(23);
+        let attempted = HeadlessGpuCandidateIntent::from_state(&state);
+        let completed_demand = attempted.pending_demand.expect("boundary demand");
+        let attempt = HeadlessGpuCandidateAttempt {
+            status: HeadlessGpuCandidateStatus::Ready,
+            binding: HeadlessGpuCandidateBindingUpdate::SatisfiedIntent,
+            output_binding: HeadlessGpuCandidateOutputBindingUpdate::NonGpu,
+            completed_demand: Some(completed_demand),
+        };
+        let mut driver = test_realtime_driver();
+
+        driver.retain_boundary_attempt(attempted, &attempt, true);
+        let policy_advanced = HeadlessGpuCandidateIntent {
+            quality_revision: attempted.quality_revision + 1,
+            pending_demand: None,
+            ..attempted
+        };
+        assert_eq!(
+            driver.take_boundary_picture(policy_advanced.epoch, policy_advanced.frame),
+            Some(HeadlessBoundaryPictureOutcome::Presented(
+                HeadlessPreviewSample {
+                    current_gpu_ready: true,
+                    stale_output_available: true,
+                    unavailable: false,
+                }
+            )),
+            "the completed boundary picture closes its coordinate even when that delivery selected the next quality generation"
+        );
+        assert_eq!(
+            driver.take_boundary_picture(policy_advanced.epoch, policy_advanced.frame),
+            None,
+            "a boundary receipt is an interval fact and cannot be reused"
+        );
+
+        let mismatched_attempt = HeadlessGpuCandidateAttempt { completed_demand: None, ..attempt };
+        driver.retain_boundary_attempt(attempted, &mismatched_attempt, true);
+        assert_eq!(
+            driver.take_boundary_picture(attempted.epoch, attempted.frame),
+            None,
+            "physical output without the exact demand receipt cannot create a boundary picture"
+        );
+    }
+
+    #[test]
+    fn boundary_terminal_receipt_becomes_stale_or_fails_closed() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(23);
+        let intent = HeadlessGpuCandidateIntent::from_state(&state);
+        let mut driver = test_realtime_driver();
+
+        let late_attempt = HeadlessGpuCandidateAttempt {
+            status: HeadlessGpuCandidateStatus::DroppedLate,
+            binding: HeadlessGpuCandidateBindingUpdate::AttemptedIntent,
+            output_binding: HeadlessGpuCandidateOutputBindingUpdate::Preserve,
+            completed_demand: None,
+        };
+        driver.retain_boundary_attempt(intent, &late_attempt, true);
+        assert_eq!(
+            driver.take_boundary_picture(intent.epoch, intent.frame),
+            Some(HeadlessBoundaryPictureOutcome::Presented(
+                HeadlessPreviewSample {
+                    current_gpu_ready: false,
+                    stale_output_available: true,
+                    unavailable: false,
+                }
+            )),
+            "an exact late attempt retains the prior physical picture without fabricating Ready"
+        );
+
+        let demand_consumed = HeadlessGpuCandidateIntent { pending_demand: None, ..intent };
+        driver.retain_boundary_attempt(demand_consumed, &late_attempt, true);
+        assert_eq!(
+            driver.take_boundary_picture(intent.epoch, intent.frame),
+            None,
+            "a terminal attempt without an exact pending demand cannot create a boundary receipt"
+        );
+
+        driver.retain_boundary_terminal(intent, HeadlessGpuCandidateStatus::DroppedLate, false);
+        assert_eq!(
+            driver.take_boundary_picture(intent.epoch, intent.frame),
+            Some(HeadlessBoundaryPictureOutcome::Terminal(
+                HeadlessGpuCandidateStatus::DroppedLate
+            )),
+            "a late receipt without a retained physical picture must fail closed"
+        );
+
+        driver.retain_boundary_terminal(intent, HeadlessGpuCandidateStatus::Unavailable, true);
+        assert_eq!(
+            driver.take_boundary_picture(intent.epoch, intent.frame),
+            Some(HeadlessBoundaryPictureOutcome::Terminal(
+                HeadlessGpuCandidateStatus::Unavailable
+            )),
+            "a decode failure cannot be reclassified as an ordinary stale interval"
+        );
+    }
+
+    #[test]
+    fn boundary_picture_cannot_cross_a_transport_coordinate() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(23);
+        let attempted = HeadlessGpuCandidateIntent::from_state(&state);
+        let attempt = HeadlessGpuCandidateAttempt {
+            status: HeadlessGpuCandidateStatus::Ready,
+            binding: HeadlessGpuCandidateBindingUpdate::SatisfiedIntent,
+            output_binding: HeadlessGpuCandidateOutputBindingUpdate::NonGpu,
+            completed_demand: attempted.pending_demand,
+        };
+        let mut driver = test_realtime_driver();
+
+        driver.retain_boundary_attempt(attempted, &attempt, false);
+        assert_eq!(
+            driver.take_boundary_picture(attempted.epoch, attempted.frame + 1),
+            None
+        );
+        assert_eq!(
+            driver.take_boundary_picture(attempted.epoch, attempted.frame),
+            None,
+            "a coordinate mismatch invalidates rather than defers stale evidence"
+        );
     }
 
     #[test]
