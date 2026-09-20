@@ -53,10 +53,23 @@ try {
 } finally {
     Pop-Location
 }
+$activatedEnvironment = [System.Collections.Generic.Dictionary[string, string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
 foreach ($line in $environment) {
     if ($line -match '^([^=]+)=(.*)$') {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+        $name = $Matches[1]
+        $value = $Matches[2]
+        # cmd.exe can retain an inherited `Path` entry alongside the `PATH`
+        # emitted by VsDevCmd. Keep the activated value rather than allowing
+        # the inherited spelling to erase the MSVC tool directories.
+        if ($name -ceq 'PATH' -or -not $activatedEnvironment.ContainsKey($name)) {
+            $activatedEnvironment[$name] = $value
+        }
     }
+}
+foreach ($entry in $activatedEnvironment.GetEnumerator()) {
+    [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
 }
 foreach ($tool in @('cl.exe', 'cmake.exe', 'ninja.exe')) {
     if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
