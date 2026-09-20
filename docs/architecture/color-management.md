@@ -1819,9 +1819,11 @@ its admitted subset and fail closed outside it.
   the sequence output color space.
 - **HDR presentation without complete native evidence** — `ViewerDisplayMode::HdrPq` /
   `ViewerDisplayMode::HdrHlg` are explicit user selections. On Windows the app
-  probes DisplayConfig Advanced Color support/enabled/force-disabled state, bits
-  per channel, color encoding, and SDR white level through `mondrian-platform`;
-  known disabled or unsupported state blocks HDR preview. wgpu
+  probes the Windows 11 DisplayConfig SDR/WCG/HDR active color mode, separate HDR
+  and wide-color support flags, policy limitation, bits per channel, color
+  encoding, and SDR white level through `mondrian-platform`. The legacy Advanced
+  Color bitfield is used only on systems that explicitly reject the INFO_2
+  packet. Known inactive or unsupported HDR state blocks HDR preview. wgpu
   `SurfaceColorSpace` compatibility is still only the swapchain side of the
   contract. macOS adds AppKit EDR headroom, Wayland consumes the active output
   image description, and Linux DRM/EDID remains hardware-only fallback evidence.
