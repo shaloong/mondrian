@@ -293,7 +293,7 @@ truncation at every CDP byte, header/footer/field-phase corruption with a repair
 outer checksum, orphan/missed/unfinished DTVCC packets, invalid extended services,
 service-command overflow, maximum packet size and forged receipt inventory. The
 ignored `caption_scc_and_708_cdp_survive_official_bmx_st436_final_mxf_rescan` test wraps
-both SCC and 708 programs using official BMX 1.6 and then reads actual final MXF
+both SCC and 708 programs using official BMX 1.7 and then reads actual final MXF
 ANC words through the shared production scanner. This is software carriage evidence;
 no SDI receiver, caption renderer or hardware qualification is inferred.
 

@@ -267,7 +267,7 @@ fn cea708_rejects_discontinuity_truncation_service_overflow_and_unknown_commands
 }
 
 #[test]
-#[ignore = "requires official BMX 1.6 via MONDRIAN_ST436_BMX_TOOL_DIR"]
+#[ignore = "requires official BMX 1.7 via MONDRIAN_ST436_BMX_TOOL_DIR"]
 fn caption_scc_and_708_cdp_survive_official_bmx_st436_final_mxf_rescan() {
     use std::process::Command;
     let directory = std::path::PathBuf::from(
@@ -281,7 +281,7 @@ fn caption_scc_and_708_cdp_survive_official_bmx_st436_final_mxf_rescan() {
         String::from_utf8_lossy(&version.stdout),
         String::from_utf8_lossy(&version.stderr)
     )
-    .contains("bmx v1.6.0"));
+    .contains("bmx v1.7.0"));
     let programs = [
         scc("Scenarist_SCC V1.0\n00:00:00:00\t9420 c849 942f", 6).expect("SCC"),
         import_caption_program(
