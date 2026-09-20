@@ -368,9 +368,11 @@ Platform display targeting now fails closed for empty extents. Quartz display
 sizes are consumed directly in physical pixels, preventing Retina double-scale
 misbinding. Windows ICC lookup first binds the active DisplayConfig adapter
 LUID/source ID and reads the Windows 11 SDR/WCG/HDR active color mode. It asks
-`ColorProfileGetDisplayDefault` for `CPST_EXTENDED_DISPLAY_COLOR_MODE` only when
-HDR is active; SDR and Advanced Color WCG use
-`CPST_STANDARD_DISPLAY_COLOR_MODE`. The legacy WCS device default
+`ColorProfileGetDisplayUserScope` which user or system association table Windows
+actually selected for that display and never accepts a stale default from the
+inactive scope. It then asks `ColorProfileGetDisplayDefault` for
+`CPST_EXTENDED_DISPLAY_COLOR_MODE` only when HDR is active; SDR and Advanced
+Color WCG use `CPST_STANDARD_DISPLAY_COLOR_MODE`. The legacy WCS device default
 (`CPT_ICC + CPST_NONE`) is a standard-mode-only fallback and is never substituted
 for a missing HDR association. Linux
 DRM fallback requires the exact EDID block count and valid checksum on every

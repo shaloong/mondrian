@@ -28,9 +28,10 @@ use windows_sys::Win32::Graphics::Gdi::{
     DISPLAYCONFIG_COLOR_ENCODING_YCBCR444,
 };
 use windows_sys::Win32::UI::ColorSystem::{
-    ColorProfileGetDisplayDefault, WcsGetDefaultColorProfile, WcsGetDefaultColorProfileSize,
-    CPST_EXTENDED_DISPLAY_COLOR_MODE, CPST_NONE, CPST_STANDARD_DISPLAY_COLOR_MODE, CPT_ICC,
-    WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER, WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
+    ColorProfileGetDisplayDefault, ColorProfileGetDisplayUserScope, WcsGetDefaultColorProfile,
+    WcsGetDefaultColorProfileSize, CPST_EXTENDED_DISPLAY_COLOR_MODE, CPST_NONE,
+    CPST_STANDARD_DISPLAY_COLOR_MODE, CPT_ICC, WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
+    WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
 };
 
 use super::physical_rect_matches_target;
@@ -224,10 +225,6 @@ fn monitor_matches_target(rect: &RECT, target: DisplayProfileProbeTarget) -> boo
 fn default_icc_profile_for_device(
     device_name: &str,
 ) -> Result<(DisplayProbeBackend, PathBuf), (DisplayProbeBackend, String)> {
-    let scopes = [
-        WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
-        WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
-    ];
     let mut failures = Vec::new();
     let path = active_display_path_for_device(device_name).map_err(|reason| {
         (
@@ -241,17 +238,21 @@ fn default_icc_profile_for_device(
             format!("could not determine the active display color mode: {reason}"),
         )
     })?;
+    let scope = display_profile_management_scope_for_path(&path).map_err(|reason| {
+        (
+            DisplayProbeBackend::WindowsColorProfileDisplayDefault,
+            reason,
+        )
+    })?;
     let subtype = advanced_color.profile_subtype;
-    for scope in scopes {
-        match display_default_profile_for_path(&path, scope, subtype) {
-            Ok(profile) => {
-                return Ok((
-                    DisplayProbeBackend::WindowsColorProfileDisplayDefault,
-                    resolve_color_profile_path(profile),
-                ));
-            }
-            Err(reason) => failures.push(reason),
+    match display_default_profile_for_path(&path, scope, subtype) {
+        Ok(profile) => {
+            return Ok((
+                DisplayProbeBackend::WindowsColorProfileDisplayDefault,
+                resolve_color_profile_path(profile),
+            ));
         }
+        Err(reason) => failures.push(reason),
     }
 
     if subtype == CPST_EXTENDED_DISPLAY_COLOR_MODE {
@@ -265,19 +266,19 @@ fn default_icc_profile_for_device(
     }
 
     let device_name = wide_null(device_name);
-    for scope in scopes {
-        // WCS is the compatibility fallback for standard display mode. CPST_NONE
-        // aliases the standard-display subtype; it cannot discover the active
-        // Advanced Color association.
-        match default_icc_profile_for_scope(device_name.as_ptr(), scope, CPST_NONE) {
-            Ok(path) => {
-                return Ok((
-                    DisplayProbeBackend::WindowsWcs,
-                    resolve_color_profile_path(path),
-                ));
-            }
-            Err(reason) => failures.push(reason),
+    // WCS is the compatibility fallback for standard display mode. CPST_NONE
+    // aliases the standard-display subtype; it cannot discover the active
+    // Advanced Color association. Query only the association scope Windows
+    // selected for this display; a stale profile in the inactive scope is not
+    // the current display default.
+    match default_icc_profile_for_scope(device_name.as_ptr(), scope, CPST_NONE) {
+        Ok(path) => {
+            return Ok((
+                DisplayProbeBackend::WindowsWcs,
+                resolve_color_profile_path(path),
+            ));
         }
+        Err(reason) => failures.push(reason),
     }
 
     Err((
@@ -287,6 +288,29 @@ fn default_icc_profile_for_device(
             failures.join("; ")
         ),
     ))
+}
+
+fn display_profile_management_scope_for_path(
+    path: &DISPLAYCONFIG_PATH_INFO,
+) -> Result<i32, String> {
+    let mut scope = WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE;
+    let result = unsafe {
+        ColorProfileGetDisplayUserScope(path.sourceInfo.adapterId, path.sourceInfo.id, &mut scope)
+    };
+    if result < 0 {
+        return Err(format!(
+            "ColorProfileGetDisplayUserScope failed with HRESULT=0x{:08x}",
+            result as u32
+        ));
+    }
+    match scope {
+        WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER | WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE => {
+            Ok(scope)
+        }
+        _ => Err(format!(
+            "ColorProfileGetDisplayUserScope returned unknown scope {scope}"
+        )),
+    }
 }
 
 fn active_display_profile_subtype(active_color_mode: i32) -> Result<i32, String> {

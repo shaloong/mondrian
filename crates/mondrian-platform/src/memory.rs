@@ -161,22 +161,6 @@ mod platform {
         use super::*;
 
         #[test]
-        #[ignore = "requires independently verified installed memory in MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES"]
-        fn installed_capacity_matches_independent_dmi_evidence() {
-            let expected = std::env::var("MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES")
-                .expect("independent installed-capacity evidence")
-                .parse::<u64>()
-                .expect("installed capacity in bytes");
-            assert!(expected > 0);
-            let actual = physical_memory_capacity();
-            assert_eq!(
-                actual.installed_physical_bytes,
-                Some(expected),
-                "{actual:?}"
-            );
-        }
-
-        #[test]
         fn parses_required_meminfo_units() {
             let values = parse_meminfo("MemTotal: 8192 kB\nMemAvailable: 2048 kB\n")
                 .expect("meminfo should parse");
@@ -311,5 +295,26 @@ mod platform {
         SystemMemoryProbeResult::unsupported(
             "native whole-system memory discovery is not implemented for this platform",
         )
+    }
+}
+
+#[cfg(test)]
+mod qualification_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires independently verified installed memory in MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES"]
+    fn installed_capacity_matches_independent_hardware_evidence() {
+        let expected = std::env::var("MONDRIAN_EXPECTED_INSTALLED_MEMORY_BYTES")
+            .expect("independent installed-capacity evidence")
+            .parse::<u64>()
+            .expect("installed capacity in bytes");
+        assert!(expected > 0);
+        let actual = physical_memory_capacity();
+        assert_eq!(
+            actual.installed_physical_bytes,
+            Some(expected),
+            "{actual:?}"
+        );
     }
 }
