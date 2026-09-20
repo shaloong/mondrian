@@ -58,6 +58,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+struct ThreadLocalPreviewDecodeSessionGuard;
+
+impl ThreadLocalPreviewDecodeSessionGuard {
+    fn new() -> Self {
+        clear_thread_local_preview_decode_session();
+        Self
+    }
+}
+
+impl Drop for ThreadLocalPreviewDecodeSessionGuard {
+    fn drop(&mut self) {
+        clear_thread_local_preview_decode_session();
+    }
+}
+
 fn synthetic_file_fingerprint(
     len: u64,
     modified_secs: u64,
@@ -4541,6 +4556,7 @@ fn test_packet(pts: Option<i64>, dts: Option<i64>, key: bool) -> ffmpeg::Packet 
 #[test]
 #[ignore = "manual decode performance diagnostic; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
 fn preview_decode_fixture_perf_smoke() {
+    let _session_guard = ThreadLocalPreviewDecodeSessionGuard::new();
     let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE").map(PathBuf::from) else {
         eprintln!(
             "MONDRIAN_PREVIEW_DECODE_PERF_JSON={{\"skipped\":\"MONDRIAN_PREVIEW_DECODE_FIXTURE not set\"}}"
@@ -4612,6 +4628,7 @@ fn preview_decode_fixture_perf_smoke() {
 #[test]
 #[ignore = "requires a three-second 25 fps HEVC Main10 fixture with reordered open GOPs; set MONDRIAN_PREVIEW_DECODE_FIXTURE"]
 fn native_reordered_gop_seeks_preserve_exact_covering_intervals() {
+    let _session_guard = ThreadLocalPreviewDecodeSessionGuard::new();
     let path = PathBuf::from(
         std::env::var_os("MONDRIAN_PREVIEW_DECODE_FIXTURE")
             .expect("explicit synthetic HEVC fixture is required"),
