@@ -108,6 +108,46 @@ the negative failure case and the 140-request forward/reverse Main10 open-GOP
 coverage case exit cleanly; Media all-target/all-feature Clippy, format, and
 diff checks pass.
 
+The current v14 Complete Golden gate passed three consecutive clean-source
+runs after two supervisor defects were exposed by a fresh C-drive target. The
+supervisor had built only `mondrian-golden`, leaving media-probe discovery
+accidentally dependent on a stale sibling product executable, and still accepted
+only obsolete process-report schema 1 while the product publishes schema 2. It
+now builds and hashes both the product worker and dedicated Golden executable,
+and the commercial-engine contract owns the process-report schema separately
+from aggregate schema 3. Contract tests and `Pr/All` asset validation cover both
+boundaries. The final baseline-eligible run at revision `7216ba21` passed 3/3
+with distinct run and Project identities, natural exit codes zero, and elapsed
+times 61.851, 53.594, and 51.280 seconds. The aggregate report SHA-256 is
+`98A0B23492B1202ADABDAE141567433E2500412F36935564F3443D55684415DA`;
+the Golden executable SHA-256 is
+`FFB190783A931ABD8CDDCA01C58978AF8450FA0B5EA094DCCCE7499AAE3A202E`,
+and the packaged product worker SHA-256 is
+`5DEE280B54ECAE86D31A90CCA7D390D8D3465C715685A22AB6F92EE2B0CD373B`.
+Generated PCM/AAC, CFR/VFR, HLG, and Alpha media remain ignored local fixtures.
+
+The Release Project lifecycle smoke also passed: create was 129 ms against an
+8,000 ms limit, three opens had an 18 ms maximum against 6,000 ms, and five
+saves had a 14 ms maximum against 6,000 ms, with complete App and worker-owner
+closure. Its report SHA-256 is
+`EB763625213906717ECDF3E3752C80AB980B3163839EE395B0AF18FD41F0EDF3`.
+The large App UI smoke passed all seven cases with 360 assets, 720 clips, and
+480 effects: root build 1,255 ms, refresh maximum 19 ms, 40-resize loop 47 ms,
+6,533-command paint 30 ms, sustained playback refresh 418 ms, Preview probe
+144 ms, and Preview playback refresh 339 ms. Both Preview owners closed all
+seven workers. Its report SHA-256 is
+`FD1EED9DACE5DA56B8C1BC974FC03C55DF48EBAB8BA35DB7391C933936AE34A6`.
+
+A separate qualification review found that
+`preview_media_realtime_4k60_dual_video_gate` is not yet sealed despite its
+name: it invokes the development policy, so environment variables can change
+its frame count and timing limits, and its default decode p95 limit is 60 ms.
+Its functional contract still requires two media layers and a real GPU
+composite, but it cannot certify the fixed 4K60 realtime row until the workload,
+50 ms decode ceiling, GPU timing, extent, and readiness policy are immutable.
+This remains a test-harness gap; no result from that entrypoint is promoted to a
+qualification pass.
+
 DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
 but its documented external scripting API is unavailable: the local API returns
 no Resolve object and no scripting service listens. The UI automation helper
