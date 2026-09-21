@@ -7389,6 +7389,14 @@ fn professional_playback_case_budget_ms(frame_count: usize, interval_ns: u64) ->
         .saturating_add(PROFESSIONAL_CASE_OVERHEAD_MARGIN_MS)
 }
 
+fn cross_region_seek_probe_source(index: usize, seek_count: usize) -> TimelineSeekSource {
+    if index < seek_count / 2 {
+        TimelineSeekSource::PointerDrag
+    } else {
+        TimelineSeekSource::Settled
+    }
+}
+
 fn run_headless_cross_region_seeks(
     preview_service: &HeadlessPreviewRuntime,
     state: &mut AppState,
@@ -7409,10 +7417,14 @@ fn run_headless_cross_region_seeks(
             .saturating_mul(target_span)
             .checked_div(seek_count.saturating_add(1))
             .unwrap_or(0);
-        // Each cross-region observation is an accuracy probe. PointerDrag is
-        // allowed to stop at its bounded interactive decode budget, while the
-        // release edge must issue Settled authority for the exact frame.
-        state.seek_with_source(target as i64, TimelineSeekSource::Settled)?;
+        // The fixed probe population is split evenly between interactive
+        // PointerDrag latency and exact Settled latency. Each request must reach
+        // a presentable result so both latency distributions are independently
+        // auditable before the separate latest-wins supersession burst below.
+        state.seek_with_source(
+            target as i64,
+            cross_region_seek_probe_source(index, seek_count),
+        )?;
         wait_for_headless_gpu_ready(
             preview_service,
             state,
@@ -8140,6 +8152,43 @@ fn validate_executed_adaptive_scaling_for_window(
         adaptive_extents,
     );
     Ok(())
+}
+
+#[test]
+fn cross_region_seek_probe_balances_completed_warm_and_accurate_samples() {
+    let professional_sources = (0..100)
+        .map(|index| cross_region_seek_probe_source(index, 100))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        professional_sources
+            .iter()
+            .filter(|source| **source == TimelineSeekSource::PointerDrag)
+            .count(),
+        50
+    );
+    assert_eq!(
+        professional_sources
+            .iter()
+            .filter(|source| **source == TimelineSeekSource::Settled)
+            .count(),
+        50
+    );
+    assert_eq!(
+        cross_region_seek_probe_source(0, 4),
+        TimelineSeekSource::PointerDrag
+    );
+    assert_eq!(
+        cross_region_seek_probe_source(1, 4),
+        TimelineSeekSource::PointerDrag
+    );
+    assert_eq!(
+        cross_region_seek_probe_source(2, 4),
+        TimelineSeekSource::Settled
+    );
+    assert_eq!(
+        cross_region_seek_probe_source(3, 4),
+        TimelineSeekSource::Settled
+    );
 }
 
 #[test]
