@@ -197,6 +197,21 @@ contiguous-key scopes aggregation experiment produced no stable cross-row gain
 and were fully reverted. The unchanged baseline JSONL SHA-256 is
 `6DFA1DF28EDFFF6DE159D0EC891FCB3779061099C105E2FB67FB488593CEE265`.
 
+A subsequent exact-count scopes optimization removed three redundant global
+atomics per RGB-parade source pixel: RGB histograms are now reconstructed by a
+bounded integer reduction of the already exact waveform planes. All CPU/GPU
+count comparisons, high-entropy bins, excursions, vectors, and tail pixels pass.
+Under the same resident-Blender limitation, the first Release physical rerun
+reduced scopes p95 from 13.38 to 10.165 ms at 4K and from 41.11 to 32.09 ms at
+8K. Complete-frame p95 remained 27.312 ms against 16 ms and 72.729 ms against
+32 ms, so neither fixed row is promoted to Passed. Its JSONL SHA-256 is
+`1334F9E79DE9BC93CE44D6945BC59A89CE6D3087C29BEDB0D347C55A07214741`.
+A second run confirmed normal 0.868 ms CPU-record p95 but experienced severe
+external GPU contention: the 8K scopes stage reached 16.70 seconds while the two
+Blender processes remained active. That run is retained as load evidence only,
+with SHA-256 `A9784338FE3A1666E95B12F21A9B3D98297D2C74A4C0AFC930C9C8CDCD6BD035`.
+The fixed 16/32 ms thresholds and workload were not changed.
+
 The sealed Release long-authoring matrix passed all six fixed cases, including
 the 120-minute project scale. The largest case retained a 202.37 MiB project,
 completed its maximum operation in 5.261 seconds, and peaked at 462.57 MiB

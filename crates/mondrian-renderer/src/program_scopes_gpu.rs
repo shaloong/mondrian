@@ -310,6 +310,16 @@ impl GpuProgramScopesRuntime {
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("program-scopes-histogram-reduction-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipelines.reduce_histogram_pipeline);
+            pass.set_bind_group(0, &aggregate_bind_group, &[]);
+            pass.dispatch_workgroups(request.bins.div_ceil(WORKGROUP_SIZE), 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("program-scopes-display-pass"),
                 timestamp_writes: None,
             });
@@ -498,6 +508,7 @@ struct ScopesPipelines {
     display_bind_group_layout: wgpu::BindGroupLayout,
     aggregate_luma_pipeline: wgpu::ComputePipeline,
     aggregate_rgb_pipeline: wgpu::ComputePipeline,
+    reduce_histogram_pipeline: wgpu::ComputePipeline,
     display_pipeline: wgpu::ComputePipeline,
 }
 
@@ -570,6 +581,15 @@ impl ScopesPipelines {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
+        let reduce_histogram_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-reduce-histogram-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("reduce_histogram"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let display_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("program-scopes-display-pipeline"),
             layout: Some(&display_pipeline_layout),
@@ -583,6 +603,7 @@ impl ScopesPipelines {
             display_bind_group_layout,
             aggregate_luma_pipeline,
             aggregate_rgb_pipeline,
+            reduce_histogram_pipeline,
             display_pipeline,
         }
     }
@@ -777,10 +798,16 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
         let gb = signal_bin(scaled.g);
         let bb = signal_bin(scaled.b);
         let yb = signal_bin(scaled.a);
-        red_histogram[i] = uniforms.histogram_offset + rb;
-        green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
-        blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
-        luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
+        if rgb_waveform {
+            // RGB histograms are the exact column reduction of the three
+            // waveform planes. Avoid three redundant global atomics per pixel;
+            // the reduction pass below reconstructs the same integer counts.
+            luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
+        } else {
+            red_histogram[i] = uniforms.histogram_offset + rb;
+            green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
+            blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
+        }
 
         let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
         waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, rgb_waveform);
@@ -823,6 +850,33 @@ fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
     if blue_high != 0u { atomicAdd(&counts[5u], blue_high); }
     if luma_low != 0u { atomicAdd(&counts[6u], luma_low); }
     if luma_high != 0u { atomicAdd(&counts[7u], luma_high); }
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bin = gid.x;
+    let channel = gid.y;
+    if bin >= uniforms.bins || channel >= 4u {
+        return;
+    }
+    var sum = 0u;
+    let plane = uniforms.waveform_width * uniforms.bins;
+    if uniforms.waveform_channels == 3u {
+        if channel >= 3u {
+            return;
+        }
+        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
+            sum += atomicLoad(&counts[uniforms.waveform_offset + channel * plane + x * uniforms.bins + bin]);
+        }
+    } else {
+        if channel != 3u {
+            return;
+        }
+        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
+            sum += atomicLoad(&counts[uniforms.waveform_offset + x * uniforms.bins + bin]);
+        }
+    }
+    atomicStore(&counts[uniforms.histogram_offset + channel * uniforms.bins + bin], sum);
 }
 
 @compute @workgroup_size(16, 16, 1)

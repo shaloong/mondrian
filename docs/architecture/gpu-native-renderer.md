@@ -1602,6 +1602,14 @@ for two immutable workloads: four-layer 3840×2160 at 60 fps and two-layer
 Effects; both workloads produce PQ Program Output in an RGBA16F carrier and
 run demand-driven RGB-parade scopes from the Program Output tap.
 
+RGB-parade scopes keep one exact waveform count plane per channel. Their RGB
+histograms are the deterministic column reduction of those same planes, so the
+GPU aggregation pass does not repeat three contended global atomic writes for
+every source pixel. A bounded follow-up compute pass reconstructs the exact
+integer histogram counters before visualization; luma mode applies the inverse
+choice and derives its luma histogram from its waveform. CPU-reference readback
+tests cover both modes, high-entropy bins, excursions, vectors, and tail pixels.
+
 The producer uses the bounded asynchronous Viewer timestamp-query ring. It
 reports complete-frame and per-stage GPU timestamps separately from CPU
 command-recording time, and records composite, fusion, color-stage, scope,
