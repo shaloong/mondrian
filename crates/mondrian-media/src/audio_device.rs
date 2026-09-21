@@ -295,10 +295,10 @@ pub struct RealtimeAudioCandidateCounts {
     pub executable: u32,
 }
 
-/// Immutable physical output contract selected before stream creation.
+/// Immutable Program-facing output contract selected before stream creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RealtimeAudioOutputContract {
-    /// Exact requested and selected sample rate.
+    /// Exact Program sample rate accepted at the enqueue boundary.
     pub sample_rate: u32,
     /// Exact semantic target layout. Channel count is derived from this value.
     pub channel_layout: AudioChannelLayout,
@@ -334,10 +334,13 @@ pub struct RealtimeAudioOutputDeviceEvidence {
     pub share_mode: RealtimeAudioOutputShareMode,
     /// Exact reason preferred-exclusive negotiation fell back to shared mode.
     pub exclusive_fallback_reason: Option<String>,
-    /// Scalar container width of the application-facing stream format.
+    /// Scalar container width of the physical endpoint stream format.
     pub stream_container_bits: Option<u16>,
-    /// Valid signal bits within the application-facing stream container.
+    /// Valid signal bits within the physical endpoint stream container.
     pub stream_valid_bits: Option<u16>,
+    /// Physical endpoint sample rate. This differs from the application-facing
+    /// contract only when a backend performs an explicit output-rate conversion.
+    pub stream_sample_rate: u32,
     /// Negotiated endpoint buffer size in sample frames.
     pub buffer_frames: Option<u32>,
     /// Negotiated endpoint period in 100-nanosecond units.
@@ -348,7 +351,7 @@ pub struct RealtimeAudioOutputDeviceEvidence {
     pub device_name: Option<String>,
     /// Name-query failure retained without blocking otherwise valid playback.
     pub device_name_error: Option<String>,
-    /// Exact selected stream contract.
+    /// Program-facing contract paired with the selected physical stream facts above.
     pub contract: RealtimeAudioOutputContract,
 }
 
@@ -700,6 +703,7 @@ pub(crate) fn prepare_realtime_audio_output(
             exclusive_fallback_reason,
             stream_container_bits: None,
             stream_valid_bits: None,
+            stream_sample_rate: selected.contract.sample_rate,
             buffer_frames: None,
             period_100ns: None,
             was_system_default,

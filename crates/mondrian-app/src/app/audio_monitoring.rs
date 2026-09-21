@@ -289,6 +289,7 @@ mod tests {
             exclusive_fallback_reason: None,
             stream_container_bits: None,
             stream_valid_bits: None,
+            stream_sample_rate: contract.sample_rate,
             buffer_frames: None,
             period_100ns: None,
             was_system_default: true,

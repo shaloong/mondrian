@@ -77,6 +77,7 @@ impl WasapiSampleEncoding {
 
 struct WasapiFormatCandidate {
     encoding: WasapiSampleEncoding,
+    sample_rate: u32,
     format: Audio::WAVEFORMATEXTENSIBLE,
 }
 
@@ -87,6 +88,7 @@ pub(super) struct WindowsWasapiOutputNegotiation {
     pub(super) sample_format: crate::RealtimeAudioSampleFormat,
     pub(super) container_bits: u16,
     pub(super) valid_bits: u16,
+    pub(super) sample_rate: u32,
     pub(super) buffer_frames: u32,
     pub(super) period_100ns: i64,
     pub(super) exclusive_fallback_reason: Option<String>,
@@ -252,6 +254,7 @@ fn run_stream_inner(
     let opened = open_audio_client(&endpoint, context)?;
     let audio_client = opened.client;
     let encoding = opened.encoding;
+    let stream_sample_rate = opened.sample_rate;
     let share_mode = opened.share_mode;
     let period_100ns = opened.period_100ns;
     let exclusive_fallback_reason = opened.exclusive_fallback_reason;
@@ -303,13 +306,13 @@ fn run_stream_inner(
     let initial_playback_delay = super::callback_tail_playback_delay(
         stream_latency,
         buffer_frames as usize,
-        context.sample_rate,
+        stream_sample_rate,
     )
     .map_err(|error| format!("invalid initial WASAPI endpoint delay: {error}"))?;
     let initial_uncertainty = super::callback_tail_playback_delay(
         Duration::ZERO,
         buffer_frames as usize,
-        context.sample_rate,
+        stream_sample_rate,
     )
     .map_err(|error| format!("invalid initial WASAPI buffer span: {error}"))?;
     write_frames(
@@ -340,6 +343,7 @@ fn run_stream_inner(
                 sample_format: encoding.sample_format(),
                 container_bits: encoding.container_bits(),
                 valid_bits: encoding.valid_bits(),
+                sample_rate: stream_sample_rate,
                 buffer_frames,
                 period_100ns,
                 exclusive_fallback_reason,
@@ -369,7 +373,7 @@ fn run_stream_inner(
                 qpc_frequency,
                 context.telemetry.callback_consumed_frames.load(Ordering::Acquire),
                 packet.frames,
-                context.sample_rate,
+                stream_sample_rate,
                 last_audio_clock_correlation,
             )?;
             last_audio_clock_correlation = Some(sampled.correlation);
@@ -396,6 +400,7 @@ fn run_stream_inner(
 struct OpenedAudioClient {
     client: Audio::IAudioClient,
     encoding: WasapiSampleEncoding,
+    sample_rate: u32,
     share_mode: RealtimeAudioOutputShareMode,
     period_100ns: i64,
     exclusive_fallback_reason: Option<String>,
@@ -410,17 +415,32 @@ fn open_audio_client(
     }
 
     let probe_client = activate_audio_client(endpoint)?;
-    let selected = select_exclusive_format(&probe_client, context);
-    match selected {
-        Ok(candidate) => match open_exclusive_audio_client(endpoint, context, candidate) {
-            Ok(opened) => Ok(opened),
-            Err(reason)
-                if context.access_policy == RealtimeAudioOutputAccessPolicy::PreferExclusive =>
-            {
-                open_shared_audio_client(endpoint, context, Some(reason))
+    let candidates = select_exclusive_formats(&probe_client, context);
+    let exclusive = match candidates {
+        Ok(candidates) => {
+            let mut initialization_failures = Vec::new();
+            let mut opened = None;
+            for candidate in candidates {
+                let label = format!("{}Hz/{}", candidate.sample_rate, candidate.encoding.label());
+                match open_exclusive_audio_client(endpoint, candidate) {
+                    Ok(stream) => {
+                        opened = Some(stream);
+                        break;
+                    }
+                    Err(reason) => initialization_failures.push(format!("{label}: {reason}")),
+                }
             }
-            Err(reason) => Err(reason.into()),
-        },
+            opened.ok_or_else(|| {
+                format!(
+                    "WASAPI exclusive initialization rejected every format accepted by IsFormatSupported; {}",
+                    initialization_failures.join("; ")
+                )
+            })
+        }
+        Err(reason) => Err(reason),
+    };
+    match exclusive {
+        Ok(opened) => Ok(opened),
         Err(reason)
             if context.access_policy == RealtimeAudioOutputAccessPolicy::PreferExclusive =>
         {
@@ -463,47 +483,56 @@ fn open_shared_audio_client(
     Ok(OpenedAudioClient {
         client,
         encoding: WasapiSampleEncoding::F32,
+        sample_rate: context.sample_rate,
         share_mode: RealtimeAudioOutputShareMode::Shared,
         period_100ns: engine_period,
         exclusive_fallback_reason,
     })
 }
 
-fn select_exclusive_format(
+fn select_exclusive_formats(
     client: &Audio::IAudioClient,
     context: &RenderContext,
-) -> Result<WasapiFormatCandidate, String> {
-    let candidates = [
+) -> Result<Vec<WasapiFormatCandidate>, String> {
+    let encodings = [
         WasapiSampleEncoding::F32,
         WasapiSampleEncoding::Pcm24In32,
         WasapiSampleEncoding::Pcm24Packed,
         WasapiSampleEncoding::Pcm32,
         WasapiSampleEncoding::Pcm16,
     ];
-    let mut rejected = Vec::with_capacity(candidates.len());
-    for encoding in candidates {
-        let format = match encoding {
-            WasapiSampleEncoding::F32 => {
-                named_float_format(context.sample_rate, context.channels, context.channel_mask)?
+    let rates = exclusive_sample_rate_candidates(context.sample_rate);
+    let mut rejected = Vec::with_capacity(rates.len() * encodings.len());
+    let mut supported = Vec::new();
+    for sample_rate in rates {
+        for encoding in encodings {
+            let format = match encoding {
+                WasapiSampleEncoding::F32 => {
+                    named_float_format(sample_rate, context.channels, context.channel_mask)?
+                }
+                _ => named_pcm_format(
+                    sample_rate,
+                    context.channels,
+                    context.channel_mask,
+                    encoding.container_bits(),
+                    encoding.valid_bits(),
+                )?,
+            };
+            let result = unsafe {
+                client.IsFormatSupported(Audio::AUDCLNT_SHAREMODE_EXCLUSIVE, &format.Format, None)
+            };
+            if result.is_ok() {
+                supported.push(WasapiFormatCandidate { encoding, sample_rate, format });
+            } else {
+                rejected.push(format!("{sample_rate}/{}={result:?}", encoding.label()));
             }
-            _ => named_pcm_format(
-                context.sample_rate,
-                context.channels,
-                context.channel_mask,
-                encoding.container_bits(),
-                encoding.valid_bits(),
-            )?,
-        };
-        let result = unsafe {
-            client.IsFormatSupported(Audio::AUDCLNT_SHAREMODE_EXCLUSIVE, &format.Format, None)
-        };
-        if result.is_ok() {
-            return Ok(WasapiFormatCandidate { encoding, format });
         }
-        rejected.push(format!("{}={result:?}", encoding.label()));
+    }
+    if !supported.is_empty() {
+        return Ok(supported);
     }
     Err(format!(
-        "WASAPI exclusive mode supports none of the allowed exact {} Hz / {} channel mask 0x{:08x} formats; {}",
+        "WASAPI exclusive mode supports none of the allowed {} Hz or nearest standard-rate / {} channel mask 0x{:08x} formats; {}",
         context.sample_rate,
         context.channels,
         context.channel_mask,
@@ -511,9 +540,19 @@ fn select_exclusive_format(
     ))
 }
 
+fn exclusive_sample_rate_candidates(requested: u32) -> Vec<u32> {
+    const STANDARD_RATES: [u32; 11] = [
+        8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+    ];
+    let mut rates = STANDARD_RATES.to_vec();
+    if !rates.contains(&requested) {
+        rates.push(requested);
+    }
+    rates.sort_unstable_by_key(|rate| (rate.abs_diff(requested), *rate));
+    rates
+}
 fn open_exclusive_audio_client(
     endpoint: &Audio::IMMDevice,
-    context: &RenderContext,
     candidate: WasapiFormatCandidate,
 ) -> Result<OpenedAudioClient, String> {
     let mut probe_client = activate_audio_client(endpoint).map_err(|error| match error {
@@ -554,7 +593,7 @@ fn open_exclusive_audio_client(
                 "WASAPI exclusive buffer alignment failed and aligned size was unavailable: {query_error}"
             )
         })?;
-        period = aligned_buffer_duration_100ns(aligned_frames, context.sample_rate)?;
+        period = aligned_buffer_duration_100ns(aligned_frames, candidate.sample_rate)?;
         probe_client =
             activate_audio_client(endpoint).map_err(|activate_error| match activate_error {
                 WindowsWasapiNamedOutputOpenError::Build(detail)
@@ -573,6 +612,7 @@ fn open_exclusive_audio_client(
     Ok(OpenedAudioClient {
         client: probe_client,
         encoding: candidate.encoding,
+        sample_rate: candidate.sample_rate,
         share_mode: RealtimeAudioOutputShareMode::Exclusive,
         period_100ns: period,
         exclusive_fallback_reason: None,
@@ -1124,6 +1164,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exclusive_rate_candidates_keep_exact_first_then_nearest_standard_rates() {
+        let rates = exclusive_sample_rate_candidates(48_000);
+        assert_eq!(&rates[..4], &[48_000, 44_100, 32_000, 22_050]);
+        assert_eq!(rates.iter().filter(|rate| **rate == 48_000).count(), 1);
+
+        let nonstandard = exclusive_sample_rate_candidates(50_000);
+        assert_eq!(nonstandard[0], 50_000);
+        assert_eq!(nonstandard[1], 48_000);
+    }
     #[test]
     fn exclusive_event_packet_transfers_full_buffer_without_padding_query() {
         let packet = sample_render_packet(RealtimeAudioOutputShareMode::Exclusive, 480, || {

@@ -9,6 +9,7 @@ use crossbeam_queue::ArrayQueue;
 #[cfg(test)]
 use mondrian_core::MondrianError;
 use mondrian_core::{AudioChannelLayout, Result};
+use output_rate_converter::OutputSampleRateConverter;
 use parking_lot::Mutex;
 #[cfg(test)]
 use std::path::Path;
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod cpal_output;
+mod output_rate_converter;
 #[cfg(target_os = "windows")]
 mod windows_wasapi_output;
 
@@ -145,6 +147,7 @@ pub(crate) struct RealtimeAudioOutput {
     activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
     snapshot_cache: Arc<Mutex<Option<RealtimeAudioOutputSnapshot>>>,
+    stream_sample_rate: u32,
     _stream: RealtimeAudioOutputStream,
 }
 
@@ -157,6 +160,9 @@ pub(crate) struct RealtimeAudioOutputHandle {
     activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
     snapshot_cache: Arc<Mutex<Option<RealtimeAudioOutputSnapshot>>>,
+    stream_sample_rate: u32,
+    logical_capacity_frames: usize,
+    rate_converter: Option<OutputSampleRateConverter>,
 }
 
 /// Cloneable read-only evidence handle retained by the device worker after
@@ -168,6 +174,7 @@ pub(crate) struct RealtimeAudioOutputObserver {
     activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
     snapshot_cache: Arc<Mutex<Option<RealtimeAudioOutputSnapshot>>>,
+    stream_sample_rate: u32,
 }
 
 /// Identity of one callback-quiescence obligation.
@@ -232,6 +239,9 @@ pub(crate) enum RealtimeAudioOutputEnqueueError {
     /// Interleaved samples do not form complete frames in the declared layout.
     #[error("PCM sample count {samples} is not divisible by {channels} channels")]
     IncompleteInterleavedFrame { samples: usize, channels: usize },
+    /// Stateful output-rate conversion failed before any converted sample was queued.
+    #[error("PCM output sample-rate conversion failed: {detail}")]
+    SampleRateConversionFailed { detail: String },
     /// The whole buffer cannot fit; no sample was admitted.
     #[error("PCM output queue has {available_samples} samples free but needs {required_samples}")]
     InsufficientCapacity {
@@ -674,9 +684,29 @@ impl RealtimeAudioOutput {
         let mut contract = contract;
         let channels = contract.channels();
 
-        let queue_capacity = usize::try_from(sample_rate)
+        let logical_capacity_frames = usize::try_from(sample_rate)
             .ok()
-            .and_then(|rate| rate.checked_mul(usize::from(channels)))
+            .and_then(|rate| rate.checked_mul(2))
+            .ok_or_else(|| {
+                RealtimeAudioOutputOpenFailure::after_selection(
+                    RealtimeAudioOutputOpenFailureCode::QueueCapacityOverflow,
+                    contract,
+                    "two-second logical PCM queue extent overflowed addressable memory",
+                )
+            })?;
+        const MAX_NEGOTIATED_STREAM_RATE: usize = 192_000;
+        let maximum_stream_rate = usize::try_from(sample_rate)
+            .ok()
+            .map(|rate| rate.max(MAX_NEGOTIATED_STREAM_RATE))
+            .ok_or_else(|| {
+                RealtimeAudioOutputOpenFailure::after_selection(
+                    RealtimeAudioOutputOpenFailureCode::QueueCapacityOverflow,
+                    contract,
+                    "physical PCM queue rate exceeded addressable memory",
+                )
+            })?;
+        let queue_capacity = maximum_stream_rate
+            .checked_mul(usize::from(channels))
             .and_then(|samples_per_second| samples_per_second.checked_mul(2))
             .ok_or_else(|| {
                 RealtimeAudioOutputOpenFailure::after_selection(
@@ -699,7 +729,7 @@ impl RealtimeAudioOutput {
                 RealtimeAudioOutputCreateError::Open(failure) => failure,
             },
         )?);
-        let stream = match prepared.backend {
+        let (stream, stream_sample_rate) = match prepared.backend {
             PreparedRealtimeAudioOutputBackend::Cpal { device, config, sample_format } => {
                 let stream = cpal_output::build_and_start(
                     &device,
@@ -710,7 +740,10 @@ impl RealtimeAudioOutput {
                     Arc::clone(&telemetry),
                     contract,
                 )?;
-                RealtimeAudioOutputStream::Cpal { _stream: stream }
+                (
+                    RealtimeAudioOutputStream::Cpal { _stream: stream },
+                    contract.sample_rate,
+                )
             }
             #[cfg(target_os = "windows")]
             PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed {
@@ -747,12 +780,32 @@ impl RealtimeAudioOutput {
                 prepared.evidence.exclusive_fallback_reason = negotiation.exclusive_fallback_reason;
                 prepared.evidence.stream_container_bits = Some(negotiation.container_bits);
                 prepared.evidence.stream_valid_bits = Some(negotiation.valid_bits);
+                prepared.evidence.stream_sample_rate = negotiation.sample_rate;
                 prepared.evidence.buffer_frames = Some(negotiation.buffer_frames);
                 prepared.evidence.period_100ns = Some(negotiation.period_100ns);
-                RealtimeAudioOutputStream::WindowsWasapiNamed { _stream: stream }
+                (
+                    RealtimeAudioOutputStream::WindowsWasapiNamed { _stream: stream },
+                    negotiation.sample_rate,
+                )
             }
         };
 
+        let rate_converter = (stream_sample_rate != contract.sample_rate)
+            .then(|| {
+                OutputSampleRateConverter::new(
+                    contract.sample_rate,
+                    stream_sample_rate,
+                    usize::from(channels),
+                )
+            })
+            .transpose()
+            .map_err(|detail| {
+                RealtimeAudioOutputOpenFailure::after_selection(
+                    RealtimeAudioOutputOpenFailureCode::StreamBuildFailed,
+                    contract,
+                    detail,
+                )
+            })?;
         let snapshot_cache = Arc::new(Mutex::new(None));
         let device_evidence = Arc::new(prepared.evidence);
         let output = Self {
@@ -763,6 +816,7 @@ impl RealtimeAudioOutput {
             activation_elapsed_ns: Arc::new(AtomicU64::new(0)),
             telemetry,
             snapshot_cache,
+            stream_sample_rate,
             _stream: stream,
         };
         let handle = RealtimeAudioOutputHandle {
@@ -773,6 +827,9 @@ impl RealtimeAudioOutput {
             activation_elapsed_ns: Arc::clone(&output.activation_elapsed_ns),
             telemetry: Arc::clone(&output.telemetry),
             snapshot_cache: Arc::clone(&output.snapshot_cache),
+            stream_sample_rate,
+            logical_capacity_frames,
+            rate_converter,
         };
         let observer = RealtimeAudioOutputObserver {
             contract,
@@ -781,6 +838,7 @@ impl RealtimeAudioOutput {
             activation_elapsed_ns: Arc::clone(&output.activation_elapsed_ns),
             telemetry: Arc::clone(&output.telemetry),
             snapshot_cache: Arc::clone(&output.snapshot_cache),
+            stream_sample_rate,
         };
         Ok((output, handle, observer))
     }
@@ -808,6 +866,7 @@ impl RealtimeAudioOutput {
     pub(crate) fn snapshot(&self) -> RealtimeAudioOutputSnapshot {
         capture_output_snapshot(
             self.contract,
+            self.stream_sample_rate,
             &self.queue,
             &self.callback_control,
             &self.activation_elapsed_ns,
@@ -848,9 +907,27 @@ impl RealtimeAudioOutputHandle {
             .capacity()
             .checked_sub(self.queue.len())
             .ok_or(RealtimeAudioOutputEnqueueError::InvalidQueueOccupancy)?;
-        if buffer.samples.len() > available_samples {
+        let converted_samples = if let Some(converter) = self.rate_converter.as_mut() {
+            let maximum_samples =
+                converter.maximum_output_samples(buffer.samples.len()).map_err(|detail| {
+                    RealtimeAudioOutputEnqueueError::SampleRateConversionFailed { detail }
+                })?;
+            if maximum_samples > available_samples {
+                return Err(RealtimeAudioOutputEnqueueError::InsufficientCapacity {
+                    required_samples: maximum_samples,
+                    available_samples,
+                });
+            }
+            Some(converter.process(&buffer.samples).map_err(|detail| {
+                RealtimeAudioOutputEnqueueError::SampleRateConversionFailed { detail }
+            })?)
+        } else {
+            None
+        };
+        let samples = converted_samples.as_deref().unwrap_or(&buffer.samples);
+        if samples.len() > available_samples {
             return Err(RealtimeAudioOutputEnqueueError::InsufficientCapacity {
-                required_samples: buffer.samples.len(),
+                required_samples: samples.len(),
                 available_samples,
             });
         }
@@ -858,7 +935,7 @@ impl RealtimeAudioOutputHandle {
         // it is the queue's sole producer. The device callback only pops. Once
         // the whole-buffer capacity preflight succeeds, every push is proven to
         // succeed and the interleaved buffer is admitted atomically.
-        for sample in &buffer.samples {
+        for sample in samples {
             assert!(
                 self.queue.push(*sample).is_ok(),
                 "single-producer PCM capacity proof was violated"
@@ -867,8 +944,11 @@ impl RealtimeAudioOutputHandle {
         Ok(())
     }
 
-    pub(crate) fn clear(&self) {
+    pub(crate) fn clear(&mut self) {
         while self.queue.pop().is_some() {}
+        if let Some(converter) = self.rate_converter.as_mut() {
+            converter.reset();
+        }
     }
 
     pub(crate) fn deactivate(
@@ -923,7 +1003,10 @@ impl RealtimeAudioOutputHandle {
         frames: usize,
     ) -> std::result::Result<(), RealtimeAudioOutputControlError> {
         let channels = self.contract.channel_layout.channel_count();
-        let requested_samples = frames
+        let physical_frames =
+            scale_frames_ceil_usize(frames, self.contract.sample_rate, self.stream_sample_rate)
+                .ok_or(RealtimeAudioOutputControlError::SampleCoordinateOverflow)?;
+        let requested_samples = physical_frames
             .checked_mul(channels)
             .ok_or(RealtimeAudioOutputControlError::SampleCoordinateOverflow)?;
         let buffered_samples = self.queue.len();
@@ -931,7 +1014,11 @@ impl RealtimeAudioOutputHandle {
             return Err(
                 RealtimeAudioOutputControlError::InsufficientBufferedFrames {
                     requested_frames: frames,
-                    buffered_frames: buffered_samples / channels,
+                    buffered_frames: scale_frames_floor_usize(
+                        buffered_samples / channels,
+                        self.stream_sample_rate,
+                        self.contract.sample_rate,
+                    ),
                 },
             );
         }
@@ -940,7 +1027,11 @@ impl RealtimeAudioOutputHandle {
                 return Err(
                     RealtimeAudioOutputControlError::InsufficientBufferedFrames {
                         requested_frames: frames,
-                        buffered_frames: self.queue.len() / channels,
+                        buffered_frames: scale_frames_floor_usize(
+                            self.queue.len() / channels,
+                            self.stream_sample_rate,
+                            self.contract.sample_rate,
+                        ),
                     },
                 );
             }
@@ -949,11 +1040,15 @@ impl RealtimeAudioOutputHandle {
     }
 
     pub(crate) fn capacity_frames(&self) -> usize {
-        self.queue.capacity() / self.contract.channel_layout.channel_count()
+        self.logical_capacity_frames
     }
 
     pub(crate) fn buffered_frames(&self) -> usize {
-        self.queue.len() / self.contract.channel_layout.channel_count()
+        scale_frames_floor_usize(
+            self.queue.len() / self.contract.channel_layout.channel_count(),
+            self.stream_sample_rate,
+            self.contract.sample_rate,
+        )
     }
 
     pub(crate) fn device_evidence(&self) -> RealtimeAudioOutputDeviceEvidence {
@@ -963,6 +1058,7 @@ impl RealtimeAudioOutputHandle {
     pub(crate) fn snapshot(&self) -> RealtimeAudioOutputSnapshot {
         capture_output_snapshot(
             self.contract,
+            self.stream_sample_rate,
             &self.queue,
             &self.callback_control,
             &self.activation_elapsed_ns,
@@ -976,6 +1072,7 @@ impl RealtimeAudioOutputObserver {
     pub(crate) fn snapshot(&self) -> RealtimeAudioOutputSnapshot {
         capture_output_snapshot(
             self.contract,
+            self.stream_sample_rate,
             &self.queue,
             &self.callback_control,
             &self.activation_elapsed_ns,
@@ -985,8 +1082,45 @@ impl RealtimeAudioOutputObserver {
     }
 }
 
+fn scale_frames_floor_u64(frames: u64, from_rate: u32, to_rate: u32) -> u64 {
+    if from_rate == to_rate {
+        return frames;
+    }
+    (u128::from(frames) * u128::from(to_rate) / u128::from(from_rate)).min(u128::from(u64::MAX))
+        as u64
+}
+
+fn scale_frames_ceil_u64(frames: u64, from_rate: u32, to_rate: u32) -> u64 {
+    if from_rate == to_rate {
+        return frames;
+    }
+    (u128::from(frames) * u128::from(to_rate))
+        .div_ceil(u128::from(from_rate))
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn scale_frames_floor_usize(frames: usize, from_rate: u32, to_rate: u32) -> usize {
+    if from_rate == to_rate {
+        return frames;
+    }
+    ((frames as u128) * u128::from(to_rate) / u128::from(from_rate)).min(usize::MAX as u128)
+        as usize
+}
+
+fn scale_frames_ceil_usize(frames: usize, from_rate: u32, to_rate: u32) -> Option<usize> {
+    if from_rate == to_rate {
+        return Some(frames);
+    }
+    (frames as u128)
+        .checked_mul(u128::from(to_rate))?
+        .div_ceil(u128::from(from_rate))
+        .try_into()
+        .ok()
+}
+
 fn capture_output_snapshot(
     contract: RealtimeAudioOutputContract,
+    stream_sample_rate: u32,
     queue: &ArrayQueue<f32>,
     callback_control: &RealtimeAudioCallbackControl,
     activation_elapsed_ns: &AtomicU64,
@@ -1038,20 +1172,41 @@ fn capture_output_snapshot(
             captured_at,
             stream_generation: telemetry.stream_generation,
             contract,
-            callback_consumed_frames,
-            active_callback_consumed_frames,
+            callback_consumed_frames: scale_frames_floor_u64(
+                callback_consumed_frames,
+                stream_sample_rate,
+                contract.sample_rate,
+            ),
+            active_callback_consumed_frames: scale_frames_floor_u64(
+                active_callback_consumed_frames,
+                stream_sample_rate,
+                contract.sample_rate,
+            ),
             active_duration: active
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(activation_elapsed_ns))),
             callback_count,
-            underrun_frames,
-            last_callback_frames: last_callback_frames.min(u32::MAX as u64) as u32,
+            underrun_frames: scale_frames_floor_u64(
+                underrun_frames,
+                stream_sample_rate,
+                contract.sample_rate,
+            ),
+            last_callback_frames: scale_frames_ceil_u64(
+                last_callback_frames,
+                stream_sample_rate,
+                contract.sample_rate,
+            )
+            .min(u64::from(u32::MAX)) as u32,
             last_callback_playback_delay: (last_callback_elapsed_ns > 0)
                 .then(|| Duration::from_nanos(last_callback_playback_delay_ns)),
             last_callback_playback_delay_uncertainty: (last_callback_elapsed_ns > 0)
                 .then(|| Duration::from_nanos(last_callback_playback_delay_uncertainty_ns)),
             last_callback_age: (last_callback_elapsed_ns > 0)
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(last_callback_elapsed_ns))),
-            buffered_frames: queue.len() / contract.channel_layout.channel_count(),
+            buffered_frames: scale_frames_floor_usize(
+                queue.len() / contract.channel_layout.channel_count(),
+                stream_sample_rate,
+                contract.sample_rate,
+            ),
             stream_failed,
             active,
         };
@@ -1247,6 +1402,7 @@ mod tests {
             exclusive_fallback_reason: None,
             stream_container_bits: None,
             stream_valid_bits: None,
+            stream_sample_rate: contract.sample_rate,
             buffer_frames: None,
             period_100ns: None,
             was_system_default: true,
@@ -1270,11 +1426,72 @@ mod tests {
                     RealtimeAudioOutputTelemetry::new().expect("allocate test stream generation"),
                 ),
                 snapshot_cache: Arc::new(Mutex::new(None)),
+                stream_sample_rate: contract.sample_rate,
+                logical_capacity_frames: capacity_samples / contract.channel_layout.channel_count(),
+                rate_converter: None,
             },
             queue,
         )
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual physical WASAPI rate-conversion gate; requires MONDRIAN_WASAPI_EXCLUSIVE_DEVICE_ID"]
+    fn external_wasapi_rate_conversion_streams_program_pcm_at_negotiated_device_rate() {
+        let device_id = std::env::var("MONDRIAN_WASAPI_EXCLUSIVE_DEVICE_ID")
+            .expect("set MONDRIAN_WASAPI_EXCLUSIVE_DEVICE_ID to one discovered WASAPI identity");
+        let selection = RealtimeAudioOutputDeviceSelection::SpecificExclusive {
+            device_id: crate::RealtimeAudioOutputDeviceId::new(device_id)
+                .expect("valid WASAPI device identity"),
+        };
+        let (output, mut handle, observer) =
+            RealtimeAudioOutput::try_new(&selection, 48_000, AudioChannelLayout::Stereo)
+                .expect("open required-exclusive output");
+        let evidence = handle.device_evidence();
+        assert_eq!(
+            evidence.share_mode,
+            crate::RealtimeAudioOutputShareMode::Exclusive
+        );
+        assert_ne!(
+            evidence.stream_sample_rate, evidence.contract.sample_rate,
+            "this gate requires a device-rate fallback rather than an exact-rate endpoint"
+        );
+
+        let mut pcm = AudioBuffer::silent(48_000, AudioChannelLayout::Stereo, 48_000);
+        for (frame, samples) in pcm.samples.chunks_exact_mut(2).enumerate() {
+            let sample =
+                0.02 * (2.0 * std::f32::consts::PI * 1_000.0 * frame as f32 / 48_000.0).sin();
+            samples.fill(sample);
+        }
+        handle.enqueue(&pcm).expect("queue converted program PCM");
+        let token = handle.deactivate().expect("obtain inactive generation token");
+        handle
+            .activate_after_discard(token, 0)
+            .expect("activate converted physical stream");
+        std::thread::sleep(Duration::from_millis(250));
+        let snapshot = handle.snapshot();
+        assert!(snapshot.active);
+        assert!(!snapshot.stream_failed);
+        assert_eq!(snapshot.underrun_frames, 0);
+        assert!(snapshot.callback_count > 0);
+        assert!(snapshot.active_callback_consumed_frames > 0);
+        assert_eq!(snapshot.contract.sample_rate, 48_000);
+        assert!(snapshot.active_callback_consumed_frames <= snapshot.callback_consumed_frames);
+        drop(observer);
+        drop(handle);
+        drop(output);
+    }
+
+    #[test]
+    fn physical_frame_counts_project_monotonically_to_program_rate() {
+        assert_eq!(scale_frames_floor_u64(44_100, 44_100, 48_000), 48_000);
+        assert_eq!(scale_frames_ceil_u64(132, 44_100, 48_000), 144);
+        assert_eq!(scale_frames_floor_usize(44_099, 44_100, 48_000), 47_998);
+        assert_eq!(
+            scale_frames_ceil_usize(48_000, 48_000, 44_100),
+            Some(44_100)
+        );
+    }
     #[test]
     fn callback_age_includes_work_after_delay_sampling() {
         let mut telemetry =
@@ -1293,6 +1510,7 @@ mod tests {
         let callback_control = RealtimeAudioCallbackControl::new();
         let snapshot = capture_output_snapshot(
             output_contract(48_000, AudioChannelLayout::Stereo),
+            48_000,
             &queue,
             &callback_control,
             &AtomicU64::new(0),
@@ -1357,6 +1575,7 @@ mod tests {
         let snapshot_cache = Mutex::new(None);
         let initial = capture_output_snapshot(
             output_contract(48_000, AudioChannelLayout::Stereo),
+            48_000,
             &queue,
             &callback_control,
             &activation_elapsed_ns,
@@ -1385,6 +1604,7 @@ mod tests {
         while !writer.is_finished() {
             let snapshot = capture_output_snapshot(
                 output_contract(48_000, AudioChannelLayout::Stereo),
+                48_000,
                 &queue,
                 &callback_control,
                 &activation_elapsed_ns,
@@ -1392,6 +1612,7 @@ mod tests {
                 &snapshot_cache,
             );
             assert!(!snapshot.stream_failed);
+            assert_eq!(snapshot.underrun_frames, 0);
             assert_eq!(
                 snapshot.callback_consumed_frames,
                 snapshot.callback_count * 2
@@ -1413,6 +1634,7 @@ mod tests {
 
         let snapshot = capture_output_snapshot(
             output_contract(48_000, AudioChannelLayout::Stereo),
+            48_000,
             &queue,
             &callback_control,
             &activation_elapsed_ns,

@@ -461,8 +461,8 @@ impl RealtimeAudioOutputManager {
     }
 
     /// Drop all queued PCM without affecting lifecycle retries.
-    pub fn clear(&self) {
-        if let Some(handle) = &self.handle {
+    pub fn clear(&mut self) {
+        if let Some(handle) = &mut self.handle {
             handle.clear();
         }
     }
