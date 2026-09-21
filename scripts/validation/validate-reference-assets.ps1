@@ -417,7 +417,10 @@ if (-not (Has-Property $commercialEngine "complete_golden")) {
         Add-Issue "error" "commercial-engine.complete-golden-contract-mismatch" "Commercial engine contract must reference the current Golden Project contract"
     }
     if ($commercialEngine.complete_golden.report_schema_version -ne 3) {
-        Add-Issue "error" "commercial-engine.complete-golden-report-schema-unsupported" "Commercial engine contract must require Complete Golden report schema 3"
+        Add-Issue "error" "commercial-engine.complete-golden-report-schema-unsupported" "Commercial engine contract must require aggregate report schema 3"
+    }
+    if ($commercialEngine.complete_golden.process_report_schema_version -ne 2) {
+        Add-Issue "error" "commercial-engine.complete-golden-process-report-schema-unsupported" "Commercial engine contract must require process report schema 2"
     }
     foreach ($field in @("build_timeout_seconds", "process_timeout_seconds")) {
         if (-not (Has-Property $commercialEngine.complete_golden $field)) {

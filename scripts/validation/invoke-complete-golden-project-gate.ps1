@@ -50,10 +50,11 @@ function Assert-ExactStringSet(
 function Assert-CompleteGoldenReport(
     [pscustomobject]$Report,
     [pscustomobject]$Contract,
+    [int]$ExpectedSchemaVersion,
     [string[]]$RequiredSliceIds
 ) {
     if (
-        $Report.schema_version -ne 1 -or
+        $Report.schema_version -ne $ExpectedSchemaVersion -or
         $Report.profile -ne "windows-alpha-complete-golden-project" -or
         $Report.contract_id -ne $Contract.id -or
         $Report.status -ne "pass" -or
@@ -297,7 +298,11 @@ try {
         }
 
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-        Assert-CompleteGoldenReport $report $contract $requiredSliceIds
+        Assert-CompleteGoldenReport `
+            $report `
+            $contract `
+            ([int]$commercialEngineContract.complete_golden.process_report_schema_version) `
+            $requiredSliceIds
         if (-not $processResult.forced_after_report -and $processResult.exit_code -ne 0) {
             throw "Complete Golden pass $index returned exit code $($processResult.exit_code)."
         }

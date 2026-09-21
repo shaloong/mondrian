@@ -207,6 +207,17 @@ fn complete_golden_supervisor_build_is_non_incremental() {
 }
 
 #[test]
+fn complete_golden_supervisor_binds_the_process_report_schema() {
+    let supervisor =
+        include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");
+    let commercial_engine_contract =
+        include_str!("../../../tests/validation/windows-commercial-engine.json");
+    assert!(commercial_engine_contract.contains(r#""process_report_schema_version": 2"#));
+    assert!(supervisor.contains("$Report.schema_version -ne $ExpectedSchemaVersion"));
+    assert!(supervisor.contains("complete_golden.process_report_schema_version"));
+}
+
+#[test]
 fn complete_golden_supervisor_separates_contract_owned_deadlines() {
     let supervisor =
         include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");
