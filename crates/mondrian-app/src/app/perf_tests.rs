@@ -86,8 +86,8 @@ use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_media::AudioPlaybackSnapshot;
 use mondrian_media::{
     probe_media_info, MediaInfo, PreviewDecodeAccessMode, PreviewDecodeExecutionStage,
-    PreviewDecodeStageDurations, PreviewHardwareDecodeRequest, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueAggregate,
+    PreviewDecodeStageDurations, PreviewHardwareDecodeRequest, VideoCodecProfile,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
 use mondrian_playback::{
@@ -113,6 +113,62 @@ const PROFESSIONAL_NATIVE_VIDEO_GPU_IMPORTS_PER_CANDIDATE_BUDGET: usize = 4;
 const PROFESSIONAL_NATIVE_VIDEO_GPU_CANDIDATE_OVERHEAD: usize = 128;
 const PROFESSIONAL_NATIVE_VIDEO_GPU_OBSERVATION_CAPACITY_LIMIT: usize = 1_000_000;
 const QUALIFIED_MAX_FRAME_DISPLACEMENT: u64 = 4;
+const SEALED_REALTIME_4K60_FRAME_COUNT: usize = 600;
+const SEALED_REALTIME_4K60_DECODE_P95_LIMIT_US: u64 = 50_000;
+const SEALED_REALTIME_4K60_QUEUE_WAIT_P95_LIMIT_US: u64 = 10_000;
+const SEALED_REALTIME_4K60_READY_TIMEOUT_MS: u64 = 30_000;
+const SEALED_REALTIME_4K60_TOTAL_TIMEOUT_MS: u64 = 180_000;
+const SEALED_REALTIME_4K60_SEEK_PROBES: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalPlaybackQualification {
+    Development,
+    SealedRealtime4k60,
+    ProfessionalLongRun,
+}
+
+impl ExternalPlaybackQualification {
+    const fn is_professional(self) -> bool {
+        matches!(self, Self::ProfessionalLongRun)
+    }
+
+    const fn is_sealed(self) -> bool {
+        !matches!(self, Self::Development)
+    }
+}
+
+fn ensure_sealed_realtime_4k60_media(media_info: &MediaInfo) -> anyhow::Result<()> {
+    let video = media_info
+        .primary_video()
+        .context("sealed realtime 4K60 gate requires a primary video stream")?;
+    anyhow::ensure!(
+        video.width == 3840 && video.height == 2160,
+        "sealed realtime 4K60 gate requires exact 3840x2160 media, probed {}x{}",
+        video.width,
+        video.height
+    );
+    anyhow::ensure!(
+        video.frame_rate_proven && video.frame_rate.reduce() == Rational::FPS_60,
+        "sealed realtime 4K60 gate requires a proven exact 60/1 frame rate, probed {}/{} (proven={})",
+        video.frame_rate.num,
+        video.frame_rate.den,
+        video.frame_rate_proven
+    );
+    anyhow::ensure!(
+        video.codec_profile == VideoCodecProfile::HevcMain10,
+        "sealed realtime 4K60 gate requires HEVC Main10, probed {:?}",
+        video.codec_profile
+    );
+    let sampling = video
+        .proven_sampling()
+        .context("sealed realtime 4K60 gate requires decoder-proven pixel format and bit depth")?;
+    anyhow::ensure!(
+        sampling.bit_depth >= 10,
+        "sealed realtime 4K60 gate requires at least 10-bit media, probed {}-bit",
+        sampling.bit_depth
+    );
+    Ok(())
+}
 
 fn commit_perf_media_probe(
     library: &AssetLibrary,
@@ -4421,7 +4477,7 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         );
         return Ok(());
     };
-    run_external_continuous_playback_gate(video_path, false, 1)
+    run_external_continuous_playback_gate(video_path, ExternalPlaybackQualification::Development, 1)
 }
 
 #[test]
@@ -4437,7 +4493,7 @@ fn preview_media_external_dual_video_playback_smoke() -> anyhow::Result<()> {
         );
         return Ok(());
     };
-    run_external_continuous_playback_gate(video_path, false, 2)
+    run_external_continuous_playback_gate(video_path, ExternalPlaybackQualification::Development, 2)
 }
 
 #[test]
@@ -4449,7 +4505,11 @@ fn preview_media_realtime_4k60_dual_video_gate() -> anyhow::Result<()> {
         .context(
             "MONDRIAN_REALTIME_4K60_MEDIA_PATH is required; the sealed realtime gate never skips",
         )?;
-    run_external_continuous_playback_gate(video_path, false, 2)
+    run_external_continuous_playback_gate(
+        video_path,
+        ExternalPlaybackQualification::SealedRealtime4k60,
+        2,
+    )
 }
 
 #[test]
@@ -5511,7 +5571,11 @@ fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow:
             .context(
                 "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips",
             )?;
-    run_external_continuous_playback_gate(video_path, true, 1)
+    run_external_continuous_playback_gate(
+        video_path,
+        ExternalPlaybackQualification::ProfessionalLongRun,
+        1,
+    )
 }
 
 #[test]
@@ -5803,7 +5867,7 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
 
 fn run_external_continuous_playback_gate(
     video_path: PathBuf,
-    professional: bool,
+    qualification: ExternalPlaybackQualification,
     video_layer_count: u32,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -5811,12 +5875,28 @@ fn run_external_continuous_playback_gate(
         "external playback gate supports one or two video layers"
     );
     anyhow::ensure!(
+        !matches!(
+            qualification,
+            ExternalPlaybackQualification::SealedRealtime4k60
+        ) || video_layer_count == 2,
+        "sealed realtime 4K60 gate requires exactly two video layers"
+    );
+    anyhow::ensure!(
         video_path.exists(),
         "external playback media path does not exist: {}",
         video_path.display()
     );
 
+    let professional = qualification.is_professional();
+    let sealed = qualification.is_sealed();
+
     let media_info = probe_external_preview_media_info(&video_path)?;
+    if matches!(
+        qualification,
+        ExternalPlaybackQualification::SealedRealtime4k60
+    ) {
+        ensure_sealed_realtime_4k60_media(&media_info)?;
+    }
     let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
     let professional_min_frames = professional
         .then(|| professional_min_frame_count(&media_probe))
@@ -5832,14 +5912,21 @@ fn run_external_continuous_playback_gate(
     } else {
         1_800
     };
-    let frame_count = env_usize_clamped(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES",
-        default_frame_count,
-        professional_min_frames,
-        max_frame_count,
-    );
+    let frame_count = if matches!(
+        qualification,
+        ExternalPlaybackQualification::SealedRealtime4k60
+    ) {
+        SEALED_REALTIME_4K60_FRAME_COUNT
+    } else {
+        env_usize_clamped(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES",
+            default_frame_count,
+            professional_min_frames,
+            max_frame_count,
+        )
+    };
     let probed_frame_interval_ns = media_probe.frame_interval_ns()?;
-    let frame_interval_ns = if professional {
+    let frame_interval_ns = if sealed {
         probed_frame_interval_ns
     } else {
         std::env::var("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS")
@@ -5849,7 +5936,7 @@ fn run_external_continuous_playback_gate(
             .map(|milliseconds| milliseconds.saturating_mul(1_000_000))
             .unwrap_or(probed_frame_interval_ns)
     };
-    if professional {
+    if sealed {
         media_probe.ensure_observation_coverage(frame_count, frame_interval_ns)?;
     }
     let default_playback_threshold_ms = if professional {
@@ -5861,7 +5948,7 @@ fn run_external_continuous_playback_gate(
             .saturating_div(1_000_000)
             .saturating_add(5_000)
     };
-    let playback_threshold_ms = if professional {
+    let playback_threshold_ms = if sealed {
         default_playback_threshold_ms
     } else {
         env_u128(
@@ -5871,11 +5958,15 @@ fn run_external_continuous_playback_gate(
     };
     let gpu_candidate_threshold_ms = if professional {
         PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS
+    } else if sealed {
+        2_000
     } else {
         env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000)
     };
     let ready_timeout = Duration::from_millis(if professional {
         PROFESSIONAL_READY_TIMEOUT_MS
+    } else if sealed {
+        SEALED_REALTIME_4K60_READY_TIMEOUT_MS
     } else {
         env_u128(
             "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_TIMEOUT_MS",
@@ -5889,6 +5980,8 @@ fn run_external_continuous_playback_gate(
     };
     let overall_timeout = Duration::from_millis(if professional {
         PROFESSIONAL_TOTAL_TIMEOUT_MS
+    } else if sealed {
+        SEALED_REALTIME_4K60_TOTAL_TIMEOUT_MS
     } else {
         env_u128(
             "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
@@ -5897,11 +5990,15 @@ fn run_external_continuous_playback_gate(
     });
     let playback_p95_limit_us = if professional {
         PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US
+    } else if sealed {
+        SEALED_REALTIME_4K60_DECODE_P95_LIMIT_US
     } else {
         env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 60_000)
     };
     let playback_queue_wait_p95_limit_us = if professional {
         PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US
+    } else if sealed {
+        SEALED_REALTIME_4K60_QUEUE_WAIT_P95_LIMIT_US
     } else {
         env_u64(
             "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US",
@@ -5910,6 +6007,8 @@ fn run_external_continuous_playback_gate(
     };
     let min_visible_percent = if professional {
         PROFESSIONAL_MIN_VISIBLE_PERCENT
+    } else if sealed {
+        95
     } else {
         env_usize_clamped(
             "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT",
@@ -5920,6 +6019,8 @@ fn run_external_continuous_playback_gate(
     };
     let min_ready_basis_points = if professional {
         PROFESSIONAL_MIN_READY_BASIS_POINTS
+    } else if sealed {
+        9_950
     } else {
         env_usize_clamped(
             "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_BASIS_POINTS",
@@ -5936,6 +6037,11 @@ fn run_external_continuous_playback_gate(
     let deadline = Instant::now() + overall_timeout;
     let scenario = if professional {
         "preview_media_professional_4k_hevc_main10_hardware_playback"
+    } else if matches!(
+        qualification,
+        ExternalPlaybackQualification::SealedRealtime4k60
+    ) {
+        "preview_media_realtime_4k60_dual_video"
     } else if video_layer_count == 2 {
         "preview_media_external_dual_video_playback"
     } else {
@@ -5943,6 +6049,8 @@ fn run_external_continuous_playback_gate(
     };
     let seek_probe_count = if professional {
         PROFESSIONAL_MIN_WARM_SEEKS.saturating_add(PROFESSIONAL_MIN_ACCURATE_SEEKS) as usize
+    } else if sealed {
+        SEALED_REALTIME_4K60_SEEK_PROBES
     } else if video_layer_count == 2 {
         std::env::var("MONDRIAN_PREVIEW_EXTERNAL_SEEK_PROBES")
             .ok()
@@ -5958,12 +6066,14 @@ fn run_external_continuous_playback_gate(
     };
     let seek_threshold_per_settled_ms = if professional {
         1_000
+    } else if sealed {
+        3_000
     } else {
         env_u128("MONDRIAN_PREVIEW_EXTERNAL_SEEK_MS", 3_000)
     };
     let resume_probe_frames = if seek_probe_count == 0 {
         0
-    } else if professional {
+    } else if sealed {
         12
     } else {
         env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_RESUME_FRAMES", 12, 4, 60)
@@ -5979,7 +6089,7 @@ fn run_external_continuous_playback_gate(
         frame_interval_ns,
         source_frame_count,
     );
-    let sequence_frame_count = if professional {
+    let sequence_frame_count = if sealed {
         default_sequence_frame_count
     } else {
         env_usize_clamped(
@@ -6008,7 +6118,7 @@ fn run_external_continuous_playback_gate(
             resize_probe_frames: if seek_probe_count == 0 { 0 } else { 8 },
             video_layer_count,
             probe_cancellation_recovery: professional,
-            native_video_gpu_timing: if professional {
+            native_video_gpu_timing: if sealed {
                 PreviewNativeVideoGpuTimingPolicy::Strict {
                     observation_capacity:
                         professional_native_video_gpu_timing_observation_capacity(
@@ -6021,7 +6131,7 @@ fn run_external_continuous_playback_gate(
             },
             absolute_deadline: Some(deadline),
             authored_output: PreviewMediaAuthoredOutput::SourceFull,
-            gpu_extent_requirement: if professional {
+            gpu_extent_requirement: if sealed {
                 PreviewGpuExtentRequirement::AuthoredFull
             } else {
                 PreviewGpuExtentRequirement::ProductionSelected
@@ -7367,25 +7477,17 @@ fn run_headless_pause_seek_resume_probe(
         state.playback_engine.snapshot().state == mondrian_playback::TransportState::Paused,
         "pause-seek-resume probe must begin from Paused transport"
     );
+    let preparation_deadline = Instant::now()
+        .checked_add(timeout)
+        .context("derive pause-seek-resume stopped-picture deadline")?;
+    let preparation = realtime.prepare_stopped_picture(state, gpu_summary, preparation_deadline)?;
+    anyhow::ensure!(
+        preparation.exact_physical_picture_ready,
+        "pause-seek-resume stopped preparation omitted its exact physical picture"
+    );
     state.play()?;
-    let initial = {
-        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-        let initial = wait_for_headless_gpu_ready_observation(
-            preview_service,
-            state,
-            gpu_adapter,
-            gpu_summary,
-            timeout,
-        )?;
-        wait_for_headless_playback_preroll(
-            preview_service,
-            state,
-            gpu_adapter,
-            gpu_summary,
-            timeout,
-        )?;
-        initial
-    };
+    realtime.begin_realtime(state, None)?;
+    let initial = realtime.complete_current_video_opportunity(state, gpu_summary, timeout)?;
     anyhow::ensure!(
         initial.current_gpu_ready,
         "resumed playback failed to establish an exact current presentation"
@@ -7396,7 +7498,6 @@ fn run_headless_pause_seek_resume_probe(
     let mut observed_observations = 0usize;
     let mut first_epoch = None;
     let mut last_epoch = None;
-    realtime.begin_realtime(state, None)?;
     for _ in 0..observation_count {
         match realtime.run_video_interval(state, gpu_summary, timeout)? {
             HeadlessRealtimeIntervalOutcome::Advanced { epoch, sample, .. } => {

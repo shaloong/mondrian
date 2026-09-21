@@ -1090,6 +1090,23 @@ impl HeadlessSettledPictureEvidence {
         })
     }
 
+    fn from_prepared(
+        status: HeadlessGpuCandidateStatus,
+        binding: HeadlessGpuCandidateBinding,
+        output_key: super::preview_execution::PreviewOutputKey,
+        current: HeadlessGpuCandidateIntent,
+        physical_output_matches: bool,
+        generation_healthy: bool,
+    ) -> Option<Self> {
+        headless_candidate_is_ready_for_sample(
+            status,
+            Some(binding),
+            current,
+            physical_output_matches && generation_healthy,
+        )
+        .then_some(Self { status, binding, output_key })
+    }
+
     fn matches(
         &self,
         current: HeadlessGpuCandidateIntent,
@@ -1270,6 +1287,10 @@ impl HeadlessRealtimePlaybackSession {
             !state.is_playing(),
             "stopped preparation requires nonplaying transport"
         );
+        // Any prior realtime binding belongs to the old stopped coordinate.
+        // Publish a replacement only after this preparation proves the exact
+        // current Preview output and its physical GPU owner.
+        self.settled_picture = None;
         let started = Instant::now();
         anyhow::ensure!(
             started < deadline,
@@ -1365,6 +1386,28 @@ impl HeadlessRealtimePlaybackSession {
                 && physical
                 && !self.gpu.has_submission_in_flight()
             {
+                let binding = binding
+                    .context("stopped picture readiness omitted its exact candidate binding")?;
+                let output_key = match output_binding.as_ref() {
+                    Some(HeadlessGpuCandidateOutputBinding::Gpu(key)) => key.clone(),
+                    Some(HeadlessGpuCandidateOutputBinding::NonGpu) | None => {
+                        anyhow::bail!(
+                            "stopped picture readiness omitted its physical GPU output binding"
+                        )
+                    }
+                };
+                self.settled_picture = HeadlessSettledPictureEvidence::from_prepared(
+                    effective_status,
+                    binding,
+                    output_key,
+                    observed,
+                    physical,
+                    self.gpu.device_generation_terminal().is_none(),
+                );
+                anyhow::ensure!(
+                    self.settled_picture.is_some(),
+                    "stopped picture readiness could not preserve its exact physical binding"
+                );
                 return Ok(HeadlessStoppedPicturePreparation {
                     epoch: target.epoch.get(),
                     quality_revision: target.quality_revision,
@@ -4020,21 +4063,45 @@ mod tests {
             frame: 41,
             pending_demand: None,
         };
-        let mut evidence = HeadlessSettledPictureEvidence {
-            status: HeadlessGpuCandidateStatus::Ready,
-            binding: HeadlessGpuCandidateBinding {
-                intent,
-                state: HeadlessGpuCandidateBindingState::Satisfied,
-            },
-            output_key: super::super::preview_execution::PreviewOutputKey::new(
-                mondrian_core::SequenceId::new(),
-                64,
-                64,
-                super::super::preview_execution::PreviewSemanticIdentity::from_test_fingerprint(
-                    [7; 32],
-                ),
-            ),
+        let binding = HeadlessGpuCandidateBinding {
+            intent,
+            state: HeadlessGpuCandidateBindingState::Satisfied,
         };
+        let output_key = super::super::preview_execution::PreviewOutputKey::new(
+            mondrian_core::SequenceId::new(),
+            64,
+            64,
+            super::super::preview_execution::PreviewSemanticIdentity::from_test_fingerprint(
+                [7; 32],
+            ),
+        );
+        let mut evidence = HeadlessSettledPictureEvidence::from_prepared(
+            HeadlessGpuCandidateStatus::Ready,
+            binding,
+            output_key.clone(),
+            intent,
+            true,
+            true,
+        )
+        .expect("verified preparation must preserve its exact physical binding");
+        assert!(HeadlessSettledPictureEvidence::from_prepared(
+            HeadlessGpuCandidateStatus::Ready,
+            binding,
+            output_key.clone(),
+            intent,
+            false,
+            true,
+        )
+        .is_none());
+        assert!(HeadlessSettledPictureEvidence::from_prepared(
+            HeadlessGpuCandidateStatus::Ready,
+            binding,
+            output_key,
+            intent,
+            true,
+            false,
+        )
+        .is_none());
         // A fresh scheduling driver has no proof; the settled session retains
         // the exact already-presented frame instead of presenting it again.
         assert!(!headless_candidate_is_ready_for_sample(
