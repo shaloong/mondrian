@@ -18,13 +18,18 @@ Native DisplayConfig capture resolved two physical outputs. `DISPLAY1` is active
 HDR/WCG, 10-bit RGB, with 120-nit SDR reference white. `DISPLAY2` supports
 HDR/WCG but is currently 8-bit RGB SDR with 80-nit reference white. An installed
 Windows HDR calibration ICC profile builds Mondrian calibration processors for
-sRGB, Rec.2020, and PQ source spaces. It is not the active default association
-for either current display mode: `DISPLAY1` selects the system-wide association
-scope while the profile exists in a per-user legacy association, and `DISPLAY2`
-selects current-user scope without a standard-mode default. Windows ICC lookup
-now obeys `ColorProfileGetDisplayUserScope`; it cannot borrow a stale profile
-from the inactive scope. Physical Viewer observation and a sealed same-run ICC
-row remain open.
+sRGB, Rec.2020, and PQ source spaces. After the user changed the Windows color
+profile setting, a fresh production-probe capture still found no active default
+association for either current mode. Both paths now select the system-wide
+association scope: `DISPLAY1` has no extended-display-color-mode default and
+`DISPLAY2` has no standard-display-color-mode default. The four diagnostic
+transcript SHA-256 values are `F597E40E2BE6439974934AD595C60636590D72FB5068C81A525367853C7DF41A`,
+`9223A4CC4BABF33C884D93764F17BEC0DF3A040CEC5ABB6476ECE81D0C569DBF`,
+`34014F52FCFB2528C7FD303C945DD3699CAB7D316C2D2194427A7BAC19B98A04`,
+and `CB670FA8D4A395C611C403685C2AAA363467D1A338500A6150683028904D59B5`.
+Windows ICC lookup obeys `ColorProfileGetDisplayUserScope`; it cannot borrow a
+stale profile from the inactive scope. Physical Viewer observation and a sealed
+same-run ICC row remain open.
 
 On the observed NVIDIA GeForce GTX 1050 Ti driver, HEVC Main10 3840x2160 streams
 with SPS coded height 2176 remove the shared D3D12 device after the first frame.
@@ -218,16 +223,18 @@ immediately superseded. The probe population now completes 50 PointerDrag and
 50 Settled samples before the independent latest-wins burst; its focused
 Release regression passes. The physical latency row remains to be replayed.
 
-DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
-but its documented external scripting API is unavailable: the local API returns
-no Resolve object and no scripting service listens. The UI automation helper
-also cannot start from this UNC-hosted task (`CreateProcessWithLogonW` error
-267). The installation contains Resolve 21.1.0.17 plus its OCIO 2.5,
-OpenImageIO, Fusion scripting, and codec runtime components, but component
-presence is not an execution result. No Resolve project or output was created,
-so its cross-application rows remain NotRun rather than inferred from installation. The
-existing Blender 5.2
-process was not terminated and still prevents an uncontended sealed GPU run.
+DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
+Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
+and examples are present. A fresh `-nogui` product instance stayed alive and
+responsive, but four queries from Resolve's own Python host all returned no
+Resolve object. The README exposes the external-scripting preference under
+Resolve Studio, so this standard build cannot provide the required auditable
+external capture route. The test-created empty process was closed and no
+project or output was created. The UI automation helper also cannot start from
+this UNC-hosted task (`CreateProcessWithLogonW` error 267). Resolve's
+cross-application rows therefore remain NotRun rather than inferred from
+installation. The existing Blender 5.2 processes were not terminated and still
+prevent an uncontended sealed GPU run.
 DeckLink/AJA/Genlock, physical ANC wire capture, instruments, macOS/Linux, direct
 operator Viewer attestation, and the 72-hour campaign remain NotRun.
 
