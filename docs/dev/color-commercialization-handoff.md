@@ -381,6 +381,18 @@ This proves native HDR/ICC discovery, mode binding, payload capture, and LUT
 construction on real local displays; it is not the authority-challenged,
 operator-observed three-lane COL-046 row.
 
+The complete non-ignored real-wgpu Renderer correctness selection also passed on
+the GTX 1050 Ti: 13 tests covered all Standard views, Standard and ACES PQ
+Delta-E ITP, Rec.709 byte parity, scene-linear input, pooled composite resources,
+point effects, native NV12/Rec.601, OCIO backend objects, and Viewer-to-program
+output against their CPU or analytic references. The separately ignored output
+boundary smoke then passed under `sealed-required`: DX12/discrete-adapter
+identity was present, maximum RGBA code delta was zero, every health check
+passed, and its GPU-resident stage reported zero readback stages and zero GPU
+blockers. Its 3,230-byte JSONL report has SHA-256
+`85470852A5C00B33ECCFE61E106DA4A4EE3EC3724BADAC046B49ED6E803AB3F8`.
+These are correctness and path-residency results, not substitutes for the
+currently contention-blocked fixed-time 4K60/8K30 visual performance rows.
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and
