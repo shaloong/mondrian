@@ -236,6 +236,21 @@ The process-tree memory gate and complete owner shutdown passed. The audio
 report SHA-256 is
 `A1F7BEC329F7B637551A4061194A78BD2FC01605D9527840296949B066E59C76`.
 
+The Windows professional-device follow-up closed the UR22C exclusive-mode gap
+without a device-specific format exception. The final production probe opened
+all five installed WASAPI endpoints in shared, preferred-exclusive, and
+required-exclusive modes. Both NVIDIA display endpoints retained exact 48 kHz
+PCM24-in-32 exclusive streams. The Voice, DAW, and Music UR22C endpoints
+negotiated 44.1 kHz packed PCM24, 132-frame buffers, and 3 ms periods for a
+48 kHz Program contract. The dedicated physical-stream test then queued one
+second of 48 kHz PCM through the stateful sinc converter, activated the real
+UR22C DAW exclusive stream for 250 ms, and observed active callback progress,
+zero underrun frames, and no stream failure. The complete endpoint matrix
+SHA-256 is
+`4C6DE534A5336A899003B4D0D0BBA680D745C43087B6C5C2793F88578DED4C79`;
+the physical converted-stream test SHA-256 is
+`098F0F2FEF07E438CC87A53094CD46AF92CBFEECCE61EA5BEDEFF61E19A1559B`.
+Both evidence files remain outside the repository.
 The 30-minute 4K HEVC Main10 video gate exposed two separate facts. First, its
 4,096-event diagnostic tail evicted 130,909 events and incorrectly made
 adaptive-scale proof impossible. Playback Evidence schema 6 now retains two
