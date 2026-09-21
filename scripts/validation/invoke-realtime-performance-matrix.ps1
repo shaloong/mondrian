@@ -101,7 +101,7 @@ function Invoke-CargoGate(
             if ($workerBuild.timed_out -or $workerBuild.exit_code -ne 0) {
                 return [pscustomobject]@{ passed = $false; phase = "demux-worker-build"; worker_build = $workerBuild; worker = $null; build = $null; run = $null }
             }
-            $targetDirectory = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) { Join-Path $script:repositoryRoot "target" } else { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) }
+            $targetDirectory = Resolve-CargoTargetDirectory $script:repositoryRoot
             $workerFileName = if ($IsWindows) { "mondrian.exe" } else { "mondrian" }
             $workerPath = Join-Path (Join-Path $targetDirectory "release") $workerFileName
             if (-not (Test-Path -LiteralPath $workerPath -PathType Leaf)) {

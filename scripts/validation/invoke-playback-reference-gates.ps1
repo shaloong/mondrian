@@ -73,7 +73,8 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
                 throw "Packaged Preview demux worker build failed or timed out."
             }
             $workerFileName = if ($IsWindows) { "mondrian.exe" } else { "mondrian" }
-            $demuxWorkerPath = Resolve-RepositoryPath (Join-Path "target/release" $workerFileName)
+            $targetDirectory = Resolve-CargoTargetDirectory $script:repositoryRoot
+            $demuxWorkerPath = Join-Path (Join-Path $targetDirectory "release") $workerFileName
             if (-not (Test-Path -LiteralPath $demuxWorkerPath -PathType Leaf)) {
                 throw "Packaged Preview demux worker is missing: $demuxWorkerPath"
             }
