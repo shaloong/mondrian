@@ -259,6 +259,16 @@ immediately superseded. The probe population now completes 50 PointerDrag and
 50 Settled samples before the independent latest-wins burst; its focused
 Release regression passes. The physical latency row remains to be replayed.
 
+The full generated AS-11 X9 video/audio path now passes official BMX 1.7 rather
+than only the earlier ANC-only OP1a subset. The ignored test no longer hardcodes
+an obsolete BMX 1.6 checkout or returns success when the tools are absent: it
+requires `MONDRIAN_BMX_TOOL_DIR`, verifies both `bmx v1.7.0` identities and their
+native cleanup receipts, then generates and reimports a 60-frame 720p59.94 OP1a
+MXF with AVC High 4:2:2 Intra 10-bit, stereo 48 kHz PCM24, the AS-11 X9 spec
+identifier, and complete/last-frame metadata. Its console SHA-256 is
+`AB01F69403F6E1C40655BBA5969FB79992F6BCAB11855C0895E73CCA6A49175B`.
+This qualifies the generated file/software path, not physical SDI wire output.
+
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and

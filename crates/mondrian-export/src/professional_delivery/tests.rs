@@ -574,24 +574,33 @@ fn real_smpte_dcp_tracks_and_package_pass_independent_verifier() {
 }
 
 #[test]
-#[ignore = "requires the isolated COL-038 BMX and FFmpeg qualification tools"]
+#[ignore = "requires official BMX 1.7 via MONDRIAN_BMX_TOOL_DIR and qualified FFmpeg"]
 fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
-    let tool_root = workspace.join("target/col038-tools");
-    let raw2bmx = tool_root.join("bmx/bmx-win64-binary-1.6/bin/raw2bmx.exe");
-    let mxf2raw = tool_root.join("bmx/bmx-win64-binary-1.6/bin/mxf2raw.exe");
-    if [&raw2bmx, &mxf2raw].iter().any(|path| !path.is_file()) {
-        eprintln!("COL-038 AS-11 qualification tools are not present; skipping local HITL fixture");
-        return;
-    }
+    let tool_root = PathBuf::from(
+        std::env::var_os("MONDRIAN_BMX_TOOL_DIR")
+            .expect("explicit official BMX 1.7 tool directory"),
+    );
+    let raw2bmx = tool_root.join("raw2bmx.exe");
+    let mxf2raw = tool_root.join("mxf2raw.exe");
+    assert!(
+        raw2bmx.is_file(),
+        "missing official raw2bmx: {}",
+        raw2bmx.display()
+    );
+    assert!(
+        mxf2raw.is_file(),
+        "missing official mxf2raw: {}",
+        mxf2raw.display()
+    );
     let toolchain =
         ProfessionalDeliveryToolchain::from_paths(raw2bmx, mxf2raw, PathBuf::new(), PathBuf::new());
-    toolchain
+    let identities = toolchain
         .qualify_for(ProfessionalDeliveryProfile::As11X9NabaHd720p5994)
         .expect("qualified AS-11 toolchain");
+    assert_eq!(identities.len(), 2);
+    assert!(identities.iter().all(|identity| {
+        identity.version.contains("bmx v1.7.0") && identity.native_cleanup.all_resources_released()
+    }));
     let root = tempfile::tempdir().expect("qualification root");
     let avc = root.path().join("picture.h264");
     run_qualification_command(
