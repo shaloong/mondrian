@@ -1426,3 +1426,29 @@ about 14.5 of the 16 ms budget. Scope decimation, reduced bins, skipped frames,
 or a relaxed threshold would change the sealed workload and were not used.
 Golden three-run qualification was already complete and was not repeated; the
 long endurance row remains intentionally skipped by user direction.
+
+The remaining short local follow-up also passed. A generated 640x360 25 fps
+HEVC Main10 open-GOP source completed 140 exact-covering forward/reverse random
+seeks. Its 50-frame packaged-demux compact-YUV sequence measured 317 us p95
+after a 174,977 us cold maximum (168,042 us Session open), with one worker
+launch, clean closure, and no hardware transfer, swscale, or RGBA copy. A
+separate Rec.709 H.264 source passed the RGBA8 Preview probe in 25 ms total.
+The production playback owner also retained and independently cleared a real
+3840x2160 Main10 video Session and a 3840x3000 still-image Session. These
+generated fixtures were temporary and were removed after qualification.
+
+The two real-GPU Viewer retirement tests, eight selected App GPU/Host ownership
+tests, and the release production-Host startup qualification all passed. The
+Host test exercised every injected partial-startup phase and service-constructor
+failure before proving complete owner closure. The release Audio load matrix
+again passed all dense-schedule and per-track lookahead-limiter cases from 1 to
+64 tracks with zero deadline misses; the heaviest 64-limiter, 1,024-frame case
+measured 8,653 us vectorized p99 against a 21,334 us deadline.
+
+The release Export simulations also repeated successfully under their existing
+contracts. Two-layer 1080p29.97 measured 12 ms p95 at 29.97 fps, and the 4K60
+single-layer identity path sustained 60 fps without a missed frame budget. The
+CPU float-linear two-layer 4K60 fallback measured 20.345 fps and 57 ms p95,
+missing all nominal 16.67 ms frame budgets while passing only its explicit
+12 fps offline floor. This remains CPU fallback characterization rather than a
+4K60 realtime or GPU-path pass; no threshold or workload identity was changed.
