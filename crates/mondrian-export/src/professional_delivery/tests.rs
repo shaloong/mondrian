@@ -320,21 +320,26 @@ fn package_reimport_rejects_dtd_and_entity_declarations() {
 }
 
 #[test]
-#[ignore = "requires the isolated COL-038 BMX, Photon, JDK, and FFmpeg qualification tools"]
+#[ignore = "requires official BMX 1.7 and qualified Photon/JDK/FFmpeg tools discoverable by the product"]
 fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
-    let tool_root = workspace.join("target/col038-tools");
-    let raw2bmx = tool_root.join("bmx/bmx-win64-binary-1.6/bin/raw2bmx.exe");
-    let mxf2raw = tool_root.join("bmx/bmx-win64-binary-1.6/bin/mxf2raw.exe");
-    let java = tool_root.join("microsoft-jdk/jdk-21.0.12.1+1/bin/java.exe");
-    let photon_lib = tool_root.join("photon/build/libs");
-    if [&raw2bmx, &mxf2raw, &java].iter().any(|path| !path.is_file()) || !photon_lib.is_dir() {
-        eprintln!("COL-038 qualification tools are not present; skipping local HITL fixture");
-        return;
-    }
+    let toolchain = ProfessionalDeliveryToolchain::discover(
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25,
+    )
+    .expect("discover complete IMF qualification toolchain");
+    let identities = toolchain
+        .qualify_for(ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25)
+        .expect("qualified IMF toolchain");
+    assert_eq!(identities.len(), 4);
+    assert!(identities
+        .iter()
+        .all(|identity| identity.native_cleanup.all_resources_released()));
+    assert!(identities
+        .iter()
+        .filter(|identity| matches!(
+            identity.tool,
+            ProfessionalDeliveryTool::BmxRaw2Bmx | ProfessionalDeliveryTool::BmxMxf2Raw
+        ))
+        .all(|identity| identity.version.contains("bmx v1.7.0")));
     let root = tempfile::tempdir().expect("qualification root");
     let package = root.path().join("package");
     let work = root.path().join("work");
@@ -386,11 +391,6 @@ fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
         "0\nchL, chan=0\nchR, chan=1\nsgST, lang=en-US, mcaaudiocontentkind=PRM, mcaaudioelementkind=FCMP, mcatitle=Mondrian, mcatitleversion=1\n",
     )
     .expect("MCA labels");
-    let toolchain =
-        ProfessionalDeliveryToolchain::from_paths_with_photon(raw2bmx, mxf2raw, java, photon_lib);
-    toolchain
-        .qualify_for(ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25)
-        .expect("qualified IMF toolchain");
     run_qualification_command(
         &mut toolchain.imf_picture_command(
             &prores,
@@ -459,25 +459,18 @@ fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
 }
 
 #[test]
-#[ignore = "requires the isolated COL-038 asdcplib, DCP-o-matic, and FFmpeg qualification tools"]
+#[ignore = "requires qualified asdcplib, DCP-o-matic, and FFmpeg tools discoverable by the product"]
 fn real_smpte_dcp_tracks_and_package_pass_independent_verifier() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
-    let tool_root = workspace.join("target/col038-tools");
-    let asdcp_wrap = tool_root.join("asdcplib-build/src/asdcp-wrap.exe");
-    let asdcp_info = tool_root.join("asdcplib-build/src/asdcp-info.exe");
-    let dcp_verifier = tool_root.join("dcpomatic/bin/dcpomatic2_verify_cli.exe");
-    if [&asdcp_wrap, &asdcp_info, &dcp_verifier].iter().any(|path| !path.is_file()) {
-        eprintln!("COL-038 DCP qualification tools are not present; skipping local HITL fixture");
-        return;
-    }
     let toolchain =
-        ProfessionalDeliveryToolchain::from_paths_with_dcp(asdcp_wrap, asdcp_info, dcp_verifier);
-    toolchain
+        ProfessionalDeliveryToolchain::discover(ProfessionalDeliveryProfile::SmpteDcp2kFlat24)
+            .expect("discover complete DCP qualification toolchain");
+    let identities = toolchain
         .qualify_for(ProfessionalDeliveryProfile::SmpteDcp2kFlat24)
         .expect("qualified DCP toolchain");
+    assert_eq!(identities.len(), 3);
+    assert!(identities
+        .iter()
+        .all(|identity| identity.native_cleanup.all_resources_released()));
     let root = tempfile::tempdir().expect("qualification root");
     let package = root.path().join("package");
     let work = root.path().join("work");

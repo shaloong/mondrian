@@ -269,6 +269,13 @@ identifier, and complete/last-frame metadata. Its console SHA-256 is
 `AB01F69403F6E1C40655BBA5969FB79992F6BCAB11855C0895E73CCA6A49175B`.
 This qualifies the generated file/software path, not physical SDI wire output.
 
+The sibling ignored IMF/Photon and DCP qualification tests also no longer
+hardcode stale `target/col038-tools` layouts or return success when their
+independent validators are absent. They now exercise the product toolchain
+discovery path and require complete native cleanup receipts. Local inventory
+found usable JDK and BMX 1.7 installations but no Photon library set, asdcplib,
+or DCP-o-matic verifier, so those two external-verifier rows remain NotRun.
+
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and
