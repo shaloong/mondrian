@@ -164,6 +164,23 @@ fn cross_platform_ci_covers_the_complete_app_and_windows_golden_entrypoint() {
 }
 
 #[test]
+fn complete_golden_supervisor_builds_the_packaged_product_worker() {
+    let supervisor =
+        include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");
+    assert!(
+        supervisor.contains(
+            r#""--bin", "mondrian",
+    "--bin", "mondrian-golden""#
+        ),
+        "the complete Golden gate must build the product executable that owns hidden media workers"
+    );
+    assert!(
+        supervisor.contains("packaged_product_worker_sha256 = $builtProductExecutableSha256"),
+        "the complete Golden report must bind the packaged product worker identity"
+    );
+}
+
+#[test]
 fn complete_golden_supervisor_build_is_non_incremental() {
     let supervisor =
         include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");

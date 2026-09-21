@@ -185,12 +185,14 @@ $gateWorkRoot = Join-Path $runDirectory "work"
 $assetReportPath = Join-Path $runDirectory "reference-assets.json"
 $buildLogPath = Join-Path $runDirectory "build.log"
 $aggregateReportPath = Join-Path $runDirectory "complete-golden-consecutive-report.json"
+$productExecutable = Join-Path $repositoryRoot "target/debug/mondrian.exe"
 $goldenExecutable = Join-Path $repositoryRoot "target/debug/mondrian-golden.exe"
 $buildArguments = @(
     "build",
     "-p", "mondrian-app",
     "--features", "validation",
-    "--bin", "mondrian-golden"
+    "--bin", "mondrian",
+    "--bin", "mondrian-golden",
     "-j", "1"
 )
 New-Item -ItemType Directory -Force -Path $gateWorkRoot | Out-Null
@@ -199,6 +201,7 @@ $failurePhase = $null
 $failureMessage = $null
 $buildResult = $null
 $builtExecutableSha256 = $null
+$builtProductExecutableSha256 = $null
 $runEvidence = @()
 $reports = @()
 $oldRunRoot = [Environment]::GetEnvironmentVariable(
@@ -248,9 +251,15 @@ try {
     if ($buildResult.timed_out -or $buildResult.exit_code -ne 0) {
         throw "Complete Golden validation binary did not build successfully."
     }
+    if (-not (Test-Path -LiteralPath $productExecutable -PathType Leaf)) {
+        throw "Complete Golden packaged product worker is absent after a successful build."
+    }
     if (-not (Test-Path -LiteralPath $goldenExecutable -PathType Leaf)) {
         throw "Complete Golden validation binary is absent after a successful build."
     }
+    $builtProductExecutableSha256 = (
+        Get-FileHash -LiteralPath $productExecutable -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
     $builtExecutableSha256 = (
         Get-FileHash -LiteralPath $goldenExecutable -Algorithm SHA256
     ).Hash.ToLowerInvariant()
@@ -340,7 +349,8 @@ $sourceStable = (
     -not $startingDirty -and
     -not $endingDirty -and
     $endingRevision -eq $startingRevision -and
-    -not [string]::IsNullOrWhiteSpace($builtExecutableSha256)
+    -not [string]::IsNullOrWhiteSpace($builtExecutableSha256) -and
+    -not [string]::IsNullOrWhiteSpace($builtProductExecutableSha256)
 )
 if ($null -eq $failureMessage -and -not $sourceStable -and -not $AllowDirtyDiagnostic) {
     $failurePhase = "source-attestation-postflight"
@@ -371,6 +381,7 @@ $aggregateReport = [ordered]@{
         timed_out = if ($null -eq $buildResult) { $false } else { [bool]$buildResult.timed_out }
         exit_code = if ($null -eq $buildResult) { $null } else { $buildResult.exit_code }
         executable_sha256 = $builtExecutableSha256
+        packaged_product_worker_sha256 = $builtProductExecutableSha256
     }
     timeouts = [ordered]@{
         build_timeout_seconds = $effectiveBuildTimeoutSeconds
