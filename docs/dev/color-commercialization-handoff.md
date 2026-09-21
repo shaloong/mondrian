@@ -138,15 +138,35 @@ The large App UI smoke passed all seven cases with 360 assets, 720 clips, and
 seven workers. Its report SHA-256 is
 `FD1EED9DACE5DA56B8C1BC974FC03C55DF48EBAB8BA35DB7391C933936AE34A6`.
 
-A separate qualification review found that
-`preview_media_realtime_4k60_dual_video_gate` is not yet sealed despite its
-name: it invokes the development policy, so environment variables can change
-its frame count and timing limits, and its default decode p95 limit is 60 ms.
-Its functional contract still requires two media layers and a real GPU
-composite, but it cannot certify the fixed 4K60 realtime row until the workload,
-50 ms decode ceiling, GPU timing, extent, and readiness policy are immutable.
-This remains a test-harness gap; no result from that entrypoint is promoted to a
-qualification pass.
+The real 4K60 dual-layer gate is now sealed independently of development
+environment overrides. It requires exact 3840x2160, proven 60/1 HEVC Main10
+10-bit media, 600 observations, two layers, Source-Full authored extent, a
+50,000 us decode p95 ceiling, 10,000 us queue-wait p95 ceiling, 99.5% Ready
+policy, eight settled seeks, pause/seek/resume and resize continuity, and strict
+native GPU timestamps. The first strict run exposed a real stopped-to-realtime
+ownership gap: cross-region seek preparation produced an exact physical GPU
+picture but did not preserve that binding for the new realtime coordinator,
+causing three isolated stale recovery samples. Stopped-picture preparation now
+invalidates old evidence and publishes the new exact Preview/GPU binding only
+after physical ownership and a healthy generation are proven.
+
+The corrected gate passed on the GTX 1050 Ti even with every former tuning
+environment variable deliberately set to a conflicting or permissive value.
+It completed all 600 observations over 9.990 seconds with zero stale or missed
+opportunities. Decode p95 was 10,000 us against 50,000 us, queue wait p95 was
+1,000 us against 10,000 us, and GPU execution p95 was 9,798 us against the
+16,667 us frame period. It recorded 601 native two-layer GPU composites, zero
+passthrough, fallback, or readback frames, 1,268 native import GPU timestamp
+samples with none missing, passing resume and resize probes, and complete owner
+closure. The environment-poisoned console evidence SHA-256 is
+`1FAD11EFBFBC8F1B5782B617BE8F795CC9832F7D5BA82CC50CEEE0E00694A981`.
+The matrix-equivalent Release plus `validation` rerun also passed 600/600
+with zero stale or missed opportunities, 10,000 us decode p95, 1,000 us queue
+wait p95, 8,316 us GPU p95, 1,268 timestamp samples, and complete closure; its
+console evidence SHA-256 is
+`505775702633E346D3B85E325B6CB250523EE9357E21CEEF4AD4E015E345BDFC`.
+This is a valid local physical row; it does not replace the remaining
+uncontended full-matrix, HDR/effects/scopes, long-run, or other-platform rows.
 
 DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
 but its documented external scripting API is unavailable: the local API returns
@@ -992,12 +1012,12 @@ from the local x86_64 optimization.
 ## Physical and external-application work
 
 - P0 COL-010: real HDR/P3/ICC Viewer display qualification.
-- P1 COL-031: execute the complete sealed realtime performance matrix for the
-  current release candidate: 4K60/8K30 HDR/effects/scopes, real dual-layer
-  Main10 Preview, 30-minute video/audio, and 5/30/120-minute authoring gates.
-  The software matrix exists, but the issue records no executed sealed
-  reference-machine baseline. Run locally eligible cells after owner closure
-  is complete; retain unmet reference-machine requirements for transfer.
+- P1 COL-031: execute the remaining sealed realtime performance matrix for the
+  current release candidate: 4K60/8K30 HDR/effects/scopes, 30-minute
+  video/audio, and 5/30/120-minute authoring gates. The sealed real dual-layer
+  Main10 Preview row now has a local physical pass. The issue still lacks an
+  uncontended complete reference-machine baseline; retain unmet
+  reference-machine requirements for transfer.
   Local read-only inventory on 2026-09-04 reports 15.86 GiB physical memory,
   12 logical processors, Windows build 26200, and an NVIDIA RTX 3050 Laptop GPU
   (WMI-reported adapter RAM approximately 4 GiB; driver 32.0.15.9159). No
