@@ -276,6 +276,32 @@ discovery path and require complete native cleanup receipts. Local inventory
 found usable JDK and BMX 1.7 installations but no Photon library set, asdcplib,
 or DCP-o-matic verifier, so those two external-verifier rows remain NotRun.
 
+The independent native repeated-export gate also passed against the complete
+six-file generated media corpus. It admitted three jobs, cancelled the first,
+completed and independently full-decoded two durable H.264 artifacts, rendered
+240 frames, and closed every verifier, terminal publication, native child, App,
+and worker owner with zero residual inventory. The report took 101.895 seconds
+and has SHA-256
+`22E07AA41D2ED961B0EF5097B7F98F321C8E4547DA8789F729BD56D2A9174C60`.
+This is functional cancellation/publication evidence, not an H.264 resident
+performance pass: the selected NVIDIA NVENC encoder still received frames through
+`cpu_rawvideo_pipe` because the installed FFmpeg exposes `hevc_d3d12va` but no
+`h264_d3d12va` encoder.
+
+A newly exposed Windows production gate now executes the existing same-device
+resident HEVC qualification body through DX12, D3D12 Video Process, and FFmpeg
+D3D12VA. The first real run found and fixed four separate implementation gaps:
+the lowercase `cqp` enum rejected encoder open; Matroska required HEVC extradata
+before D3D12VA emitted its first Annex-B packet; the newer FFmpeg D3D12 frame ABI
+moved the fence behind `subresource_index`; and a VIDEO_PROCESS command list
+cannot perform the wgpu `RENDER_TARGET` cross-engine transition. The corrected
+path detects the installed header layout, uses MPEG-TS only as the timestamped
+video staging container, and orders direct-to-video-to-direct resource ownership
+with three fences before pool reuse. D3D12VA asynchronous depth one closes the
+observed one-to-four-frame zero-packet edge case. Both one-frame and 120-frame
+Release executions passed; the 120-frame test body completed in 2.65 seconds with
+120 native conversions, 120 encoded packets, one final stream-copy mux, and zero
+CPU pixel readbacks, rawvideo bytes, or CPU uploads. No threshold was relaxed.
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and

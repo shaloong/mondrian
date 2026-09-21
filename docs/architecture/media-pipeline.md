@@ -2840,8 +2840,18 @@ and bounded NV12/P010 hardware-frame pool. An acquired
 Adapter may turn it into `D3D12ResidentEncodeReadyFrame` after enqueueing the
 producer fence signal. Media waits on that fence through FFmpeg's hardware-frame
 contract and never maps the surface or stages raw pixels through host memory.
-The hand-written FFmpeg 7.1 D3D12 ABI declarations are target-gated and guarded
-by compile-time size and offset assertions.
+The hand-written D3D12 frame ABI declarations are target-gated and guarded by
+compile-time size and offset assertions. Build-time inspection of the installed
+FFmpeg header selects the original layout or the later texture-array layout;
+libavcodec major version alone is not treated as layout authority. The direct
+queue transitions the wgpu output from `RENDER_TARGET` to `COMMON`, the video
+queue owns only `COMMON` to/from `VIDEO_PROCESS_*`, and the direct queue restores
+`RENDER_TARGET` before its completion fence permits pool reuse. The video-only
+staging artifact uses MPEG-TS because D3D12VA emits HEVC parameter sets with the
+first Annex-B packet rather than during codec open; the requested final container
+is produced by timestamp-preserving stream copy. D3D12VA uses asynchronous depth
+one so even a one-frame sequence drains correctly without changing the
+no-readback surface contract.
 
 On Linux NVIDIA, the Renderer constructs `RendererHwAccelDeviceContext` only
 after its Vulkan UUID maps to an exact CUDA ordinal. Media retains that FFmpeg

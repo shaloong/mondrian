@@ -12,11 +12,16 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_0)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_1)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_8_0)");
+    println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_d3d12va_frame_v2)");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=FFMPEG_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=VCPKGRS_TRIPLET");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+
+    if has_d3d12va_frame_v2() {
+        println!("cargo:rustc-cfg=mondrian_ffmpeg_d3d12va_frame_v2");
+    }
 
     match detect_libavcodec_version() {
         Some((major, minor)) => {
@@ -38,6 +43,16 @@ fn main() {
             );
         }
     }
+}
+
+fn has_d3d12va_frame_v2() -> bool {
+    candidate_include_dirs().into_iter().any(|include_dir| {
+        let header = include_dir.join("libavutil").join("hwcontext_d3d12va.h");
+        println!("cargo:rerun-if-changed={}", header.display());
+        std::fs::read_to_string(header).is_ok_and(|text| {
+            text.contains("int subresource_index;") && text.contains("AVD3D12VAFrameFlags flags;")
+        })
+    })
 }
 
 fn detect_libavcodec_version() -> Option<(u32, u32)> {

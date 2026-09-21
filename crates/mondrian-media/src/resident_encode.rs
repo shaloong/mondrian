@@ -977,17 +977,31 @@ mod windows_impl {
     #[repr(C)]
     struct AvD3D12VaFrame {
         texture: *mut c_void,
+        #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
+        subresource_index: i32,
         sync_ctx: AvD3D12VaSyncContext,
+        #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
+        flags: i32,
     }
 
-    // FFmpeg 7.1 public ABI from libavutil/hwcontext_d3d12va.h. The cfg is
-    // emitted by build.rs only for that qualified header family.
+    // Public ABI from libavutil/hwcontext_d3d12va.h. FFmpeg added texture-array
+    // fields after 8.0, so build.rs derives the layout from the installed header
+    // rather than guessing from the libavcodec major version.
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(std::mem::size_of::<AvD3D12VaSyncContext>() == 24);
         assert!(std::mem::offset_of!(AvD3D12VaSyncContext, fence_value) == 16);
-        assert!(std::mem::size_of::<AvD3D12VaFrame>() == 32);
-        assert!(std::mem::offset_of!(AvD3D12VaFrame, sync_ctx) == 8);
+        #[cfg(not(mondrian_ffmpeg_d3d12va_frame_v2))]
+        {
+            assert!(std::mem::size_of::<AvD3D12VaFrame>() == 32);
+            assert!(std::mem::offset_of!(AvD3D12VaFrame, sync_ctx) == 8);
+        }
+        #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
+        {
+            assert!(std::mem::size_of::<AvD3D12VaFrame>() == 48);
+            assert!(std::mem::offset_of!(AvD3D12VaFrame, sync_ctx) == 16);
+            assert!(std::mem::offset_of!(AvD3D12VaFrame, flags) == 40);
+        }
     };
 
     pub(super) struct SessionInner {
@@ -1083,7 +1097,8 @@ mod windows_impl {
                 }
             }
             let mut options = Dictionary::new();
-            options.set("rc_mode", "cqp");
+            options.set("async_depth", "1");
+            options.set("rc_mode", "CQP");
             options.set("qp", &config.quantizer.to_string());
             let opened = {
                 let mut stream =
