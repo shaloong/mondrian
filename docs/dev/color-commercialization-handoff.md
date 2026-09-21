@@ -302,6 +302,30 @@ observed one-to-four-frame zero-packet edge case. Both one-frame and 120-frame
 Release executions passed; the 120-frame test body completed in 2.65 seconds with
 120 native conversions, 120 encoded packets, one final stream-copy mux, and zero
 CPU pixel readbacks, rawvideo bytes, or CPU uploads. No threshold was relaxed.
+
+The complete Release 5/30/120-minute authoring scale matrix passed on the current
+32 GiB machine with timing enforcement enabled. All six active-heavy and
+project-heavy reports passed their operation, sequence-locality, history, and
+native process-memory budgets; the completion record proves all six reports and
+an unchanged content-addressed source tree. The 120-minute project-heavy case
+peaked at 451,420,160 bytes of additional private commit against its 3 GiB limit;
+its slowest operation was manual publication at 6,564,894 us, within the
+versioned reference budget. The seven-record JSONL evidence has SHA-256
+`92870F39B502ECAB3B0667B9B83775643FF8D3ADF2E194173CB06CEE560C42B4`.
+
+The short production 4K60 HEVC Main10 isolated-demux gate also passed after a
+fixture gap was corrected without changing code or thresholds. The original
+12-second generated clip failed admission because the gate requires at least
+30 minutes plus one frame; a temporary 1,801.033-second stream-copy loop supplied
+108,062 unchanged encoded frames. The real GTX 1050 Ti/DX12 run presented one
+native P010 10-bit hardware layer at 100% hardware execution with zero CPU
+transfer, upload, readback, or fallback. Codec-checkpoint cancellation recovered,
+nine isolated demux sessions closed cleanly, and all runtime owners retired. The
+one-record evidence has SHA-256
+`1D7E6EFF1AFB29268E05218C544EDEF8680A5AC21C2F5FD6E3B125537E49DD0F`.
+The copied source remains tagged BT.709, so this result qualifies Main10 hardware
+playback and cancellation behavior, not HDR PQ color correctness.
+
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and
@@ -1149,11 +1173,11 @@ from the local x86_64 optimization.
 
 - P0 COL-010: real HDR/P3/ICC Viewer display qualification.
 - P1 COL-031: execute the remaining sealed realtime performance matrix for the
-  current release candidate: 4K60/8K30 HDR/effects/scopes, 30-minute
-  video/audio, and 5/30/120-minute authoring gates. The sealed real dual-layer
-  Main10 Preview row now has a local physical pass. The issue still lacks an
-  uncontended complete reference-machine baseline; retain unmet
-  reference-machine requirements for transfer.
+  current release candidate: 8K30 HDR/effects/scopes and 30-minute video/audio.
+  The sealed real dual-layer Main10 Preview row has a local physical pass, and
+  the complete enforced 5/30/120-minute authoring matrix now passes on the
+  qualified 32 GiB machine. The issue still lacks an uncontended complete
+  reference-machine baseline; retain unmet requirements for transfer.
   Refreshed read-only inventory on 2026-09-21 reports two 16 GiB DDR4-3600
   modules (32 GiB installed), 31.93 GiB visible after firmware reservation, and
   an NVIDIA GeForce GTX 1050 Ti with approximately 4 GiB adapter memory and
