@@ -31,6 +31,18 @@ Windows ICC lookup obeys `ColorProfileGetDisplayUserScope`; it cannot borrow a
 stale profile from the inactive scope. Physical Viewer observation and a sealed
 same-run ICC row remain open.
 
+The Windows HDR probe previously left transfer identity and physical luminance
+empty even when DisplayConfig proved that HDR mode was active, making the strict
+Windows HDR-PQ source row impossible to satisfy. It now matches the exact GDI
+output through DXGI and consumes `IDXGIOutput6::GetDesc1` rather than inferring
+PQ from the HDR enable bit. The fresh physical probe reported `DISPLAY1` as PQ,
+10-bit RGB, HDR/WCG active, 0.324-nit minimum and 456-nit maximum luminance;
+`DISPLAY2` remained 8-bit SDR with no HDR transfer claim. Their transcript
+SHA-256 values are `748D6073EB70E4504930A66ED07A1E626CBCD1D03DD01953FF61D9D7158B810E`
+and `D2695DF69FB48D6754A24981C2B401FE4B2E91FC19E83893F3028D09ADB93D74`.
+This closes the native Windows transfer/luminance implementation gap, while the
+same-run Viewer/operator and active ICC requirements remain open.
+
 On the observed NVIDIA GeForce GTX 1050 Ti driver, HEVC Main10 3840x2160 streams
 with SPS coded height 2176 remove the shared D3D12 device after the first frame.
 The same adapter decodes coded-height 2160 Main10 through D3D12VA/P010. Preview

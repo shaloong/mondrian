@@ -8,6 +8,17 @@ use mondrian_platform_core::{
     DisplayHdrProbeDetails, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
     DisplayProbeBackend, DisplayProfileProbeTarget,
 };
+use windows::core::Interface;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+    DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020, DXGI_COLOR_SPACE_TYPE,
+    DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6, DXGI_ERROR_NOT_FOUND,
+};
 use windows_sys::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
@@ -123,22 +134,35 @@ pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeRe
     };
 
     match advanced_color_for_device(&display_device_name) {
-        Ok(state) => DisplayHdrProbeResult::found(
-            DisplayProbeBackend::WindowsDisplayConfig,
-            Some(display_device_name.clone()),
-            DisplayHdrProbeDetails {
-                hdr_supported: Some(state.hdr_supported),
-                hdr_enabled: Some(state.hdr_enabled),
-                wide_color_supported: state.wide_color_supported,
-                wide_color_active: Some(state.wide_color_active),
-                force_disabled: Some(state.force_disabled),
-                bits_per_color_channel: Some(state.bits_per_color_channel),
-                color_encoding: state.color_encoding,
-                sdr_reference_white_nits: state.sdr_white_level.map(sdr_white_level_to_nits),
-                ..DisplayHdrProbeDetails::default()
-            },
-        )
-        .with_native_display_path_id(Some(display_device_name)),
+        Ok(state) => {
+            let dxgi = dxgi_output_color_state(&display_device_name).ok();
+            DisplayHdrProbeResult::found(
+                DisplayProbeBackend::WindowsDisplayConfig,
+                Some(display_device_name.clone()),
+                DisplayHdrProbeDetails {
+                    hdr_supported: Some(state.hdr_supported),
+                    hdr_enabled: Some(state.hdr_enabled),
+                    wide_color_supported: state.wide_color_supported,
+                    wide_color_active: Some(state.wide_color_active),
+                    force_disabled: Some(state.force_disabled),
+                    bits_per_color_channel: Some(state.bits_per_color_channel),
+                    color_encoding: state.color_encoding,
+                    active_transfer_function: dxgi
+                        .as_ref()
+                        .and_then(|details| details.active_transfer_function.clone()),
+                    supported_transfer_functions: Vec::new(),
+                    sdr_reference_white_nits: state.sdr_white_level.map(sdr_white_level_to_nits),
+                    min_luminance_millinits: dxgi
+                        .as_ref()
+                        .and_then(|details| details.min_luminance_millinits),
+                    max_luminance_nits: dxgi
+                        .as_ref()
+                        .and_then(|details| details.max_luminance_nits),
+                    ..DisplayHdrProbeDetails::default()
+                },
+            )
+            .with_native_display_path_id(Some(display_device_name))
+        }
         Err(reason) => DisplayHdrProbeResult::failed(
             DisplayProbeBackend::WindowsDisplayConfig,
             Some(display_device_name.clone()),
@@ -146,6 +170,103 @@ pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeRe
         )
         .with_native_display_path_id(Some(display_device_name)),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DxgiOutputColorState {
+    active_transfer_function: Option<String>,
+    min_luminance_millinits: Option<u32>,
+    max_luminance_nits: Option<u32>,
+}
+
+fn dxgi_output_color_state(device_name: &str) -> Result<DxgiOutputColorState, String> {
+    // SAFETY: the returned COM factory and every enumerated interface remain
+    // owned for the duration of this metadata-only query.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|error| {
+        format!(
+            "CreateDXGIFactory1 failed with HRESULT=0x{:08x}",
+            error.code().0 as u32
+        )
+    })?;
+    for adapter_index in 0..u32::MAX {
+        // SAFETY: `factory` remains live and returns an owned adapter.
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => {
+                return Err(format!(
+                    "IDXGIFactory1::EnumAdapters1 failed with HRESULT=0x{:08x}",
+                    error.code().0 as u32
+                ));
+            }
+        };
+        for output_index in 0..u32::MAX {
+            // SAFETY: `adapter` remains live and returns an owned output.
+            let output = match unsafe { adapter.EnumOutputs(output_index) } {
+                Ok(output) => output,
+                Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) => {
+                    return Err(format!(
+                        "IDXGIAdapter1::EnumOutputs failed with HRESULT=0x{:08x}",
+                        error.code().0 as u32
+                    ));
+                }
+            };
+            // SAFETY: `output` remains live for this descriptor query.
+            let descriptor = unsafe { output.GetDesc() }.map_err(|error| {
+                format!(
+                    "IDXGIOutput::GetDesc failed with HRESULT=0x{:08x}",
+                    error.code().0 as u32
+                )
+            })?;
+            let Some(enumerated_name) = utf16z_to_string(&descriptor.DeviceName) else {
+                continue;
+            };
+            if !enumerated_name.eq_ignore_ascii_case(device_name) {
+                continue;
+            }
+            let output6: IDXGIOutput6 = output.cast().map_err(|error| {
+                format!(
+                    "IDXGIOutput does not expose IDXGIOutput6: HRESULT=0x{:08x}",
+                    error.code().0 as u32
+                )
+            })?;
+            // SAFETY: `output6` remains live for this immutable descriptor query.
+            let descriptor = unsafe { output6.GetDesc1() }.map_err(|error| {
+                format!(
+                    "IDXGIOutput6::GetDesc1 failed with HRESULT=0x{:08x}",
+                    error.code().0 as u32
+                )
+            })?;
+            return Ok(DxgiOutputColorState {
+                active_transfer_function: dxgi_transfer_function(descriptor.ColorSpace)
+                    .map(str::to_owned),
+                min_luminance_millinits: scaled_luminance(descriptor.MinLuminance, 1_000.0),
+                max_luminance_nits: scaled_luminance(descriptor.MaxLuminance, 1.0),
+            });
+        }
+    }
+    Err(format!(
+        "DXGI did not enumerate active display output '{device_name}'"
+    ))
+}
+
+fn dxgi_transfer_function(color_space: DXGI_COLOR_SPACE_TYPE) -> Option<&'static str> {
+    match color_space {
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+        | DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020
+        | DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
+        | DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020 => Some("PQ"),
+        DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020
+        | DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020 => Some("HLG"),
+        DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 => Some("Linear"),
+        _ => None,
+    }
+}
+
+fn scaled_luminance(value: f32, scale: f32) -> Option<u32> {
+    let scaled = value * scale;
+    (value.is_finite() && value >= 0.0 && scaled <= u32::MAX as f32).then(|| scaled.round() as u32)
 }
 
 fn display_device_name_for_target(
@@ -705,9 +826,13 @@ fn wide_null(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_display_profile_subtype, sdr_white_level_to_nits,
-        DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
-        DISPLAYCONFIG_ADVANCED_COLOR_MODE_WCG,
+        active_display_profile_subtype, dxgi_transfer_function, scaled_luminance,
+        sdr_white_level_to_nits, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR,
+        DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR, DISPLAYCONFIG_ADVANCED_COLOR_MODE_WCG,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+        DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020,
     };
     use windows_sys::Win32::UI::ColorSystem::{
         CPST_EXTENDED_DISPLAY_COLOR_MODE, CPST_STANDARD_DISPLAY_COLOR_MODE,
@@ -718,6 +843,31 @@ mod tests {
         assert_eq!(sdr_white_level_to_nits(1_000), 80);
         assert_eq!(sdr_white_level_to_nits(2_000), 160);
         assert_eq!(sdr_white_level_to_nits(2_537), 203);
+    }
+
+    #[test]
+    fn dxgi_output_color_space_preserves_observed_transfer_identity() {
+        assert_eq!(
+            dxgi_transfer_function(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020),
+            Some("PQ")
+        );
+        assert_eq!(
+            dxgi_transfer_function(DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020),
+            Some("HLG")
+        );
+        assert_eq!(
+            dxgi_transfer_function(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709),
+            None
+        );
+    }
+
+    #[test]
+    fn dxgi_luminance_rejects_non_finite_values_and_scales_minimums() {
+        assert_eq!(scaled_luminance(0.0005, 1_000.0), Some(1));
+        assert_eq!(scaled_luminance(1_499.6, 1.0), Some(1_500));
+        assert_eq!(scaled_luminance(f32::NAN, 1.0), None);
+        assert_eq!(scaled_luminance(f32::INFINITY, 1.0), None);
+        assert_eq!(scaled_luminance(-0.1, 1_000.0), None);
     }
 
     #[test]

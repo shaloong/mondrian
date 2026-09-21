@@ -374,8 +374,12 @@ inactive scope. It then asks `ColorProfileGetDisplayDefault` for
 `CPST_EXTENDED_DISPLAY_COLOR_MODE` only when HDR is active; SDR and Advanced
 Color WCG use `CPST_STANDARD_DISPLAY_COLOR_MODE`. The legacy WCS device default
 (`CPT_ICC + CPST_NONE`) is a standard-mode-only fallback and is never substituted
-for a missing HDR association. Linux
-DRM fallback requires the exact EDID block count and valid checksum on every
+for a missing HDR association. Windows HDR evidence separately matches the GDI
+output identity against `IDXGIOutput6::GetDesc1`; its active DXGI color space
+provides the observed PQ, HLG, or linear transfer identity, while the same output
+descriptor provides minimum and maximum luminance. An enabled Advanced Color bit
+alone is never promoted to PQ evidence. Linux DRM fallback requires the exact
+EDID block count and valid checksum on every
 block before exposing HDR capability.
 
 ### Action Codes

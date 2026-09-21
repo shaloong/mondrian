@@ -1831,9 +1831,11 @@ its admitted subset and fail closed outside it.
   `ViewerDisplayMode::HdrHlg` are explicit user selections. On Windows the app
   probes the Windows 11 DisplayConfig SDR/WCG/HDR active color mode, separate HDR
   and wide-color support flags, policy limitation, bits per channel, color
-  encoding, and SDR white level through `mondrian-platform`. The legacy Advanced
-  Color bitfield is used only on systems that explicitly reject the INFO_2
-  packet. Known inactive or unsupported HDR state blocks HDR preview. wgpu
+  encoding, and SDR white level through `mondrian-platform`. It matches that
+  output to DXGI and reads the active transfer identity plus physical luminance
+  from `IDXGIOutput6`; the HDR enable bit is not treated as PQ evidence. The
+  legacy Advanced Color bitfield is used only on systems that explicitly reject
+  the INFO_2 packet. Known inactive or unsupported HDR state blocks HDR preview. wgpu
   `SurfaceColorSpace` compatibility is still only the swapchain side of the
   contract. macOS adds AppKit EDR headroom, Wayland consumes the active output
   image description, and Linux DRM/EDID remains hardware-only fallback evidence.
