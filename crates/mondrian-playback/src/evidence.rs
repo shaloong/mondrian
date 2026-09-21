@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 5;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 6;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +226,18 @@ pub struct PlaybackClockFrameAdvanceCounts {
     pub skipped_intermediate_frames: u64,
 }
 
+/// Whole-run counts for preview-resolution reductions selected by playback policy.
+///
+/// These aggregates remain available when the bounded detailed-event tail evicts
+/// old frame events during long playback sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackPreviewScaleReductionCounts {
+    /// Transitions from full resolution to half resolution.
+    pub to_half: u64,
+    /// Transitions from full or half resolution to quarter resolution.
+    pub to_quarter: u64,
+}
+
 /// Versioned aggregate report shared by UI diagnostics and headless harnesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackEvidenceReport {
@@ -251,6 +263,8 @@ pub struct PlaybackEvidenceReport {
     pub state_residency: PlaybackStateResidency,
     /// Clock-driven single-frame and multi-frame advancement totals.
     pub clock_frame_advances: PlaybackClockFrameAdvanceCounts,
+    /// Whole-run preview-resolution reductions selected by playback policy.
+    pub preview_scale_reductions: PlaybackPreviewScaleReductionCounts,
     /// Terminal delivery totals.
     pub deliveries: PlaybackDeliveryCounts,
     /// Demand issue-to-terminal latency.
@@ -321,6 +335,7 @@ pub struct PlaybackEvidenceCollector {
     clock_residency: PlaybackClockResidencyDuration,
     state_residency: PlaybackStateResidencyDuration,
     clock_frame_advances: PlaybackClockFrameAdvanceCounts,
+    preview_scale_reductions: PlaybackPreviewScaleReductionCounts,
     deliveries: PlaybackDeliveryCounts,
     active_demand: Option<ActiveDemand>,
     last_demand_identity: Option<FrameDemandIdentity>,
@@ -478,6 +493,7 @@ impl PlaybackEvidenceCollector {
             clock_residency: PlaybackClockResidencyDuration::default(),
             state_residency: PlaybackStateResidencyDuration::default(),
             clock_frame_advances: PlaybackClockFrameAdvanceCounts::default(),
+            preview_scale_reductions: PlaybackPreviewScaleReductionCounts::default(),
             deliveries: PlaybackDeliveryCounts::default(),
             active_demand: None,
             last_demand_identity: None,
@@ -541,6 +557,18 @@ impl PlaybackEvidenceCollector {
             );
         }
         if let Some(from) = self.last_scale.filter(|from| *from != snapshot.preview_scale) {
+            if snapshot.preview_scale.dimension_divisor() > from.dimension_divisor() {
+                let count = match snapshot.preview_scale {
+                    PreviewResolutionScale::Half => &mut self.preview_scale_reductions.to_half,
+                    PreviewResolutionScale::Quarter => {
+                        &mut self.preview_scale_reductions.to_quarter
+                    }
+                    PreviewResolutionScale::Full => unreachable!(
+                        "full resolution cannot be a reduction from another preview scale"
+                    ),
+                };
+                *count = count.saturating_add(1);
+            }
             self.push_event(
                 observed_at,
                 epoch,
@@ -726,6 +754,7 @@ impl PlaybackEvidenceCollector {
             clock_residency: self.clock_residency.report(),
             state_residency: self.state_residency.report(),
             clock_frame_advances: self.clock_frame_advances,
+            preview_scale_reductions: self.preview_scale_reductions,
             deliveries: self.deliveries,
             demand_latency: self.demand_latencies.summary(),
             warm_seek_latency: self.warm_seek_latencies.summary(),
@@ -1209,6 +1238,36 @@ mod tests {
         assert_eq!(report.observed_duration_us, 1_000);
         assert_eq!(report.clock_residency.synthetic_us, 1_000);
         assert_eq!(report.state_residency.playing_us, 1_000);
+    }
+
+    #[test]
+    fn preview_scale_reduction_aggregates_survive_detailed_event_eviction() {
+        let epoch = PlaybackEpoch(1);
+        let mut collector = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig {
+            event_capacity: 1,
+            sample_capacity: 1,
+        })
+        .expect("collector");
+        let full = snapshot(
+            epoch,
+            0,
+            TransportState::Playing,
+            Some(ClockMaster::Synthetic),
+        );
+        collector.observe_snapshot(at(0), full, None).unwrap();
+
+        let mut half = full;
+        half.preview_scale = PreviewResolutionScale::Half;
+        collector.observe_snapshot(at(1), half, None).unwrap();
+        let mut quarter = half;
+        quarter.preview_scale = PreviewResolutionScale::Quarter;
+        collector.observe_snapshot(at(2), quarter, None).unwrap();
+        collector.observe_audio_underrun(at(3), epoch, 1, false).unwrap();
+
+        let report = collector.report();
+        assert!(report.evicted_event_count > 0);
+        assert_eq!(report.preview_scale_reductions.to_half, 1);
+        assert_eq!(report.preview_scale_reductions.to_quarter, 1);
     }
 
     #[test]

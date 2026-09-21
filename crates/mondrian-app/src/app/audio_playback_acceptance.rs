@@ -1076,6 +1076,7 @@ mod tests {
                 ..PlaybackStateResidency::default()
             },
             clock_frame_advances: Default::default(),
+            preview_scale_reductions: Default::default(),
             deliveries: PlaybackDeliveryCounts {
                 ready: 54_000,
                 ..PlaybackDeliveryCounts::default()

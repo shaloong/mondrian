@@ -90,10 +90,7 @@ use mondrian_media::{
     VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
-use mondrian_playback::{
-    PlaybackClockPhaseErrorSummary, PlaybackEvidenceEvent, PlaybackEvidenceEventKind,
-    PlaybackEvidenceReport,
-};
+use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
 use mondrian_render_cache::TimelineRenderCacheDiagnostics;
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
@@ -8029,11 +8026,6 @@ fn required_adaptive_scale_gpu_extents(
     authored_full_extent: HeadlessViewerGpuExtent,
     runtime_minimum_scale: mondrian_playback::PreviewResolutionScale,
 ) -> anyhow::Result<Vec<HeadlessViewerGpuExtent>> {
-    anyhow::ensure!(
-        playback.evicted_event_count == 0,
-        "continuous playback evicted {} detailed event(s), so adaptive scale transitions cannot be proven",
-        playback.evicted_event_count
-    );
     let extent_for_scale = |scale: mondrian_playback::PreviewResolutionScale| {
         let divisor = scale.dimension_divisor();
         HeadlessViewerGpuExtent {
@@ -8049,14 +8041,20 @@ fn required_adaptive_scale_gpu_extents(
         }
     };
     let mut required = Vec::new();
-    for event in &playback.events {
-        let PlaybackEvidenceEventKind::PreviewScaleChanged { from, to } = event.kind else {
-            continue;
-        };
-        if to.dimension_divisor() <= from.dimension_divisor() {
+    for (count, scale) in [
+        (
+            playback.preview_scale_reductions.to_half,
+            mondrian_playback::PreviewResolutionScale::Half,
+        ),
+        (
+            playback.preview_scale_reductions.to_quarter,
+            mondrian_playback::PreviewResolutionScale::Quarter,
+        ),
+    ] {
+        if count == 0 {
             continue;
         }
-        let extent = extent_for_scale(coarser(to));
+        let extent = extent_for_scale(coarser(scale));
         if !required.contains(&extent) {
             required.push(extent);
         }
@@ -8151,7 +8149,6 @@ fn adaptive_scaling_validation_uses_observed_scale_transitions_and_separate_gpu_
     let quarter = HeadlessViewerGpuExtent { width: 960, height: 540 };
     let full_scale = mondrian_playback::PreviewResolutionScale::Full;
     let half_scale = mondrian_playback::PreviewResolutionScale::Half;
-    let quarter_scale = mondrian_playback::PreviewResolutionScale::Quarter;
 
     let mut playback = mondrian_playback::PlaybackEvidenceCollector::default().report();
     playback.deliveries.degraded = 32;
@@ -8167,12 +8164,7 @@ fn adaptive_scaling_validation_uses_observed_scale_transitions_and_separate_gpu_
         "scattered degraded deliveries must not invent a scale transition the production policy never made"
     );
 
-    playback.events.push(PlaybackEvidenceEvent {
-        sequence: 1,
-        observed_at_us: 1,
-        epoch: 1,
-        kind: PlaybackEvidenceEventKind::PreviewScaleChanged { from: full_scale, to: half_scale },
-    });
+    playback.preview_scale_reductions.to_half = 1;
     assert!(validate_executed_adaptive_scaling_for_window(
         &playback,
         &[full],
@@ -8193,15 +8185,7 @@ fn adaptive_scaling_validation_uses_observed_scale_transitions_and_separate_gpu_
         "the bounded extension may prove a policy-selected scale from the fixed window"
     );
 
-    playback.events.push(PlaybackEvidenceEvent {
-        sequence: 2,
-        observed_at_us: 2,
-        epoch: 1,
-        kind: PlaybackEvidenceEventKind::PreviewScaleChanged {
-            from: half_scale,
-            to: quarter_scale,
-        },
-    });
+    playback.preview_scale_reductions.to_quarter = 1;
     assert!(validate_executed_adaptive_scaling_for_window(
         &playback,
         &[full, half],
@@ -8235,7 +8219,7 @@ fn adaptive_scaling_validation_uses_observed_scale_transitions_and_separate_gpu_
         full,
         full_scale,
     )
-    .is_err());
+    .is_ok());
 }
 #[test]
 fn submitted_current_frame_can_fill_the_bounded_successor_slot() {
