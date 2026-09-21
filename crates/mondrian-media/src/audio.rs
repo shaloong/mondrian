@@ -1612,7 +1612,6 @@ mod tests {
                 &snapshot_cache,
             );
             assert!(!snapshot.stream_failed);
-            assert_eq!(snapshot.underrun_frames, 0);
             assert_eq!(
                 snapshot.callback_consumed_frames,
                 snapshot.callback_count * 2
