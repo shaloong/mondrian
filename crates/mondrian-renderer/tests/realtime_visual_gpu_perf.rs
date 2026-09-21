@@ -320,6 +320,13 @@ fn measure_scenario(
         frames.gpu_native_composites = frames
             .gpu_native_composites
             .saturating_add(record.compositing_diagnostics.gpu_native_composites);
+        frames.opaque_normal_single_accumulator_composites =
+            frames.opaque_normal_single_accumulator_composites.saturating_add(
+                record.compositing_diagnostics.opaque_normal_single_accumulator_composites,
+            );
+        frames.avoided_accumulator_sample_pixels = frames
+            .avoided_accumulator_sample_pixels
+            .saturating_add(record.compositing_diagnostics.avoided_accumulator_sample_pixels);
         frames.fused_point_operations = frames
             .fused_point_operations
             .saturating_add(record.compositing_diagnostics.execution.fused_point_operations);

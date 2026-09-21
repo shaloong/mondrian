@@ -1452,3 +1452,37 @@ CPU float-linear two-layer 4K60 fallback measured 20.345 fps and 57 ms p95,
 missing all nominal 16.67 ms frame budgets while passing only its explicit
 12 fps offline floor. This remains CPU fallback characterization rather than a
 4K60 realtime or GPU-path pass; no threshold or workload identity was changed.
+
+The compositor now admits a general, checked single-accumulator path when the
+first contributing Layer proves a full-canvas opaque result and all contributing
+Layers use Normal blending without Adjustment sources. It retains affine source
+sampling and fused point effects, but replaces per-Layer accumulator texture
+sampling with fixed-function straight-alpha blending into one attachment.
+Non-Normal, Adjustment, cropped-base, and otherwise unproven stacks retain the
+original two-accumulator implementation. Real-GPU pixel-oracle coverage and the
+resource-pool regression passed, including blend-mode fallback, affine solids,
+16-bit alpha/opacity, LUT and point effects, ROI, and retained-target counts.
+
+With the sealed workload and the original 16 ms/32 ms thresholds unchanged,
+the final optimized run measured 23.787 ms total p95 at 4K60 (11.793 ms
+composite, 2.710 ms Program Output, 9.288 ms scopes) and 52.456 ms at 8K30
+(20.959 ms composite, 9.549 ms Program Output, 22.276 ms scopes). Relative to
+the preceding uncontended baseline, total GPU time fell 17.5% at 4K and 34.1%
+at 8K; composite time fell 20.0% and 30.8%. Both rows still fail only the
+unchanged total-GPU deadline. All 60 measured 4K frames and all 30 measured 8K
+frames directly reported fast-path admission. Each scenario avoided
+1,990,656,000 accumulator pixel samples with zero CPU fallback, upload,
+readback, blocker, timestamp drop, or warm-path allocation. The temporary
+evidence JSONL SHA-256 was
+`1972A1BC4E8041966A05A7C9D8E3E3C7F36137E1B8E6CE3E0DE12B9D003D1515`.
+
+An exact 65,536-entry Float16-to-PQ-nits lookup-table experiment was also run
+against the same real GPU workload. It changed 4K scopes p95 from 9.452 ms to
+9.459 ms and 8K from 22.263 ms to 22.201 ms, which is measurement noise rather
+than a useful gain, so the experiment was reverted. This isolates the current
+scope cost primarily to full-frame reads, exact histogram/waveform atomics, and
+scheduling pressure rather than the PQ transfer function. Scope work is not an
+immutable hardware constant: fusing exact aggregation with the Program Output
+boundary, or using a benchmark-proven hierarchical/subgroup reduction on
+supported adapters, remain architectural opportunities. Neither may weaken the
+sealed exact-resolution, exact-bin, every-frame contract.

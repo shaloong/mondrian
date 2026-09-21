@@ -156,6 +156,19 @@ pass. Tiles are at most 4096 pixels per axis and remain draws within one render
 pass. A 4,096-tile hard limit fails before allocation. The plan reports actual
 shaded pixels, avoided full-frame shader pixels, preserved-copy work, tile
 draws, eliminated Layers, and fused point operations.
+
+A checked opaque-Normal fast path removes accumulator ping-pong for the common
+case. Admission requires the first contributing Layer to prove a full-canvas,
+fully opaque result and every contributing Layer to use Normal blend without an
+Adjustment source. The recorder then uses fixed-function straight-alpha
+blending into one attachment, so it does not allocate the second accumulator,
+sample the prior accumulator, or copy preserved regions. Source sampling,
+affine transforms, bounded draws, and fused point effects remain unchanged.
+Crop cannot establish the opaque base; non-Normal blend, Adjustment, or any
+unproven base retains the general two-accumulator path. Diagnostics report both
+admitted composites and avoided accumulator samples so qualification can prove
+that the optimization executed without inferring it from timing.
+
 Its damage is intra-frame Layer-versus-accumulator evidence only; temporal
 damage reuse remains unavailable until a caller can prove exact prior-output
 identity and lifetime.

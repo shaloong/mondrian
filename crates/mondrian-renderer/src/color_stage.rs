@@ -6520,7 +6520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_compositor_reuses_both_accumulation_targets_after_ordered_submit() {
+    async fn gpu_compositor_reuses_one_opaque_target_and_two_ping_pong_fallback_targets() {
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu compositor-pool test: no GPU adapter available");
             return;
@@ -6548,7 +6548,7 @@ mod tests {
                 context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("mondrian-test-gpu-compositor-resource-pool"),
                 });
-            runtime
+            let record = runtime
                 .record_wgpu_working_composite(
                     &compositor,
                     &context.device,
@@ -6562,9 +6562,46 @@ mod tests {
                     },
                 )
                 .expect("GPU solid composite should record");
+            assert_eq!(
+                record.diagnostics.opaque_normal_single_accumulator_composites,
+                1
+            );
+            assert_eq!(record.diagnostics.avoided_accumulator_sample_pixels, 16);
             context.queue.submit(std::iter::once(encoder.finish()));
             runtime.clear_frame_resources();
         }
+
+        let fallback_layer = crate::GpuCompositeLayer {
+            blend_mode: mondrian_core::types::BlendMode::Multiply,
+            ..layer
+        };
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-compositor-ping-pong-fallback"),
+        });
+        let fallback_record = runtime
+            .record_wgpu_working_composite(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: std::slice::from_ref(&fallback_layer),
+                },
+            )
+            .expect("non-Normal composite should retain the ping-pong fallback");
+        assert_eq!(
+            fallback_record.diagnostics.opaque_normal_single_accumulator_composites,
+            0
+        );
+        assert_eq!(
+            fallback_record.diagnostics.avoided_accumulator_sample_pixels,
+            0
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        runtime.clear_frame_resources();
 
         let diagnostics = runtime.diagnostics().resource_pool;
         assert_eq!(diagnostics.hits, 2);

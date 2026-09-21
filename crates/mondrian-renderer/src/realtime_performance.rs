@@ -216,6 +216,12 @@ pub struct RealtimeVisualFrameEvidence {
     pub program_scopes_frames: u64,
     /// Native working-linear composite operations.
     pub gpu_native_composites: u64,
+    /// Composites that proved an opaque Normal stack and used one accumulator.
+    #[serde(default)]
+    pub opaque_normal_single_accumulator_composites: u64,
+    /// Accumulator texture samples avoided by the opaque Normal fast path.
+    #[serde(default)]
+    pub avoided_accumulator_sample_pixels: u64,
     /// Point operations actually fused into layer passes.
     pub fused_point_operations: u64,
     /// Composite work that fell back to CPU.
@@ -415,6 +421,18 @@ pub fn evaluate_realtime_visual_performance(
             "realtime_visual_gpu_native_composites",
             observation.frames.gpu_native_composites,
             expected_composites,
+        ),
+        check_at_least(
+            "realtime_visual_opaque_normal_single_accumulator_composites",
+            observation.frames.opaque_normal_single_accumulator_composites,
+            expected_composites,
+        ),
+        check_at_least(
+            "realtime_visual_avoided_accumulator_sample_pixels",
+            observation.frames.avoided_accumulator_sample_pixels,
+            expected_composites
+                .saturating_mul(u64::from(observation.workload.width))
+                .saturating_mul(u64::from(observation.workload.height)),
         ),
         check_at_least(
             "realtime_visual_fused_point_effects",
@@ -676,6 +694,10 @@ mod tests {
                 presentation_output_leases: frames,
                 program_scopes_frames: frames,
                 gpu_native_composites: composites,
+                opaque_normal_single_accumulator_composites: frames,
+                avoided_accumulator_sample_pixels: composites
+                    .saturating_mul(u64::from(workload.width))
+                    .saturating_mul(u64::from(workload.height)),
                 fused_point_operations: composites
                     .saturating_mul(u64::from(workload.point_effects_per_layer)),
                 gpu_color_stages: frames,
