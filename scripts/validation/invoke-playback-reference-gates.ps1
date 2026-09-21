@@ -81,7 +81,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $demuxWorkerPath, "Process")
         }
         $testBuildArguments = @(
-            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--no-run",
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--lib", "--no-run",
             [string]$GateContract.cargo_test
         )
         $testBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $testBuildArguments $script:repositoryRoot ([int]$GateContract.build_timeout_seconds) $testBuildLogPath
@@ -89,7 +89,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             throw "Playback gate test build failed or timed out."
         }
         $cargoArguments = @(
-            "test", "-p", "mondrian-app", "--release", "--features", "validation", [string]$GateContract.cargo_test,
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--lib", [string]$GateContract.cargo_test,
             "--", "--ignored", "--nocapture", "--test-threads=1"
         )
         $processResult = Invoke-BoundedPlaybackGateProcess "cargo" $cargoArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $logPath
