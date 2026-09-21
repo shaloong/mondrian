@@ -74,6 +74,15 @@ passed against the CPU OCIO reference. The report SHA-256 is
 This is a valid physical short gate, while the sealed uncontended matrix remains
 open until the unrelated Blender process is no longer resident.
 
+The separate fixed 4K input-transform timestamp gate also passed its default 60
+samples per transform against the unchanged 5,000 us p95 limit. Exact working
+identity remained a zero-pass alias; matrix plus Rec.709 OETF measured 1,929 us,
+Rec.709 input to working measured 1,159 us, and Sony S-Log3/S-Gamut3.Cine input
+to working measured 1,136 us. All 180 executed samples reused their shader,
+pipeline, backend object, bind group, and output texture without a warm-path
+creation or allocation. The report SHA-256 is
+`8E744992C3B73FD19B4BBB9B8F6CE33C01133BF4EE2286EE132BBC4675C267EA`.
+
 The post-optimization full workspace/all-feature test run completed with exit
 code zero, followed by strict workspace/all-target/all-feature Clippy with
 warnings denied, format, and diff checks. Twelve explicitly selected App ignored
