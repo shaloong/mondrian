@@ -775,6 +775,23 @@ supervisor correctly classified the run as `passed-diagnostic`, not baseline,
 because `-Gate Video` omits the required Audio gate; this result closes the
 current-revision Windows long-video slice only.
 
+A later local 2026-09-21 execution used a temporary 1,801.033-second 4K60 HEVC
+Main10 stream-copy fixture on the 32 GiB/GTX 1050 Ti machine. It completed
+108,002 observations over 1,800.019 seconds with 108,000 exact Ready results,
+native P010 hardware presentation throughout, 10 ms decode p95, 3.808 ms GPU
+execution p95, two missed deadlines, and zero CPU transfer, readback, fallback,
+native-timing gap, failure code, or residual owner. Memory, warm seek,
+supersession, cancellation, resize, resume, and demux shutdown all passed. The
+profile correctly remained failed because accurate seek measured 711,740 us p95
+against the fixed 500,000 us limit. Seek latency tracked distance from the
+fixture's preceding four-second-GOP keyframe, and direct same-target FFmpeg
+D3D12VA, CUVID/CUDA, D3D11VA, and software comparisons were all materially
+slower than Mondrian's reused D3D12VA session. This is retained as a local
+hardware-limit observation; it neither relaxes the sealed threshold nor
+supersedes the 356,722 us qualifying result above. The report SHA-256 is
+`878806E264A4F36D358F26EE95F855372AC6F80C6C673DDEB547372065C8CD63`.
+Its BT.709 tagging qualifies hardware Main10 behavior, not HDR color accuracy.
+
 The Golden v14 contract resolves PCM, AAC, CFR and
 VFR Rec.709 H.264, HLG Main10, and sRGB Alpha fixture identities and assigns
 all six to executable slices.

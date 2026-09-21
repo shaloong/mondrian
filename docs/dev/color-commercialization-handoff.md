@@ -326,6 +326,38 @@ one-record evidence has SHA-256
 The copied source remains tagged BT.709, so this result qualifies Main10 hardware
 playback and cancellation behavior, not HDR PQ color correctness.
 
+The same temporary 1,801.033-second 4K60 Main10 stream-copy fixture then drove
+the complete 30-minute production playback gate. It completed 108,002 observed
+frames over 1,800.019 seconds with 108,000 exact Ready results and only two
+missed deadlines. Decode p95 was 10 ms, queue-wait p95 was 1 ms, GPU execution
+p95 was 3.808 ms, and 100% of presented media remained native P010 10-bit
+hardware surfaces. There were zero CPU transfers, uploads, readbacks, fallbacks,
+native timing gaps, decoder/render failure codes, or owner leaks. Process
+private commit peaked at 2,129,080,320 bytes against the fixed 4 GiB limit and
+returned to zero post-stress growth. Warm seek, latest-wins supersession,
+cancellation, resize, resume, and all ten demux-session shutdown contracts
+passed.
+
+The gate remains failed because the 53 accurate seeks measured 711,740 us p95
+against the unchanged 500,000 us limit. The source has four-second GOPs, and
+the latency rises with the number of frames decoded from the preceding
+keyframe: targets four frames after a keyframe completed in 50.926 ms, while
+targets 231-233 frames after one took 702.523-711.740 ms. The short gate had
+already measured 502.627 ms p95, so this is not long-run degradation. Direct
+FFmpeg comparisons on the same file and target were slower: approximately
+1.656-1.681 seconds through D3D12VA, 1.306-1.403 seconds through CUVID,
+1.344-1.405 seconds through CUDA hwaccel, 1.513-1.540 seconds through D3D11VA,
+and 1.428-1.533 seconds in software. Mondrian already seeks to the indexed
+preceding keyframe, reuses the decoder session, and preserves a 64-frame full
+decode preroll for reference correctness. The evidence therefore classifies
+this single local row as a GTX 1050 Ti plus four-second-GOP throughput limit;
+it does not justify a Windows CUDA detour or a relaxed product threshold. A
+previous qualifying machine completed the sealed accurate-seek row at
+356,722 us p95, so 500 ms remains the reference requirement. The 73,352,299-byte
+JSONL report has SHA-256
+`878806E264A4F36D358F26EE95F855372AC6F80C6C673DDEB547372065C8CD63`.
+As above, BT.709 tagging prevents this run from qualifying HDR color.
+
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and
@@ -1173,11 +1205,16 @@ from the local x86_64 optimization.
 
 - P0 COL-010: real HDR/P3/ICC Viewer display qualification.
 - P1 COL-031: execute the remaining sealed realtime performance matrix for the
-  current release candidate: 8K30 HDR/effects/scopes and 30-minute video/audio.
+  current release candidate: 8K30 HDR/effects/scopes and an uncontended complete
+  reference-machine baseline. The 30-minute audio/recovery row passes. The
+  30-minute 4K60 Main10 row passes its continuous playback, native GPU, memory,
+  cancellation, and teardown contracts on this machine, but remains failed at
+  711,740 us accurate-seek p95 against the unchanged 500,000 us requirement;
+  the four-second-GOP/backend comparisons above classify that local exception
+  as GTX 1050 Ti throughput rather than permission to change the threshold.
   The sealed real dual-layer Main10 Preview row has a local physical pass, and
-  the complete enforced 5/30/120-minute authoring matrix now passes on the
-  qualified 32 GiB machine. The issue still lacks an uncontended complete
-  reference-machine baseline; retain unmet requirements for transfer.
+  the complete enforced 5/30/120-minute authoring matrix passes on the qualified
+  32 GiB machine. Retain the unmet complete-baseline requirements for transfer.
   Refreshed read-only inventory on 2026-09-21 reports two 16 GiB DDR4-3600
   modules (32 GiB installed), 31.93 GiB visible after firmware reservation, and
   an NVIDIA GeForce GTX 1050 Ti with approximately 4 GiB adapter memory and
