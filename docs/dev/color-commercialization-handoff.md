@@ -284,12 +284,14 @@ identifier, and complete/last-frame metadata. Its console SHA-256 is
 `AB01F69403F6E1C40655BBA5969FB79992F6BCAB11855C0895E73CCA6A49175B`.
 This qualifies the generated file/software path, not physical SDI wire output.
 
-The sibling ignored IMF/Photon and DCP qualification tests also no longer
-hardcode stale `target/col038-tools` layouts or return success when their
-independent validators are absent. They now exercise the product toolchain
-discovery path and require complete native cleanup receipts. Local inventory
-found usable JDK and BMX 1.7 installations but no Photon library set, asdcplib,
-or DCP-o-matic verifier, so those two external-verifier rows remain NotRun.
+At that earlier checkpoint, the sibling ignored IMF/Photon and DCP qualification
+tests also no longer hardcode stale `target/col038-tools` layouts or return
+success when their independent validators are absent. They now exercise the
+product toolchain discovery path and require complete native cleanup receipts.
+Local inventory found usable JDK and BMX 1.7 installations but no Photon library
+set, asdcplib, or DCP-o-matic verifier, so those two external-verifier rows were
+NotRun. The 2026-09-21 follow-up below supersedes that inventory result with
+completed passes.
 
 The independent native repeated-export gate also passed against the complete
 six-file generated media corpus. It admitted three jobs, cancelled the first,
@@ -1251,14 +1253,61 @@ The CPU terminal RGBA8 kernel uses baseline SSE2 on x86_64 and canonical scalar
 code elsewhere; ARM performance must be measured on the target, not inferred
 from the local x86_64 optimization.
 
+## 2026-09-21 local qualification follow-up
+
+The previously unavailable professional-delivery software rows now pass locally.
+The real ignored qualification tests produced and reimported AS-11 X9 with
+official BMX 1.7, built and revalidated an IMF Application ProRes RDD 45 package
+with Photon 5.0.1, and produced a SMPTE 2K/24 DCP whose picture and PCM Track
+Files were wrapped and reimported with CineCert asdcplib 2.13.2 before independent
+DCP-o-matic 2.18.50 verification. The DCP-o-matic installer was Authenticode
+valid and its SHA-256 was
+`612760F71D0BEDE94C535B0E262214A6EEF09F0EFBC16590D0F21EA101476D8C`.
+The local vcpkg FFmpeg 8.1.2 profile now includes its BSD-2-Clause OpenJPEG
+feature so the DCDM stimulus uses `libopenjpeg`, `xyz12le`, `cinema2k`, and
+`2k_24`; the existing D3D12VA, CUDA, NVDEC, NVENC, x264, and x265 features remain.
+These passes qualify generated software delivery and independent verifier
+interchange, not physical cinema or broadcast output.
+
+A fresh generated HEVC Main10 BT.2100 HLG plus straight-Alpha sRGB color-media
+roundtrip initially exposed a headless resource-coordination deadlock. The export
+worker yielded its heavy slot without changing the jobs revision, while the
+Golden wait loop never advanced the App resource-observation cadence. The
+headless harness now publishes the same fresh resource decision as the Window
+composition root before polling retained job snapshots. The corrected production
+import/Preview/Export/reimport path passed in 5.59 seconds; its schema-3 partial
+slice report SHA-256 is
+`565F6C09D3659132B9CE3EC8303B1ABE12F17E27A111250F1AE75CCDB57D02D2`.
+The complete non-ignored App validation library then passed 2,277 tests with 43
+explicitly ignored physical/external/manual rows and zero failures.
+
+The uncontended sealed realtime visual matrix was also executed after confirming
+that no Blender process remained. Both rows retained native DX12 execution,
+zero CPU fallback, zero upload/readback, clean pool reuse, and clean teardown,
+but failed their unchanged hardware-time gates on the GTX 1050 Ti. The 4K60
+HDR multilayer/effects/scopes row measured 27,812 us GPU p95 against 16,000 us;
+the 8K30 row measured 64,967 us against 32,000 us. The evidence JSONL SHA-256 is
+`5E995EB2EC24DD8118C348FBBC6A8D4DA377C3FAC3101A663318F27CBC5F7DD0`.
+These are physical GPU-throughput failures and do not justify relaxed limits.
+
+Premiere Pro 2024 reports exact product version `24.5.0|57`. Its undocumented
+`/C es.processFile` command-line route executed once and then treated the JSX as
+a media path, so it is not a repeatable qualification authority. Pixel capture
+therefore remains NotRun pending the documented UI/CEP workflow and operator
+settings attestation. Resolve remains NotRun because this non-Studio installation
+does not expose the external scripting object. Blender 5.2 retains the earlier
+exact linear-EXR and SDR-PNG comparison passes.
+
 ## Physical and external-application work
 
 - P0 COL-010: complete the authority-challenged and operator-observed HDR/P3/ICC
   Viewer display qualification. Native Windows HDR/ICC discovery and calibration
   replay now pass the focused real-display diagnostic described above.
-- P1 COL-031: execute the remaining sealed realtime performance matrix for the
-  current release candidate: 8K30 HDR/effects/scopes and an uncontended complete
-  reference-machine baseline. The 30-minute audio/recovery row passes. The
+- P1 COL-031: transfer or meet the unchanged sealed realtime performance gates
+  on qualifying hardware. The fresh uncontended 4K60 and 8K30
+  HDR/effects/scopes rows were executed on this machine and failed only their
+  GPU-time limits, as recorded above; native DX12 execution and lifecycle
+  contracts passed. The 30-minute audio/recovery row passes. The
   30-minute 4K60 Main10 row passes its continuous playback, native GPU, memory,
   cancellation, and teardown contracts on this machine, but remains failed at
   711,740 us accurate-seek p95 against the unchanged 500,000 us requirement;
