@@ -358,6 +358,29 @@ JSONL report has SHA-256
 `878806E264A4F36D358F26EE95F855372AC6F80C6C673DDEB547372065C8CD63`.
 As above, BT.709 tagging prevents this run from qualifying HDR color.
 
+A focused two-display Windows diagnostic exercised the same native DisplayConfig
+and color-profile Adapter used by the product. `DISPLAY1` was already active as
+10-bit RGB/PQ HDR with a reported 456-nit peak, but it had no extended-mode ICC
+association. `DISPLAY2` was 8-bit SDR and held the user's HDR calibration profile
+only in its Advanced Color association, so the initial standard-mode lookup
+correctly returned no profile. A reversible per-target
+`DisplayConfigSetDeviceInfo` transition enabled HDR on `DISPLAY2`; the product
+probe then reported PQ/Advanced Color active and
+`ColorProfileGetDisplayDefault` returned the exact 820-byte profile with SHA-256
+`2F5F3BC8E2E740FE5095023BAE89A6CCECF8C7AE4928AF51B75008B486B1A6AA`.
+The production calibration replay parsed those bytes for Rec.2100 PQ/perceptual
+rendering and produced calibration identity
+`43E5FC209CCAB4B201FE6E3D6EA8FB80B6AC67B56177CBD37AB8FA3225B8FB05`.
+The system transition returned success in both directions, and a final native
+probe proved `DISPLAY2` was restored to its original SDR state. An experimental
+WCS extended-mode fallback still found no profile while the association was
+inactive, confirming that no code workaround is appropriate. The diagnostic
+summary SHA-256 is
+`78E1665BB2CAD8EE7AEA0BC7016977AEA769FB154EC2918405D138C7CF562D93`.
+This proves native HDR/ICC discovery, mode binding, payload capture, and LUT
+construction on real local displays; it is not the authority-challenged,
+operator-observed three-lane COL-046 row.
+
 DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
 Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
 and examples are present. A fresh `-nogui` product instance stayed alive and
@@ -1203,7 +1226,9 @@ from the local x86_64 optimization.
 
 ## Physical and external-application work
 
-- P0 COL-010: real HDR/P3/ICC Viewer display qualification.
+- P0 COL-010: complete the authority-challenged and operator-observed HDR/P3/ICC
+  Viewer display qualification. Native Windows HDR/ICC discovery and calibration
+  replay now pass the focused real-display diagnostic described above.
 - P1 COL-031: execute the remaining sealed realtime performance matrix for the
   current release candidate: 8K30 HDR/effects/scopes and an uncontended complete
   reference-machine baseline. The 30-minute audio/recovery row passes. The
