@@ -167,6 +167,12 @@ recovery wait for job completion while the same job waits for dispatch to
 reopen after Critical pressure. Queue identity, cancellation, snapshot, and
 publication authority remain unchanged across this slot reacquisition.
 
+Every execution composition root must advance the resource-observation cadence while
+waiting for cooperative work. The Window event loop does this for interactive runs;
+headless and validation coordinators call the same App refresh before polling retained
+job snapshots. A yielded boundary changes queue diagnostics without changing the jobs
+revision, so jobs-revision polling alone cannot prove that dispatch will reopen.
+
 Handoff is a close/acknowledge/resample transition. `domains_to_close` repeats
 every draining domain idempotently under the current `close_epoch`. The
 composition root synchronously closes each concrete dispatch Seam—including
