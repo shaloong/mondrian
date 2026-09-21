@@ -168,6 +168,56 @@ console evidence SHA-256 is
 This is a valid local physical row; it does not replace the remaining
 uncontended full-matrix, HDR/effects/scopes, long-run, or other-platform rows.
 
+The fixed renderer-visual matrix was also executed without changing its 16 ms
+4K or 32 ms 8K budgets. On this GTX 1050 Ti, the 4K HDR multilayer/effects/RGB
+scopes row measured 29.67 ms total p95 (13.65 ms composite, 2.97 ms output
+boundary, 13.38 ms scopes); the 8K row measured 69.43 ms (21.33, 11.67, and
+41.11 ms respectively). Both rows therefore remain failed qualification rows.
+The independent fixed 4K Rec.709 Luma scopes gate passed at 2.802 ms GPU p95
+and 46 us CPU-record p95, isolating the failure to the complex HDR/full-pipeline
+workload rather than basic scopes operation. A half-PQ LUT experiment and a
+contiguous-key scopes aggregation experiment produced no stable cross-row gain
+and were fully reverted. The unchanged baseline JSONL SHA-256 is
+`6DFA1DF28EDFFF6DE159D0EC891FCB3779061099C105E2FB67FB488593CEE265`.
+
+The sealed Release long-authoring matrix passed all six fixed cases, including
+the 120-minute project scale. The largest case retained a 202.37 MiB project,
+completed its maximum operation in 5.261 seconds, and peaked at 462.57 MiB
+private commit; all retained-history, process-memory, and locality contracts
+passed. The JSONL SHA-256 is
+`54D0217E6A9769E65CD24AAA8ACA81AF1D874A662363E59500CCF2D9ADF61B62`.
+
+The real 30-minute CPAL audio recovery gate passed over 1,804.53 seconds. It
+completed 53,949 coordinated video intervals with 100% Ready evidence, zero
+missed deadlines and underruns, handed device loss to the synthetic clock in
+18 us, reopened in 66.516 ms, and returned to the audio device in 532.503 ms.
+The process-tree memory gate and complete owner shutdown passed. The audio
+report SHA-256 is
+`A1F7BEC329F7B637551A4061194A78BD2FC01605D9527840296949B066E59C76`.
+
+The 30-minute 4K HEVC Main10 video gate exposed two separate facts. First, its
+4,096-event diagnostic tail evicted 130,909 events and incorrectly made
+adaptive-scale proof impossible. Playback Evidence schema 6 now retains two
+fixed-size whole-run scale-reduction counters; regression tests prove they
+survive detailed-event eviction. The rerun evicted 131,806 detailed events yet
+retained 68 half-scale and 73 quarter-scale reductions and physically executed
+3840x2160, 1920x1080, and 960x540 GPU outputs. Second, the unchanged 99.5%
+exact-Ready policy still failed: 43,921 of 45,002 opportunities were exact
+Ready against 44,777 required, and 489 intermediate frames were skipped against
+45 allowed. Decode p95 (10 ms), queue wait p95 (1 ms), GPU-stage p95 (19.429
+ms), native D3D12/P010 execution, zero fallback/readback, and all memory/owner
+contracts passed, while GPU completion-wait p95 was 75.722 ms. Two Blender 5.2
+processes were resident and one started during the measured window, so this is
+a truthful failed qualification under the observed load, not proof of an
+intrinsic uncontended hardware ceiling. No threshold was changed or skipped;
+an uncontended replay remains open. The video report SHA-256 is
+`6DD5174CCB05925E32F17FFD30E73465AAD173A1FE363195DDFBF623FA7044D9`.
+The same run exposed a harness error that made completed warm-seek coverage
+impossible: all settled probes completed while every PointerDrag probe was
+immediately superseded. The probe population now completes 50 PointerDrag and
+50 Settled samples before the independent latest-wins burst; its focused
+Release regression passes. The physical latency row remains to be replayed.
+
 DaVinci Resolve 21.1.0.17 is now installed. The standard build starts normally,
 but its documented external scripting API is unavailable: the local API returns
 no Resolve object and no scripting service listens. The UI automation helper
