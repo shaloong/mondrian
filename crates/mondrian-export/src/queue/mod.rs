@@ -4836,6 +4836,8 @@ fn execute_resident_hevc_export(
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-f")
+        .arg("mpegts")
         .arg("-i")
         .arg(&resident_video_path)
         .arg("-map")
