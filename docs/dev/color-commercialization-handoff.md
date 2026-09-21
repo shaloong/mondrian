@@ -1322,9 +1322,10 @@ exact linear-EXR and SDR-PNG comparison passes.
   driver 32.0.15.8266. No hardware serials were collected. The repository's
   independent installed-capacity qualification passed with the exact
   34,359,738,368-byte module total, so this machine now satisfies the 32 GiB
-  `professional-large-project` memory admission requirement. GPU throughput,
-  timestamp, HDR, and uncontended complete-matrix admission still require their
-  own measured execution and are not inferred from memory or adapter inventory.
+  `professional-large-project` memory admission requirement. Local DX12 GPU
+  timestamps and HDR execution are measured below; the unchanged throughput
+  gates remain failed, and the complete cross-machine matrix is not inferred
+  from memory or adapter inventory.
 - P2 COL-042: physical DeckLink/AJA output qualification and bridge portability.
   Windows AJA SDK 18.1.0 and DeckLink API 12.0 native bridges, including
   independent raw ANC capture, are implemented and passed native no-device
@@ -1343,3 +1344,85 @@ Use the [endurance runbook](commercial-endurance-qualification.md),
 [cross-application capture procedure](cross-application-color-capture.md).
 Missing devices, licenses, native adapters, or independent reference captures
 remain explicit incomplete qualification; simulators are contract tests only.
+
+## 2026-09-22 final local qualification follow-up
+
+The ignored real-audio cancellation gate had previously replaced its original
+50 ms physical observation with the decoder's 250 ms shutdown-slot wait. That
+relaxation has been removed. The gate now preserves a 50 ms logical
+cancellation-to-reader-return limit and a separate 50 ms native-owner-to-Session-
+capacity-release limit. This split reflects the Windows ownership boundary:
+`CreateProcess` is synchronous and supplies no child handle that another thread
+can terminate before it returns. Entry-to-return spawn time and total
+cancellation-to-release time remain visible diagnostics rather than being hidden
+or accepted as either gate.
+
+The production teardown path now releases decoder Session capacity immediately
+after native exit is observed, while the retiring owner continues to supervise
+stdout/stderr pumps and publish their independent closure evidence. A regression
+test holds a pump deliberately blocked and proves that native capacity returns
+before the join without weakening the final all-resources-released receipt. The
+real-media harness also derives its destination channel count from the selected
+stream; a generated mono fixture exposed the former stereo-only assumption.
+Generated mono PCM24 WAV and AAC/M4A fixtures then passed 10 runs each. Across
+all 20 runs logical cancellation was 5.11--6.65 ms, synchronous Windows process
+creation was 100.90--144.86 ms, total cancellation-to-capacity-release was
+102.18--146.11 ms, and post-ownership physical release was 1.17--1.68 ms. Every
+run reported zero remaining Sessions and complete native-owner cleanup. The
+temporary result JSON SHA-256 was
+`303647786D0450750764A28C4FDBF61E50800C6B5CDF14A45B8DFFDAC8E97647`.
+
+A generated, ffprobe-confirmed MPEG-2 4:2:2 MXF (`720x576`, 25 fps,
+`field_order=tt`, stream time base `1/25`) passed the packaged-demux production
+field-rate gate. Both explicit motion-adaptive TFF and Automatic policy decoded
+16 consecutive 50 Hz field samples with exact selected PTS, exact half-picture
+duration, no temporal approximation, compact CPU YUV retention, and clean
+isolated-demux closure. The temporary fixture SHA-256 was
+`5F28E19E314BAD117AF5CC0E6B3C318462D346580C8FA7C21D24937BA3AE44DB`.
+The repeated-process-crash recovery gate also passed after intentionally
+aborting three child processes and proving that final save retired recovery
+authority.
+
+The remaining real-GPU lifecycle checks passed on the local GTX 1050 Ti: two
+ordered texture-pool turnover regressions, Viewer active-texture turnover, fused
+YUV SDR/PQ/HLG parity, five native YUV upload/prewarm ordering regressions,
+4,198,498,304-byte DX12 dedicated-memory discovery, exact GPU output-boundary
+parity, three partial/completed Viewer startup ownership cases, Waveform partial
+startup failure preservation, uncaptured-device-error handling, and native audio
+device-catalog discovery/closure. Hardware-encoder probing selected NVENC;
+complete Export GPU backend construction, concurrent-playback encoder admission,
+and nested resident-output lifetime all passed.
+
+The full media-library regression also exposed a contradictory stress-test
+assertion: a callback deliberately contributed one underrun frame while the test
+simultaneously required both zero underruns and one underrun per callback. The
+zero assertion was removed; the remaining equality checks the coherent telemetry
+snapshot across 100,000 callback updates and passed five consecutive runs.
+
+The same-device D3D12VA resident HEVC Export gate initially encoded three frames
+and wrote three packets without CPU pixel readback/upload or rawvideo transport,
+but its final stream-copy mux failed with EOF. The 1,316-byte intermediate was
+seven valid 188-byte MPEG-TS packets; forced `mpegts` probing recovered all three
+HEVC packets and their Main/BT.709/legal-range/left-chroma contract. Automatic
+probing misclassified this deliberately tiny transport stream as MPEG-PS. The
+final mux now declares its known intermediate input with `-f mpegts`; the full
+production queue test subsequently passed and independently counted all three
+packets in the final MKV.
+
+A fresh uncontended sealed realtime matrix retained the unchanged 16 ms and
+32 ms gates and again failed only GPU time. The 4K60 row measured 28.822 ms p95:
+14.741 ms composite, 3.613 ms PQ boundary, and 10.926 ms exact RGB-parade scopes.
+The 8K30 row measured 79.623 ms p95: 30.274 ms composite, 15.675 ms PQ boundary,
+and 35.706 ms scopes. Both rows retained native DX12 execution, zero CPU
+fallback/upload/readback/blockers, warm resource reuse, and clean retirement.
+The evidence JSONL SHA-256 is
+`C55D35275723B7D29D20DAC3814FAE7EB88835F5126693F38D3F186A3896D6FA`.
+For 8K, the PQ boundary plus exact scopes alone total about 51.4 ms p95, so even
+an impossible zero-cost compositor cannot meet 32 ms on this adapter. The
+current compositor does issue one full-frame pass per contributing layer and a
+general bounded multi-layer shader could reduce intermediate traffic, but it
+cannot close either row by itself: at 4K the non-composite stages already consume
+about 14.5 of the 16 ms budget. Scope decimation, reduced bins, skipped frames,
+or a relaxed threshold would change the sealed workload and were not used.
+Golden three-run qualification was already complete and was not repeated; the
+long endurance row remains intentionally skipped by user direction.

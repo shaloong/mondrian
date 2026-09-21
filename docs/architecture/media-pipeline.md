@@ -305,15 +305,18 @@ over-capacity residency are diagnostic facts. This is an intentionally isolated
 process Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may
 replace it behind the same Interface without changing cache or sample semantics.
 
-The capacity is a physical-owner limit, not merely an LRU-entry limit. One
-permit covers a Session from pre-spawn admission through active, queued,
-terminating, partial-construction, and EOF-finalization states; it is released
-only after the child and both pipe pumps are proven retired. Capacity is clamped
-to 64, random seeks cannot create a replacement-child storm, and online
-reconfiguration converges without hiding terminating processes from the live
-and peak Session diagnostics. Shutdown/fault state is rechecked while holding
-the relevant cache/permit lock, immediately before spawn, and immediately after
-spawn so no reader or child can escape a racing shutdown signal.
+The capacity is a physical native-child limit, not merely an LRU-entry limit.
+One permit covers a Session from pre-spawn admission through active, queued,
+terminating, partial-construction, and EOF-finalization states. It is released
+only after native exit is observed; an unobserved exit retains the permit.
+Stdout/stderr pump owners remain independently supervised and reported after
+that point, but a slow pipe join cannot occupy native-child capacity. Capacity
+is clamped to 64, random seeks cannot create a replacement-child storm, and
+online reconfiguration converges without hiding terminating processes from the
+live and peak Session diagnostics. Shutdown/fault state is rechecked while
+holding the relevant cache/permit lock, immediately before spawn, and
+immediately after spawn so no reader or child can escape a racing shutdown
+signal.
 
 An execution owner that must prove phase isolation first obtains unique
 `AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
@@ -356,10 +359,11 @@ Native process and pipe-pump construction run on one separate prebuilt startup
 lane. Typed FFmpeg command admission still precedes the cancelable handoff;
 an admission rejection keeps its original cause. Read cancellation never waits
 for an in-progress OS process creation. The physical Session permit stays with
-the request, partial child, completed Session, or retiring owner until actual
-child and pump closure. A fixed maximum additionally bounds failed completion
-envelopes whose physical permit has already been released; it is not a second
-Playback scheduler or a change to resource-policy entitlement.
+the request, partial child, completed Session, or retiring owner until native
+exit is observed. Pipe closure remains separately owned and must still pass the
+consuming shutdown receipt. A fixed maximum additionally bounds failed
+completion envelopes whose physical permit has already been released; it is not
+a second Playback scheduler or a change to resource-policy entitlement.
 
 Each owning completion holds a producer lease through install or explicit
 retirement. Buffered-result and disconnected-channel Drop enqueue native owners
@@ -372,10 +376,13 @@ lost shutdown notifications. Startup creation failure has no synchronous fallbac
 The nested `decoder_startup` receipt distinguishes a required product lane from
 an absent synthetic decoder, records actual worker joins and exact queued,
 in-flight, unclaimed, and producer inventory, and retains failed or unverified
-native ownership after panic. Logical cancellation latency and physical retirement
-latency are separate observations against the original qualification threshold;
-isolating native startup is not a claim that OS process creation or cleanup
-always completes within 50 ms.
+native ownership after panic. The real-media gate keeps the original 50 ms
+logical cancellation-to-reader-return bound. Because synchronous Windows
+`CreateProcess` exposes no child handle before it returns, the separate physical
+50 ms bound begins when native ownership becomes available and ends when the
+Session permit is released after observed exit. Entry-to-return process creation
+and cancellation-to-physical-release remain reported as diagnostic durations;
+they are not substituted for either gate or hidden by the startup lane.
 
 Persistent decoding owns one prebuilt named teardown worker. Session eviction,
 random-seek replacement, partial child construction, normal EOF, cancellation,
