@@ -1154,14 +1154,15 @@ from the local x86_64 optimization.
   Main10 Preview row now has a local physical pass. The issue still lacks an
   uncontended complete reference-machine baseline; retain unmet
   reference-machine requirements for transfer.
-  Local read-only inventory on 2026-09-04 reports 15.86 GiB physical memory,
-  12 logical processors, Windows build 26200, and an NVIDIA RTX 3050 Laptop GPU
-  (WMI-reported adapter RAM approximately 4 GiB; driver 32.0.15.9159). No
-  hardware serials were collected. This machine does not meet the matrix's
-  32 GiB `professional-large-project` minimum; transfer the sealed full-matrix
-  baseline to a qualifying machine. Locally runnable smaller diagnostics are
-  still useful but cannot be relabeled as that baseline. GPU timestamp/HDR
-  admission remains execution evidence, not inferred from this inventory.
+  Refreshed read-only inventory on 2026-09-21 reports two 16 GiB DDR4-3600
+  modules (32 GiB installed), 31.93 GiB visible after firmware reservation, and
+  an NVIDIA GeForce GTX 1050 Ti with approximately 4 GiB adapter memory and
+  driver 32.0.15.8266. No hardware serials were collected. The repository's
+  independent installed-capacity qualification passed with the exact
+  34,359,738,368-byte module total, so this machine now satisfies the 32 GiB
+  `professional-large-project` memory admission requirement. GPU throughput,
+  timestamp, HDR, and uncontended complete-matrix admission still require their
+  own measured execution and are not inferred from memory or adapter inventory.
 - P2 COL-042: physical DeckLink/AJA output qualification and bridge portability.
   Windows AJA SDK 18.1.0 and DeckLink API 12.0 native bridges, including
   independent raw ANC capture, are implemented and passed native no-device
