@@ -47,6 +47,8 @@ $viewerDisplayProfilePath = Join-Path $contractRootAbsolute "viewer-display-qual
 $realtimeMatrixPath = Join-Path $contractRootAbsolute "realtime-performance-matrix.json"
 $crossApplicationProfilePath = Join-Path $contractRootAbsolute "cross-application-color-qualification.json"
 $crossApplicationStimulusPath = Join-Path $contractRootAbsolute "cross-application-color-stimulus-v1.json"
+$localCrossApplicationProfilePath = Join-Path $contractRootAbsolute "cross-application-color-blender-premiere-qualification.json"
+$localCrossApplicationStimulusPath = Join-Path $contractRootAbsolute "cross-application-color-stimulus-blender-premiere-v1.json"
 $platformMatrixPath = Join-Path $contractRootAbsolute "platform-driver-display-matrix.json"
 $enduranceProfilePath = Join-Path $contractRootAbsolute "commercial-endurance-qualification.json"
 $enduranceAuthorityContractPath = Join-Path $contractRootAbsolute "commercial-endurance-capture-authority.json"
@@ -68,6 +70,8 @@ $contractPaths = @(
     $realtimeMatrixPath
     $crossApplicationProfilePath
     $crossApplicationStimulusPath
+    $localCrossApplicationProfilePath
+    $localCrossApplicationStimulusPath
     $platformMatrixPath
     $enduranceProfilePath
     $enduranceAuthorityContractPath
@@ -93,6 +97,8 @@ $viewerDisplayProfile = Get-Content -LiteralPath $viewerDisplayProfilePath -Raw 
 $realtimeMatrix = Get-Content -LiteralPath $realtimeMatrixPath -Raw | ConvertFrom-Json
 $crossApplicationProfile = Get-Content -LiteralPath $crossApplicationProfilePath -Raw | ConvertFrom-Json
 $crossApplicationStimulus = Get-Content -LiteralPath $crossApplicationStimulusPath -Raw | ConvertFrom-Json
+$localCrossApplicationProfile = Get-Content -LiteralPath $localCrossApplicationProfilePath -Raw | ConvertFrom-Json
+$localCrossApplicationStimulus = Get-Content -LiteralPath $localCrossApplicationStimulusPath -Raw | ConvertFrom-Json
 $platformMatrix = Get-Content -LiteralPath $platformMatrixPath -Raw | ConvertFrom-Json
 $enduranceProfile = Get-Content -LiteralPath $enduranceProfilePath -Raw | ConvertFrom-Json
 $enduranceAuthorityContract = Get-Content -LiteralPath $enduranceAuthorityContractPath -Raw | ConvertFrom-Json
@@ -186,6 +192,17 @@ if ($crossApplicationProfile.execution_policy -ne "sealed-required") {
 }
 if (@(Compare-Object @("adobe_premiere_pro", "blender", "davinci_resolve", "mondrian") ($crossApplicationProducers | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "cross-application.producers" "Cross-application qualification must require the exact commercial producer set"
+}
+$localCrossApplicationProducers = @($localCrossApplicationProfile.required_producers | ForEach-Object { [string]$_ })
+if ($localCrossApplicationProfile.schema_version -ne 2 -or $localCrossApplicationStimulus.schema_version -ne 1 -or
+    $localCrossApplicationProfile.producer_scope -cne "blender_and_premiere") {
+    Add-Issue "error" "cross-application.local-schema" "Local Blender/Premiere policy must use schema 2 with the explicit local producer scope"
+}
+if ($localCrossApplicationProfile.execution_policy -ne "sealed-required") {
+    Add-Issue "error" "cross-application.local-policy" "Local Blender/Premiere qualification must use sealed-required execution"
+}
+if (@(Compare-Object @("adobe_premiere_pro", "blender", "mondrian") ($localCrossApplicationProducers | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "cross-application.local-producers" "Local Blender/Premiere qualification must require the exact local producer set"
 }
 $platformBackendPairs = @($platformMatrix.required_platform_backends | ForEach-Object { "$($_.platform)/$($_.backend)" })
 $platformScenarios = @($platformMatrix.required_scenarios_per_platform | ForEach-Object { [string]$_ })
@@ -353,6 +370,15 @@ foreach ($field in @("qualified_status_required", "missing_artifacts_forbidden",
     if (-not (Has-Property $crossApplicationProfile.acceptance $field) -or $crossApplicationProfile.acceptance.$field -ne $true) {
         Add-Issue "error" "cross-application.acceptance" "Cross-application qualification must require '$field'"
     }
+    if (-not (Has-Property $localCrossApplicationProfile.acceptance $field) -or $localCrossApplicationProfile.acceptance.$field -ne $true) {
+        Add-Issue "error" "cross-application.local-acceptance" "Local Blender/Premiere qualification must require '$field'"
+    }
+}
+$declaredLocalStimulusPath = Resolve-ContainedPath $repositoryRoot ([string]$localCrossApplicationProfile.stimulus.path) "Local Blender/Premiere stimulus"
+$declaredLocalStimulusHash = (Get-FileHash -LiteralPath $declaredLocalStimulusPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($declaredLocalStimulusPath -ne [IO.Path]::GetFullPath($localCrossApplicationStimulusPath) -or
+    $declaredLocalStimulusHash -ne [string]$localCrossApplicationProfile.stimulus.sha256) {
+    Add-Issue "error" "cross-application.local-stimulus" "Local Blender/Premiere policy does not bind the exact checked-in stimulus bytes"
 }
 if ($realtimeMatrix.machine_profile -ne $machineProfile.id) { Add-Issue "error" "realtime-matrix.machine-profile-mismatch" "Realtime performance matrix references a different machine profile" }
 if (@(Compare-Object @("long-authoring", "playback-reference", "real-4k60-dual-layer", "renderer-visual") ($realtimeGateIds | Sort-Object)).Count -ne 0) {
@@ -391,7 +417,10 @@ if (-not (Has-Property $commercialEngine "complete_golden")) {
         Add-Issue "error" "commercial-engine.complete-golden-contract-mismatch" "Commercial engine contract must reference the current Golden Project contract"
     }
     if ($commercialEngine.complete_golden.report_schema_version -ne 3) {
-        Add-Issue "error" "commercial-engine.complete-golden-report-schema-unsupported" "Commercial engine contract must require Complete Golden report schema 3"
+        Add-Issue "error" "commercial-engine.complete-golden-report-schema-unsupported" "Commercial engine contract must require aggregate report schema 3"
+    }
+    if ($commercialEngine.complete_golden.process_report_schema_version -ne 2) {
+        Add-Issue "error" "commercial-engine.complete-golden-process-report-schema-unsupported" "Commercial engine contract must require process report schema 2"
     }
     foreach ($field in @("build_timeout_seconds", "process_timeout_seconds")) {
         if (-not (Has-Property $commercialEngine.complete_golden $field)) {

@@ -5,6 +5,426 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
+## Current Windows physical follow-on, 2026-09-21
+
+The current host now reports exactly 32 GiB installed physical memory and passes
+the `professional-large-project` reference-machine profile without baseline
+clean-tree admission. The cross-platform exact-capacity qualification test was
+previously Linux-only; it is now executable on Windows and passed against the
+independent 34,359,738,368-byte inventory. This establishes machine-class
+eligibility, not a sealed performance result for the still-dirty candidate.
+
+Native DisplayConfig capture resolved two physical outputs. `DISPLAY1` is active
+HDR/WCG, 10-bit RGB, with 120-nit SDR reference white. `DISPLAY2` supports
+HDR/WCG but is currently 8-bit RGB SDR with 80-nit reference white. An installed
+Windows HDR calibration ICC profile builds Mondrian calibration processors for
+sRGB, Rec.2020, and PQ source spaces. After the user changed the Windows color
+profile setting, a fresh production-probe capture still found no active default
+association for either current mode. Both paths now select the system-wide
+association scope: `DISPLAY1` has no extended-display-color-mode default and
+`DISPLAY2` has no standard-display-color-mode default. The four diagnostic
+transcript SHA-256 values are `F597E40E2BE6439974934AD595C60636590D72FB5068C81A525367853C7DF41A`,
+`9223A4CC4BABF33C884D93764F17BEC0DF3A040CEC5ABB6476ECE81D0C569DBF`,
+`34014F52FCFB2528C7FD303C945DD3699CAB7D316C2D2194427A7BAC19B98A04`,
+and `CB670FA8D4A395C611C403685C2AAA363467D1A338500A6150683028904D59B5`.
+Windows ICC lookup obeys `ColorProfileGetDisplayUserScope`; it cannot borrow a
+stale profile from the inactive scope. Physical Viewer observation and a sealed
+same-run ICC row remain open.
+
+The Windows HDR probe previously left transfer identity and physical luminance
+empty even when DisplayConfig proved that HDR mode was active, making the strict
+Windows HDR-PQ source row impossible to satisfy. It now matches the exact GDI
+output through DXGI and consumes `IDXGIOutput6::GetDesc1` rather than inferring
+PQ from the HDR enable bit. The fresh physical probe reported `DISPLAY1` as PQ,
+10-bit RGB, HDR/WCG active, 0.324-nit minimum and 456-nit maximum luminance;
+`DISPLAY2` remained 8-bit SDR with no HDR transfer claim. Their transcript
+SHA-256 values are `748D6073EB70E4504930A66ED07A1E626CBCD1D03DD01953FF61D9D7158B810E`
+and `D2695DF69FB48D6754A24981C2B401FE4B2E91FC19E83893F3028D09ADB93D74`.
+This closes the native Windows transfer/luminance implementation gap, while the
+same-run Viewer/operator and active ICC requirements remain open.
+
+On the observed NVIDIA GeForce GTX 1050 Ti driver, HEVC Main10 3840x2160 streams
+with SPS coded height 2176 remove the shared D3D12 device after the first frame.
+The same adapter decodes coded-height 2160 Main10 through D3D12VA/P010. Preview
+admission now probes SPS-derived coded geometry before hardware attachment only
+for that exact adapter/codec/profile combination. Preferred hardware falls back
+with `DeviceStreamCapabilityRejected`; required GPU residency fails closed.
+Physical 4K24/25 rejection and 4K60 native-path controls completed without a
+device removal. Full workspace all-feature tests and strict all-target Clippy
+passed after the decode and display-scope fixes. The normally ignored real-GPU
+library set also passed all 13 tests on DX12, including device-local-memory
+reporting, persistent YUV upload reuse, fused SDR/PQ/HLG input, texture turnover,
+and a byte-exact GPU output-boundary readback. Both ignored viewer-retirement
+resource tests passed on the same adapter. The native alpha/UNORM boundary
+diagnostic passed, and the short 4K scopes timestamp gate measured 2,997 us GPU
+p95 and 136 us CPU-record p95 against 5,000/500 us limits. The scopes result is
+useful physical evidence but is not a sealed uncontended performance row while
+Blender remains active.
+
+The 4K Standard View timestamp gate initially isolated a real PQ shader cost:
+5,732-5,776 us p95 against the unchanged 5,000 us limit, with all warm-path
+allocation and cache checks already passing. The package-pinned PQ compiler now
+replaces the fingerprinted inverse-HLG half-domain LUT with the normative
+analytic expression only after proving the exact View, resource identity, and
+normalized formation domain. It retains the OCIO PQ LUT and original
+tetrahedral ordering. The formal 60-sample rerun passed at 4,616 us PQ p95
+(4,512 us SDR, 3,501 us HLG); all-View float parity and PQ Delta E ITP tests
+passed against the CPU OCIO reference. The report SHA-256 is
+`2D509D8A507B2F2EC9B87E167193A1E560E52D6EAC4B6F612E89F57E0FAE07F1`.
+This is a valid physical short gate, while the sealed uncontended matrix remains
+open until the unrelated Blender process is no longer resident.
+
+The separate fixed 4K input-transform timestamp gate also passed its default 60
+samples per transform against the unchanged 5,000 us p95 limit. Exact working
+identity remained a zero-pass alias; matrix plus Rec.709 OETF measured 1,929 us,
+Rec.709 input to working measured 1,159 us, and Sony S-Log3/S-Gamut3.Cine input
+to working measured 1,136 us. All 180 executed samples reused their shader,
+pipeline, backend object, bind group, and output texture without a warm-path
+creation or allocation. The report SHA-256 is
+`8E744992C3B73FD19B4BBB9B8F6CE33C01133BF4EE2286EE132BBC4675C267EA`.
+
+The post-optimization full workspace/all-feature test run completed with exit
+code zero, followed by strict workspace/all-target/all-feature Clippy with
+warnings denied, format, and diff checks. Twelve explicitly selected App ignored
+hardware tests also passed on the real DX12 adapter: Viewer startup and partial
+construction failure ownership, Headless startup/binding and retirement,
+dependency retirement ordering, injected device-error closure, partial Waveform
+startup, active realtime-session closure, and Golden whole-Viewer operation
+closure. Injected panics were observed only in their expected fail-closed tests.
+The Windows development bootstrap also now imports the VsDevCmd environment
+case-insensitively while preferring its activated `PATH`; this prevents an
+inherited `Path` entry from erasing the MSVC directories in a fresh shell.
+
+Additional locally executable qualification on 2026-09-21 passed native audio
+device enumeration through both the App validation host and the actual discovery
+protocol, four real-adapter Export tests, the two-case Release audio load matrix,
+eight packaged isolated-demux lifecycle cases, and six real-media decode,
+cancellation, seek, and independent-session cases. The audio load matrix had no
+realtime deadline misses. Its heaviest reported cases were 64 tracks plus 16
+buses at a 64-frame block (153 us p99 against 1,334 us) and 64 tracks plus 64
+lookahead limiters at a 1,024-frame block (5,934 us p99 against 21,334 us).
+The JSONL evidence SHA-256 is
+`496AF7A99841126355AAB4C80D0C628723D6E0FCF018B24A660711118FC3B0C0`.
+The real-media cancellation case returned logical cancellation in 6.502 ms and
+observed physical child termination in 87.160 ms with all owners closed. The
+packaged demux worker SHA-256 is
+`3E281D0A24A38DCFEDABA48C63F7E15004992AF1CA7361770DCF20B56E25A264`.
+These generated media fixtures remain outside the repository.
+
+The Release Export simulation batch passed its existing gates. Two-layer
+1080p29.97 reached 29.97 fps with 13 ms p95, while single-layer 4K60 identity
+passthrough reached 60 fps without a missed frame budget. The fixed two-layer
+4K60 case reached 23.399 fps with 46 ms p95 and missed all 120 nominal realtime
+budgets, while passing the existing 12 fps offline-fallback floor. Source review
+confirms that this simulation directly exercises the CPU float-linear compositor;
+it does not measure the production GPU visual executor. Separate real-adapter
+tests prove construction, nested GPU residency through one final readback, and
+NVENC admission, but there is not yet an equivalent two-layer 4K60 GPU
+performance gate. Therefore this result is neither a 4K60 realtime pass nor a
+GPU hardware-limit finding. The simulation JSONL SHA-256 is
+`945937A055099275B12CB2E457495A289CD053B520787F484D24084FB3962DD6`.
+
+The Release product-host startup qualification also passed. It exercised every
+published startup checkpoint, Waveform substage, Preview substage, and an opaque
+panic injection, and proved complete partial-owner return in all cases. A manual
+Preview diagnostic exposed a test-harness cleanup defect: assertion failure
+could leave its thread-local FFmpeg session alive and hang the test process. A
+scope guard now clears that session on success, early return, and unwind. Both
+the negative failure case and the 140-request forward/reverse Main10 open-GOP
+coverage case exit cleanly; Media all-target/all-feature Clippy, format, and
+diff checks pass.
+
+The current v14 Complete Golden gate passed three consecutive clean-source
+runs after two supervisor defects were exposed by a fresh C-drive target. The
+supervisor had built only `mondrian-golden`, leaving media-probe discovery
+accidentally dependent on a stale sibling product executable, and still accepted
+only obsolete process-report schema 1 while the product publishes schema 2. It
+now builds and hashes both the product worker and dedicated Golden executable,
+and the commercial-engine contract owns the process-report schema separately
+from aggregate schema 3. Contract tests and `Pr/All` asset validation cover both
+boundaries. The final baseline-eligible run at revision `7216ba21` passed 3/3
+with distinct run and Project identities, natural exit codes zero, and elapsed
+times 61.851, 53.594, and 51.280 seconds. The aggregate report SHA-256 is
+`98A0B23492B1202ADABDAE141567433E2500412F36935564F3443D55684415DA`;
+the Golden executable SHA-256 is
+`FFB190783A931ABD8CDDCA01C58978AF8450FA0B5EA094DCCCE7499AAE3A202E`,
+and the packaged product worker SHA-256 is
+`5DEE280B54ECAE86D31A90CCA7D390D8D3465C715685A22AB6F92EE2B0CD373B`.
+Generated PCM/AAC, CFR/VFR, HLG, and Alpha media remain ignored local fixtures.
+
+The Release Project lifecycle smoke also passed: create was 129 ms against an
+8,000 ms limit, three opens had an 18 ms maximum against 6,000 ms, and five
+saves had a 14 ms maximum against 6,000 ms, with complete App and worker-owner
+closure. Its report SHA-256 is
+`EB763625213906717ECDF3E3752C80AB980B3163839EE395B0AF18FD41F0EDF3`.
+The large App UI smoke passed all seven cases with 360 assets, 720 clips, and
+480 effects: root build 1,255 ms, refresh maximum 19 ms, 40-resize loop 47 ms,
+6,533-command paint 30 ms, sustained playback refresh 418 ms, Preview probe
+144 ms, and Preview playback refresh 339 ms. Both Preview owners closed all
+seven workers. Its report SHA-256 is
+`FD1EED9DACE5DA56B8C1BC974FC03C55DF48EBAB8BA35DB7391C933936AE34A6`.
+
+The real 4K60 dual-layer gate is now sealed independently of development
+environment overrides. It requires exact 3840x2160, proven 60/1 HEVC Main10
+10-bit media, 600 observations, two layers, Source-Full authored extent, a
+50,000 us decode p95 ceiling, 10,000 us queue-wait p95 ceiling, 99.5% Ready
+policy, eight settled seeks, pause/seek/resume and resize continuity, and strict
+native GPU timestamps. The first strict run exposed a real stopped-to-realtime
+ownership gap: cross-region seek preparation produced an exact physical GPU
+picture but did not preserve that binding for the new realtime coordinator,
+causing three isolated stale recovery samples. Stopped-picture preparation now
+invalidates old evidence and publishes the new exact Preview/GPU binding only
+after physical ownership and a healthy generation are proven.
+
+The corrected gate passed on the GTX 1050 Ti even with every former tuning
+environment variable deliberately set to a conflicting or permissive value.
+It completed all 600 observations over 9.990 seconds with zero stale or missed
+opportunities. Decode p95 was 10,000 us against 50,000 us, queue wait p95 was
+1,000 us against 10,000 us, and GPU execution p95 was 9,798 us against the
+16,667 us frame period. It recorded 601 native two-layer GPU composites, zero
+passthrough, fallback, or readback frames, 1,268 native import GPU timestamp
+samples with none missing, passing resume and resize probes, and complete owner
+closure. The environment-poisoned console evidence SHA-256 is
+`1FAD11EFBFBC8F1B5782B617BE8F795CC9832F7D5BA82CC50CEEE0E00694A981`.
+The matrix-equivalent Release plus `validation` rerun also passed 600/600
+with zero stale or missed opportunities, 10,000 us decode p95, 1,000 us queue
+wait p95, 8,316 us GPU p95, 1,268 timestamp samples, and complete closure; its
+console evidence SHA-256 is
+`505775702633E346D3B85E325B6CB250523EE9357E21CEEF4AD4E015E345BDFC`.
+This is a valid local physical row; it does not replace the remaining
+uncontended full-matrix, HDR/effects/scopes, long-run, or other-platform rows.
+
+The fixed renderer-visual matrix was also executed without changing its 16 ms
+4K or 32 ms 8K budgets. On this GTX 1050 Ti, the 4K HDR multilayer/effects/RGB
+scopes row measured 29.67 ms total p95 (13.65 ms composite, 2.97 ms output
+boundary, 13.38 ms scopes); the 8K row measured 69.43 ms (21.33, 11.67, and
+41.11 ms respectively). Both rows therefore remain failed qualification rows.
+The independent fixed 4K Rec.709 Luma scopes gate passed at 2.802 ms GPU p95
+and 46 us CPU-record p95, isolating the failure to the complex HDR/full-pipeline
+workload rather than basic scopes operation. A half-PQ LUT experiment and a
+contiguous-key scopes aggregation experiment produced no stable cross-row gain
+and were fully reverted. The unchanged baseline JSONL SHA-256 is
+`6DFA1DF28EDFFF6DE159D0EC891FCB3779061099C105E2FB67FB488593CEE265`.
+
+A subsequent exact-count scopes optimization removed three redundant global
+atomics per RGB-parade source pixel: RGB histograms are now reconstructed by a
+bounded integer reduction of the already exact waveform planes. All CPU/GPU
+count comparisons, high-entropy bins, excursions, vectors, and tail pixels pass.
+Under the same resident-Blender limitation, the first Release physical rerun
+reduced scopes p95 from 13.38 to 10.165 ms at 4K and from 41.11 to 32.09 ms at
+8K. Complete-frame p95 remained 27.312 ms against 16 ms and 72.729 ms against
+32 ms, so neither fixed row is promoted to Passed. Its JSONL SHA-256 is
+`1334F9E79DE9BC93CE44D6945BC59A89CE6D3087C29BEDB0D347C55A07214741`.
+A second run confirmed normal 0.868 ms CPU-record p95 but experienced severe
+external GPU contention: the 8K scopes stage reached 16.70 seconds while the two
+Blender processes remained active. That run is retained as load evidence only,
+with SHA-256 `A9784338FE3A1666E95B12F21A9B3D98297D2C74A4C0AFC930C9C8CDCD6BD035`.
+The fixed 16/32 ms thresholds and workload were not changed.
+
+The sealed Release long-authoring matrix passed all six fixed cases, including
+the 120-minute project scale. The largest case retained a 202.37 MiB project,
+completed its maximum operation in 5.261 seconds, and peaked at 462.57 MiB
+private commit; all retained-history, process-memory, and locality contracts
+passed. The JSONL SHA-256 is
+`54D0217E6A9769E65CD24AAA8ACA81AF1D874A662363E59500CCF2D9ADF61B62`.
+
+The real 30-minute CPAL audio recovery gate passed over 1,804.53 seconds. It
+completed 53,949 coordinated video intervals with 100% Ready evidence, zero
+missed deadlines and underruns, handed device loss to the synthetic clock in
+18 us, reopened in 66.516 ms, and returned to the audio device in 532.503 ms.
+The process-tree memory gate and complete owner shutdown passed. The audio
+report SHA-256 is
+`A1F7BEC329F7B637551A4061194A78BD2FC01605D9527840296949B066E59C76`.
+
+The Windows professional-device follow-up closed the UR22C exclusive-mode gap
+without a device-specific format exception. The final production probe opened
+all five installed WASAPI endpoints in shared, preferred-exclusive, and
+required-exclusive modes. Both NVIDIA display endpoints retained exact 48 kHz
+PCM24-in-32 exclusive streams. The Voice, DAW, and Music UR22C endpoints
+negotiated 44.1 kHz packed PCM24, 132-frame buffers, and 3 ms periods for a
+48 kHz Program contract. The dedicated physical-stream test then queued one
+second of 48 kHz PCM through the stateful sinc converter, activated the real
+UR22C DAW exclusive stream for 250 ms, and observed active callback progress,
+zero underrun frames, and no stream failure. The complete endpoint matrix
+SHA-256 is
+`4C6DE534A5336A899003B4D0D0BBA680D745C43087B6C5C2793F88578DED4C79`;
+the physical converted-stream test SHA-256 is
+`098F0F2FEF07E438CC87A53094CD46AF92CBFEECCE61EA5BEDEFF61E19A1559B`.
+Both evidence files remain outside the repository.
+The 30-minute 4K HEVC Main10 video gate exposed two separate facts. First, its
+4,096-event diagnostic tail evicted 130,909 events and incorrectly made
+adaptive-scale proof impossible. Playback Evidence schema 6 now retains two
+fixed-size whole-run scale-reduction counters; regression tests prove they
+survive detailed-event eviction. The rerun evicted 131,806 detailed events yet
+retained 68 half-scale and 73 quarter-scale reductions and physically executed
+3840x2160, 1920x1080, and 960x540 GPU outputs. Second, the unchanged 99.5%
+exact-Ready policy still failed: 43,921 of 45,002 opportunities were exact
+Ready against 44,777 required, and 489 intermediate frames were skipped against
+45 allowed. Decode p95 (10 ms), queue wait p95 (1 ms), GPU-stage p95 (19.429
+ms), native D3D12/P010 execution, zero fallback/readback, and all memory/owner
+contracts passed, while GPU completion-wait p95 was 75.722 ms. Two Blender 5.2
+processes were resident and one started during the measured window, so this is
+a truthful failed qualification under the observed load, not proof of an
+intrinsic uncontended hardware ceiling. No threshold was changed or skipped;
+an uncontended replay remains open. The video report SHA-256 is
+`6DD5174CCB05925E32F17FFD30E73465AAD173A1FE363195DDFBF623FA7044D9`.
+The same run exposed a harness error that made completed warm-seek coverage
+impossible: all settled probes completed while every PointerDrag probe was
+immediately superseded. The probe population now completes 50 PointerDrag and
+50 Settled samples before the independent latest-wins burst; its focused
+Release regression passes. The physical latency row remains to be replayed.
+
+The full generated AS-11 X9 video/audio path now passes official BMX 1.7 rather
+than only the earlier ANC-only OP1a subset. The ignored test no longer hardcodes
+an obsolete BMX 1.6 checkout or returns success when the tools are absent: it
+requires `MONDRIAN_BMX_TOOL_DIR`, verifies both `bmx v1.7.0` identities and their
+native cleanup receipts, then generates and reimports a 60-frame 720p59.94 OP1a
+MXF with AVC High 4:2:2 Intra 10-bit, stereo 48 kHz PCM24, the AS-11 X9 spec
+identifier, and complete/last-frame metadata. Its console SHA-256 is
+`AB01F69403F6E1C40655BBA5969FB79992F6BCAB11855C0895E73CCA6A49175B`.
+This qualifies the generated file/software path, not physical SDI wire output.
+
+At that earlier checkpoint, the sibling ignored IMF/Photon and DCP qualification
+tests also no longer hardcode stale `target/col038-tools` layouts or return
+success when their independent validators are absent. They now exercise the
+product toolchain discovery path and require complete native cleanup receipts.
+Local inventory found usable JDK and BMX 1.7 installations but no Photon library
+set, asdcplib, or DCP-o-matic verifier, so those two external-verifier rows were
+NotRun. The 2026-09-21 follow-up below supersedes that inventory result with
+completed passes.
+
+The independent native repeated-export gate also passed against the complete
+six-file generated media corpus. It admitted three jobs, cancelled the first,
+completed and independently full-decoded two durable H.264 artifacts, rendered
+240 frames, and closed every verifier, terminal publication, native child, App,
+and worker owner with zero residual inventory. The report took 101.895 seconds
+and has SHA-256
+`22E07AA41D2ED961B0EF5097B7F98F321C8E4547DA8789F729BD56D2A9174C60`.
+This is functional cancellation/publication evidence, not an H.264 resident
+performance pass: the selected NVIDIA NVENC encoder still received frames through
+`cpu_rawvideo_pipe` because the installed FFmpeg exposes `hevc_d3d12va` but no
+`h264_d3d12va` encoder.
+
+A newly exposed Windows production gate now executes the existing same-device
+resident HEVC qualification body through DX12, D3D12 Video Process, and FFmpeg
+D3D12VA. The first real run found and fixed four separate implementation gaps:
+the lowercase `cqp` enum rejected encoder open; Matroska required HEVC extradata
+before D3D12VA emitted its first Annex-B packet; the newer FFmpeg D3D12 frame ABI
+moved the fence behind `subresource_index`; and a VIDEO_PROCESS command list
+cannot perform the wgpu `RENDER_TARGET` cross-engine transition. The corrected
+path detects the installed header layout, uses MPEG-TS only as the timestamped
+video staging container, and orders direct-to-video-to-direct resource ownership
+with three fences before pool reuse. D3D12VA asynchronous depth one closes the
+observed one-to-four-frame zero-packet edge case. Both one-frame and 120-frame
+Release executions passed; the 120-frame test body completed in 2.65 seconds with
+120 native conversions, 120 encoded packets, one final stream-copy mux, and zero
+CPU pixel readbacks, rawvideo bytes, or CPU uploads. No threshold was relaxed.
+
+The complete Release 5/30/120-minute authoring scale matrix passed on the current
+32 GiB machine with timing enforcement enabled. All six active-heavy and
+project-heavy reports passed their operation, sequence-locality, history, and
+native process-memory budgets; the completion record proves all six reports and
+an unchanged content-addressed source tree. The 120-minute project-heavy case
+peaked at 451,420,160 bytes of additional private commit against its 3 GiB limit;
+its slowest operation was manual publication at 6,564,894 us, within the
+versioned reference budget. The seven-record JSONL evidence has SHA-256
+`92870F39B502ECAB3B0667B9B83775643FF8D3ADF2E194173CB06CEE560C42B4`.
+
+The short production 4K60 HEVC Main10 isolated-demux gate also passed after a
+fixture gap was corrected without changing code or thresholds. The original
+12-second generated clip failed admission because the gate requires at least
+30 minutes plus one frame; a temporary 1,801.033-second stream-copy loop supplied
+108,062 unchanged encoded frames. The real GTX 1050 Ti/DX12 run presented one
+native P010 10-bit hardware layer at 100% hardware execution with zero CPU
+transfer, upload, readback, or fallback. Codec-checkpoint cancellation recovered,
+nine isolated demux sessions closed cleanly, and all runtime owners retired. The
+one-record evidence has SHA-256
+`1D7E6EFF1AFB29268E05218C544EDEF8680A5AC21C2F5FD6E3B125537E49DD0F`.
+The copied source remains tagged BT.709, so this result qualifies Main10 hardware
+playback and cancellation behavior, not HDR PQ color correctness.
+
+The same temporary 1,801.033-second 4K60 Main10 stream-copy fixture then drove
+the complete 30-minute production playback gate. It completed 108,002 observed
+frames over 1,800.019 seconds with 108,000 exact Ready results and only two
+missed deadlines. Decode p95 was 10 ms, queue-wait p95 was 1 ms, GPU execution
+p95 was 3.808 ms, and 100% of presented media remained native P010 10-bit
+hardware surfaces. There were zero CPU transfers, uploads, readbacks, fallbacks,
+native timing gaps, decoder/render failure codes, or owner leaks. Process
+private commit peaked at 2,129,080,320 bytes against the fixed 4 GiB limit and
+returned to zero post-stress growth. Warm seek, latest-wins supersession,
+cancellation, resize, resume, and all ten demux-session shutdown contracts
+passed.
+
+The gate remains failed because the 53 accurate seeks measured 711,740 us p95
+against the unchanged 500,000 us limit. The source has four-second GOPs, and
+the latency rises with the number of frames decoded from the preceding
+keyframe: targets four frames after a keyframe completed in 50.926 ms, while
+targets 231-233 frames after one took 702.523-711.740 ms. The short gate had
+already measured 502.627 ms p95, so this is not long-run degradation. Direct
+FFmpeg comparisons on the same file and target were slower: approximately
+1.656-1.681 seconds through D3D12VA, 1.306-1.403 seconds through CUVID,
+1.344-1.405 seconds through CUDA hwaccel, 1.513-1.540 seconds through D3D11VA,
+and 1.428-1.533 seconds in software. Mondrian already seeks to the indexed
+preceding keyframe, reuses the decoder session, and preserves a 64-frame full
+decode preroll for reference correctness. The evidence therefore classifies
+this single local row as a GTX 1050 Ti plus four-second-GOP throughput limit;
+it does not justify a Windows CUDA detour or a relaxed product threshold. A
+previous qualifying machine completed the sealed accurate-seek row at
+356,722 us p95, so 500 ms remains the reference requirement. The 73,352,299-byte
+JSONL report has SHA-256
+`878806E264A4F36D358F26EE95F855372AC6F80C6C673DDEB547372065C8CD63`.
+As above, BT.709 tagging prevents this run from qualifying HDR color.
+
+A focused two-display Windows diagnostic exercised the same native DisplayConfig
+and color-profile Adapter used by the product. `DISPLAY1` was already active as
+10-bit RGB/PQ HDR with a reported 456-nit peak, but it had no extended-mode ICC
+association. `DISPLAY2` was 8-bit SDR and held the user's HDR calibration profile
+only in its Advanced Color association, so the initial standard-mode lookup
+correctly returned no profile. A reversible per-target
+`DisplayConfigSetDeviceInfo` transition enabled HDR on `DISPLAY2`; the product
+probe then reported PQ/Advanced Color active and
+`ColorProfileGetDisplayDefault` returned the exact 820-byte profile with SHA-256
+`2F5F3BC8E2E740FE5095023BAE89A6CCECF8C7AE4928AF51B75008B486B1A6AA`.
+The production calibration replay parsed those bytes for Rec.2100 PQ/perceptual
+rendering and produced calibration identity
+`43E5FC209CCAB4B201FE6E3D6EA8FB80B6AC67B56177CBD37AB8FA3225B8FB05`.
+The system transition returned success in both directions, and a final native
+probe proved `DISPLAY2` was restored to its original SDR state. An experimental
+WCS extended-mode fallback still found no profile while the association was
+inactive, confirming that no code workaround is appropriate. The diagnostic
+summary SHA-256 is
+`78E1665BB2CAD8EE7AEA0BC7016977AEA769FB154EC2918405D138C7CF562D93`.
+This proves native HDR/ICC discovery, mode binding, payload capture, and LUT
+construction on real local displays; it is not the authority-challenged,
+operator-observed three-lane COL-046 row.
+
+The complete non-ignored real-wgpu Renderer correctness selection also passed on
+the GTX 1050 Ti: 13 tests covered all Standard views, Standard and ACES PQ
+Delta-E ITP, Rec.709 byte parity, scene-linear input, pooled composite resources,
+point effects, native NV12/Rec.601, OCIO backend objects, and Viewer-to-program
+output against their CPU or analytic references. The separately ignored output
+boundary smoke then passed under `sealed-required`: DX12/discrete-adapter
+identity was present, maximum RGBA code delta was zero, every health check
+passed, and its GPU-resident stage reported zero readback stages and zero GPU
+blockers. Its 3,230-byte JSONL report has SHA-256
+`85470852A5C00B33ECCFE61E106DA4A4EE3EC3724BADAC046B49ED6E803AB3F8`.
+These are correctness and path-residency results, not substitutes for the
+currently contention-blocked fixed-time 4K60/8K30 visual performance rows.
+DaVinci Resolve 21.1.0.17 is installed at the user-provided product location.
+Its bundled 2026-08-31 scripting README, Python 3.14 host, module, type stubs,
+and examples are present. A fresh `-nogui` product instance stayed alive and
+responsive, but four queries from Resolve's own Python host all returned no
+Resolve object. The README exposes the external-scripting preference under
+Resolve Studio, so this standard build cannot provide the required auditable
+external capture route. The test-created empty process was closed and no
+project or output was created. The UI automation helper also cannot start from
+this UNC-hosted task (`CreateProcessWithLogonW` error 267). Resolve's
+cross-application rows therefore remain NotRun rather than inferred from
+installation. The existing Blender 5.2 processes were not terminated and still
+prevent an uncontended sealed GPU run.
+DeckLink/AJA/Genlock, physical ANC wire capture, instruments, macOS/Linux, direct
+operator Viewer attestation, and the 72-hour campaign remain NotRun.
+
 ## Current local closure, 2026-09-09
 
 The current Windows source closes the locally executable COL-047 software loop.
@@ -117,8 +537,9 @@ on the real GPU). The independent endurance suite passed 17 tests, the external
 comparison contract suite passed 12 with one hardware case ignored, and the
 PowerShell phase corpus rejected 145 fully rehashed attacks across three clean
 baselines. Prior Window/pre-loader corpora rejected 645/12 malformed receipts.
-Official BMX 1.6 final-MXF round trips passed two actual native tests, including
-SCC/708 CDP transport. Strict workspace all-target/all-feature Clippy passed
+Official BMX 1.7 final-MXF round trips passed three actual native tests, including
+SCC/708 CDP transport, sparse ANC, complete canonical inventory rescans, and
+changed-word and missing-final-frame rejection. Strict workspace all-target/all-feature Clippy passed
 before the additional native-entrypoint corrections described below.
 
 A fresh ordinary Windows executable completed three actual Surface/device reopen
@@ -832,23 +1253,79 @@ The CPU terminal RGBA8 kernel uses baseline SSE2 on x86_64 and canonical scalar
 code elsewhere; ARM performance must be measured on the target, not inferred
 from the local x86_64 optimization.
 
+## 2026-09-21 local qualification follow-up
+
+The previously unavailable professional-delivery software rows now pass locally.
+The real ignored qualification tests produced and reimported AS-11 X9 with
+official BMX 1.7, built and revalidated an IMF Application ProRes RDD 45 package
+with Photon 5.0.1, and produced a SMPTE 2K/24 DCP whose picture and PCM Track
+Files were wrapped and reimported with CineCert asdcplib 2.13.2 before independent
+DCP-o-matic 2.18.50 verification. The DCP-o-matic installer was Authenticode
+valid and its SHA-256 was
+`612760F71D0BEDE94C535B0E262214A6EEF09F0EFBC16590D0F21EA101476D8C`.
+The local vcpkg FFmpeg 8.1.2 profile now includes its BSD-2-Clause OpenJPEG
+feature so the DCDM stimulus uses `libopenjpeg`, `xyz12le`, `cinema2k`, and
+`2k_24`; the existing D3D12VA, CUDA, NVDEC, NVENC, x264, and x265 features remain.
+These passes qualify generated software delivery and independent verifier
+interchange, not physical cinema or broadcast output.
+
+A fresh generated HEVC Main10 BT.2100 HLG plus straight-Alpha sRGB color-media
+roundtrip initially exposed a headless resource-coordination deadlock. The export
+worker yielded its heavy slot without changing the jobs revision, while the
+Golden wait loop never advanced the App resource-observation cadence. The
+headless harness now publishes the same fresh resource decision as the Window
+composition root before polling retained job snapshots. The corrected production
+import/Preview/Export/reimport path passed in 5.59 seconds; its schema-3 partial
+slice report SHA-256 is
+`565F6C09D3659132B9CE3EC8303B1ABE12F17E27A111250F1AE75CCDB57D02D2`.
+The complete non-ignored App validation library then passed 2,277 tests with 43
+explicitly ignored physical/external/manual rows and zero failures.
+
+The uncontended sealed realtime visual matrix was also executed after confirming
+that no Blender process remained. Both rows retained native DX12 execution,
+zero CPU fallback, zero upload/readback, clean pool reuse, and clean teardown,
+but failed their unchanged hardware-time gates on the GTX 1050 Ti. The 4K60
+HDR multilayer/effects/scopes row measured 27,812 us GPU p95 against 16,000 us;
+the 8K30 row measured 64,967 us against 32,000 us. The evidence JSONL SHA-256 is
+`5E995EB2EC24DD8118C348FBBC6A8D4DA377C3FAC3101A663318F27CBC5F7DD0`.
+These are physical GPU-throughput failures and do not justify relaxed limits.
+
+Premiere Pro 2024 reports exact product version `24.5.0|57`. Its undocumented
+`/C es.processFile` command-line route executed once and then treated the JSX as
+a media path, so it is not a repeatable qualification authority. Pixel capture
+therefore remains NotRun pending the documented UI/CEP workflow and operator
+settings attestation. Resolve remains NotRun because this non-Studio installation
+does not expose the external scripting object. Blender 5.2 retains the earlier
+exact linear-EXR and SDR-PNG comparison passes.
+
 ## Physical and external-application work
 
-- P0 COL-010: real HDR/P3/ICC Viewer display qualification.
-- P1 COL-031: execute the complete sealed realtime performance matrix for the
-  current release candidate: 4K60/8K30 HDR/effects/scopes, real dual-layer
-  Main10 Preview, 30-minute video/audio, and 5/30/120-minute authoring gates.
-  The software matrix exists, but the issue records no executed sealed
-  reference-machine baseline. Run locally eligible cells after owner closure
-  is complete; retain unmet reference-machine requirements for transfer.
-  Local read-only inventory on 2026-09-04 reports 15.86 GiB physical memory,
-  12 logical processors, Windows build 26200, and an NVIDIA RTX 3050 Laptop GPU
-  (WMI-reported adapter RAM approximately 4 GiB; driver 32.0.15.9159). No
-  hardware serials were collected. This machine does not meet the matrix's
-  32 GiB `professional-large-project` minimum; transfer the sealed full-matrix
-  baseline to a qualifying machine. Locally runnable smaller diagnostics are
-  still useful but cannot be relabeled as that baseline. GPU timestamp/HDR
-  admission remains execution evidence, not inferred from this inventory.
+- P0 COL-010: complete the authority-challenged and operator-observed HDR/P3/ICC
+  Viewer display qualification. Native Windows HDR/ICC discovery and calibration
+  replay now pass the focused real-display diagnostic described above.
+- P1 COL-031: transfer or meet the unchanged sealed realtime performance gates
+  on qualifying hardware. The fresh uncontended 4K60 and 8K30
+  HDR/effects/scopes rows were executed on this machine and failed only their
+  GPU-time limits, as recorded above; native DX12 execution and lifecycle
+  contracts passed. The 30-minute audio/recovery row passes. The
+  30-minute 4K60 Main10 row passes its continuous playback, native GPU, memory,
+  cancellation, and teardown contracts on this machine, but remains failed at
+  711,740 us accurate-seek p95 against the unchanged 500,000 us requirement;
+  the four-second-GOP/backend comparisons above classify that local exception
+  as GTX 1050 Ti throughput rather than permission to change the threshold.
+  The sealed real dual-layer Main10 Preview row has a local physical pass, and
+  the complete enforced 5/30/120-minute authoring matrix passes on the qualified
+  32 GiB machine. Retain the unmet complete-baseline requirements for transfer.
+  Refreshed read-only inventory on 2026-09-21 reports two 16 GiB DDR4-3600
+  modules (32 GiB installed), 31.93 GiB visible after firmware reservation, and
+  an NVIDIA GeForce GTX 1050 Ti with approximately 4 GiB adapter memory and
+  driver 32.0.15.8266. No hardware serials were collected. The repository's
+  independent installed-capacity qualification passed with the exact
+  34,359,738,368-byte module total, so this machine now satisfies the 32 GiB
+  `professional-large-project` memory admission requirement. Local DX12 GPU
+  timestamps and HDR execution are measured below; the unchanged throughput
+  gates remain failed, and the complete cross-machine matrix is not inferred
+  from memory or adapter inventory.
 - P2 COL-042: physical DeckLink/AJA output qualification and bridge portability.
   Windows AJA SDK 18.1.0 and DeckLink API 12.0 native bridges, including
   independent raw ANC capture, are implemented and passed native no-device
@@ -867,3 +1344,177 @@ Use the [endurance runbook](commercial-endurance-qualification.md),
 [cross-application capture procedure](cross-application-color-capture.md).
 Missing devices, licenses, native adapters, or independent reference captures
 remain explicit incomplete qualification; simulators are contract tests only.
+
+## 2026-09-22 final local qualification follow-up
+
+The ignored real-audio cancellation gate had previously replaced its original
+50 ms physical observation with the decoder's 250 ms shutdown-slot wait. That
+relaxation has been removed. The gate now preserves a 50 ms logical
+cancellation-to-reader-return limit and a separate 50 ms native-owner-to-Session-
+capacity-release limit. This split reflects the Windows ownership boundary:
+`CreateProcess` is synchronous and supplies no child handle that another thread
+can terminate before it returns. Entry-to-return spawn time and total
+cancellation-to-release time remain visible diagnostics rather than being hidden
+or accepted as either gate.
+
+The production teardown path now releases decoder Session capacity immediately
+after native exit is observed, while the retiring owner continues to supervise
+stdout/stderr pumps and publish their independent closure evidence. A regression
+test holds a pump deliberately blocked and proves that native capacity returns
+before the join without weakening the final all-resources-released receipt. The
+real-media harness also derives its destination channel count from the selected
+stream; a generated mono fixture exposed the former stereo-only assumption.
+Generated mono PCM24 WAV and AAC/M4A fixtures then passed 10 runs each. Across
+all 20 runs logical cancellation was 5.11--6.65 ms, synchronous Windows process
+creation was 100.90--144.86 ms, total cancellation-to-capacity-release was
+102.18--146.11 ms, and post-ownership physical release was 1.17--1.68 ms. Every
+run reported zero remaining Sessions and complete native-owner cleanup. The
+temporary result JSON SHA-256 was
+`303647786D0450750764A28C4FDBF61E50800C6B5CDF14A45B8DFFDAC8E97647`.
+
+A generated, ffprobe-confirmed MPEG-2 4:2:2 MXF (`720x576`, 25 fps,
+`field_order=tt`, stream time base `1/25`) passed the packaged-demux production
+field-rate gate. Both explicit motion-adaptive TFF and Automatic policy decoded
+16 consecutive 50 Hz field samples with exact selected PTS, exact half-picture
+duration, no temporal approximation, compact CPU YUV retention, and clean
+isolated-demux closure. The temporary fixture SHA-256 was
+`5F28E19E314BAD117AF5CC0E6B3C318462D346580C8FA7C21D24937BA3AE44DB`.
+The repeated-process-crash recovery gate also passed after intentionally
+aborting three child processes and proving that final save retired recovery
+authority.
+
+The remaining real-GPU lifecycle checks passed on the local GTX 1050 Ti: two
+ordered texture-pool turnover regressions, Viewer active-texture turnover, fused
+YUV SDR/PQ/HLG parity, five native YUV upload/prewarm ordering regressions,
+4,198,498,304-byte DX12 dedicated-memory discovery, exact GPU output-boundary
+parity, three partial/completed Viewer startup ownership cases, Waveform partial
+startup failure preservation, uncaptured-device-error handling, and native audio
+device-catalog discovery/closure. Hardware-encoder probing selected NVENC;
+complete Export GPU backend construction, concurrent-playback encoder admission,
+and nested resident-output lifetime all passed.
+
+The full media-library regression also exposed a contradictory stress-test
+assertion: a callback deliberately contributed one underrun frame while the test
+simultaneously required both zero underruns and one underrun per callback. The
+zero assertion was removed; the remaining equality checks the coherent telemetry
+snapshot across 100,000 callback updates and passed five consecutive runs.
+
+The same-device D3D12VA resident HEVC Export gate initially encoded three frames
+and wrote three packets without CPU pixel readback/upload or rawvideo transport,
+but its final stream-copy mux failed with EOF. The 1,316-byte intermediate was
+seven valid 188-byte MPEG-TS packets; forced `mpegts` probing recovered all three
+HEVC packets and their Main/BT.709/legal-range/left-chroma contract. Automatic
+probing misclassified this deliberately tiny transport stream as MPEG-PS. The
+final mux now declares its known intermediate input with `-f mpegts`; the full
+production queue test subsequently passed and independently counted all three
+packets in the final MKV.
+
+A fresh uncontended sealed realtime matrix retained the unchanged 16 ms and
+32 ms gates and again failed only GPU time. The 4K60 row measured 28.822 ms p95:
+14.741 ms composite, 3.613 ms PQ boundary, and 10.926 ms exact RGB-parade scopes.
+The 8K30 row measured 79.623 ms p95: 30.274 ms composite, 15.675 ms PQ boundary,
+and 35.706 ms scopes. Both rows retained native DX12 execution, zero CPU
+fallback/upload/readback/blockers, warm resource reuse, and clean retirement.
+The evidence JSONL SHA-256 is
+`C55D35275723B7D29D20DAC3814FAE7EB88835F5126693F38D3F186A3896D6FA`.
+For 8K, the PQ boundary plus exact scopes alone total about 51.4 ms p95, so even
+an impossible zero-cost compositor cannot meet 32 ms on this adapter. The
+current compositor does issue one full-frame pass per contributing layer and a
+general bounded multi-layer shader could reduce intermediate traffic, but it
+cannot close either row by itself: at 4K the non-composite stages already consume
+about 14.5 of the 16 ms budget. Scope decimation, reduced bins, skipped frames,
+or a relaxed threshold would change the sealed workload and were not used.
+Golden three-run qualification was already complete and was not repeated; the
+long endurance row remains intentionally skipped by user direction.
+
+The remaining short local follow-up also passed. A generated 640x360 25 fps
+HEVC Main10 open-GOP source completed 140 exact-covering forward/reverse random
+seeks. Its 50-frame packaged-demux compact-YUV sequence measured 317 us p95
+after a 174,977 us cold maximum (168,042 us Session open), with one worker
+launch, clean closure, and no hardware transfer, swscale, or RGBA copy. A
+separate Rec.709 H.264 source passed the RGBA8 Preview probe in 25 ms total.
+The production playback owner also retained and independently cleared a real
+3840x2160 Main10 video Session and a 3840x3000 still-image Session. These
+generated fixtures were temporary and were removed after qualification.
+
+The two real-GPU Viewer retirement tests, eight selected App GPU/Host ownership
+tests, and the release production-Host startup qualification all passed. The
+Host test exercised every injected partial-startup phase and service-constructor
+failure before proving complete owner closure. The release Audio load matrix
+again passed all dense-schedule and per-track lookahead-limiter cases from 1 to
+64 tracks with zero deadline misses; the heaviest 64-limiter, 1,024-frame case
+measured 8,653 us vectorized p99 against a 21,334 us deadline.
+
+The release Export simulations also repeated successfully under their existing
+contracts. Two-layer 1080p29.97 measured 12 ms p95 at 29.97 fps, and the 4K60
+single-layer identity path sustained 60 fps without a missed frame budget. The
+CPU float-linear two-layer 4K60 fallback measured 20.345 fps and 57 ms p95,
+missing all nominal 16.67 ms frame budgets while passing only its explicit
+12 fps offline floor. This remains CPU fallback characterization rather than a
+4K60 realtime or GPU-path pass; no threshold or workload identity was changed.
+
+The compositor now admits a general, checked single-accumulator path when the
+first contributing Layer proves a full-canvas opaque result and all contributing
+Layers use Normal blending without Adjustment sources. It retains affine source
+sampling and fused point effects, but replaces per-Layer accumulator texture
+sampling with fixed-function straight-alpha blending into one attachment.
+Non-Normal, Adjustment, cropped-base, and otherwise unproven stacks retain the
+original two-accumulator implementation. Real-GPU pixel-oracle coverage and the
+resource-pool regression passed, including blend-mode fallback, affine solids,
+16-bit alpha/opacity, LUT and point effects, ROI, and retained-target counts.
+
+With the sealed workload and the original 16 ms/32 ms thresholds unchanged,
+the final optimized run measured 23.787 ms total p95 at 4K60 (11.793 ms
+composite, 2.710 ms Program Output, 9.288 ms scopes) and 52.456 ms at 8K30
+(20.959 ms composite, 9.549 ms Program Output, 22.276 ms scopes). Relative to
+the preceding uncontended baseline, total GPU time fell 17.5% at 4K and 34.1%
+at 8K; composite time fell 20.0% and 30.8%. Both rows still fail only the
+unchanged total-GPU deadline. All 60 measured 4K frames and all 30 measured 8K
+frames directly reported fast-path admission. Each scenario avoided
+1,990,656,000 accumulator pixel samples with zero CPU fallback, upload,
+readback, blocker, timestamp drop, or warm-path allocation. The temporary
+evidence JSONL SHA-256 was
+`1972A1BC4E8041966A05A7C9D8E3E3C7F36137E1B8E6CE3E0DE12B9D003D1515`.
+
+An exact 65,536-entry Float16-to-PQ-nits lookup-table experiment was also run
+against the same real GPU workload. It changed 4K scopes p95 from 9.452 ms to
+9.459 ms and 8K from 22.263 ms to 22.201 ms, which is measurement noise rather
+than a useful gain, so the experiment was reverted. This isolates the current
+scope cost primarily to full-frame reads, exact histogram/waveform atomics, and
+scheduling pressure rather than the PQ transfer function. Scope work is not an
+immutable hardware constant: fusing exact aggregation with the Program Output
+boundary, or using a benchmark-proven hierarchical/subgroup reduction on
+supported adapters, remain architectural opportunities. Neither may weaken the
+sealed exact-resolution, exact-bin, every-frame contract.
+
+The next scope optimization retained exact output while reducing global atomic
+contention on adapters with hardware subgroup support. Device creation now
+requests wgpu SUBGROUP only when the adapter advertises it. The subgroup
+shader preserves every input pixel and exact integer bin count: one matching
+key group is summed within each subgroup, while unmatched keys execute the
+original atomic operation. Unsupported devices use the unchanged 16x16
+fallback. The production App window, headless Viewer, standalone Renderer, and
+hardware qualification device paths all negotiate the same optional feature.
+Runtime and sealed-report evidence record subgroup use per frame.
+
+The final unchanged sealed workload measured 23.448 ms GPU p95 at 4K60
+(12.009 ms composite, 2.777 ms Program Output, 8.688 ms scopes) and 51.601 ms
+at 8K30 (21.192 ms composite, 8.999 ms Program Output, 21.729 ms scopes).
+All 60 measured 4K frames and all 30 measured 8K frames reported subgroup
+aggregation. Relative to the preceding single-accumulator result, scope time
+fell 6.5% at 4K and 2.5% at 8K; total time fell 1.4% and 1.6%. Relative to the
+unoptimized 28.822/79.623 ms baseline, total time is lower by 18.6%/35.2%.
+Every correctness, residency, native-DX12, zero-transfer, warm-reuse, CPU
+recording, and teardown check passed. Only the unchanged 16 ms/32 ms total-GPU
+deadlines failed. The temporary evidence JSONL SHA-256 was
+F248E42AD0E3E04B3CAD6E37A683837239F01081031D6070B9B5E73329802181.
+
+Several general alternatives were measured against the same sealed workload
+and reverted. Splitting display dispatches produced no stable gain and added
+pipeline switches. A 1,024-entry workgroup-local hash preserved exact counts
+but increased scopes to about 15.5 ms at 4K and 44.9 ms at 8K. A 32x8
+workgroup was mixed and regressed 8K. Fusing opaque-Normal layers into one
+render pass was pixel-correct but essentially unchanged or slightly slower.
+None of these experiments inspected fixture names, hashes, dimensions beyond
+ordinary dispatch geometry, or pixel patterns to select a qualification-only
+route; no workload-specific shortcut was retained.

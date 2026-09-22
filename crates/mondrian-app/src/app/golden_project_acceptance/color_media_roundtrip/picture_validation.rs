@@ -78,10 +78,13 @@ fn execute_preview(
     let mut decoded = HashMap::new();
     let mut adapter_failure = None;
     let mut media_frame = |request: PreviewTimelineMediaRequest| {
+        // The Golden oracle below consumes both source pixels and CPU working frames.
+        let mut cpu_reference_request = request.clone();
+        cpu_reference_request.cpu_working_required = true;
         let outcome = assets
             .get(&request.asset_id)
             .with_context(|| format!("Preview asset is absent: {}", request.asset_id))
-            .and_then(|asset| decode_media(state, &request, asset, decode_context));
+            .and_then(|asset| decode_media(state, &cpu_reference_request, asset, decode_context));
         match outcome {
             Ok(media) => {
                 let frame = media.frame.clone();

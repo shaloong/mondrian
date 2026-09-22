@@ -31,7 +31,8 @@ use crate::{
 };
 use mondrian_core::types::{Color, ColorEngine, ColorSpace};
 use mondrian_core::{
-    OutputTransformIntent, OutputTransformIntentResolutionError, WorkingColorSpace,
+    OcioColorSpaceIdentity, OutputTransformIntent, OutputTransformIntentResolutionError,
+    WorkingColorSpace,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -676,6 +677,32 @@ pub(crate) struct RenderGpuFusedInputBackend {
     pub(crate) objects: std::sync::Arc<crate::ocio_gpu::OcioGpuWgpuPreparedBackendObjects>,
 }
 
+impl RenderGpuFusedInputBackend {
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::BindGroup,
+        output: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.native-video.fused-working-input"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.objects.ocio_bind_group.bind_group, &[]);
+        pass.set_bind_group(1, input, &[]);
+        pass.draw(0..4, 0..1);
+    }
+}
 /// Error returned when a runtime-owned in-graph GPU OCIO pass cannot record.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RenderGpuColorTransformRuntimeRecordError {
@@ -1120,7 +1147,31 @@ impl RenderGpuOutputBoundaryRuntime {
         })
     }
 
-    /// Plan and record one GPU-resident OCIO identity transform between graph nodes.
+    fn intermediate_transform_is_exact_passthrough(
+        transform: &RenderIntermediateColorTransform,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_residency: ColorFrameResidency,
+    ) -> bool {
+        let descriptor = input.descriptor();
+        let identity_matches = match transform.output_identity {
+            OcioColorSpaceIdentity::Color(space) => descriptor.color_space.color() == Some(space),
+            OcioColorSpaceIdentity::Working(space) => {
+                descriptor.color_space.working() == Some(space)
+            }
+        };
+        descriptor.residency == ColorFrameResidency::Gpu
+            && output_residency == ColorFrameResidency::Gpu
+            && input.texture_format() == output_texture_format
+            && descriptor.domain == transform.output_domain
+            && descriptor.encoding == transform.output_encoding
+            && identity_matches
+    }
+
+    /// Record one GPU-resident OCIO transform between graph nodes.
+    ///
+    /// An exact match of identity, domain, encoding, residency, and texture format
+    /// aliases the input handle and records no pass or resource allocation.
     pub fn record_wgpu_intermediate_color_transform_owned_backend(
         &mut self,
         transform: &RenderIntermediateColorTransform,
@@ -1130,6 +1181,20 @@ impl RenderGpuOutputBoundaryRuntime {
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        if Self::intermediate_transform_is_exact_passthrough(
+            transform,
+            input,
+            output_texture_format,
+            gpu_options.output_residency,
+        ) {
+            return Ok(RenderGpuColorTransformRecord {
+                materialized: RenderGpuOutputStageMaterializedResources {
+                    input: input.clone(),
+                    output: input.clone(),
+                },
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            });
+        }
         let transform_plan = {
             let mut planner =
                 RenderColorTransformGpuPlanner::new(&mut self.shader_cache, gpu_options);
@@ -2754,9 +2819,9 @@ impl RenderGpuColorTransformResourcePlan {
 
 /// Result of recording one GPU-resident OCIO transform between graph nodes.
 pub struct RenderGpuColorTransformRecord {
-    /// Existing input and newly materialized output handles.
+    /// Existing input and output handles. Exact passthrough records alias these handles.
     pub materialized: RenderGpuOutputStageMaterializedResources,
-    /// Single-pass diagnostics with no upload/readback stages.
+    /// Stage diagnostics; exact passthrough records contain zero stages.
     pub stage_diagnostics: RenderColorStageDiagnostics,
 }
 
@@ -4542,7 +4607,7 @@ pub struct RenderProgramMonitorBoundaryRgba8 {
 
 /// Presentation-only CPU fallback result.
 ///
-/// Unlike [`RenderProgramMonitorBoundaryRgba8`], this contract retains only
+/// Unlike the internal boundary result, this contract retains only
 /// Program Output metadata and diagnostics. Its pixels are consumed in place
 /// by monitor adaptation, allowing one owned Float32 raster to serve both
 /// exact OCIO stages before final RGBA8 quantization.
@@ -5406,6 +5471,7 @@ mod tests {
         output_texture_format: &'static str,
         health_report: RenderGpuOutputHealthReport,
         stage: RenderGpuOutputStageDiagnosticsReport,
+        resident_stage: Option<RenderGpuOutputStageDiagnosticsReport>,
         runtime: RenderGpuOutputRuntimeDiagnosticsReport,
         readback_bytes: usize,
         max_rgba_delta: u8,
@@ -5664,6 +5730,7 @@ mod tests {
                 3,
             ),
             stage,
+            resident_stage: None,
             runtime,
             readback_bytes: 16,
             max_rgba_delta: 2,
@@ -6453,7 +6520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_compositor_reuses_both_accumulation_targets_after_ordered_submit() {
+    async fn gpu_compositor_reuses_one_opaque_target_and_two_ping_pong_fallback_targets() {
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu compositor-pool test: no GPU adapter available");
             return;
@@ -6481,7 +6548,7 @@ mod tests {
                 context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("mondrian-test-gpu-compositor-resource-pool"),
                 });
-            runtime
+            let record = runtime
                 .record_wgpu_working_composite(
                     &compositor,
                     &context.device,
@@ -6495,9 +6562,46 @@ mod tests {
                     },
                 )
                 .expect("GPU solid composite should record");
+            assert_eq!(
+                record.diagnostics.opaque_normal_single_accumulator_composites,
+                1
+            );
+            assert_eq!(record.diagnostics.avoided_accumulator_sample_pixels, 16);
             context.queue.submit(std::iter::once(encoder.finish()));
             runtime.clear_frame_resources();
         }
+
+        let fallback_layer = crate::GpuCompositeLayer {
+            blend_mode: mondrian_core::types::BlendMode::Multiply,
+            ..layer
+        };
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-compositor-ping-pong-fallback"),
+        });
+        let fallback_record = runtime
+            .record_wgpu_working_composite(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: std::slice::from_ref(&fallback_layer),
+                },
+            )
+            .expect("non-Normal composite should retain the ping-pong fallback");
+        assert_eq!(
+            fallback_record.diagnostics.opaque_normal_single_accumulator_composites,
+            0
+        );
+        assert_eq!(
+            fallback_record.diagnostics.avoided_accumulator_sample_pixels,
+            0
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        runtime.clear_frame_resources();
 
         let diagnostics = runtime.diagnostics().resource_pool;
         assert_eq!(diagnostics.hits, 2);
@@ -6828,6 +6932,7 @@ mod tests {
                         tolerance,
                     ),
                     stage: stage_report,
+                    resident_stage: None,
                     runtime: runtime_report,
                     readback_bytes: 0,
                     max_rgba_delta: 0,
@@ -6851,6 +6956,48 @@ mod tests {
         );
         let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
             .expect("CPU display boundary should encode RGBA8");
+
+        let mut resident_runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(900).expect("GPU output runtime");
+        let mut resident_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mondrian-smoke-gpu-resident-output-boundary"),
+            });
+        let resident_record = resident_runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Gpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut resident_encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let resident_output_id = resident_record.materialized.output.id();
+        let resident_output_is_gpu =
+            resident_record.materialized.output.descriptor().residency == ColorFrameResidency::Gpu;
+        let resident_has_no_readback = resident_record.readback_buffer.is_none();
+        let resident_stage_diagnostics = resident_record.stage_diagnostics;
+        context.queue.submit(std::iter::once(resident_encoder.finish()));
+        let resident_output = resident_runtime
+            .frame_table_mut()
+            .remove(resident_output_id)
+            .expect("GPU-resident output missing from resource table");
+        resident_runtime.resource_pool().release(resident_output);
+        let resident_ready = resident_output_is_gpu
+            && resident_has_no_readback
+            && resident_stage_diagnostics.total_stages == 2
+            && resident_stage_diagnostics.upload_stages == 1
+            && resident_stage_diagnostics.gpu_color_stages == 1
+            && resident_stage_diagnostics.readback_stages == 0;
+
         let mut runtime =
             RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -6914,7 +7061,7 @@ mod tests {
             max_rgba_delta,
             tolerance,
         );
-        let passed = health_report.verdict == RenderGpuOutputHealthVerdict::Pass;
+        let passed = health_report.verdict == RenderGpuOutputHealthVerdict::Pass && resident_ready;
         let report = GpuOutputBoundarySmokeReport {
             scenario: "renderer_gpu_output_boundary",
             skipped: None,
@@ -6929,6 +7076,7 @@ mod tests {
             output_texture_format: "Rgba8Unorm",
             health_report,
             stage: stage_report,
+            resident_stage: Some(resident_stage_diagnostics.into()),
             runtime: runtime_report,
             readback_bytes: actual.rgba().len(),
             max_rgba_delta,
@@ -6940,7 +7088,14 @@ mod tests {
             &context.adapter.get_info(),
             &[
                 ("native_gpu_output_ready", if passed { 1.0 } else { 0.0 }),
-                ("readback_stages", report.stage.readback_stages as f64),
+                (
+                    "readback_stages",
+                    report
+                        .resident_stage
+                        .as_ref()
+                        .expect("executed GPU-resident stage")
+                        .readback_stages as f64,
+                ),
             ],
         )?;
 
@@ -7601,6 +7756,66 @@ mod tests {
         assert_eq!(diagnostics.upload_stages, 0);
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 0);
+    }
+
+    #[test]
+    fn exact_intermediate_contract_is_passthrough_only_without_representation_change() {
+        let input = gpu_handle_with_format(
+            649,
+            ColorFrameDescriptor {
+                width: 3840,
+                height: 2160,
+                color_space: WorkingColorSpace::LinearRec2020.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "working-input",
+        );
+        let exact = RenderIntermediateColorTransform {
+            output_identity: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            output_domain: ColorFrameDomain::Working,
+            output_encoding: ColorFrameEncoding::LinearFloat,
+            engine: ColorEngine::mondrian_standard(),
+        };
+
+        assert!(
+            RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &RenderIntermediateColorTransform {
+                    output_domain: ColorFrameDomain::Effect,
+                    ..exact.clone()
+                },
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Gpu,
+            )
+        );
+        assert!(
+            !RenderGpuOutputBoundaryRuntime::intermediate_transform_is_exact_passthrough(
+                &exact,
+                &input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                ColorFrameResidency::Cpu,
+            )
+        );
     }
 
     #[test]

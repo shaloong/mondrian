@@ -915,13 +915,18 @@ fn render_program_reference_with_preference(
                 ),
             };
         }
+        // This reference renderer immediately enters the CPU working compositor below.
+        // Ask the production decoder for its CPU-addressable representation instead of
+        // accepting the compact YUV representation used by the ordinary GPU Viewer.
+        let mut cpu_reference_request = request.clone();
+        cpu_reference_request.cpu_working_required = true;
         let outcome = assets
             .get(&request.asset_id)
             .with_context(|| format!("Retime Preview asset is absent: {}", request.asset_id))
             .and_then(|asset| {
                 decode_media_with_preference(
                     state,
-                    &request,
+                    &cpu_reference_request,
                     asset,
                     decode_context,
                     decode_request.prefer_proxy,
@@ -1209,7 +1214,9 @@ fn reimport_and_compare<const N: usize>(
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: expected.resolution,
         input_color,
-        cpu_working_required: false,
+        // Pixel-difference validation consumes source RGBA below, so compact YUV
+        // and native-surface representations cannot satisfy this evidence request.
+        cpu_working_required: true,
     };
     let mut decode_context = PreviewDecodeSessionContext::new();
     let decoded = decode_media(state, &request, asset, &mut decode_context)?;

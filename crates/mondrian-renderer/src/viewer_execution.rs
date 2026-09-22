@@ -481,11 +481,11 @@ impl ViewerNativeVideoImportRuntime {
     /// closing this runtime to subsequent decoded-frame admission.
     pub fn wait_for_released_source_residency_until(
         &mut self,
-        deadline: std::time::Instant,
+        _deadline: std::time::Instant,
     ) -> Result<usize, GpuNativeDecodedFrameImportError> {
         #[cfg(target_os = "linux")]
         if let Some(backend) = self.backend.as_mut() {
-            return backend.wait_for_released_sources_until(deadline);
+            return backend.wait_for_released_sources_until(_deadline);
         }
         self.retire_completed_source_residency()
     }
@@ -553,6 +553,16 @@ impl ViewerNativeVideoImportRuntime {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn check_source_reuse(
+        &mut self,
+        frames: &[&PreviewNativeDecodedFrame],
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        if let Some(backend) = self.backend.as_mut() {
+            backend.check_source_reuse(frames)?;
+        }
+        Ok(())
+    }
     /// Import one native decoder payload into a renderer-owned working resource.
     pub fn import(
         &mut self,

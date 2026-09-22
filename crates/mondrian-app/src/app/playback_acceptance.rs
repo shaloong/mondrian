@@ -692,6 +692,9 @@ fn evaluate_cancellation_contract(
             mondrian_playback::FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded => {
                 "frame_cancellation_physical_return_late"
             }
+            mondrian_playback::FrameCancellationGateFailureKind::UninterruptibleNativeStartupToReturnExceeded => {
+                "frame_cancellation_native_startup_return_late"
+            }
         };
         push_failure(
             failures,
@@ -2047,7 +2050,8 @@ mod tests {
         cancellation.observe(mondrian_playback::FrameCancellationObservation {
             work_class: mondrian_playback::FrameWorkClass::Interactive,
             cause: mondrian_playback::FrameCancellationCause::Superseded,
-            execution_duration: std::time::Duration::from_micros(70_001),
+            return_constraint: mondrian_playback::FrameCancellationReturnConstraint::Cooperative,
+            execution_duration: std::time::Duration::from_micros(120_001),
             execution_to_logical_cancellation: Some(std::time::Duration::from_millis(20)),
             request_to_logical_cancellation: Some(std::time::Duration::from_millis(1)),
         });
@@ -2090,7 +2094,7 @@ mod tests {
                         == mondrian_playback::FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded
             })
             .expect("Interactive cancellation return must exceed the product gate");
-        assert_eq!(failure.observed, 50_001);
+        assert_eq!(failure.observed, 100_001);
         assert_eq!(failure.limit, 50_000);
         assert!(report
             .failures

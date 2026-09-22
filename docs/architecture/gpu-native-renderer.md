@@ -156,6 +156,19 @@ pass. Tiles are at most 4096 pixels per axis and remain draws within one render
 pass. A 4,096-tile hard limit fails before allocation. The plan reports actual
 shaded pixels, avoided full-frame shader pixels, preserved-copy work, tile
 draws, eliminated Layers, and fused point operations.
+
+A checked opaque-Normal fast path removes accumulator ping-pong for the common
+case. Admission requires the first contributing Layer to prove a full-canvas,
+fully opaque result and every contributing Layer to use Normal blend without an
+Adjustment source. The recorder then uses fixed-function straight-alpha
+blending into one attachment, so it does not allocate the second accumulator,
+sample the prior accumulator, or copy preserved regions. Source sampling,
+affine transforms, bounded draws, and fused point effects remain unchanged.
+Crop cannot establish the opaque base; non-Normal blend, Adjustment, or any
+unproven base retains the general two-accumulator path. Diagnostics report both
+admitted composites and avoided accumulator samples so qualification can prove
+that the optimization executed without inferring it from timing.
+
 Its damage is intra-frame Layer-versus-accumulator evidence only; temporal
 damage reuse remains unavailable until a caller can prove exact prior-output
 identity and lifetime.
@@ -322,8 +335,9 @@ LUT/uniform uploads and refresh remain owned by the same color runtime. Its
 bounded device-owned pipeline cache keys the fused shader by the complete OCIO
 identity and input source, and retires with that runtime. The GLSL frontend's
 required dummy entry is removed from validated IR before callable WGSL emission;
-no custom transfer function or color-engine fallback is introduced. The Windows
-D3D12-specific import backend retains its explicit two-pass physical path.
+no custom transfer function or color-engine fallback is introduced. Windows
+D3D12 imports use the same fused callable while retaining their native queue,
+fence, and decoder-surface ownership contracts.
 
 The opt-in Linux `compact_uhd_frames_reuse_the_standard_working_set` regression
 observes exact UHD frames through the production decoder and Viewer using the
@@ -505,6 +519,15 @@ handle alone can never imply zero-copy. D3D11VA remains a media
 hardware-decode CPU-transfer
 fallback; the renderer does not advertise the rejected D3D11-to-D3D12
 cross-API sharing experiment.
+A renderer-qualified Windows device root retains the physical DXGI vendor and
+device identity. A narrowly qualified driver/stream incompatibility may require
+a software codec open to read SPS-derived coded geometry before attaching a
+hardware decoder to that device. A preferred hardware request then reports
+`DeviceStreamCapabilityRejected` and falls back to software; a required
+GPU-resident request fails closed with the same device, codec, profile, and
+coded-extent evidence. The policy must name an observed physical adapter and
+must leave other adapters and qualified extents on D3D12VA. Runtime decode is
+never used as a probe when failure can remove the renderer-owned device.
 There is deliberately no independent platform graphics-device probe. Such a
 probe can select a different physical adapter and cannot prove feature,
 allocation, queue, or synchronization compatibility with the active Renderer
@@ -1591,6 +1614,25 @@ for two immutable workloads: four-layer 3840×2160 at 60 fps and two-layer
 7680×4320 at 30 fps. Every contributing layer executes two fused point
 Effects; both workloads produce PQ Program Output in an RGBA16F carrier and
 run demand-driven RGB-parade scopes from the Program Output tap.
+
+RGB-parade scopes keep one exact waveform count plane per channel. Their RGB
+histograms are the deterministic column reduction of those same planes, so the
+GPU aggregation pass does not repeat three contended global atomic writes for
+every source pixel. A bounded follow-up compute pass reconstructs the exact
+integer histogram counters before visualization; luma mode applies the inverse
+choice and derives its luma histogram from its waveform. CPU-reference readback
+tests cover both modes, high-entropy bins, excursions, vectors, and tail pixels.
+
+When the adapter advertises wgpu subgroup operations, device creation requests
+that optional feature and the aggregation shader uses a one-dimensional
+256-invocation workgroup. For each four-pixel key vector it elects one active
+key group in the hardware subgroup, sums that group's integer increments, and
+issues one exact global atomic; unmatched keys retain the original exact
+atomic operation. The result does not depend on media identity, pixel-pattern
+recognition, decimation, or relaxed binning. Adapters without subgroup support
+retain the original 16x16 shader and dispatch. Per-frame runtime evidence
+records which variant executed, and CPU-reference tests cover low-entropy,
+high-entropy, floating-point excursion, vector, and tail-pixel inputs.
 
 The producer uses the bounded asynchronous Viewer timestamp-query ring. It
 reports complete-frame and per-stage GPU timestamps separately from CPU

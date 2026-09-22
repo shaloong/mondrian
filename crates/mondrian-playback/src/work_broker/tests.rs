@@ -407,6 +407,55 @@ fn promoted_current_queue_wait_starts_at_latest_binding() {
 }
 
 #[test]
+fn dispatch_wait_excludes_preceding_same_lane_execution_time() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    broker.submit(request(1, generation, FrameWorkClass::Playback));
+    let first = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected first receive: {other:?}"),
+    };
+
+    clock.set(Duration::from_millis(12));
+    broker.submit(request(2, generation, FrameWorkClass::Playback));
+    clock.set(Duration::from_millis(20));
+    assert!(broker.mark_execution_completed(first.id));
+    clock.set(Duration::from_millis(23));
+
+    let second = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected second receive: {other:?}"),
+    };
+    assert_eq!(second.queue_wait, Duration::from_millis(11));
+    assert_eq!(second.dispatch_wait, Duration::from_millis(3));
+}
+
+#[test]
+fn dispatch_wait_starts_at_admission_when_lane_was_already_available() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    broker.submit(request(1, generation, FrameWorkClass::Playback));
+    let first = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected first receive: {other:?}"),
+    };
+    clock.set(Duration::from_millis(20));
+    assert!(broker.mark_execution_completed(first.id));
+    clock.set(Duration::from_millis(25));
+    broker.submit(request(2, generation, FrameWorkClass::Playback));
+    clock.set(Duration::from_millis(29));
+
+    let second = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected second receive: {other:?}"),
+    };
+    assert_eq!(second.queue_wait, Duration::from_millis(4));
+    assert_eq!(second.dispatch_wait, Duration::from_millis(4));
+}
+
+#[test]
 fn bind_existing_rebinds_compatible_in_flight_work() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -977,6 +1026,37 @@ fn injected_clock_controls_cancellation_age_and_reports_regression() {
         Some(FrameExecutionCancellation::Superseded { age: Some(Duration::from_millis(7)) })
     );
     assert_eq!(broker.diagnostics().clock_regressions, 1);
+}
+
+#[test]
+fn completed_execution_age_excludes_delayed_cancellation_observer_teardown() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+    let generation = broker.begin_generation();
+    broker.submit(request(1, generation, FrameWorkClass::Interactive));
+    let execution = match broker.receive(FrameWorkerLane::NonPlayback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected receive: {other:?}"),
+    };
+
+    clock.set(Duration::from_millis(20));
+    broker.begin_generation();
+    clock.set(Duration::from_millis(49));
+    assert!(broker.mark_execution_completed(execution.id));
+
+    // Model an observer/channel teardown that finishes well after the worker
+    // returned. Cancellation age remains current, while execution age must be
+    // frozen at the worker completion stamp.
+    clock.set(Duration::from_millis(160));
+    assert_eq!(
+        broker.execution_cancellation_evidence(execution.id),
+        Some(crate::FrameExecutionCancellationEvidence {
+            cancellation: FrameExecutionCancellation::Superseded {
+                age: Some(Duration::from_millis(140)),
+            },
+            execution_age: Duration::from_millis(39),
+        })
+    );
 }
 
 #[test]

@@ -104,7 +104,8 @@ pub(super) fn execute_export_roundtrip(
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: PREVIEW_RESOLUTION,
         input_color,
-        cpu_working_required: false,
+        // Roundtrip comparison consumes decoded RGBA source pixels below.
+        cpu_working_required: true,
     };
     let decoded = decode_media(state, &request, &asset, decode_context)?;
     let export_rgba = source_rgba(&decoded.frame)?;

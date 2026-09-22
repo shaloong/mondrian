@@ -623,8 +623,14 @@ pub(crate) struct MediaPreviewJobPromoteStatus {
 
 #[derive(Debug)]
 pub(crate) enum MediaPreviewJobQueueReceive {
-    Job(MediaPreviewJob),
-    DroppedExpired(MediaPreviewJob),
+    Job {
+        job: MediaPreviewJob,
+        dispatch_wait: Duration,
+    },
+    DroppedExpired {
+        job: MediaPreviewJob,
+        dispatch_wait: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -767,8 +773,8 @@ impl MediaPreviewJobQueueReceiver {
     #[cfg(test)]
     pub(crate) fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
         match self.recv_for_worker_outcome(lane)? {
-            MediaPreviewJobQueueReceive::Job(job) => Some(job),
-            MediaPreviewJobQueueReceive::DroppedExpired(_) => None,
+            MediaPreviewJobQueueReceive::Job { job, .. } => Some(job),
+            MediaPreviewJobQueueReceive::DroppedExpired { .. } => None,
         }
     }
 
@@ -778,13 +784,13 @@ impl MediaPreviewJobQueueReceiver {
         lane: MediaPreviewWorkerLane,
     ) -> Option<MediaPreviewJobQueueReceive> {
         match self.broker.receive(frame_worker_lane(lane)) {
-            Some(mondrian_playback::FrameWorkReceive::Ready(execution)) => Some(
-                MediaPreviewJobQueueReceive::Job(media_preview_job_from_execution(execution)),
-            ),
+            Some(mondrian_playback::FrameWorkReceive::Ready(execution)) => {
+                let (job, dispatch_wait) = media_preview_job_from_execution(execution);
+                Some(MediaPreviewJobQueueReceive::Job { job, dispatch_wait })
+            }
             Some(mondrian_playback::FrameWorkReceive::Expired(execution)) => {
-                Some(MediaPreviewJobQueueReceive::DroppedExpired(
-                    media_preview_job_from_execution(execution),
-                ))
+                let (job, dispatch_wait) = media_preview_job_from_execution(execution);
+                Some(MediaPreviewJobQueueReceive::DroppedExpired { job, dispatch_wait })
             }
             None => None,
         }
@@ -802,14 +808,22 @@ impl MediaPreviewJobQueueReceiver {
         ) {
             mondrian_playback::FrameWorkReceiveWait::Work(
                 mondrian_playback::FrameWorkReceive::Ready(execution),
-            ) => MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job(
-                media_preview_job_from_execution(execution),
-            )),
+            ) => {
+                let (job, dispatch_wait) = media_preview_job_from_execution(execution);
+                MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job {
+                    job,
+                    dispatch_wait,
+                })
+            }
             mondrian_playback::FrameWorkReceiveWait::Work(
                 mondrian_playback::FrameWorkReceive::Expired(execution),
-            ) => MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::DroppedExpired(
-                media_preview_job_from_execution(execution),
-            )),
+            ) => {
+                let (job, dispatch_wait) = media_preview_job_from_execution(execution);
+                MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::DroppedExpired {
+                    job,
+                    dispatch_wait,
+                })
+            }
             mondrian_playback::FrameWorkReceiveWait::TimedOut => MediaPreviewJobQueueWait::Idle,
             mondrian_playback::FrameWorkReceiveWait::Interrupted { revision } => {
                 self.observed_lifecycle_revision.set(revision);
@@ -889,7 +903,8 @@ fn media_preview_execution_cancellation_budget(job: &MediaPreviewJob) -> Option<
 
 fn media_preview_job_from_execution(
     execution: mondrian_playback::FrameWorkExecution<MediaPreviewKey, Instant, MediaPreviewJob>,
-) -> MediaPreviewJob {
+) -> (MediaPreviewJob, Duration) {
+    let dispatch_wait = execution.dispatch_wait;
     let mut job = execution.payload;
     let dequeued_at = Instant::now();
     job.enqueued_at = dequeued_at.checked_sub(execution.queue_wait).unwrap_or(dequeued_at);
@@ -900,7 +915,7 @@ fn media_preview_job_from_execution(
     job.deadline_at = execution.deadline;
     job.demand_identity = execution.demand_identity;
     job.execution_id = Some(execution.id);
-    job
+    (job, dispatch_wait)
 }
 
 #[cfg(test)]

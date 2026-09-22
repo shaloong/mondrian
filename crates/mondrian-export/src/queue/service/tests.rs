@@ -652,11 +652,13 @@ fn queued_and_running_cancellation_preserve_execution_boundary_evidence() {
 fn cancelled_attempts_release_routes_without_reusing_retry_identity_or_cancellation() {
     for reuse_target in [true, false] {
         let root = tempfile::tempdir().expect("isolated output parent");
-        let original_path = root.path().join("deliverable.mp4");
+        // Queue routing compares canonical identities (macOS /var aliases and Windows short names).
+        let canonical_root = root.path().canonicalize().expect("canonical output parent");
+        let original_path = canonical_root.join("deliverable.mp4");
         let retry_path = if reuse_target {
             original_path.clone()
         } else {
-            root.path().join("retry.mp4")
+            canonical_root.join("retry.mp4")
         };
         let backend = GateExecutor::new([GateOutcome::Complete]);
         let queue = RenderQueue::new_with_executor(backend.clone());

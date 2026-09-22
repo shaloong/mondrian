@@ -351,6 +351,18 @@ impl GpuViewerSpatialRuntime {
         Self { resource_pool, ..Self::default() }
     }
 
+    /// Prepare the device-scoped spatial pipelines before the runtime is published.
+    ///
+    /// This keeps one-time shader and pipeline compilation out of the first
+    /// interactive Viewer frame while preserving lazy construction for
+    /// standalone spatial runtimes that never resize a frame.
+    pub fn prepare_backend(&mut self, device: &wgpu::Device) {
+        if self.pipeline.is_none() {
+            self.pipeline = Some(GpuViewerSpatialPipeline::new(device));
+            self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
+        }
+    }
+
     /// Reuse an identity input or record the required crop/resize passes.
     ///
     /// A reused output remains owned by the caller's resource table. A
@@ -416,10 +428,7 @@ impl GpuViewerSpatialRuntime {
             output_width,
             output_height,
         )?;
-        if self.pipeline.is_none() {
-            self.pipeline = Some(GpuViewerSpatialPipeline::new(device));
-            self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
-        }
+        self.prepare_backend(device);
         let pipeline =
             self.pipeline
                 .as_ref()

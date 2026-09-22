@@ -773,7 +773,7 @@ trait AudioOutputAdapter: Send {
 
     fn poll(&mut self) -> Option<RealtimeAudioOutputEvent>;
     fn enqueue(&mut self, buffer: &AudioBuffer) -> Result<(), RealtimeAudioOutputEnqueueError>;
-    fn clear(&self);
+    fn clear(&mut self);
     fn validate_deactivation(&self) -> Result<(), RealtimeAudioOutputControlError>;
     fn deactivate(
         &self,
@@ -1159,7 +1159,7 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
         RealtimeAudioOutputManager::enqueue(self, buffer)
     }
 
-    fn clear(&self) {
+    fn clear(&mut self) {
         RealtimeAudioOutputManager::clear(self);
     }
 
@@ -1294,6 +1294,7 @@ struct AudioPlaybackPollPreflight {
     chunk_frames: i64,
     elapsed_skip_frames: Option<usize>,
     admission_target_frames: usize,
+    external_output_retirement_pending: bool,
 }
 
 enum CompletionAdmission {
@@ -2075,6 +2076,30 @@ impl AudioPlayback {
         Ok(())
     }
 
+    fn external_output_retirement_pending(
+        &self,
+        output_snapshot: Option<RealtimeAudioOutputSnapshot>,
+    ) -> Result<bool, AudioPlaybackError> {
+        let Some(snapshot) = output_snapshot.filter(|snapshot| !snapshot.active) else {
+            return Ok(false);
+        };
+        if !self
+            .stream_media_anchor
+            .is_some_and(|(stream_generation, _)| stream_generation == snapshot.stream_generation)
+        {
+            return Ok(false);
+        }
+        let token = self.quiescence_token.ok_or(AudioPlaybackError::MissingQuiescenceToken)?;
+        match self.output.is_quiescent(token) {
+            Err(RealtimeAudioOutputControlError::QuiescenceRevisionMismatch {
+                token_revision,
+                current_revision,
+            }) if current_revision > token_revision => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn validate_poll_arithmetic(
         &self,
         mode: AudioPlaybackMode,
@@ -2101,11 +2126,17 @@ impl AudioPlayback {
             .checked_add(maximum_sample_span)
             .ok_or(AudioPlaybackError::CoordinateOverflow)?;
         let output_snapshot = self.output.snapshot();
+        let external_output_retirement_pending =
+            self.external_output_retirement_pending(output_snapshot)?;
         // The owner trims PCM to the predicted audible activation point, not
         // the earlier wall-clock poll. The host delay names the callback tail;
         // it is also the first-frame time of the next equal-sized callback.
         let activation_authority = match output_snapshot {
-            Some(snapshot) if mode.permits_consumption() && !snapshot.active => {
+            Some(snapshot)
+                if mode.permits_consumption()
+                    && !snapshot.active
+                    && !external_output_retirement_pending =>
+            {
                 match (
                     snapshot.last_callback_playback_delay,
                     snapshot.last_callback_age,
@@ -2133,7 +2164,9 @@ impl AudioPlayback {
             }
             _ => Some(authority),
         };
-        let elapsed_skip_frames = if output_snapshot.is_some_and(|snapshot| !snapshot.active) {
+        let elapsed_skip_frames = if !external_output_retirement_pending
+            && output_snapshot.is_some_and(|snapshot| !snapshot.active)
+        {
             self.generation_render_anchor
                 .map(|render_anchor| {
                     activation_authority.unwrap_or(authority).samples_since(render_anchor)
@@ -2170,6 +2203,7 @@ impl AudioPlayback {
             chunk_frames,
             elapsed_skip_frames,
             admission_target_frames,
+            external_output_retirement_pending,
         })
     }
 
@@ -2384,6 +2418,14 @@ impl AudioPlayback {
                     }
                 }
             }
+        }
+
+        if preflight.external_output_retirement_pending && generation_rotations == 0 {
+            // The device worker has closed callback admission but has not yet
+            // published the frozen Lost snapshot. Its newer deactivation
+            // revision invalidates this module's activation token. Leave PCM
+            // and generation state untouched until that lifecycle fact arrives.
+            return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
 
         if let Some(token) = self.quiescence_token
@@ -3114,6 +3156,14 @@ mod tests {
             device_id: crate::RealtimeAudioOutputDeviceId::new("test:test-output")
                 .expect("test device identity"),
             selection: crate::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            access_policy: crate::RealtimeAudioOutputAccessPolicy::Shared,
+            share_mode: crate::RealtimeAudioOutputShareMode::Shared,
+            exclusive_fallback_reason: None,
+            stream_container_bits: None,
+            stream_valid_bits: None,
+            stream_sample_rate: contract.sample_rate,
+            buffer_frames: None,
+            period_100ns: None,
             was_system_default: true,
             device_name: Some("test-output".to_owned()),
             device_name_error: None,
@@ -3191,7 +3241,7 @@ mod tests {
             Ok(())
         }
 
-        fn clear(&self) {
+        fn clear(&mut self) {
             let mut state = self.state.lock();
             state.queued_frames = 0;
             if let Some(snapshot) = state.snapshot.as_mut() {
@@ -3674,6 +3724,7 @@ mod tests {
             underrun_frames: 0,
             last_callback_frames: 10,
             last_callback_playback_delay: Some(Duration::ZERO),
+            last_callback_playback_delay_uncertainty: Some(Duration::ZERO),
             last_callback_age: Some(Duration::ZERO),
             buffered_frames: 0,
             stream_failed: false,
@@ -5175,10 +5226,16 @@ mod tests {
                 AudioPcmContinuityModel::IndependentWindows,
             )
             .expect("prepare current generation");
+        poll_until_settled(&mut playback, sample_position(0));
         assert_eq!(
             playback.quiescence_token.map(|token| token.revision),
             Some(1)
         );
+        assert_eq!(playback.stream_media_anchor, Some((4, sample_position(0))));
+
+        let generation = playback.generation;
+        let next_start_sample = playback.next_start_sample;
+        let queued_frames = state.lock().queued_frames;
 
         let final_snapshot = {
             let mut output = state.lock();
@@ -5186,12 +5243,15 @@ mod tests {
             // CPAL stream destruction can publish its frozen Lost event.
             output.quiescence_revision = 2;
             output.confirmed_quiescence_revision = 2;
+            output.snapshot.as_mut().expect("concrete output").active = false;
             output.snapshot.expect("concrete output")
         };
         let waiting = playback
-            .poll(AudioPlaybackMode::Preroll, sample_position(0))
+            .poll(AudioPlaybackMode::Consume, sample_position(5_000))
             .expect("superseded quiescence waits for lifecycle evidence");
-        assert!(!playback.output_generation_ready);
+        assert_eq!(playback.generation, generation);
+        assert_eq!(playback.next_start_sample, next_start_sample);
+        assert_eq!(state.lock().queued_frames, queued_frames);
         assert_eq!(waiting.snapshot.in_flight, 0);
 
         {

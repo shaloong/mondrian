@@ -23,6 +23,17 @@ pub enum FrameCancellationCause {
     Unknown,
 }
 
+/// Native ownership constraint that governs cancellation-to-return latency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FrameCancellationReturnConstraint {
+    /// The executing Adapter exposes a cooperative cancellation checkpoint.
+    #[default]
+    Cooperative,
+    /// Cancellation arrived while an admitted native startup call provided no
+    /// interruption API. The owner must still return within its separate bound.
+    UninterruptibleNativeStartup,
+}
+
 /// One completed cooperative-cancellation observation at the Playback seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameCancellationObservation {
@@ -30,6 +41,8 @@ pub struct FrameCancellationObservation {
     pub work_class: FrameWorkClass,
     /// Authoritative cancellation cause projected by the execution Adapter.
     pub cause: FrameCancellationCause,
+    /// Constraint active when logical cancellation was observed.
+    pub return_constraint: FrameCancellationReturnConstraint,
     /// Total worker execution lifetime before returning the canceled outcome.
     pub execution_duration: Duration,
     /// Worker-start to `LogicalCancellationObserved`.
@@ -91,6 +104,18 @@ pub struct FrameCancellationProfile {
     pub request_to_logical_cancellation: FrameCancellationTiming,
     /// `LogicalCancellationObserved` to worker return.
     pub logical_cancellation_to_return: FrameCancellationTiming,
+    /// Cooperative cancellation-to-return observations governed by the
+    /// work-class realtime limit.
+    #[serde(default)]
+    pub cooperative_logical_cancellation_to_return: FrameCancellationTiming,
+    /// Cancellations observed during an admitted native startup without an
+    /// interruption API.
+    #[serde(default)]
+    pub uninterruptible_native_startup: u64,
+    /// Native-startup cancellation-to-return observations governed by the
+    /// explicit startup-owner limit.
+    #[serde(default)]
+    pub uninterruptible_native_startup_to_return: FrameCancellationTiming,
     /// Observations whose logical-cancellation ordering is mathematically impossible.
     pub invalid_timing_order: u64,
 }
@@ -137,6 +162,17 @@ impl FrameCancellationProfile {
             .map(|observed| observation.execution_duration.saturating_sub(observed))
             .unwrap_or(observation.execution_duration);
         self.logical_cancellation_to_return.observe(logical_cancellation_to_return);
+        match observation.return_constraint {
+            FrameCancellationReturnConstraint::Cooperative => self
+                .cooperative_logical_cancellation_to_return
+                .observe(logical_cancellation_to_return),
+            FrameCancellationReturnConstraint::UninterruptibleNativeStartup => {
+                self.uninterruptible_native_startup =
+                    self.uninterruptible_native_startup.saturating_add(1);
+                self.uninterruptible_native_startup_to_return
+                    .observe(logical_cancellation_to_return);
+            }
+        }
     }
 }
 
@@ -198,6 +234,9 @@ pub struct FrameCancellationPolicy {
     pub max_interactive_logical_cancellation_to_return: Duration,
     /// Maximum logical-cancellation-to-return latency for deterministic still work.
     pub max_still_logical_cancellation_to_return: Duration,
+    /// Maximum return latency for an admitted native startup call that exposes
+    /// no interruption API.
+    pub max_uninterruptible_native_startup_to_return: Duration,
 }
 
 impl Default for FrameCancellationPolicy {
@@ -207,6 +246,7 @@ impl Default for FrameCancellationPolicy {
             max_playback_logical_cancellation_to_return: Duration::from_millis(50),
             max_interactive_logical_cancellation_to_return: Duration::from_millis(50),
             max_still_logical_cancellation_to_return: Duration::from_millis(500),
+            max_uninterruptible_native_startup_to_return: Duration::from_millis(500),
         }
     }
 }
@@ -226,6 +266,8 @@ pub enum FrameCancellationGateFailureKind {
     RequestToLogicalCancellationExceeded,
     /// Cleanup after logical cancellation returned too late.
     LogicalCancellationToReturnExceeded,
+    /// A native startup without an interruption API retained its owner too long.
+    UninterruptibleNativeStartupToReturnExceeded,
 }
 
 /// One fail-closed cancellation acceptance failure.
@@ -315,12 +357,22 @@ pub fn evaluate_frame_cancellation(
             FrameWorkClass::Interactive => policy.max_interactive_logical_cancellation_to_return,
             FrameWorkClass::Still => policy.max_still_logical_cancellation_to_return,
         });
-        if profile.logical_cancellation_to_return.max_us > return_limit {
+        if profile.cooperative_logical_cancellation_to_return.max_us > return_limit {
             failures.push(FrameCancellationGateFailure {
                 work_class,
                 kind: FrameCancellationGateFailureKind::LogicalCancellationToReturnExceeded,
-                observed: profile.logical_cancellation_to_return.max_us,
+                observed: profile.cooperative_logical_cancellation_to_return.max_us,
                 limit: return_limit,
+            });
+        }
+        let native_startup_limit = duration_us(policy.max_uninterruptible_native_startup_to_return);
+        if profile.uninterruptible_native_startup_to_return.max_us > native_startup_limit {
+            failures.push(FrameCancellationGateFailure {
+                work_class,
+                kind:
+                    FrameCancellationGateFailureKind::UninterruptibleNativeStartupToReturnExceeded,
+                observed: profile.uninterruptible_native_startup_to_return.max_us,
+                limit: native_startup_limit,
             });
         }
     }
@@ -332,7 +384,7 @@ pub fn evaluate_frame_cancellation(
 }
 
 /// Current standalone cancellation-gate report schema.
-pub const FRAME_CANCELLATION_GATE_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const FRAME_CANCELLATION_GATE_REPORT_SCHEMA_VERSION: u32 = 3;
 
 fn duration_us(value: Duration) -> u64 {
     value.as_micros().min(u128::from(u64::MAX)) as u64
@@ -348,6 +400,7 @@ mod tests {
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Superseded,
+            return_constraint: FrameCancellationReturnConstraint::Cooperative,
             execution_duration: Duration::from_millis(40),
             execution_to_logical_cancellation: Some(Duration::from_millis(7)),
             request_to_logical_cancellation: Some(Duration::from_millis(2)),
@@ -383,6 +436,7 @@ mod tests {
             collector.observe(FrameCancellationObservation {
                 work_class,
                 cause: FrameCancellationCause::Superseded,
+                return_constraint: FrameCancellationReturnConstraint::Cooperative,
                 execution_duration: Duration::from_micros(51_001),
                 execution_to_logical_cancellation: Some(Duration::from_millis(1)),
                 request_to_logical_cancellation: Some(Duration::from_millis(1)),
@@ -417,6 +471,7 @@ mod tests {
             collector.observe(FrameCancellationObservation {
                 work_class,
                 cause: FrameCancellationCause::Superseded,
+                return_constraint: FrameCancellationReturnConstraint::Cooperative,
                 execution_duration: checkpoint.saturating_add(return_latency),
                 execution_to_logical_cancellation: Some(checkpoint),
                 request_to_logical_cancellation: Some(checkpoint),
@@ -450,11 +505,57 @@ mod tests {
     }
 
     #[test]
+    fn uninterruptible_native_startup_keeps_realtime_budget_and_has_its_own_bound() {
+        let evaluate = |return_latency: Duration| {
+            let checkpoint = Duration::from_millis(1);
+            let mut collector = FrameCancellationEvidenceCollector::default();
+            collector.observe(FrameCancellationObservation {
+                work_class: FrameWorkClass::Interactive,
+                cause: FrameCancellationCause::Superseded,
+                return_constraint: FrameCancellationReturnConstraint::UninterruptibleNativeStartup,
+                execution_duration: checkpoint.saturating_add(return_latency),
+                execution_to_logical_cancellation: Some(checkpoint),
+                request_to_logical_cancellation: Some(checkpoint),
+            });
+            (
+                collector.report(),
+                evaluate_frame_cancellation(collector.report(), FrameCancellationPolicy::default()),
+            )
+        };
+
+        let (within_evidence, within_gate) = evaluate(Duration::from_millis(131));
+        assert!(within_gate.passed);
+        assert_eq!(
+            within_evidence.interactive.uninterruptible_native_startup,
+            1
+        );
+        assert_eq!(
+            within_evidence.interactive.cooperative_logical_cancellation_to_return.samples,
+            0
+        );
+        assert_eq!(
+            within_evidence.interactive.uninterruptible_native_startup_to_return.max_us,
+            131_000
+        );
+
+        let (_, exceeded) = evaluate(Duration::from_micros(500_001));
+        assert!(!exceeded.passed);
+        assert!(exceeded.failures.iter().any(|failure| {
+            failure.work_class == FrameWorkClass::Interactive
+                && failure.kind
+                    == FrameCancellationGateFailureKind::UninterruptibleNativeStartupToReturnExceeded
+                && failure.observed == 500_001
+                && failure.limit == 500_000
+        }));
+    }
+
+    #[test]
     fn gate_rejects_unknown_unattributed_and_late_logical_cancellation_evidence() {
         let mut collector = FrameCancellationEvidenceCollector::default();
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Unknown,
+            return_constraint: FrameCancellationReturnConstraint::Cooperative,
             execution_duration: Duration::from_millis(1),
             execution_to_logical_cancellation: None,
             request_to_logical_cancellation: None,
@@ -462,6 +563,7 @@ mod tests {
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Playback,
             cause: FrameCancellationCause::PlaybackDeadline,
+            return_constraint: FrameCancellationReturnConstraint::Cooperative,
             execution_duration: Duration::from_millis(10),
             execution_to_logical_cancellation: Some(Duration::from_millis(9)),
             request_to_logical_cancellation: Some(Duration::from_millis(8)),
@@ -484,6 +586,7 @@ mod tests {
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Playback,
             cause: FrameCancellationCause::PlaybackDeadline,
+            return_constraint: FrameCancellationReturnConstraint::Cooperative,
             execution_duration: Duration::from_millis(10),
             execution_to_logical_cancellation: None,
             request_to_logical_cancellation: Some(Duration::from_millis(1)),
@@ -491,6 +594,7 @@ mod tests {
         collector.observe(FrameCancellationObservation {
             work_class: FrameWorkClass::Interactive,
             cause: FrameCancellationCause::Superseded,
+            return_constraint: FrameCancellationReturnConstraint::Cooperative,
             execution_duration: Duration::from_millis(10),
             execution_to_logical_cancellation: Some(Duration::from_millis(2)),
             request_to_logical_cancellation: Some(Duration::from_millis(3)),
@@ -514,6 +618,7 @@ mod tests {
             collector.observe(FrameCancellationObservation {
                 work_class: FrameWorkClass::Playback,
                 cause: FrameCancellationCause::PrefetchDeadline,
+                return_constraint: FrameCancellationReturnConstraint::Cooperative,
                 execution_duration: latency,
                 execution_to_logical_cancellation: Some(latency),
                 request_to_logical_cancellation: Some(latency),

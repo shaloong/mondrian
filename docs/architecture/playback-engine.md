@@ -397,16 +397,32 @@ time.
 
 ### Audio clock observation quality
 
-CPAL callback activity alone is not automatically a hardware playback-head
-measurement. The current portable Adapter therefore publishes only
-`CallbackConsumptionEstimate`: cumulative callback-consumed frames corrected
-by CPAL's predicted output-playback delay, with a bounded recorded uncertainty.
-CPAL backends derive that prediction differently (for example endpoint padding
-and stream latency on WASAPI, host time plus configured latency on CoreAudio,
-or queue delay on ALSA/PipeWire), so Mondrian must not relabel the portable
-result as an exact device position. A future native Adapter may add a stronger
-grade only when it supplies a stream-correlated hardware position and a
-backend-specific uncertainty contract.
+Callback activity alone is not automatically a hardware playback-head
+measurement. Every Adapter therefore publishes cumulative callback-consumed
+frames corrected by its output-playback delay and an explicit uncertainty.
+When the Adapter supplies a timestamped playback delay, the App subtracts
+callback age from that delay to project the consumed counter to the observation
+instant. Projection stops at the submitted audio tail; age beyond that tail
+contributes to uncertainty again. The delay and its local sampling instant
+travel together through buffer filling and conversion so execution time remains
+part of callback age instead of silently moving the estimate's origin.
+
+The native Windows shared-mode path queries `IAudioClock::GetPosition` on the
+single COM stream worker immediately before each packet submission. It measures
+the submitted tail against that device position, uses the correlated 100 ns QPC
+sample to project the position to the local observation instant, and caps that
+projection at the submitted tail. `IAudioClock::GetFrequency` is a fixed nominal
+frequency and does not include device drift relative to QPC, so adjacent
+correlated samples measure their device-time versus QPC-time residual. The path
+publishes that residual, query duration, and one device-frame quantization as
+uncertainty. Portable CPAL backends use
+the host playback timestamp and retain one complete callback span as their
+uncertainty floor; without a host delay, the bound retains the larger of
+callback age and callback span. Both currently retain the conservative
+`CallbackConsumptionEstimate` grade. Mondrian must not relabel either as an
+exact hardware position until the public contract distinguishes a
+stream-correlated native device-clock grade and validates that contract on each
+backend.
 
 Availability is independent of observation grade:
 
@@ -583,7 +599,10 @@ The App may cap a distant wake for responsiveness but must preserve zero and
 sub-millisecond remaining durations exactly; rounding them up to a nominal UI
 timer quantum would knowingly sleep past the Engine's phase deadline.
 Reissuing the same target for a quality revision or Clock Master handoff may
-conservatively retain an earlier deadline but can never renew it. The same
+conservatively retain an earlier deadline but can never renew it. Final
+presentation classification revalidates an Audio Device ticket against the live
+point phase plus uncertainty at physical commit; generic late grace cannot
+authorize publication beyond the hard A/V phase budget. The same
 pending deadline participates in the Engine's next-wake result, so a scheduler
 cannot sleep until the successor frame boundary after phase authority has
 expired. The next-wake result also retains its typed reason (`PrimingDeadline`,
@@ -800,14 +819,29 @@ from an explicit key/binding removal without sampling private queue state.
 Cancellation acceptance measures two non-overlapping intervals from the same
 execution: authority request to `LogicalCancellationObserved`, then that
 logical observation to worker return. Product policy requires the first
-interval to be at most 5 ms for every work class, the second to be at most
-50 ms for Playback and Interactive work, and at most 500 ms for deterministic
-Still work. The bounds are inclusive. Total execution lifetime remains
-diagnostic because work completed before cancellation authority existed cannot
-be charged as cancellation latency. A logical observation is scheduler
-evidence only; the media Adapter must separately report a concrete codec/demux
-checkpoint, and publication remains forbidden until the execution lease has
-returned and resolved.
+interval to be at most 5 ms for every work class. Cooperative work must return
+within 50 ms for Playback and Interactive work and within 500 ms for
+deterministic Still work. The bounds are inclusive.
+
+One narrower ownership class exists for an admitted native startup call that
+provides no interruption API. FFmpeg `avcodec_open2` is such a call:
+`AVIOInterruptCB` interrupts protocol and demux I/O, not codec construction.
+A cancellation first observed immediately after an Opened/Replaced Session with
+a nonzero Session-open duration is therefore recorded as
+`UninterruptibleNativeStartup`, not as cooperative cleanup. Its owner must
+return within 500 ms, remains counted in the raw cancellation latency, cannot
+publish, and does not release its execution or residency lease early. The
+separate logical observer still authorizes the bounded cross-lane Current
+replacement described below. No other codec, seek, decode, copy, demux, process
+retirement, or output-lease path may use this classification.
+
+Total execution lifetime remains diagnostic because work completed before
+cancellation authority existed cannot be charged as cancellation latency. The
+Broker stamps physical worker return before observer/channel teardown; later
+sampling uses that completion stamp and cannot extend return latency. A logical
+observation is scheduler evidence only; the media Adapter must separately
+report a concrete codec/demux checkpoint, and publication remains forbidden
+until the execution lease has returned and resolved.
 
 `wait_for_execution_terminal_state` waits under the same lifecycle lock and
 Condvar for `Canceled`, `Completed`, `Missing`, or caller-bounded `Timeout`.
@@ -1132,8 +1166,12 @@ already-visible physical artifact. A different ordinary GPU result owns an
 independent prepared physical lease; a blank Program owns an explicit
 transparent successor. Neither slot changes the current Viewer, consumes a
 future Frame Demand, extends a deadline, nor survives Preview-generation
-rotation. Only an exact current-coordinate request promotes semantic and
-physical ownership. Late cleanup is artifact/submission-scoped and cannot erase
+rotation. Promotion requires current-coordinate evaluation. An exact intent match
+promotes
+directly; after that current coordinate independently proves the same complete
+output identity, it may adopt the already-rendered prepared artifact while using
+only the current demand's presentation ticket. Pixel identity never transfers
+future-frame authority by itself. Late cleanup is artifact/submission-scoped and cannot erase
 or revive a newer prepared result.
 
 For Headless realtime playback, an exact semantic and physical prepared match
@@ -1169,11 +1207,24 @@ current Playback demand. Qualification keeps its independent four-frame
 maximum recovery displacement; the larger ownership horizon cannot relax that
 acceptance rule.
 
-Once AudioDevice owns time, the pre-clock interval path only retains existing
-lookahead owners. After an exact boundary presentation completes, the
-coordinator may add one nearest missing staged coordinate. This rolling
-replenishment replaces the entry consumed as the new immediate successor
-without allowing distant staging to precede the current frame's publication.
+Once AudioDevice owns time, the pre-clock interval path refreshes the existing
+Audio Device observation and retains existing lookahead owners. The Engine may
+advance the transport coordinate and refresh its demand from that observation;
+this pump does not freeze the transport coordinate. Before Audio Device handoff,
+the same path may fill PCM without publishing clock authority.
+
+A timed picture that is terminally `Late` during steady Audio Device playback is
+not renewed against another deadline. When the previous physical output remains
+available, the coordinator records one stale interval and advances from the live
+device observation. It never relabels that interval Ready. Missing physical
+output and explicit `Unavailable` remain failures. Initial startup and device
+recovery still require an exact, physically present Ready picture before the
+production A/V window can begin or resume.
+
+After an exact boundary presentation completes, the coordinator may add one
+nearest missing staged coordinate. This rolling replenishment replaces the entry
+consumed as the new immediate successor without allowing distant staging to
+precede the current frame's publication.
 
 `app::viewer_gpu_publication::ViewerGpuPublicationSlots` is the sole physical
 ownership Module for this contract. It retains one current and one prepared
@@ -2346,7 +2397,11 @@ decode capability probes.
 
 - 30 minutes continuous playback with non-empty Audio Device phase evidence,
   zero running-interval unproven presentable delivery, and maximum
-  uncertainty-inclusive phase error ≤20 ms while Audio Master is valid;
+  uncertainty-inclusive phase error ≤20 ms while Audio Master is valid. The
+  gate terminates only after both authoritative Playback Evidence duration and
+  the active physical callback duration reach 30 minutes; nominal frame-loop
+  count cannot substitute for either duration. A 30-second absolute wall-clock
+  extension bounds qualification failure without granting missing evidence;
 - paused/still seek deliveries retain `phase_not_applicable` diagnostics without
   failing the running-interval phase gate;
 - injected device loss: timeline discontinuity ≤1 ms at Synthetic handoff, no

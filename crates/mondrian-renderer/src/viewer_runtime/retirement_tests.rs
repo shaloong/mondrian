@@ -1,11 +1,17 @@
 use super::*;
 
+#[path = "../../tests/support/gpu_availability.rs"]
+mod gpu_availability;
+
 #[test]
 fn retirement_drop_revokes_escaped_pool_lease_return() {
     use crate::{ColorFrameDescriptor, ColorFrameDomain, GpuColorFrameAllocationPlan, GpuContext};
     use std::time::Duration;
 
-    let context = pollster::block_on(GpuContext::new()).expect("real GPU required");
+    if !gpu_availability::gpu_is_available("retirement_drop_revokes_escaped_pool_lease_return") {
+        return;
+    }
+    let context = pollster::block_on(GpuContext::new()).expect("available GPU must initialize");
     let runtime = ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
         .expect("Viewer runtime");
     let pool = Arc::clone(&runtime.resource_pool);

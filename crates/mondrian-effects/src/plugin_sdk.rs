@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Shaloong.
+// Additionally licensed under MIT; see LICENSES/MIT-SDK.txt.
+// Dependencies retain their own licenses.
+
 use crate::{
     effect::{
         EffectCacheKeyBuilder, EffectCachePolicy, EffectDefinition, EffectEvalContext,

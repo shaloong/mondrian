@@ -955,6 +955,66 @@ fn subframe_aligned_audio_handoff_uses_continuous_synthetic_phase() {
 }
 
 #[test]
+fn behind_audio_handoff_cannot_rewind_forward_transport_on_the_next_tick() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    assert_eq!(engine.tick(ts(45)).unwrap().position.frame, 1);
+
+    // The measured device point is 39 ms: six milliseconds behind the
+    // authoritative Synthetic phase, with five milliseconds of sampled
+    // uncertainty. The proven 11 ms handoff error is inside the 20 ms policy.
+    let handed_off = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_872, ts(45)))
+        .expect("behind but qualified audio handoff");
+    assert_eq!(handed_off.clock_master, Some(ClockMaster::AudioDevice));
+    assert_eq!(handed_off.position.frame, 1);
+    assert_eq!(
+        handed_off.audio_handoff,
+        Some(AudioClockHandoffEvidence {
+            stream_generation: 7,
+            phase_error_ns: -6_000_000,
+            uncertainty_ns: 5_000_000,
+            proven_phase_error_ns: 11_000_000,
+            status: AudioClockHandoffStatus::Accepted,
+        })
+    );
+
+    assert_eq!(
+        engine.tick(ts(45)).unwrap().position.frame,
+        1,
+        "the accepted Audio Device anchor must preserve forward phase continuity"
+    );
+}
+
+#[test]
+fn handoff_phase_correction_cannot_exceed_clock_uncertainty_policy() {
+    let policy = PlaybackPolicy {
+        max_audio_clock_uncertainty: Duration::from_millis(10),
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    assert_eq!(engine.tick(ts(45)).unwrap().position.frame, 1);
+
+    let rejected = engine
+        .observe_audio_device_clock(audio_observation(&engine, 2_872, ts(45)))
+        .expect("bounded fail-closed handoff");
+
+    assert_eq!(rejected.position.frame, 1);
+    assert_eq!(rejected.clock_master, Some(ClockMaster::Synthetic));
+    assert_eq!(
+        rejected.audio_handoff.map(|evidence| evidence.status),
+        Some(AudioClockHandoffStatus::PhaseRejected)
+    );
+    assert_eq!(
+        rejected.audio_clock_fallback,
+        Some(AudioClockFallbackReason::CorrectedUncertaintyLimitExceeded)
+    );
+}
+
+#[test]
 fn out_of_phase_new_stream_is_rejected_without_reanchoring_synthetic_time() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
@@ -1895,6 +1955,41 @@ fn running_demand_deadline_uses_remaining_synthetic_clock_phase() {
     assert_eq!(tardy_demand.deadline, Some(ts(159)));
 }
 
+#[test]
+fn audio_phase_budget_overrides_generic_late_grace_at_commit() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    engine
+        .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+        .expect("aligned audio handoff");
+    let demand = engine.pending_frame_demand().expect("audio demand");
+    let ticket = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+
+    assert_eq!(ticket.delivery_kind_at(ts(9)), FrameDeliveryKind::Degraded);
+    assert_eq!(
+        engine
+            .frame_presentation_delivery_kind(ticket, ts(9))
+            .expect("phase classification"),
+        Some(FrameDeliveryKind::Late),
+        "generic late grace cannot authorize a frame beyond the A/V phase budget"
+    );
+    assert!(matches!(
+        engine
+            .frame_presentation_delivery_kind(ticket, ts(5))
+            .expect("on-time phase classification"),
+        Some(FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded)
+    ));
+
+    let mut stale = ticket;
+    stale.identity.sequence = FrameDemandSequence(stale.identity.sequence.get() + 1);
+    assert_eq!(
+        engine
+            .frame_presentation_delivery_kind(stale, ts(5))
+            .expect("stale authority classification"),
+        None
+    );
+}
 #[test]
 fn audio_clock_demand_deadline_uses_observed_media_phase() {
     let mut engine = engine();

@@ -247,6 +247,8 @@ pub(crate) struct MediaPreviewResult {
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) queue_disposition: MediaPreviewQueueDisposition,
     pub(crate) queue_wait_us: u64,
+    /// Worker wake/dispatch latency after the owning lane became runnable.
+    pub(crate) dispatch_wait_us: u64,
     pub(crate) decode_elapsed_us: u64,
     pub(crate) deadline_at: Option<Instant>,
     pub(crate) logical_cancellation_observed: Option<LogicalCancellationObserved>,
@@ -429,9 +431,9 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             MediaPreviewJobQueueWait::Idle => continue,
             MediaPreviewJobQueueWait::Closed => break,
         };
-        let job = match outcome {
-            MediaPreviewJobQueueReceive::Job(job) => job,
-            MediaPreviewJobQueueReceive::DroppedExpired(job) => {
+        let (job, dispatch_wait) = match outcome {
+            MediaPreviewJobQueueReceive::Job { job, dispatch_wait } => (job, dispatch_wait),
+            MediaPreviewJobQueueReceive::DroppedExpired { job, dispatch_wait } => {
                 let Some(execution_id) = job.execution_id else {
                     if shutdown.is_requested() {
                         break;
@@ -446,6 +448,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                     break;
                 }
                 let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
+                let dispatch_wait_us = app_duration_us(dispatch_wait);
                 let scheduler_evidence = scheduler.execution_cancellation_evidence(execution_id);
                 let scheduler_cancellation =
                     scheduler_evidence.map(|evidence| evidence.cancellation);
@@ -473,6 +476,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 );
                 result.cancellation_phase = Some(MediaPreviewCancellationPhase::Queued);
                 result.queue_disposition = MediaPreviewQueueDisposition::Expired;
+                result.dispatch_wait_us = dispatch_wait_us;
                 let publication = send_media_preview_result(
                     lane,
                     residency_revision,
@@ -502,6 +506,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             break;
         }
         let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
+        let dispatch_wait_us = app_duration_us(dispatch_wait);
         let scheduler_evidence = scheduler.execution_cancellation_evidence(execution_id);
         if let Some(evidence) = scheduler_evidence {
             let cancellation = evidence.cancellation;
@@ -511,7 +516,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 job.access_mode,
             );
             let execution_age_us = app_duration_us(evidence.execution_age);
-            let result = media_preview_canceled_result(
+            let mut result = media_preview_canceled_result(
                 job,
                 queue_wait_us,
                 reason,
@@ -519,6 +524,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 Some(execution_age_us),
                 cancellation.request_age().map(app_duration_us),
             );
+            result.dispatch_wait_us = dispatch_wait_us;
             let publication = send_media_preview_result(
                 lane,
                 residency_revision,
@@ -579,6 +585,7 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 panic_context.into_result(panic_error, app_duration_us(decode_started_at.elapsed()))
             }
         };
+        result.dispatch_wait_us = dispatch_wait_us;
         scheduler.mark_execution_completed(execution_id);
         let terminal = match cancellation_observer.finish(execution_id) {
             Ok(terminal) => terminal,
@@ -825,6 +832,7 @@ impl MediaPreviewWorkerPanicContext {
             access_mode: self.access_mode,
             queue_disposition: MediaPreviewQueueDisposition::Ready,
             queue_wait_us: self.queue_wait_us,
+            dispatch_wait_us: 0,
             decode_elapsed_us,
             deadline_at: self.deadline_at,
             logical_cancellation_observed: None,
@@ -1001,6 +1009,7 @@ pub(crate) fn media_preview_canceled_result(
         access_mode: job.access_mode,
         queue_disposition: MediaPreviewQueueDisposition::Ready,
         queue_wait_us,
+        dispatch_wait_us: 0,
         decode_elapsed_us,
         deadline_at: job.deadline_at,
         logical_cancellation_observed: logical_execution_elapsed_us.map(|execution_elapsed_us| {
@@ -1143,6 +1152,7 @@ fn decode_media_preview_inner(
                 access_mode,
                 queue_disposition: MediaPreviewQueueDisposition::Ready,
                 queue_wait_us,
+                dispatch_wait_us: 0,
                 decode_elapsed_us,
                 deadline_at,
                 logical_cancellation_observed: None,
@@ -1229,6 +1239,7 @@ fn decode_media_preview_inner(
                 access_mode,
                 queue_disposition: MediaPreviewQueueDisposition::Ready,
                 queue_wait_us,
+                dispatch_wait_us: 0,
                 decode_elapsed_us,
                 deadline_at,
                 logical_cancellation_observed: None,
@@ -1318,6 +1329,7 @@ fn decode_media_preview_inner(
                 access_mode,
                 queue_disposition: MediaPreviewQueueDisposition::Ready,
                 queue_wait_us,
+                dispatch_wait_us: 0,
                 decode_elapsed_us,
                 deadline_at,
                 logical_cancellation_observed: None,
@@ -1422,6 +1434,7 @@ fn decode_media_preview_inner(
                 access_mode,
                 queue_disposition: MediaPreviewQueueDisposition::Ready,
                 queue_wait_us,
+                dispatch_wait_us: 0,
                 decode_elapsed_us,
                 deadline_at,
                 logical_cancellation_observed: None,
@@ -1447,6 +1460,7 @@ fn decode_media_preview_inner(
             access_mode,
             queue_disposition: MediaPreviewQueueDisposition::Ready,
             queue_wait_us,
+            dispatch_wait_us: 0,
             decode_elapsed_us,
             deadline_at,
             logical_cancellation_observed: None,
@@ -1473,6 +1487,7 @@ fn decode_media_preview_inner(
                 access_mode,
                 queue_disposition: MediaPreviewQueueDisposition::Ready,
                 queue_wait_us,
+                dispatch_wait_us: 0,
                 decode_elapsed_us,
                 deadline_at,
                 logical_cancellation_observed: None,
@@ -1508,6 +1523,7 @@ fn media_preview_alpha_failure(
         access_mode: job.access_mode,
         queue_disposition: MediaPreviewQueueDisposition::Ready,
         queue_wait_us,
+        dispatch_wait_us: 0,
         decode_elapsed_us,
         deadline_at: job.deadline_at,
         logical_cancellation_observed: None,
@@ -1546,6 +1562,7 @@ fn media_preview_temporal_failure(
         access_mode: job.access_mode,
         queue_disposition: MediaPreviewQueueDisposition::Ready,
         queue_wait_us,
+        dispatch_wait_us: 0,
         decode_elapsed_us,
         deadline_at: job.deadline_at,
         logical_cancellation_observed: None,

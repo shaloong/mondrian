@@ -380,12 +380,15 @@ mod tests {
             frame.data_mut(1).fill(128);
             frame.data_mut(2).fill(128);
             // SAFETY: the test exclusively owns this AVFrame and sets only
-            // FFmpeg's public scan flags plus their compatibility mirrors.
+            // FFmpeg's public scan flags, plus mirrors required by older bindings.
             unsafe {
                 (*frame.as_mut_ptr()).flags |= ffmpeg::ffi::AV_FRAME_FLAG_INTERLACED
                     | ffmpeg::ffi::AV_FRAME_FLAG_TOP_FIELD_FIRST;
-                (*frame.as_mut_ptr()).interlaced_frame = 1;
-                (*frame.as_mut_ptr()).top_field_first = 1;
+                #[cfg(not(mondrian_ffmpeg_8_0))]
+                {
+                    (*frame.as_mut_ptr()).interlaced_frame = 1;
+                    (*frame.as_mut_ptr()).top_field_first = 1;
+                }
             }
             outputs.extend(session.push(pts, &frame).expect("BWDIF input"));
         }

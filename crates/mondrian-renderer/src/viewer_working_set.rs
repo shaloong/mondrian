@@ -688,26 +688,13 @@ fn estimate_source(
                         reason: "native source has an unsupported decoded surface format",
                     });
                 };
-                let encoded_rgb_bytes = checked_texture_bytes(
+                // Media owns the adopted decoder surface. Every native backend
+                // fuses YUV reconstruction and OCIO into one Working texture.
+                let bytes = checked_texture_bytes(
                     width,
                     height,
                     working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                )?;
-                let working_bytes = checked_texture_bytes(
-                    width,
-                    height,
-                    working_bytes_per_pixel(),
-                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                )?;
-                // The media Frame Store governs the adopted decoder surface.
-                // Keep the conservative two-pass bound for backends that
-                // materialize encoded RGB before OCIO. Fused direct inputs
-                // need only the working output, but do not expand this grant.
-                let bytes = encoded_rgb_bytes.checked_add(working_bytes).ok_or(
-                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
-                        stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                    },
                 )?;
                 // The CUDA bridge owns one padded storage allocation, separate
                 // from Media's retained decoder surface. Its exact fixed-capacity
@@ -744,7 +731,7 @@ fn estimate_source(
                     bytes
                 };
                 estimate.source_preparation.checked_add(
-                    ViewerGpuActiveTextureDemand { textures: 2, bytes },
+                    ViewerGpuActiveTextureDemand { textures: 1, bytes },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 observe_effect_extent(&mut effect_extent, width, height)?;
@@ -1133,7 +1120,6 @@ fn checked_texture_bytes(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
     #[test]
     fn native_materialization_charges_output_extent_and_full_cuda_storage() {
         use mondrian_media::{
@@ -1180,6 +1166,8 @@ mod tests {
         decoder.clear();
         let (_, effect_plan) = identity_effect();
         for kind in [
+            DecodedGpuFrameHandleKind::D3D12Resource,
+            DecodedGpuFrameHandleKind::CVPixelBuffer,
             DecodedGpuFrameHandleKind::VaapiSurface,
             DecodedGpuFrameHandleKind::CudaDeviceMemory,
         ] {
@@ -1232,15 +1220,17 @@ mod tests {
                 with_request(1920, 1080, &layers, |request| {
                     let estimate =
                         estimate_viewer_gpu_active_working_set(request).expect("estimate");
-                    let extra = if kind == DecodedGpuFrameHandleKind::CudaDeviceMemory {
+                    let extra = if cfg!(target_os = "linux")
+                        && kind == DecodedGpuFrameHandleKind::CudaDeviceMemory
+                    {
                         cuda_bytes
                     } else {
                         0
                     };
-                    let expected = 1920 * 1080 * 16 * 2 + extra;
+                    let expected = 1920 * 1080 * 16 + extra;
                     assert_eq!(
                         estimate.source_preparation,
-                        ViewerGpuActiveTextureDemand { textures: 2, bytes: expected }
+                        ViewerGpuActiveTextureDemand { textures: 1, bytes: expected }
                     );
                     let grant = ViewerGpuExecutionResourceGrant::new(0, 0)
                         .with_active_limits(estimate.total().bytes, estimate.total().textures);

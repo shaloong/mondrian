@@ -732,6 +732,7 @@ impl GpuNativeYuvDecoder {
         }
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn enable_buffer_source(&mut self, device: &wgpu::Device) {
         if self.buffer.is_none() {
             self.buffer = Some(Self::create_pipeline(device, true));
@@ -834,6 +835,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         (Self::fused_texture_source(), self.texture_input_layout())
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn fused_buffer_input(&self) -> Option<(&'static str, &wgpu::BindGroupLayout)> {
         static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             // Substitute only the physical fetch. Sampling, range, matrix and
@@ -904,6 +906,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn prepare_buffer_pass(
         &self,
         device: &wgpu::Device,
@@ -1406,6 +1409,27 @@ mod tests {
                 wgpu::TextureFormat::Rg16Unorm,
             ),
         ] {
+            if bytes == 2 {
+                let supported =
+                    context.adapter.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+                if !policy
+                    .admit_capability(
+                        "native-yuv-buffer-parity",
+                        "16-bit normalized planes",
+                        supported,
+                    )
+                    .expect("16-bit plane admission")
+                {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr(),
+                        "SKIP native-yuv-buffer-parity P010: adapter lacks TEXTURE_FORMAT_16BIT_NORM");
+                    continue;
+                }
+                assert!(
+                    context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+                    "supported 16-bit planes must be enabled on the production device"
+                );
+            }
             let row = 32usize;
             let offset = row * 3 + 16;
             let mut storage = vec![0xa5u8; offset + row * 2];

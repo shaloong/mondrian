@@ -4410,7 +4410,7 @@ fn execute_timeline_export(
                     .arg("1:a:0")
                     .arg("-shortest");
             }
-            TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+            TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
                 let Some(channel_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
@@ -4420,7 +4420,8 @@ fn execute_timeline_export(
                     .arg("lavfi")
                     .arg("-i")
                     .arg(format!(
-                        "anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}"
+                        "anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                        analysis.sample_frames
                     ))
                     .arg("-map")
                     .arg("0:v:0")
@@ -4643,7 +4644,10 @@ fn execute_resident_hevc_export(
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
-    let resident_video_path = temp_dir.path().join("resident-video.mkv");
+    // D3D12VA emits HEVC parameter sets with its first packet rather than as
+    // codec extradata during open. MPEG-TS admits that standard Annex-B stream
+    // while preserving timestamps for the final pixel-free stream-copy mux.
+    let resident_video_path = temp_dir.path().join("resident-video.ts");
     let config = ResidentHevcEncoderConfig {
         output_path: resident_video_path.clone(),
         width,
@@ -4832,6 +4836,8 @@ fn execute_resident_hevc_export(
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-f")
+        .arg("mpegts")
         .arg("-i")
         .arg(&resident_video_path)
         .arg("-map")
@@ -4861,7 +4867,7 @@ fn execute_resident_hevc_export(
                 .arg("-shortest");
             apply_audio_codec_args(&mut command, audio);
         }
-        TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+        TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return ResidentExportAttemptOutcome::Failed(
                     "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
@@ -4872,7 +4878,8 @@ fn execute_resident_hevc_export(
                 .arg("lavfi")
                 .arg("-i")
                 .arg(format!(
-                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate}"
+                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                    analysis.sample_frames
                 ))
                 .arg("-map")
                 .arg("1:a:0")
@@ -5028,12 +5035,13 @@ fn try_execute_smart_render(
                 .arg("-i")
                 .arg(path);
         }
-        TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+        TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
             command.arg("-f").arg("lavfi").arg("-i").arg(format!(
-                "anullsrc=channel_layout={layout}:sample_rate={sample_rate}"
+                "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                analysis.sample_frames
             ));
         }
         TimelineAudioInput::Disabled => {}
@@ -11624,7 +11632,20 @@ mod tests {
                     .expect("read published manifest"),
             )
             .expect("parse published manifest");
-            assert_eq!(manifest["schema_version"], 2);
+            assert_eq!(manifest["schema_version"], 3);
+            let expected_association = if job.config.preset.alpha_mode != ExportAlphaMode::Preserve
+            {
+                "opaque"
+            } else if matches!(
+                format,
+                crate::preset::ImageSequenceFormat::OpenExrHalf
+                    | crate::preset::ImageSequenceFormat::OpenExrFloat
+            ) {
+                "premultiplied"
+            } else {
+                "straight"
+            };
+            assert_eq!(manifest["alpha_association"], expected_association);
             assert_eq!(manifest["frame_count"], 1);
             assert!(manifest["frame_contract"].is_string());
             assert!(manifest["output_pixel_format"].is_string());
@@ -12066,7 +12087,7 @@ mod tests {
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-x264-params")
-            .arg("keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0")
+            .arg("keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0:colorprim=bt709:transfer=bt709:colormatrix=bt709")
             .arg("-color_range")
             .arg("tv")
             .arg("-color_primaries")
@@ -12269,10 +12290,22 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
+    fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
+        run_production_export_queue_resident_hevc_qualification();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
     fn production_export_queue_runs_same_device_cuda_resident_hevc() {
+        run_production_export_queue_resident_hevc_qualification();
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn run_production_export_queue_resident_hevc_qualification() {
         let _gpu_visual = GpuVisualExecutionGuard::activate();
         let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
             .ok()
@@ -12280,7 +12313,7 @@ mod tests {
             .filter(|value| (1..=600).contains(value))
             .unwrap_or(3);
         let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
-        let mut sequence = Sequence::new("Linux CUDA resident Export");
+        let mut sequence = Sequence::new("same-device resident HEVC Export");
         sequence.settings.resolution = Resolution { width: 320, height: 180 };
         sequence.settings.frame_rate = Rational::new(30_000, 1_001);
         sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
@@ -16658,7 +16691,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "-vf"
                 && pair[1]
-                    == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setsar=1/1"
+                    == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,setsar=1/1"
         }));
         assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
     }

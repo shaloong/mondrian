@@ -157,6 +157,7 @@ if ($shouldGenerate) {
             "-an",
             "-vf", "format=yuv420p",
             "-c:v", "libx264",
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
             "-preset", "veryfast",
             "-crf", "18",
             "-profile:v", "high",

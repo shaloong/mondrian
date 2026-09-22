@@ -3,7 +3,7 @@ use super::*;
 use crate::*;
 
 #[test]
-#[ignore = "requires an explicitly available Vulkan adapter"]
+#[ignore = "requires an explicitly available GPU adapter"]
 fn fused_yuv_input_matches_two_pass_sdr_pq_hlg() {
     mondrian_core::ensure_mondrian_default_ocio_loaded().expect("bundled OCIO");
     let context = pollster::block_on(GpuContext::new()).expect("required GPU adapter");
@@ -132,32 +132,15 @@ fn fused_yuv_input_matches_two_pass_sdr_pq_hlg() {
                     &context.device,
                     &GpuColorFrameAllocationPlan::for_handle(fused),
                 );
-                {
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &output.resource().texture_view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        ..Default::default()
-                    });
-                    pass.set_pipeline(&backend.pipeline);
-                    pass.set_bind_group(0, &backend.objects.ocio_bind_group.bind_group, &[]);
-                    pass.set_bind_group(
-                        1,
-                        if buffer_source {
-                            &prepared_buffer.bind_group
-                        } else {
-                            &prepared.bind_group
-                        },
-                        &[],
-                    );
-                    pass.draw(0..4, 0..1);
-                }
+                backend.record(
+                    &mut encoder,
+                    if buffer_source {
+                        &prepared_buffer.bind_group
+                    } else {
+                        &prepared.bind_group
+                    },
+                    &output.resource().texture_view,
+                );
                 let reference = runtime.frame_table().get(&working).expect("working result");
                 let expected = readback(&context, &mut encoder, reference);
                 let actual = readback(&context, &mut encoder, &output);

@@ -1703,6 +1703,13 @@ impl AppState {
         self.playback_engine.snapshot().clock_master
     }
 
+    /// Current authoritative transport snapshot exposed to qualification
+    /// harnesses when a clock invariant fails.
+    #[cfg(test)]
+    pub(crate) fn playback_diagnostic_snapshot(&self) -> mondrian_playback::PlaybackSnapshot {
+        self.playback_engine.snapshot()
+    }
+
     /// Identity of the current contiguous Playback Session.
     ///
     /// Preview execution uses this to retain forward work across ordinary
@@ -1863,10 +1870,10 @@ impl AppState {
         ticket: FramePresentationTicket,
         completion_timestamp: MonotonicTimestamp,
     ) -> Option<FrameDeliveryKind> {
-        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
-            return None;
-        }
-        Some(ticket.delivery_kind_at(completion_timestamp))
+        self.playback_engine
+            .frame_presentation_delivery_kind(ticket, completion_timestamp)
+            .ok()
+            .flatten()
     }
 
     /// Atomically commit one prepared output and its exact presentation ticket.
@@ -2049,11 +2056,14 @@ impl AppState {
                 return FramePresentationPreflight::LostAuthority;
             }
         };
-        let Some(kind) =
-            self.frame_presentation_delivery_kind_at_timestamp(ticket, observed_timestamp)
-        else {
+        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
             return FramePresentationPreflight::LostAuthority;
-        };
+        }
+        // Preparation does not publish pixels. A refreshed clock observation
+        // may reduce phase uncertainty before visibility, so only the carried
+        // expiry can terminally reject work here. Final publication still
+        // checks both the deadline and the live phase bound.
+        let kind = ticket.delivery_kind_at(observed_timestamp);
         if kind != FrameDeliveryKind::Late {
             return FramePresentationPreflight::MaySubmit;
         }
@@ -2103,13 +2113,10 @@ impl AppState {
         completed_at: Instant,
         completion_timestamp: MonotonicTimestamp,
     ) -> Option<FramePresentationCompletion> {
-        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
-            // GPU completion may race a newer frame demand. It is a stale
-            // presentation completion, not a terminal observation for the
-            // newer demand and must not pollute rejected-delivery evidence.
-            return None;
-        }
-        let delivery = ticket.complete_at(completion_timestamp);
+        let kind =
+            self.frame_presentation_delivery_kind_at_timestamp(ticket, completion_timestamp)?;
+        let delivery = FrameDeliveryCandidate::for_demand(ticket.identity(), kind)
+            .complete_at(completion_timestamp);
         let applied = self.observe_frame_delivery_at_wall(delivery, completed_at);
         applied.accepted.then_some(FramePresentationCompletion {
             delivery,
@@ -2417,8 +2424,8 @@ fn audio_device_clock_observation(
             _ => false,
         };
     let stream_available = terminal_frozen || (snapshot.active && !snapshot.stream_failed);
-    let playback_delay = snapshot
-        .last_callback_playback_delay
+    let reported_playback_delay = snapshot.last_callback_playback_delay;
+    let playback_delay = reported_playback_delay
         .map(Ok)
         .unwrap_or_else(|| sample_frames_duration_ceil(callback_period_frames, sample_rate))?;
     let remaining_playback_delay = snapshot
@@ -2446,8 +2453,31 @@ fn audio_device_clock_observation(
         && callback_position_plausible
         && (already_audio_master || activation_preroll_satisfied);
     let uncertainty_frames = match callback_age_frames {
-        Some(frames) => u32::try_from(frames.max(callback_period_frames))
-            .map_err(|_| mondrian_playback::PlaybackError::TransportArithmeticOverflow)?,
+        Some(frames) => {
+            // A host playback timestamp already projects the consumed counter
+            // through callback age via `remaining_playback_delay`; counting
+            // that age again would duplicate the same uncertainty. Native
+            // clocks publish query and quantization uncertainty. Portable
+            // callbacks publish their complete callback span. With no host
+            // delay, stale callback age remains the only bound.
+            let bounded_frames = if let Some(delay) = reported_playback_delay {
+                // Projection stops at the submitted tail. Beyond that instant,
+                // a missing callback again leaves an unobserved span.
+                let unobserved_age =
+                    snapshot.last_callback_age.unwrap_or_default().saturating_sub(delay);
+                let reported_uncertainty_frames = snapshot
+                    .last_callback_playback_delay_uncertainty
+                    .map(|uncertainty| duration_sample_frames_ceil(uncertainty, sample_rate))
+                    .transpose()?
+                    .unwrap_or(callback_period_frames);
+                reported_uncertainty_frames
+                    .max(duration_sample_frames_ceil(unobserved_age, sample_rate)?)
+            } else {
+                frames.max(callback_period_frames)
+            };
+            u32::try_from(bounded_frames)
+                .map_err(|_| mondrian_playback::PlaybackError::TransportArithmeticOverflow)?
+        }
         None => u32::MAX,
     };
     Ok(AudioDeviceClockObservation {
@@ -2747,6 +2777,7 @@ mod tests {
             underrun_frames: 0,
             last_callback_frames: 480,
             last_callback_playback_delay: Some(Duration::from_millis(10)),
+            last_callback_playback_delay_uncertainty: Some(Duration::from_millis(10)),
             last_callback_age: Some(Duration::from_millis(1)),
             buffered_frames: 5_760,
             stream_failed: false,
@@ -2901,6 +2932,60 @@ mod tests {
         assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
     }
 
+    #[test]
+    fn native_playback_delay_uses_its_measured_uncertainty() {
+        let state = state_with_sequence(20);
+        let epoch = state.playback_engine.snapshot().epoch;
+        let mut native = audio_snapshot();
+        native.last_callback_playback_delay_uncertainty = Some(Duration::from_micros(50));
+        native.last_callback_age = Some(Duration::from_millis(5));
+
+        let observation = audio_device_clock_observation(
+            native,
+            epoch,
+            MonotonicTimestamp::ZERO,
+            true,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("native clock observation");
+
+        assert_eq!(observation.uncertainty_frames, 3);
+    }
+
+    #[test]
+    fn timestamped_playback_delay_retains_age_beyond_submitted_tail() {
+        let state = state_with_sequence(20);
+        let epoch = state.playback_engine.snapshot().epoch;
+        let mut timestamped = audio_snapshot();
+        timestamped.last_callback_age = Some(Duration::from_millis(25));
+        let timestamped_observation = audio_device_clock_observation(
+            timestamped,
+            epoch,
+            MonotonicTimestamp::ZERO,
+            true,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("timestamped observation");
+        assert_eq!(timestamped_observation.uncertainty_frames, 720);
+
+        let mut fallback = timestamped;
+        fallback.last_callback_playback_delay = None;
+        let fallback_observation = audio_device_clock_observation(
+            fallback,
+            epoch,
+            MonotonicTimestamp::ZERO,
+            true,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("untimestamped observation");
+        assert_eq!(fallback_observation.uncertainty_frames, 1_200);
+    }
     #[test]
     fn long_lived_audio_master_uses_incremental_clock_validation_after_handoff() {
         let mut state = state_with_sequence(20_000);
@@ -3421,6 +3506,71 @@ mod tests {
             state.playback_evidence_report().deliveries.rejected,
             rejected_before,
             "a stale epoch is retired silently and cannot pollute the replacement demand"
+        );
+    }
+
+    #[test]
+    fn preparation_keeps_authority_until_visibility_phase_is_checked() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        let initial = audio_device_clock_observation(
+            audio_snapshot(),
+            state.playback_engine.snapshot().epoch,
+            state.playback_engine.monotonic_high_water(),
+            false,
+            audio_anchor(0),
+            true,
+            false,
+        )
+        .expect("audio clock observation");
+        state
+            .playback_engine
+            .observe_audio_device_clock(initial)
+            .expect("audio handoff");
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(ClockMaster::AudioDevice)
+        );
+        let mut next = initial;
+        next.consumed_frames += 1_920;
+        next.observed_at = initial.observed_at.checked_add(Duration::from_millis(40)).unwrap();
+        state
+            .playback_engine
+            .observe_audio_device_clock(next)
+            .expect("next frame boundary");
+        let ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("current ticket");
+        let observed_at = state.playback_observation_instant_anchor + Duration::from_millis(46);
+        let timestamp = state.playback_timestamp_for_observation(observed_at).unwrap();
+        assert_ne!(ticket.delivery_kind_at(timestamp), FrameDeliveryKind::Late);
+        assert_eq!(
+            state.frame_presentation_delivery_kind_at_timestamp(ticket, timestamp),
+            Some(FrameDeliveryKind::Late),
+            "the stale clock estimate cannot yet prove visibility phase"
+        );
+        assert_eq!(
+            state.preflight_frame_presentation(Some(ticket), observed_at),
+            FramePresentationPreflight::MaySubmit,
+            "preparing an output does not make it visible or consume its authority"
+        );
+        assert_eq!(
+            state.pending_playback_frame_demand_identity(),
+            Some(ticket.identity())
+        );
+        let published = std::cell::Cell::new(false);
+        let disposition = state.finalize_frame_presentation_at(
+            Some(ticket),
+            observed_at,
+            FramePresentationPublication::prepared(|| published.set(true)),
+        );
+        assert!(matches!(
+            disposition,
+            FramePresentationDisposition::DroppedLate(_)
+        ));
+        assert!(
+            !published.get(),
+            "physical publication still enforces the phase budget"
         );
     }
 

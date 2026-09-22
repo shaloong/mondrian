@@ -177,6 +177,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 canceled = result.canceled,
                 failure = ?result.failure_reason,
                 queue_wait_us = result.queue_wait_us,
+                dispatch_wait_us = result.dispatch_wait_us,
                 decode_elapsed_us = result.decode_elapsed_us,
                 decode_diagnostics = ?result.decode_diagnostics,
                 retained_cpu_bytes = ?result.frame.as_ref().map(MediaPreviewFrame::reserved_cpu_bytes),
@@ -190,6 +191,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             result.priority,
                             result.access_mode,
                             result.queue_wait_us,
+                            result.dispatch_wait_us,
                             presentation_current,
                         );
                     }

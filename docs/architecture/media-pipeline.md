@@ -1,5 +1,10 @@
 # Media Pipeline
 
+Source builds use FFmpeg 6.1 through 8.x headers with the 8.x Rust bindings.
+Professional codec probe mapping uses the stable `AV_PROFILE_*` names rather
+than removed legacy aliases. CI native dependency and font provisioning are
+documented in [CI native dependencies](../dev/ci-native-dependencies.md).
+
 Preview worker resources may bind a lifecycle waker before the family is shared.
 The last logical native output releases its Session and family charges before
 waking the existing worker transport. Renderer clones share the original lease;
@@ -300,15 +305,18 @@ over-capacity residency are diagnostic facts. This is an intentionally isolated
 process Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may
 replace it behind the same Interface without changing cache or sample semantics.
 
-The capacity is a physical-owner limit, not merely an LRU-entry limit. One
-permit covers a Session from pre-spawn admission through active, queued,
-terminating, partial-construction, and EOF-finalization states; it is released
-only after the child and both pipe pumps are proven retired. Capacity is clamped
-to 64, random seeks cannot create a replacement-child storm, and online
-reconfiguration converges without hiding terminating processes from the live
-and peak Session diagnostics. Shutdown/fault state is rechecked while holding
-the relevant cache/permit lock, immediately before spawn, and immediately after
-spawn so no reader or child can escape a racing shutdown signal.
+The capacity is a physical native-child limit, not merely an LRU-entry limit.
+One permit covers a Session from pre-spawn admission through active, queued,
+terminating, partial-construction, and EOF-finalization states. It is released
+only after native exit is observed; an unobserved exit retains the permit.
+Stdout/stderr pump owners remain independently supervised and reported after
+that point, but a slow pipe join cannot occupy native-child capacity. Capacity
+is clamped to 64, random seeks cannot create a replacement-child storm, and
+online reconfiguration converges without hiding terminating processes from the
+live and peak Session diagnostics. Shutdown/fault state is rechecked while
+holding the relevant cache/permit lock, immediately before spawn, and
+immediately after spawn so no reader or child can escape a racing shutdown
+signal.
 
 An execution owner that must prove phase isolation first obtains unique
 `AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
@@ -351,10 +359,11 @@ Native process and pipe-pump construction run on one separate prebuilt startup
 lane. Typed FFmpeg command admission still precedes the cancelable handoff;
 an admission rejection keeps its original cause. Read cancellation never waits
 for an in-progress OS process creation. The physical Session permit stays with
-the request, partial child, completed Session, or retiring owner until actual
-child and pump closure. A fixed maximum additionally bounds failed completion
-envelopes whose physical permit has already been released; it is not a second
-Playback scheduler or a change to resource-policy entitlement.
+the request, partial child, completed Session, or retiring owner until native
+exit is observed. Pipe closure remains separately owned and must still pass the
+consuming shutdown receipt. A fixed maximum additionally bounds failed
+completion envelopes whose physical permit has already been released; it is not
+a second Playback scheduler or a change to resource-policy entitlement.
 
 Each owning completion holds a producer lease through install or explicit
 retirement. Buffered-result and disconnected-channel Drop enqueue native owners
@@ -367,10 +376,13 @@ lost shutdown notifications. Startup creation failure has no synchronous fallbac
 The nested `decoder_startup` receipt distinguishes a required product lane from
 an absent synthetic decoder, records actual worker joins and exact queued,
 in-flight, unclaimed, and producer inventory, and retains failed or unverified
-native ownership after panic. Logical cancellation latency and physical retirement
-latency are separate observations against the original qualification threshold;
-isolating native startup is not a claim that OS process creation or cleanup
-always completes within 50 ms.
+native ownership after panic. The real-media gate keeps the original 50 ms
+logical cancellation-to-reader-return bound. Because synchronous Windows
+`CreateProcess` exposes no child handle before it returns, the separate physical
+50 ms bound begins when native ownership becomes available and ends when the
+Session permit is released after observed exit. Entry-to-return process creation
+and cancellation-to-physical-release remain reported as diagnostic durations;
+they are not substituted for either gate or hidden by the startup lane.
 
 Persistent decoding owns one prebuilt named teardown worker. Session eviction,
 random-seek replacement, partial child construction, normal EOF, cancellation,
@@ -1588,7 +1600,9 @@ observed, that timestamp is the authoritative exclusive boundary: it truncates
 overlapping duration metadata and extends a shorter packet duration through a
 VFR cadence gap, matching continuous video presentation's predecessor hold.
 For an interior request the exact decoder keeps one-frame lookahead whenever a
-successor can still arrive; at EOF a positive duration remains sufficient.
+successor can still arrive; a retained candidate cannot take the early
+materialization path until that same lookahead rule confirms its interval. At
+EOF a positive duration remains sufficient.
 Without a positive duration or successor, only equality with `selected_pts` is
 exact. A duration or successor proves the same interval for Playback, Scrub,
 and Still; access mode changes only the permitted fallback when no interval
@@ -2833,8 +2847,18 @@ and bounded NV12/P010 hardware-frame pool. An acquired
 Adapter may turn it into `D3D12ResidentEncodeReadyFrame` after enqueueing the
 producer fence signal. Media waits on that fence through FFmpeg's hardware-frame
 contract and never maps the surface or stages raw pixels through host memory.
-The hand-written FFmpeg 7.1 D3D12 ABI declarations are target-gated and guarded
-by compile-time size and offset assertions.
+The hand-written D3D12 frame ABI declarations are target-gated and guarded by
+compile-time size and offset assertions. Build-time inspection of the installed
+FFmpeg header selects the original layout or the later texture-array layout;
+libavcodec major version alone is not treated as layout authority. The direct
+queue transitions the wgpu output from `RENDER_TARGET` to `COMMON`, the video
+queue owns only `COMMON` to/from `VIDEO_PROCESS_*`, and the direct queue restores
+`RENDER_TARGET` before its completion fence permits pool reuse. The video-only
+staging artifact uses MPEG-TS because D3D12VA emits HEVC parameter sets with the
+first Annex-B packet rather than during codec open; the requested final container
+is produced by timestamp-preserving stream copy. D3D12VA uses asynchronous depth
+one so even a one-frame sequence drains correctly without changing the
+no-readback surface contract.
 
 On Linux NVIDIA, the Renderer constructs `RendererHwAccelDeviceContext` only
 after its Vulkan UUID maps to an exact CUDA ordinal. Media retains that FFmpeg
@@ -3722,8 +3746,9 @@ only when the GPU input stage cannot be recorded. CPU outcomes still require
 one host-to-device upload; native decoder surfaces use the separate zero-copy
 import contract and never masquerade as one of these CPU source types. Here
 zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
-sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
-encoded and working textures.
+sampling. Fused YUV reconstruction and OCIO allocate one Renderer-owned Working
+texture; no encoded RGB intermediate is allocated. Linux CUDA imports additionally
+charge their padded interop storage buffer to the active working-set budget.
 
 An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
 semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
@@ -3902,10 +3927,11 @@ working space.
 
 Physical endurance admission now calls
 `probe_realtime_audio_output_contract` to use the same exact device selection,
-sample rate, channel-layout and platform negotiation as the real Audio output
-owner. The probe creates no running stream and cannot prove later callback
-progress; stream-open/runtime evidence still belongs to the phase owner. A
-missing device or unsupported exact contract produces missing pre-start
+sample rate, channel-layout, platform negotiation and bounded stream owner as
+the real Audio output path. The probe must create and start that production
+stream, capture its concrete device evidence, and close it before admission
+returns; later callback progress still belongs to the phase owner. A missing
+device or unsupported exact stream contract produces missing pre-start
 capability and NotRun, while a later device loss is a startup/runtime failure.
 
 ### Qualified CLI capsule and native process closure

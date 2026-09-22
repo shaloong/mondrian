@@ -1530,6 +1530,8 @@ struct CompletedProcessMemorySample {
     completed_at_run_us: u64,
 }
 
+const MEMORY_WAIT_PUMP_QUANTUM_US: u64 = 2_000;
+
 struct PhaseProcessMemorySampler {
     request_sender: mpsc::Sender<()>,
     result_receiver: mpsc::Receiver<CompletedProcessMemorySample>,
@@ -1562,7 +1564,6 @@ impl PhaseProcessMemorySampler {
                     ));
                 }
                 Err(mpsc::TryRecvError::Empty) if continue_realtime_pump => {
-                    const MEMORY_WAIT_PUMP_QUANTUM_US: u64 = 2_000;
                     let deadline_run_us = clock
                         .elapsed_us()
                         .checked_add(MEMORY_WAIT_PUMP_QUANTUM_US)
@@ -1998,6 +1999,8 @@ mod tests {
             let realtime = owners.realtime.as_mut().expect("paired realtime session");
             realtime.begin_realtime(&state, None).expect("begin realtime residency");
             assert!(realtime.preview().is_err());
+            #[cfg(feature = "validation")]
+            assert!(realtime.realtime_preview_diagnostics().is_ok());
             assert!(realtime.gpu().is_err());
             assert!(realtime.gpu_mut().is_err());
             assert!(realtime.bound_resources().is_err());
@@ -2135,6 +2138,17 @@ mod tests {
             &mut self,
             deadline_run_us: u64,
         ) -> Result<Vec<EnduranceCampaignEvent>, EnduranceCampaignError> {
+            // Polling the real sampler thread must not advance synthetic time
+            // by arbitrarily many quanta before the OS schedules that thread.
+            // FakeMemory owns probe cost; only cadence milestones advance this
+            // fixture's runtime clock. Dedicated blocking-probe tests exercise
+            // continued real-time pumping separately.
+            if deadline_run_us.saturating_sub(self.clock.elapsed_us())
+                <= MEMORY_WAIT_PUMP_QUANTUM_US
+            {
+                std::thread::yield_now();
+                return Ok(Vec::new());
+            }
             self.clock.0.store(deadline_run_us, Ordering::Relaxed);
             if self.kind != Some(mondrian_platform::EndurancePhaseKind::ContinuousExport) {
                 return Ok(Vec::new());
@@ -2818,9 +2832,8 @@ mod tests {
         let last = last_chunk.samples.last().expect("terminal sample");
         assert_eq!(first.scheduled_at_us, 0);
         assert_eq!(first.started_at_us, 0);
-        // The real sampler worker races the fake runtime pump. Its one-unit
-        // work cost does not imply it was scheduled at the measurement origin.
-        assert!(first.completed_at_us >= 1);
+        // OS scheduling does not add simulated work to the probe's one-unit cost.
+        assert_eq!(first.completed_at_us, 1);
         assert!(first.completed_at_us - first.started_at_us <= profile.maximum_probe_latency_us);
         assert_eq!(last.scheduled_at_us, 86_400_000_000);
         assert_eq!(

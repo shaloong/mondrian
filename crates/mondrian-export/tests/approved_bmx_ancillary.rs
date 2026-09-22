@@ -222,7 +222,7 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires official BMX 1.6 and explicit native evidence directory; ANC-only, no physical qualification"]
+#[ignore = "requires official BMX 1.7 and explicit native evidence directory; ANC-only, no physical qualification"]
 fn approved_bmx_wrap_reimport_and_exact_word_rescan() -> Result<()> {
     let tools = PathBuf::from(
         std::env::var_os("MONDRIAN_BMX_TOOL_DIR")
@@ -254,7 +254,7 @@ fn approved_bmx_wrap_reimport_and_exact_word_rescan() -> Result<()> {
             command.arg("-v");
             let version = execute(&mut command, &format!("version:{tool:?}"), deadline, &cancel, &mut observations)?;
             // BMX emits version identity on stdout in the approved native build.
-            ensure!(String::from_utf8_lossy(&version).contains("bmx v1.6.0"), "approved BMX 1.6 identity missing");
+            ensure!(String::from_utf8_lossy(&version).contains("bmx v1.7.0"), "approved BMX 1.7 identity missing");
         }
         for (name, program) in programs()? {
             boundary(deadline, &cancel)?;

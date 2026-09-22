@@ -1,6 +1,21 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Resolve-CargoTargetDirectory {
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RepositoryRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $configured = [Environment]::GetEnvironmentVariable("CARGO_TARGET_DIR", "Process")
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        return [IO.Path]::GetFullPath((Join-Path $root "target"))
+    }
+    if ([IO.Path]::IsPathRooted($configured)) {
+        return [IO.Path]::GetFullPath($configured)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $root $configured))
+}
 function Invoke-BoundedPlaybackGateProcess {
     <#
     .SYNOPSIS
@@ -195,6 +210,7 @@ function Invoke-TerminalReportGateProcess {
 }
 
 Export-ModuleMember -Function @(
+    "Resolve-CargoTargetDirectory",
     "Invoke-BoundedPlaybackGateProcess",
     "Invoke-TerminalReportGateProcess"
 )

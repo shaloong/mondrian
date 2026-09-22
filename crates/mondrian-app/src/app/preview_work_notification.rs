@@ -64,6 +64,12 @@ impl PreviewWorkNotificationState {
         let gate = lock_unpoisoned(&self.wait_gate);
         let next = self.revision.load(Ordering::Relaxed).saturating_add(1);
         self.revision.store(next, Ordering::Release);
+        #[cfg(windows)]
+        unsafe {
+            // WaitOnAddress compares the value before sleeping, so this wake
+            // cannot be lost if publication races the consumer's wait entry.
+            windows_sys::Win32::System::Threading::WakeByAddressAll(self.revision.as_ptr().cast());
+        }
         self.changed.notify_all();
         drop(gate);
         PreviewWorkRevision(next)
@@ -181,17 +187,48 @@ impl PreviewWorkWatch {
         observed: PreviewWorkRevision,
         timeout: Duration,
     ) -> PreviewWorkRevision {
-        let gate = lock_unpoisoned(&self.shared.wait_gate);
-        if self.revision() != observed {
-            return self.revision();
+        #[cfg(windows)]
+        {
+            if self.revision() == observed {
+                let timeout_ms = if timeout.is_zero() {
+                    0
+                } else {
+                    timeout
+                        .as_nanos()
+                        .saturating_add(999_999)
+                        .checked_div(1_000_000)
+                        .unwrap_or(u128::MAX)
+                        .min(u128::from(u32::MAX)) as u32
+                };
+                unsafe {
+                    // Windows condition-variable timeouts inherit the system
+                    // timer tick. Wait on the monotonic revision itself so a
+                    // GPU/decoder publication wakes immediately while the
+                    // timeout remains bounded for clock progress.
+                    let _ = windows_sys::Win32::System::Threading::WaitOnAddress(
+                        self.shared.revision.as_ptr().cast(),
+                        (&observed.0 as *const u64).cast(),
+                        std::mem::size_of::<u64>(),
+                        timeout_ms,
+                    );
+                }
+            }
+            self.revision()
         }
-        let (gate, _) = self
-            .shared
-            .changed
-            .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        drop(gate);
-        self.revision()
+        #[cfg(not(windows))]
+        {
+            let gate = lock_unpoisoned(&self.shared.wait_gate);
+            if self.revision() != observed {
+                return self.revision();
+            }
+            let (gate, _) = self
+                .shared
+                .changed
+                .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drop(gate);
+            self.revision()
+        }
     }
 
     /// Install the single native-consumer wake Adapter.

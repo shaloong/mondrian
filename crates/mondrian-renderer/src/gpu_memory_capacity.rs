@@ -69,7 +69,43 @@ fn primary_device_local_capacity(properties: &ash::vk::PhysicalDeviceMemoryPrope
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn query_backend_gpu_device_memory_capacity(
+    device: &wgpu::Device,
+) -> Option<GpuDeviceMemoryCapacity> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ERROR_NOT_FOUND};
+
+    // SAFETY: the HAL guard retains the exact public DX12 Device for this
+    // immutable identity query; no native handle escapes the function.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }?;
+    // SAFETY: the HAL guard keeps the raw D3D12 device alive for this POD query.
+    let target_luid = luid_as_u64(unsafe { hal.raw_device().GetAdapterLuid() });
+    // SAFETY: the returned COM factory remains owned for this enumeration.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    for index in 0..u32::MAX {
+        // SAFETY: the live factory returns an owned adapter reference.
+        let adapter = match unsafe { factory.EnumAdapters1(index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(_) => return None,
+        };
+        // SAFETY: the owned adapter remains live for this descriptor query.
+        let descriptor = unsafe { adapter.GetDesc1() }.ok()?;
+        if luid_as_u64(descriptor.AdapterLuid) == target_luid {
+            let device_local_bytes = u64::try_from(descriptor.DedicatedVideoMemory).ok()?;
+            return (device_local_bytes > 0)
+                .then_some(GpuDeviceMemoryCapacity { device_local_bytes });
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn luid_as_u64(value: windows::Win32::Foundation::LUID) -> u64 {
+    (u64::from(value.HighPart as u32) << 32) | u64::from(value.LowPart)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn query_backend_gpu_device_memory_capacity(
     _device: &wgpu::Device,
 ) -> Option<GpuDeviceMemoryCapacity> {
@@ -136,6 +172,39 @@ mod tests {
 
         let capacity =
             query_gpu_device_memory_capacity(&device).expect("device-local Vulkan heap capacity");
+        assert!(capacity.device_local_bytes() >= 128 * 1024 * 1024);
+        eprintln!(
+            "device_local_memory_bytes={}",
+            capacity.device_local_bytes()
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::query_gpu_device_memory_capacity;
+
+    #[test]
+    #[ignore = "manual Windows DX12 qualification; requires a physical GPU adapter"]
+    fn active_dx12_device_reports_dedicated_video_memory() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..wgpu::InstanceDescriptor::new_without_display_handle_from_env()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..wgpu::RequestAdapterOptions::default()
+        }))
+        .expect("physical Windows GPU adapter");
+        assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+        let (device, _queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("DX12 Device");
+
+        let capacity = query_gpu_device_memory_capacity(&device)
+            .expect("dedicated DXGI video-memory capacity");
         assert!(capacity.device_local_bytes() >= 128 * 1024 * 1024);
         eprintln!(
             "device_local_memory_bytes={}",

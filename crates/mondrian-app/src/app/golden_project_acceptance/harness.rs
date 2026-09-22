@@ -341,6 +341,11 @@ pub(super) fn wait_for_export_job_until(
             Instant::now() < deadline,
             "export deadline elapsed before polling job {job_id}"
         );
+        // Headless Golden execution has no Window event loop to advance the
+        // resource coordinator. A worker can cooperatively yield its heavy
+        // slot at any export boundary without changing the jobs revision; the
+        // fresh demand observation is what re-admits that immutable attempt.
+        state.refresh_execution_resource_decision(Default::default());
         state.poll_export_queue();
         let snapshot = state
             .export_jobs_snapshot()

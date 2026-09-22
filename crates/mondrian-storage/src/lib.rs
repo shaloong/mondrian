@@ -804,7 +804,28 @@ fn publish_directory_create_new(source: &Path, target: &Path) -> std::io::Result
     }
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+#[cfg(target_os = "macos")]
+fn publish_directory_create_new(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
+    })?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "target path contains NUL")
+    })?;
+    // SAFETY: both buffers are live, NUL-terminated paths. RENAME_EXCL
+    // atomically refuses an existing destination, including an empty directory.
+    if unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
 fn publish_directory_create_new(_source: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -1847,7 +1868,12 @@ mod tests {
         assert_eq!(fs::read(&target).expect("target"), b"new");
     }
 
-    #[cfg(any(windows, target_os = "linux", target_os = "android"))]
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos"
+    ))]
     #[test]
     fn populated_directory_is_published_as_one_create_new_namespace() {
         let root = unique_root("populated-directory-publish");

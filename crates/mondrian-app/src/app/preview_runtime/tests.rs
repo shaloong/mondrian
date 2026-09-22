@@ -338,6 +338,43 @@ fn viewer_gpu_failure_executes_bounded_cpu_fallback_off_thread() {
 }
 
 #[test]
+fn cached_cpu_fallback_successor_reports_semantic_preparation() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    state.play().expect("start playback fixture");
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.request_viewer_cpu_fallback("test speculative CPU preparation");
+
+    let request = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing fixture has an immediate successor");
+    assert!(matches!(
+        runtime.gpu_preview_frame(request),
+        PreviewGpuFrameState::Loading
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let poll = runtime.pump_cpu_fallback_results();
+        if poll.visible_change {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "speculative CPU fallback worker did not complete"
+        );
+        std::thread::yield_now();
+    }
+
+    let request = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing fixture retains its immediate successor");
+    assert!(matches!(
+        runtime.gpu_preview_frame(request),
+        PreviewGpuFrameState::Prepared
+    ));
+}
+
+#[test]
 fn cpu_fallback_rejects_non_default_display_policy_instead_of_showing_srgb() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     state.set_viewer_display_management(
@@ -932,6 +969,7 @@ fn cancellation_evidence(
     collector.observe(mondrian_playback::FrameCancellationObservation {
         work_class,
         cause,
+        return_constraint: mondrian_playback::FrameCancellationReturnConstraint::Cooperative,
         execution_duration: Duration::from_micros(execution_us),
         execution_to_logical_cancellation: execution_to_logical_cancellation_us
             .map(Duration::from_micros),
@@ -1016,9 +1054,10 @@ fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner(
         shared_owner.session_residency_config().max_interactive_sessions_per_worker(),
         decision.preview.frame_store.current_media_working_set_resource_unit_limit
     );
+    let diagnostics = runtime.diagnostics();
+    assert_eq!(diagnostics.resource_decision_applications, 2);
     assert_eq!(
-        runtime.diagnostics().resource_decision_applications,
-        1,
+        diagnostics.resource_decision_reconfigurations, 1,
         "an equal immutable policy must not reconfigure Preview twice"
     );
 }
@@ -3937,18 +3976,21 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
         MediaPreviewRequestPriority::Prefetch,
         PreviewDecodeAccessMode::PlaybackCursor,
         400,
+        300,
         false,
     );
     service.record_preview_decode_queue_wait(
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::ScrubCursor,
         1_200,
+        700,
         true,
     );
     service.record_preview_decode_queue_wait(
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         20,
+        10,
         true,
     );
     service.record_preview_decode_cancel(
@@ -4034,6 +4076,12 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(diagnostics.decode_queue_wait_last_us, 20);
     assert_eq!(diagnostics.decode_current_queue_wait_max_us, 1_200);
     assert_eq!(diagnostics.decode_prefetch_queue_wait_max_us, 400);
+    let playback_queue = diagnostics.decode_access_mode_profiles.playback_cursor;
+    assert_eq!(playback_queue.dispatch_wait_samples, 1);
+    assert_eq!(playback_queue.dispatch_wait_over_4ms, 0);
+    let scrub_queue = diagnostics.decode_access_mode_profiles.scrub_cursor;
+    assert_eq!(scrub_queue.dispatch_wait_samples, 1);
+    assert_eq!(scrub_queue.dispatch_wait_over_4ms, 0);
     assert_eq!(diagnostics.decode_seeked_frames, 1);
     assert_eq!(diagnostics.decode_decoded_frame_count, 48);
     assert_eq!(diagnostics.decode_max_decoded_frame_count, 48);
@@ -4069,12 +4117,13 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(playback_profile.total_duration_us, 2_540);
     assert_eq!(playback_profile.max_duration_us, 2_500);
     assert_eq!(playback_profile.last_duration_us, 40);
-    assert_eq!(playback_profile.latency_buckets.le_10ms, 2);
+    assert_eq!(playback_profile.latency_buckets.le_1ms, 1);
+    assert_eq!(playback_profile.latency_buckets.le_4ms, 1);
     assert_eq!(playback_profile.latency_buckets.total(), 2);
     assert_eq!(playback_profile.queue_wait_total_us, 400);
     assert_eq!(playback_profile.queue_wait_max_us, 400);
     assert_eq!(playback_profile.queue_wait_last_us, 400);
-    assert_eq!(playback_profile.queue_wait_buckets.le_10ms, 1);
+    assert_eq!(playback_profile.queue_wait_buckets.le_1ms, 1);
     assert_eq!(playback_profile.queue_wait_buckets.total(), 1);
     assert_eq!(playback_profile.queue_wait_samples, 1);
     assert_eq!(playback_profile.max_frame_queue_wait_us, 400);
@@ -4199,7 +4248,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
     assert_eq!(scrub_profile.frames, 1);
     assert_eq!(scrub_profile.in_process_cpu_frames, 1);
-    assert_eq!(scrub_profile.latency_buckets.le_10ms, 1);
+    assert_eq!(scrub_profile.latency_buckets.le_1ms, 1);
     assert_eq!(scrub_profile.latency_buckets.total(), 1);
     assert_eq!(scrub_profile.seeked_frames, 1);
     assert_eq!(scrub_profile.bounded_any_seek_strategy_frames, 1);
@@ -4242,7 +4291,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(scrub_profile.queue_wait_total_us, 1_200);
     assert_eq!(scrub_profile.queue_wait_max_us, 1_200);
     assert_eq!(scrub_profile.queue_wait_last_us, 1_200);
-    assert_eq!(scrub_profile.queue_wait_buckets.le_10ms, 1);
+    assert_eq!(scrub_profile.queue_wait_buckets.le_2ms, 1);
     assert_eq!(scrub_profile.queue_wait_buckets.total(), 1);
     assert_eq!(scrub_profile.canceled_jobs, 1);
     assert_eq!(scrub_profile.canceled_obsolete_jobs, 1);
@@ -4265,12 +4314,12 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     let still_profile = diagnostics.decode_access_mode_profiles.random_access_still;
     assert_eq!(still_profile.frames, 1);
     assert_eq!(still_profile.cache_hit_frames, 0);
-    assert_eq!(still_profile.latency_buckets.le_10ms, 1);
+    assert_eq!(still_profile.latency_buckets.le_1ms, 1);
     assert_eq!(still_profile.latency_buckets.total(), 1);
     assert_eq!(still_profile.queue_wait_total_us, 20);
     assert_eq!(still_profile.queue_wait_max_us, 20);
     assert_eq!(still_profile.queue_wait_last_us, 20);
-    assert_eq!(still_profile.queue_wait_buckets.le_10ms, 1);
+    assert_eq!(still_profile.queue_wait_buckets.le_1ms, 1);
     assert_eq!(still_profile.queue_wait_buckets.total(), 1);
     assert_eq!(still_profile.canceled_jobs, 1);
     assert_eq!(still_profile.canceled_shutdown_jobs, 1);
@@ -4332,6 +4381,7 @@ fn cache_only_current_decode_does_not_pollute_presentation_queue_wait() {
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::PlaybackCursor,
         850_000,
+        5_000,
         false,
     );
 
@@ -4341,6 +4391,14 @@ fn cache_only_current_decode_does_not_pollute_presentation_queue_wait() {
     assert_eq!(
         diagnostics.decode_access_mode_profiles.playback_cursor.queue_wait_max_us,
         850_000
+    );
+    assert_eq!(
+        diagnostics.decode_access_mode_profiles.playback_cursor.dispatch_wait_samples,
+        1
+    );
+    assert_eq!(
+        diagnostics.decode_access_mode_profiles.playback_cursor.dispatch_wait_over_4ms,
+        1
     );
 }
 
@@ -4566,7 +4624,10 @@ fn test_zero_latency_preview_decode_work_classes(
 fn test_decode_latency_buckets_at(duration_us: u64, samples: u64) -> PreviewDecodeLatencyBuckets {
     let mut buckets = PreviewDecodeLatencyBuckets::default();
     match duration_us {
-        0..=10_000 => buckets.le_10ms = samples,
+        0..=1_000 => buckets.le_1ms = samples,
+        1_001..=2_000 => buckets.le_2ms = samples,
+        2_001..=4_000 => buckets.le_4ms = samples,
+        4_001..=10_000 => buckets.le_10ms = samples,
         10_001..=16_000 => buckets.le_16ms = samples,
         16_001..=25_000 => buckets.le_25ms = samples,
         25_001..=40_000 => buckets.le_40ms = samples,
@@ -5679,7 +5740,7 @@ fn steady_prefetch_reserves_immediate_picture_then_cold_source_transition() {
         MediaPreviewWorkerLane::Playback,
         Duration::from_millis(10),
     ) {
-        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job(job)) => job,
+        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
         other => panic!("expected immediate prefetch on the Playback owner: {other:?}"),
     };
     assert_eq!(
@@ -5694,7 +5755,7 @@ fn steady_prefetch_reserves_immediate_picture_then_cold_source_transition() {
         MediaPreviewWorkerLane::NonPlayback,
         Duration::from_millis(10),
     ) {
-        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job(job)) => job,
+        MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
         other => panic!("expected cold activation on the alternate Session owner: {other:?}"),
     };
     assert_eq!(
@@ -7759,7 +7820,7 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
 #[test]
 fn preview_decode_performance_report_excludes_expired_queue_wait_from_ready_p95() {
     let ready_buckets = PreviewDecodeLatencyBuckets {
-        le_10ms: 95,
+        le_4ms: 95,
         ..PreviewDecodeLatencyBuckets::default()
     };
     let expired_queue_wait = PreviewDecodeQueueWaitProfile {
@@ -7810,7 +7871,7 @@ fn preview_decode_performance_report_excludes_expired_queue_wait_from_ready_p95(
         .find(|check| check.code == "preview_decode_playback_cursor_queue_wait_p95_us")
         .expect("playback Ready queue-wait p95 check");
 
-    assert_eq!(ready_p95.observed, 10_000);
+    assert_eq!(ready_p95.observed, 4_000);
     assert_eq!(
         report.summary.expect("summary").expired_queue_wait,
         expired_queue_wait
@@ -7820,7 +7881,7 @@ fn preview_decode_performance_report_excludes_expired_queue_wait_from_ready_p95(
         json["schema_version"],
         PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION
     );
-    assert_eq!(json["schema_version"], 37);
+    assert_eq!(json["schema_version"], 39);
     assert_eq!(json["summary"]["expired_queue_wait"]["samples"], 64);
     assert_eq!(
         json["summary"]["access_mode_profiles"]["playback_cursor"]["expired_queue_wait"]["buckets"]
@@ -8112,29 +8173,29 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Interactive,
             mondrian_playback::FrameCancellationCause::Superseded,
-            90_000,
+            140_000,
             Some(20_000),
             Some(1_000),
         ),
         decode_canceled_jobs: 1,
         decode_canceled_obsolete_jobs: 1,
         decode_canceled_scrub_cursor_jobs: 1,
-        decode_canceled_total_duration_us: 90_000,
-        decode_canceled_max_duration_us: 90_000,
-        decode_canceled_last_duration_us: 90_000,
-        decode_canceled_return_latency_total_us: 70_000,
-        decode_canceled_return_latency_max_us: 70_000,
-        decode_canceled_return_latency_last_us: 70_000,
+        decode_canceled_total_duration_us: 140_000,
+        decode_canceled_max_duration_us: 140_000,
+        decode_canceled_last_duration_us: 140_000,
+        decode_canceled_return_latency_total_us: 120_000,
+        decode_canceled_return_latency_max_us: 120_000,
+        decode_canceled_return_latency_last_us: 120_000,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             scrub_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
-                canceled_total_duration_us: 90_000,
-                canceled_max_duration_us: 90_000,
-                canceled_last_duration_us: 90_000,
-                canceled_return_latency_total_us: 70_000,
-                canceled_return_latency_max_us: 70_000,
-                canceled_return_latency_last_us: 70_000,
+                canceled_total_duration_us: 140_000,
+                canceled_max_duration_us: 140_000,
+                canceled_last_duration_us: 140_000,
+                canceled_return_latency_total_us: 120_000,
+                canceled_return_latency_max_us: 120_000,
+                canceled_return_latency_last_us: 120_000,
                 ..PreviewDecodeAccessModeProfile::default()
             },
             ..PreviewDecodeAccessModeProfiles::default()
@@ -8152,7 +8213,7 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_interactive_cancel_return_latency_max_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
-            && check.observed == 70_000
+            && check.observed == 120_000
             && check.limit == Some(50_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -14069,6 +14130,7 @@ fn test_successful_media_preview_result(
         access_mode: PreviewDecodeAccessMode::ScrubCursor,
         queue_disposition: MediaPreviewQueueDisposition::Ready,
         queue_wait_us: 0,
+        dispatch_wait_us: 0,
         decode_elapsed_us: 0,
         deadline_at: None,
         logical_cancellation_observed: None,

@@ -73,14 +73,15 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
                 throw "Packaged Preview demux worker build failed or timed out."
             }
             $workerFileName = if ($IsWindows) { "mondrian.exe" } else { "mondrian" }
-            $demuxWorkerPath = Resolve-RepositoryPath (Join-Path "target/release" $workerFileName)
+            $targetDirectory = Resolve-CargoTargetDirectory $script:repositoryRoot
+            $demuxWorkerPath = Join-Path (Join-Path $targetDirectory "release") $workerFileName
             if (-not (Test-Path -LiteralPath $demuxWorkerPath -PathType Leaf)) {
                 throw "Packaged Preview demux worker is missing: $demuxWorkerPath"
             }
             [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $demuxWorkerPath, "Process")
         }
         $testBuildArguments = @(
-            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--no-run",
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--lib", "--no-run",
             [string]$GateContract.cargo_test
         )
         $testBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $testBuildArguments $script:repositoryRoot ([int]$GateContract.build_timeout_seconds) $testBuildLogPath
@@ -88,7 +89,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             throw "Playback gate test build failed or timed out."
         }
         $cargoArguments = @(
-            "test", "-p", "mondrian-app", "--release", "--features", "validation", [string]$GateContract.cargo_test,
+            "test", "-p", "mondrian-app", "--release", "--features", "validation", "--lib", [string]$GateContract.cargo_test,
             "--", "--ignored", "--nocapture", "--test-threads=1"
         )
         $processResult = Invoke-BoundedPlaybackGateProcess "cargo" $cargoArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $logPath

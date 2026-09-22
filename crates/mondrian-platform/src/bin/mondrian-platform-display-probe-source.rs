@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 const MAXIMUM_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAXIMUM_EXECUTABLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -339,7 +340,10 @@ fn hash_file(path: &Path, maximum_bytes: u64) -> Result<String> {
     }
     let mut file = File::open(path).context("open producer executable")?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Keep the streaming buffer off the stack. Windows PE executables commonly
+    // have a 1 MiB main-thread stack, so a 1 MiB local buffer can overflow
+    // before the native display probe is reached.
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let read = file.read(&mut buffer).context("hash producer executable")?;
         if read == 0 {
@@ -367,4 +371,28 @@ fn write_create_only_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_file, HASH_BUFFER_BYTES};
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn executable_hashing_fits_a_small_windows_style_stack() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("producer.bin");
+        let bytes = vec![0x5a; HASH_BUFFER_BYTES * 3 + 17];
+        std::fs::write(&path, &bytes).expect("write fixture");
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+
+        let observed = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || hash_file(&path, u64::MAX).expect("hash fixture"))
+            .expect("spawn constrained-stack hashing thread")
+            .join()
+            .expect("hashing thread must not overflow");
+
+        assert_eq!(observed, expected);
+    }
 }

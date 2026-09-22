@@ -343,25 +343,11 @@ where
         });
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
         let yuv_record_started = Instant::now();
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mondrian.native-video.fused-working-input"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &working.resource().texture_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&backend.pipeline);
-            pass.set_bind_group(0, &backend.objects.ocio_bind_group.bind_group, &[]);
-            pass.set_bind_group(1, &prepared_yuv.bind_group, &[]);
-            pass.draw(0..4, 0..1);
-        }
+        backend.record(
+            &mut encoder,
+            &prepared_yuv.bind_group,
+            &working.resource().texture_view,
+        );
         // This bracket records the fused YUV + OCIO pass. No separate color
         // pass or frame-table extraction remains to time.
         let yuv_record_us = elapsed_us(yuv_record_started);
