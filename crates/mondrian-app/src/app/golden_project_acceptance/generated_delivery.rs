@@ -1104,7 +1104,8 @@ fn reimport_export(
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: reference.resolution,
         input_color,
-        cpu_working_required: false,
+        // Delivery validation samples decoded RGBA pixels below.
+        cpu_working_required: true,
     };
     let decoded = decode_media(state, &request, asset, decode_context)?;
     let decoded_rgba = source_rgba(&decoded.frame)?;

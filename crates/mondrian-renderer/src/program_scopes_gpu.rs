@@ -5,6 +5,7 @@
 //! pass turns those counts into sampleable display textures without a normal
 //! CPU readback path.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -163,6 +164,8 @@ pub struct GpuProgramScopesRecord {
     pub waveform_view: wgpu::TextureView,
     /// Vectorscope visualization (`256 x 256`, RGBA8 linear carrier).
     pub vectorscope_view: wgpu::TextureView,
+    /// True when this frame used hardware subgroup atomic coalescing.
+    pub used_subgroups: bool,
     _counts: Arc<wgpu::Buffer>,
 }
 
@@ -184,6 +187,8 @@ pub struct GpuProgramScopesRuntimeDiagnostics {
     pub texture_allocations: u64,
     /// Frames for which aggregation and visualization were recorded.
     pub frames_recorded: u64,
+    /// Recorded frames that used exact hardware subgroup atomic coalescing.
+    pub subgroup_frames_recorded: u64,
 }
 
 /// Retained, device-local Program Output scopes executor.
@@ -295,13 +300,33 @@ impl GpuProgramScopesRuntime {
                 label: Some("program-scopes-aggregate-pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipelines.aggregate_pipeline);
+            let aggregate_pipeline = match request.waveform_mode {
+                WaveformMode::Luma => &pipelines.aggregate_luma_pipeline,
+                WaveformMode::RgbParade => &pipelines.aggregate_rgb_pipeline,
+            };
+            pass.set_pipeline(aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
-            pass.dispatch_workgroups(
-                input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
-                input_height.div_ceil(WORKGROUP_SIZE),
-                1,
-            );
+            if pipelines.use_subgroups {
+                let row_invocations = input_width.div_ceil(PIXELS_PER_INVOCATION);
+                let total_invocations = row_invocations.saturating_mul(input_height);
+                pass.dispatch_workgroups(total_invocations.div_ceil(256), 1, 1);
+            } else {
+                pass.dispatch_workgroups(
+                    input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
+                    input_height.div_ceil(WORKGROUP_SIZE),
+                    1,
+                );
+            }
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("program-scopes-histogram-reduction-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipelines.reduce_histogram_pipeline);
+            pass.set_bind_group(0, &aggregate_bind_group, &[]);
+            pass.dispatch_workgroups(request.bins.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
 
         {
@@ -318,12 +343,17 @@ impl GpuProgramScopesRuntime {
             );
         }
         self.diagnostics.frames_recorded = self.diagnostics.frames_recorded.saturating_add(1);
+        if pipelines.use_subgroups {
+            self.diagnostics.subgroup_frames_recorded =
+                self.diagnostics.subgroup_frames_recorded.saturating_add(1);
+        }
         Ok(GpuProgramScopesRecord {
             request,
             buffer_layout: resources.layout,
             histogram_view: resources.histogram_view.clone(),
             waveform_view: resources.waveform_view.clone(),
             vectorscope_view: resources.vectorscope_view.clone(),
+            used_subgroups: pipelines.use_subgroups,
             _counts: Arc::clone(&resources.counts),
         })
     }
@@ -492,8 +522,11 @@ fn create_display_texture(
 struct ScopesPipelines {
     aggregate_bind_group_layout: wgpu::BindGroupLayout,
     display_bind_group_layout: wgpu::BindGroupLayout,
-    aggregate_pipeline: wgpu::ComputePipeline,
+    aggregate_luma_pipeline: wgpu::ComputePipeline,
+    aggregate_rgb_pipeline: wgpu::ComputePipeline,
+    reduce_histogram_pipeline: wgpu::ComputePipeline,
     display_pipeline: wgpu::ComputePipeline,
+    use_subgroups: bool,
 }
 
 impl ScopesPipelines {
@@ -527,9 +560,14 @@ impl ScopesPipelines {
                     storage_texture_layout_entry(4),
                 ],
             });
+        let use_subgroups = device.features().contains(wgpu::Features::SUBGROUP);
         let aggregate_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("program-scopes-aggregate-shader"),
-            source: wgpu::ShaderSource::Wgsl(AGGREGATE_SHADER.into()),
+            label: Some(if use_subgroups {
+                "program-scopes-subgroup-aggregate-shader"
+            } else {
+                "program-scopes-aggregate-shader"
+            }),
+            source: wgpu::ShaderSource::Wgsl(aggregate_shader_source(use_subgroups)),
         });
         let display_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("program-scopes-display-shader"),
@@ -547,14 +585,33 @@ impl ScopesPipelines {
                 bind_group_layouts: &[Some(&display_bind_group_layout)],
                 immediate_size: 0,
             });
-        let aggregate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("program-scopes-aggregate-pipeline"),
-            layout: Some(&aggregate_pipeline_layout),
-            module: &aggregate_module,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let aggregate_luma_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-aggregate-luma-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("main_luma"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        let aggregate_rgb_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-aggregate-rgb-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("main_rgb"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        let reduce_histogram_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("program-scopes-reduce-histogram-pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_module,
+                entry_point: Some("reduce_histogram"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let display_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("program-scopes-display-pipeline"),
             layout: Some(&display_pipeline_layout),
@@ -566,8 +623,11 @@ impl ScopesPipelines {
         Self {
             aggregate_bind_group_layout,
             display_bind_group_layout,
-            aggregate_pipeline,
+            aggregate_luma_pipeline,
+            aggregate_rgb_pipeline,
+            reduce_histogram_pipeline,
             display_pipeline,
+            use_subgroups,
         }
     }
 }
@@ -611,6 +671,126 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+const GROUPED_GLOBAL_SHADER: &str = r#"fn add_grouped_global(keys: vec4<u32>) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    if k0 != INVALID_KEY {
+        atomicAdd(
+            &counts[k0],
+            1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        );
+    }
+    if k1 != INVALID_KEY && k1 != k0 {
+        atomicAdd(
+            &counts[k1],
+            1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        );
+    }
+    if k2 != INVALID_KEY && k2 != k0 && k2 != k1 {
+        atomicAdd(&counts[k2], 1u + select(0u, 1u, k3 == k2));
+    }
+    if k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2 {
+        atomicAdd(&counts[k3], 1u);
+    }
+}"#;
+
+const GROUPED_SUBGROUP_SHADER: &str = r#"fn first_ballot_lane(mask: vec4<u32>) -> u32 {
+    if mask.x != 0u { return firstTrailingBit(mask.x); }
+    if mask.y != 0u { return 32u + firstTrailingBit(mask.y); }
+    if mask.z != 0u { return 64u + firstTrailingBit(mask.z); }
+    return 96u + firstTrailingBit(mask.w);
+}
+
+fn add_subgroup_key(key: u32, amount: u32, enabled: bool, subgroup_invocation_id: u32) {
+    let active_mask = subgroupBallot(enabled);
+    if all(active_mask == vec4<u32>(0u)) {
+        return;
+    }
+    let leader = first_ballot_lane(active_mask);
+    let leader_key = subgroupShuffle(key, leader);
+    let matches_leader = enabled && key == leader_key;
+    let leader_total = subgroupAdd(select(0u, amount, matches_leader));
+    if subgroup_invocation_id == leader {
+        atomicAdd(&counts[leader_key], leader_total);
+    }
+    if enabled && !matches_leader {
+        atomicAdd(&counts[key], amount);
+    }
+}
+
+fn add_grouped_subgroup(keys: vec4<u32>, subgroup_invocation_id: u32) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    add_subgroup_key(
+        k0,
+        1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        k0 != INVALID_KEY,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k1,
+        1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        k1 != INVALID_KEY && k1 != k0,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k2,
+        1u + select(0u, 1u, k3 == k2),
+        k2 != INVALID_KEY && k2 != k0 && k2 != k1,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k3,
+        1u,
+        k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2,
+        subgroup_invocation_id,
+    );
+}"#;
+
+fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
+    if !use_subgroups {
+        return Cow::Borrowed(AGGREGATE_SHADER);
+    }
+    let mut shader = AGGREGATE_SHADER.replacen(GROUPED_GLOBAL_SHADER, GROUPED_SUBGROUP_SHADER, 1);
+    shader = shader.replacen(
+        "fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {",
+        "fn aggregate(gid: vec3<u32>, rgb_waveform: bool, subgroup_invocation_id: u32) {",
+        1,
+    );
+    for name in [
+        "red_histogram",
+        "green_histogram",
+        "blue_histogram",
+        "luma_histogram",
+        "waveform_red_or_luma",
+        "waveform_green",
+        "waveform_blue",
+        "vectorscope",
+    ] {
+        shader = shader.replace(
+            &format!("add_grouped_global({name});"),
+            &format!("add_grouped_subgroup({name}, subgroup_invocation_id);"),
+        );
+    }
+    shader = shader.replacen(
+        "@compute @workgroup_size(16, 16, 1)\nfn main_luma(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, false);",
+        "@compute @workgroup_size(256, 1, 1)\nfn main_luma(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, false, subgroup_invocation_id);",
+        1,
+    );
+    shader = shader.replacen(
+        "@compute @workgroup_size(16, 16, 1)\nfn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, true);",
+        "@compute @workgroup_size(256, 1, 1)\nfn main_rgb(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, true, subgroup_invocation_id);",
+        1,
+    );
+    debug_assert!(!shader.contains("add_grouped_global("));
+    debug_assert!(shader.contains("@builtin(subgroup_invocation_id)"));
+    Cow::Owned(shader)
+}
+
 const AGGREGATE_SHADER: &str = r#"
 struct Uniforms {
     input_width: u32,
@@ -634,6 +814,7 @@ struct Uniforms {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> counts: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
 
 fn signal_bin(value: f32) -> u32 {
     return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
@@ -699,67 +880,54 @@ fn scaled_components(rgb: vec3<f32>, encoded_luma: f32) -> vec4<f32> {
 
 const INVALID_KEY: u32 = 0xffffffffu;
 
-fn add_grouped(keys: array<u32, 4>) {
-    for (var i = 0u; i < 4u; i += 1u) {
-        let key = keys[i];
-        if key == INVALID_KEY {
-            continue;
-        }
-        var is_first = true;
-        for (var previous = 0u; previous < i; previous += 1u) {
-            if keys[previous] == key {
-                is_first = false;
-            }
-        }
-        if !is_first {
-            continue;
-        }
-        var occurrences = 1u;
-        for (var following = i + 1u; following < 4u; following += 1u) {
-            if keys[following] == key {
-                occurrences += 1u;
-            }
-        }
-        atomicAdd(&counts[key], occurrences);
+fn add_grouped_global(keys: vec4<u32>) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    if k0 != INVALID_KEY {
+        atomicAdd(
+            &counts[k0],
+            1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        );
+    }
+    if k1 != INVALID_KEY && k1 != k0 {
+        atomicAdd(
+            &counts[k1],
+            1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        );
+    }
+    if k2 != INVALID_KEY && k2 != k0 && k2 != k1 {
+        atomicAdd(&counts[k2], 1u + select(0u, 1u, k3 == k2));
+    }
+    if k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2 {
+        atomicAdd(&counts[k3], 1u);
     }
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {
     let first_x = gid.x * 4u;
-    if first_x >= uniforms.input_width || gid.y >= uniforms.input_height {
-        return;
-    }
-    var red_histogram: array<u32, 4>;
-    var green_histogram: array<u32, 4>;
-    var blue_histogram: array<u32, 4>;
-    var luma_histogram: array<u32, 4>;
-    var waveform_red_or_luma: array<u32, 4>;
-    var waveform_green: array<u32, 4>;
-    var waveform_blue: array<u32, 4>;
-    var vectorscope: array<u32, 4>;
-    var red_excursion: array<u32, 4>;
-    var green_excursion: array<u32, 4>;
-    var blue_excursion: array<u32, 4>;
-    var luma_excursion: array<u32, 4>;
-    for (var i = 0u; i < 4u; i += 1u) {
-        red_histogram[i] = INVALID_KEY;
-        green_histogram[i] = INVALID_KEY;
-        blue_histogram[i] = INVALID_KEY;
-        luma_histogram[i] = INVALID_KEY;
-        waveform_red_or_luma[i] = INVALID_KEY;
-        waveform_green[i] = INVALID_KEY;
-        waveform_blue[i] = INVALID_KEY;
-        vectorscope[i] = INVALID_KEY;
-        red_excursion[i] = INVALID_KEY;
-        green_excursion[i] = INVALID_KEY;
-        blue_excursion[i] = INVALID_KEY;
-        luma_excursion[i] = INVALID_KEY;
-    }
+    let active_row = first_x < uniforms.input_width && gid.y < uniforms.input_height;
+    var red_histogram = vec4<u32>(INVALID_KEY);
+    var green_histogram = vec4<u32>(INVALID_KEY);
+    var blue_histogram = vec4<u32>(INVALID_KEY);
+    var luma_histogram = vec4<u32>(INVALID_KEY);
+    var waveform_red_or_luma = vec4<u32>(INVALID_KEY);
+    var waveform_green = vec4<u32>(INVALID_KEY);
+    var waveform_blue = vec4<u32>(INVALID_KEY);
+    var vectorscope = vec4<u32>(INVALID_KEY);
+    var red_low = 0u;
+    var red_high = 0u;
+    var green_low = 0u;
+    var green_high = 0u;
+    var blue_low = 0u;
+    var blue_high = 0u;
+    var luma_low = 0u;
+    var luma_high = 0u;
     let plane = uniforms.waveform_width * uniforms.bins;
     for (var i = 0u; i < 4u; i += 1u) {
         let x = first_x + i;
-        if x >= uniforms.input_width {
+        if !active_row || x >= uniforms.input_width {
             continue;
         }
         let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
@@ -773,14 +941,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let gb = signal_bin(scaled.g);
         let bb = signal_bin(scaled.b);
         let yb = signal_bin(scaled.a);
-        red_histogram[i] = uniforms.histogram_offset + rb;
-        green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
-        blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
-        luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
+        if rgb_waveform {
+            // RGB histograms are the exact column reduction of the three
+            // waveform planes. Avoid three redundant global atomics per pixel;
+            // the reduction pass below reconstructs the same integer counts.
+            luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
+        } else {
+            red_histogram[i] = uniforms.histogram_offset + rb;
+            green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
+            blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
+        }
 
         let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
-        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, uniforms.waveform_channels != 1u);
-        if uniforms.waveform_channels != 1u {
+        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, rgb_waveform);
+        if rgb_waveform {
             waveform_green[i] = uniforms.waveform_offset + plane + wx * uniforms.bins + gb;
             waveform_blue[i] = uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb;
         }
@@ -792,23 +966,70 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let vy = min(u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 63u);
         vectorscope[i] = uniforms.vectorscope_offset + vy * 64u + ux;
 
-        red_excursion[i] = select(INVALID_KEY, select(1u, 0u, rgb.r < 0.0), rgb.r < 0.0 || rgb.r > 1.0);
-        green_excursion[i] = select(INVALID_KEY, select(3u, 2u, rgb.g < 0.0), rgb.g < 0.0 || rgb.g > 1.0);
-        blue_excursion[i] = select(INVALID_KEY, select(5u, 4u, rgb.b < 0.0), rgb.b < 0.0 || rgb.b > 1.0);
-        luma_excursion[i] = select(INVALID_KEY, select(7u, 6u, y < 0.0), y < 0.0 || y > 1.0);
+        red_low += select(0u, 1u, rgb.r < 0.0);
+        red_high += select(0u, 1u, rgb.r > 1.0);
+        green_low += select(0u, 1u, rgb.g < 0.0);
+        green_high += select(0u, 1u, rgb.g > 1.0);
+        blue_low += select(0u, 1u, rgb.b < 0.0);
+        blue_high += select(0u, 1u, rgb.b > 1.0);
+        luma_low += select(0u, 1u, y < 0.0);
+        luma_high += select(0u, 1u, y > 1.0);
     }
-    add_grouped(red_histogram);
-    add_grouped(green_histogram);
-    add_grouped(blue_histogram);
-    add_grouped(luma_histogram);
-    add_grouped(waveform_red_or_luma);
-    add_grouped(waveform_green);
-    add_grouped(waveform_blue);
-    add_grouped(vectorscope);
-    add_grouped(red_excursion);
-    add_grouped(green_excursion);
-    add_grouped(blue_excursion);
-    add_grouped(luma_excursion);
+    add_grouped_global(red_histogram);
+    add_grouped_global(green_histogram);
+    add_grouped_global(blue_histogram);
+    add_grouped_global(luma_histogram);
+    add_grouped_global(waveform_red_or_luma);
+    if rgb_waveform {
+        add_grouped_global(waveform_green);
+        add_grouped_global(waveform_blue);
+    }
+    add_grouped_global(vectorscope);
+    if red_low != 0u { atomicAdd(&counts[0u], red_low); }
+    if red_high != 0u { atomicAdd(&counts[1u], red_high); }
+    if green_low != 0u { atomicAdd(&counts[2u], green_low); }
+    if green_high != 0u { atomicAdd(&counts[3u], green_high); }
+    if blue_low != 0u { atomicAdd(&counts[4u], blue_low); }
+    if blue_high != 0u { atomicAdd(&counts[5u], blue_high); }
+    if luma_low != 0u { atomicAdd(&counts[6u], luma_low); }
+    if luma_high != 0u { atomicAdd(&counts[7u], luma_high); }
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn reduce_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bin = gid.x;
+    let channel = gid.y;
+    if bin >= uniforms.bins || channel >= 4u {
+        return;
+    }
+    var sum = 0u;
+    let plane = uniforms.waveform_width * uniforms.bins;
+    if uniforms.waveform_channels == 3u {
+        if channel >= 3u {
+            return;
+        }
+        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
+            sum += atomicLoad(&counts[uniforms.waveform_offset + channel * plane + x * uniforms.bins + bin]);
+        }
+    } else {
+        if channel != 3u {
+            return;
+        }
+        for (var x = 0u; x < uniforms.waveform_width; x += 1u) {
+            sum += atomicLoad(&counts[uniforms.waveform_offset + x * uniforms.bins + bin]);
+        }
+    }
+    atomicStore(&counts[uniforms.histogram_offset + channel * uniforms.bins + bin], sum);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main_luma(@builtin(global_invocation_id) gid: vec3<u32>) {
+    aggregate(gid, false);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {
+    aggregate(gid, true);
 }
 "#;
 
@@ -914,6 +1135,21 @@ mod tests {
                 .expect("PQ is an encoded signal");
         assert_eq!(bounded.bins(), 16);
         assert_eq!(bounded.waveform_width(), 1024);
+    }
+
+    #[test]
+    fn subgroup_shader_is_an_optional_exact_aggregation_variant() {
+        let fallback = aggregate_shader_source(false);
+        assert!(fallback.contains("fn add_grouped_global"));
+        assert!(!fallback.contains("@builtin(subgroup_invocation_id)"));
+        assert!(fallback.contains("@compute @workgroup_size(16, 16, 1)"));
+
+        let subgroup = aggregate_shader_source(true);
+        assert!(subgroup.contains("fn add_grouped_subgroup"));
+        assert!(subgroup.contains("@builtin(subgroup_invocation_id)"));
+        assert!(subgroup.contains("@compute @workgroup_size(256, 1, 1)"));
+        assert!(!subgroup.contains("fn add_grouped_global"));
+        assert!(!subgroup.contains("add_grouped_global("));
     }
 
     #[tokio::test]
@@ -1029,6 +1265,14 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 1);
+        assert_eq!(
+            record.used_subgroups,
+            context.device.features().contains(wgpu::Features::SUBGROUP)
+        );
+        assert_eq!(
+            runtime.diagnostics().subgroup_frames_recorded,
+            u64::from(record.used_subgroups)
+        );
 
         let mut warm_encoder =
             context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1053,8 +1297,135 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 2);
+        assert_eq!(
+            runtime.diagnostics().subgroup_frames_recorded,
+            2 * u64::from(record.used_subgroups)
+        );
     }
 
+    #[tokio::test]
+    async fn grouped_global_atomics_preserve_exact_high_entropy_counts() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU scopes test: no adapter available");
+            return;
+        };
+        const WIDTH: u32 = 256;
+        const HEIGHT: u32 = 4;
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                pixels.extend_from_slice(&[
+                    x as u8,
+                    (x.wrapping_mul(73) + y.wrapping_mul(41)) as u8,
+                    (x.wrapping_mul(151) + y.wrapping_mul(97)) as u8,
+                    255,
+                ]);
+            }
+        }
+        let input = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("program-scopes-high-entropy-test-input"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 4),
+                rows_per_image: Some(HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        let request =
+            GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::RgbParade, 256, WIDTH)
+                .expect("high-entropy scope request");
+        let mut runtime = GpuProgramScopesRuntime::default();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("program-scopes-high-entropy-test-encoder"),
+        });
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &input.create_view(&wgpu::TextureViewDescriptor::default()),
+                WIDTH,
+                HEIGHT,
+                request,
+            )
+            .expect("record high-entropy GPU scopes");
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("program-scopes-overflow-test-readback"),
+            size: record.buffer_layout.byte_size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(
+            record.counts(),
+            0,
+            &readback,
+            0,
+            record.buffer_layout.byte_size(),
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let bytes = map_test_readback(&context.device, &readback);
+        let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+        let cpu = compute_program_color_scopes_rgba8_with_scale(
+            &pixels,
+            WIDTH,
+            HEIGHT,
+            ColorSpace::Rec709,
+            WaveformMode::RgbParade,
+            ProgramScopeScale::Ire,
+            256,
+        )
+        .expect("CPU high-entropy scopes reference");
+
+        assert_eq!(&actual[..8], &[0; 8]);
+        let histogram = record.buffer_layout.histogram_offset as usize;
+        assert_eq!(&actual[histogram..histogram + 256], cpu.histogram.red);
+        assert_eq!(
+            &actual[histogram + 256..histogram + 512],
+            cpu.histogram.green
+        );
+        assert_eq!(
+            &actual[histogram + 512..histogram + 768],
+            cpu.histogram.blue
+        );
+        assert_eq!(
+            &actual[histogram + 768..histogram + 1024],
+            cpu.histogram.luma
+        );
+        let waveform = record.buffer_layout.waveform_offset as usize;
+        let vectorscope = record.buffer_layout.vectorscope_offset as usize;
+        assert_eq!(&actual[waveform..vectorscope], cpu.waveform.values);
+        let mut expected_vectorscope = vec![0_u32; 64 * 64];
+        for sample in cpu.vectorscope {
+            let x = ((sample.u + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+            let y = ((sample.v + 0.5) * 64.0).floor().clamp(0.0, 63.0) as usize;
+            expected_vectorscope[y * 64 + x] = sample.weight;
+        }
+        assert_eq!(&actual[vectorscope..], expected_vectorscope);
+    }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
         let Ok(context) = GpuContext::new().await else {

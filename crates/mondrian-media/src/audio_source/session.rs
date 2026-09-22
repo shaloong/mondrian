@@ -28,7 +28,7 @@ const PUMP_LOOKAHEAD_CHUNKS: usize = 2;
 const STDERR_TAIL_BYTES: usize = 64 * 1024;
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const DECODER_TEARDOWN_QUEUE_CAPACITY: usize = AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX;
-const DECODER_SHUTDOWN_SLOT_WAIT: Duration = Duration::from_millis(250);
+pub(super) const DECODER_SHUTDOWN_SLOT_WAIT: Duration = Duration::from_millis(250);
 const DECODER_TERMINAL_STATUS_WAIT: Duration = Duration::from_millis(250);
 const DECODER_TEARDOWN_WORKER_RUNNING: u8 = 1;
 const DECODER_TEARDOWN_WORKER_COMPLETED: u8 = 2;
@@ -1361,9 +1361,9 @@ impl PartialDecodeSession {
             self.stdout_thread.take(),
             self.stderr_thread.take(),
             &mut self.shutdown_evidence,
+            &mut self.permit,
             deadline,
         );
-        self.permit.take();
         std::mem::take(&mut self.shutdown_evidence)
     }
 }
@@ -1770,12 +1770,12 @@ impl DecodeSession {
             self.stdout_thread.take(),
             self.stderr_thread.take(),
             &mut self.shutdown_evidence,
+            &mut self.permit,
             deadline,
         );
         self.terminal_status.take();
         self.pending.clear();
         self.pending_offset = 0;
-        self.permit.take();
         std::mem::take(&mut self.shutdown_evidence)
     }
     fn terminate(&mut self) -> AudioWindowDecoderShutdownEvidence {
@@ -1863,6 +1863,7 @@ fn consume_audio_resources(
     stdout: Option<JoinHandle<()>>,
     stderr: Option<JoinHandle<()>>,
     evidence: &mut AudioWindowDecoderShutdownEvidence,
+    permit: &mut Option<DecoderSessionPermit>,
     deadline: Instant,
 ) {
     let mut cleanup = crate::SupervisedProcessCleanupReceipt {
@@ -1874,6 +1875,7 @@ fn consume_audio_resources(
         stdout_error: None,
         stderr_error: None,
     };
+    let no_native_child = child.is_none();
     if let Some(child) = child.as_mut() {
         evidence.child_processes_observed = evidence.child_processes_observed.saturating_add(1);
         cleanup = crate::process_supervisor::terminate_and_reap(child, deadline);
@@ -1888,6 +1890,12 @@ fn consume_audio_resources(
             evidence.child_process_termination_failures =
                 evidence.child_process_termination_failures.saturating_add(1);
         }
+    }
+    // A decoder permit bounds native child Sessions, not pipe-drain workers. Once
+    // native exit is observed, return capacity immediately while this owner keeps
+    // supervising both pumps and publishing their independent closure evidence.
+    if no_native_child || cleanup.native_exit_observed {
+        permit.take();
     }
     cleanup.stdout_error = join_pump_thread(stdout, PumpKind::Stdout, evidence, deadline);
     cleanup.stderr_error = join_pump_thread(stderr, PumpKind::Stderr, evidence, deadline);
@@ -2210,6 +2218,71 @@ mod tests {
     }
 
     #[test]
+    fn native_exit_releases_session_capacity_before_pump_join() {
+        let pool = Arc::new(DecoderSessionPermitPool::new(1));
+        let mut permit = Some(
+            pool.acquire(
+                &ExecutionCancellationToken::new(),
+                &AudioWindowDecoderShutdownSignal::new(),
+                &AtomicBool::new(false),
+                std::path::Path::new("retiring"),
+            )
+            .expect("physical Session permit"),
+        );
+        let child = crate::ffmpeg_command::spawn_native_helper(
+            std::process::Command::new(
+                std::env::current_exe().expect("current test executable path"),
+            )
+            .arg("shutdown_child_fixture")
+            .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        )
+        .expect("spawn disposable child process");
+        let release = Arc::new(AtomicBool::new(false));
+        let pump_release = Arc::clone(&release);
+        let pump = std::thread::spawn(move || {
+            while !pump_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let cleanup = std::thread::spawn(move || {
+            let mut evidence = AudioWindowDecoderShutdownEvidence::default();
+            consume_audio_resources(
+                child.id(),
+                Some(child),
+                Some(pump),
+                None,
+                &mut evidence,
+                &mut permit,
+                Instant::now() + Duration::from_secs(2),
+            );
+            finished_tx.send(evidence).expect("publish cleanup evidence");
+        });
+
+        let release_deadline = Instant::now() + Duration::from_millis(50);
+        while pool.diagnostics().0 != 0 && Instant::now() < release_deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            pool.diagnostics().0,
+            0,
+            "native exit must release Session capacity"
+        );
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "blocked pipe supervision must remain independent from Session capacity"
+        );
+
+        release.store(true, Ordering::Release);
+        let evidence = finished_rx.recv_timeout(Duration::from_secs(2)).expect("cleanup evidence");
+        cleanup.join().expect("cleanup worker");
+        assert!(evidence.all_resources_released(), "{evidence:?}");
+    }
+
+    #[test]
     fn ordinary_last_decoder_drop_hands_blocking_teardown_to_background() {
         let release = Arc::new(AtomicBool::new(false));
         let pump_exited = Arc::new(AtomicBool::new(false));
@@ -2342,7 +2415,16 @@ mod tests {
         }
         let mut evidence = AudioWindowDecoderShutdownEvidence::default();
         let deadline = Instant::now();
-        consume_audio_resources(0, None, Some(stdout), Some(stderr), &mut evidence, deadline);
+        let mut permit = None;
+        consume_audio_resources(
+            0,
+            None,
+            Some(stdout),
+            Some(stderr),
+            &mut evidence,
+            &mut permit,
+            deadline,
+        );
         assert!(deadline.elapsed() < Duration::from_millis(100));
         assert_eq!(evidence.stdout_pump_threads_joined, 0);
         assert_eq!(evidence.stdout_pump_thread_owner_abandonments, 1);

@@ -15,8 +15,12 @@ fn device() -> (wgpu::Adapter, wgpu::Device, wgpu::Queue) {
     )
     .expect("real GPU adapter (not a capability skip)");
     let supported = adapter.features();
+    let working_texture_features =
+        mondrian_renderer::product_gpu_working_texture_device_features(&adapter)
+            .expect("admitted working texture features");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: mondrian_renderer::native_video_texture_device_features(supported)
+        required_features: working_texture_features
+            | mondrian_renderer::native_video_texture_device_features(supported)
             | mondrian_renderer::ocio_lut_filtering_device_features(supported),
         ..Default::default()
     }))

@@ -1962,8 +1962,23 @@ fn audio_output_device_label(
     selection: &RealtimeAudioOutputDeviceSelection,
     catalog: &AudioOutputDeviceCatalogState,
 ) -> String {
-    match selection {
-        RealtimeAudioOutputDeviceSelection::SystemDefault => {
+    let suffix = match selection.access_policy() {
+        mondrian_media::RealtimeAudioOutputAccessPolicy::Shared => "共享",
+        mondrian_media::RealtimeAudioOutputAccessPolicy::PreferExclusive => "优先独占，可回退共享",
+        mondrian_media::RealtimeAudioOutputAccessPolicy::RequireExclusive => "强制独占",
+    };
+    let device_id = match selection {
+        RealtimeAudioOutputDeviceSelection::SystemDefault
+        | RealtimeAudioOutputDeviceSelection::SystemDefaultExclusive
+        | RealtimeAudioOutputDeviceSelection::SystemDefaultPreferExclusive => None,
+        RealtimeAudioOutputDeviceSelection::Specific { device_id }
+        | RealtimeAudioOutputDeviceSelection::SpecificExclusive { device_id }
+        | RealtimeAudioOutputDeviceSelection::SpecificPreferExclusive { device_id } => {
+            Some(device_id)
+        }
+    };
+    let base = match device_id {
+        None => {
             let default_name = match catalog {
                 AudioOutputDeviceCatalogState::Ready(catalog) => catalog
                     .devices
@@ -1978,7 +1993,7 @@ fn audio_output_device_label(
                 |name| format!("系统默认 — {name}"),
             )
         }
-        RealtimeAudioOutputDeviceSelection::Specific { device_id } => match catalog {
+        Some(device_id) => match catalog {
             AudioOutputDeviceCatalogState::Ready(catalog) => catalog
                 .devices
                 .iter()
@@ -1988,9 +2003,9 @@ fn audio_output_device_label(
             AudioOutputDeviceCatalogState::Loading => "正在确认已选设备…".to_owned(),
             AudioOutputDeviceCatalogState::Failed(_) => "无法确认已选设备".to_owned(),
         },
-    }
+    };
+    format!("{base} · {suffix}")
 }
-
 fn monitor_output_choices(engine: &mondrian_core::ColorEngine) -> Vec<MonitorOutputChoice> {
     let mut choices = vec![MonitorOutputChoice {
         label: "跟随 Program Output".to_owned(),
@@ -2170,16 +2185,31 @@ fn audio_output_device_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
 }
 
 fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
-    let mut items = vec![MenuItem::new(
-        "跟随系统默认设备",
-        app_shell_preferences_audio_output_device_changed_action(
+    let default_choices = [
+        (
+            "跟随系统默认设备 · 共享",
             RealtimeAudioOutputDeviceSelection::SystemDefault,
         ),
-    )
-    .checked(matches!(
-        model.audio_output_device_selection,
-        RealtimeAudioOutputDeviceSelection::SystemDefault
-    ))];
+        (
+            "跟随系统默认设备 · 优先独占，可回退共享",
+            RealtimeAudioOutputDeviceSelection::SystemDefaultPreferExclusive,
+        ),
+        (
+            "跟随系统默认设备 · 强制独占",
+            RealtimeAudioOutputDeviceSelection::SystemDefaultExclusive,
+        ),
+    ];
+    let mut items = default_choices
+        .into_iter()
+        .map(|(label, selection)| {
+            let checked = model.audio_output_device_selection == selection;
+            MenuItem::new(
+                label,
+                app_shell_preferences_audio_output_device_changed_action(selection),
+            )
+            .checked(checked)
+        })
+        .collect::<Vec<_>>();
     match &model.audio_output_device_catalog {
         AudioOutputDeviceCatalogState::Loading => {
             items.push(MenuItem::inert("正在发现输出设备…"));
@@ -2209,26 +2239,43 @@ fn selectable_audio_output_device_items(
     catalog
         .devices
         .iter()
-        .map(|device| {
+        .flat_map(|device| {
             let Some(device_id) = device.device_id.clone() else {
-                return MenuItem::inert(format!("{}（身份不可用）", device.display_name));
+                return vec![MenuItem::inert(format!(
+                    "{}（身份不可用）",
+                    device.display_name
+                ))];
             };
-            let checked = matches!(
-                selection,
-                RealtimeAudioOutputDeviceSelection::Specific { device_id: selected }
-                    if selected == &device_id
-            );
-            MenuItem::new(
-                device.display_name.clone(),
-                app_shell_preferences_audio_output_device_changed_action(
-                    RealtimeAudioOutputDeviceSelection::Specific { device_id },
+            let choices = [
+                (
+                    format!("{} · 共享", device.display_name),
+                    RealtimeAudioOutputDeviceSelection::Specific { device_id: device_id.clone() },
                 ),
-            )
-            .checked(checked)
+                (
+                    format!("{} · 优先独占，可回退共享", device.display_name),
+                    RealtimeAudioOutputDeviceSelection::SpecificPreferExclusive {
+                        device_id: device_id.clone(),
+                    },
+                ),
+                (
+                    format!("{} · 强制独占", device.display_name),
+                    RealtimeAudioOutputDeviceSelection::SpecificExclusive { device_id },
+                ),
+            ];
+            choices
+                .into_iter()
+                .map(|(label, candidate)| {
+                    let checked = selection == &candidate;
+                    MenuItem::new(
+                        label,
+                        app_shell_preferences_audio_output_device_changed_action(candidate),
+                    )
+                    .checked(checked)
+                })
+                .collect()
         })
         .collect()
 }
-
 fn enabled_label(enabled: bool) -> String {
     if enabled { "已启用" } else { "已禁用" }.to_owned()
 }
@@ -3011,7 +3058,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(model.audio_output_device_label, "Studio Output");
+        assert_eq!(model.audio_output_device_label, "Studio Output · 共享");
         let items = audio_output_device_items(&model);
         let selected = items.iter().find(|item| item.checked).expect("checked device row");
         let action = selected.action().expect("device selection action");

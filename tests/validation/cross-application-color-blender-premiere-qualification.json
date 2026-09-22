@@ -5,7 +5,7 @@
   "runtime_profile_schema_version": 2,
   "stimulus": {
     "path": "tests/validation/cross-application-color-stimulus-blender-premiere-v1.json",
-    "sha256": "730d60dd7e98e3c7b18f5241b9d2f7ab4d098b8362fbe489e594df2c1356dd5f"
+    "sha256": "6e394b6b9d04f38fb5ef9a1db78fa5337336893419757071dc97f67d8d29d129"
   },
   "required_producers": [
     "mondrian",

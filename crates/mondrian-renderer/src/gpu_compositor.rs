@@ -528,6 +528,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     );
 }
 
+@fragment
+fn fs_opaque_normal(in: VsOut) -> @location(0) vec4<f32> {
+    let source_position = source_coordinate(in.position.xy);
+    var layer_px: vec4<f32>;
+    if (uniforms.source_kind == 1u) {
+        layer_px = select(vec4<f32>(0.0), uniforms.solid_color, source_inside(source_position));
+    } else {
+        layer_px = sample_layer(source_position);
+    }
+    let effect_position = source_position - vec2<f32>(0.5);
+    layer_px = apply_effects(layer_px, effect_position);
+    let coverage = clamp(layer_px.a * clamp(uniforms.opacity, 0.0, 1.0), 0.0, 1.0);
+    return vec4<f32>(layer_px.rgb, coverage);
+}
+
 fn source_coordinate(dst_center: vec2<f32>) -> vec2<f32> {
     // Fragment position is the exact destination pixel center. Interpolated UV
     // reconstruction can fall below 0.5 at an identity edge on Vulkan, causing
@@ -1038,6 +1053,12 @@ pub struct GpuCompositingDiagnostics {
     pub data_texture_uploads: u64,
     /// Dedicated two-input working-linear Cross Dissolve passes.
     pub gpu_cross_dissolve_passes: u64,
+    /// Opaque Normal composites recorded into one attachment without ping-pong.
+    #[serde(default)]
+    pub opaque_normal_single_accumulator_composites: u64,
+    /// Per-pixel accumulator texture samples avoided by that single-attachment path.
+    #[serde(default)]
+    pub avoided_accumulator_sample_pixels: u64,
     /// Number of compositing operations that fell back to CPU compositing.
     pub cpu_fallback_composites: u64,
     /// Total pixels processed through GPU compositing.
@@ -1064,6 +1085,12 @@ impl GpuCompositingDiagnostics {
             self.data_texture_uploads.saturating_add(other.data_texture_uploads);
         self.gpu_cross_dissolve_passes =
             self.gpu_cross_dissolve_passes.saturating_add(other.gpu_cross_dissolve_passes);
+        self.opaque_normal_single_accumulator_composites = self
+            .opaque_normal_single_accumulator_composites
+            .saturating_add(other.opaque_normal_single_accumulator_composites);
+        self.avoided_accumulator_sample_pixels = self
+            .avoided_accumulator_sample_pixels
+            .saturating_add(other.avoided_accumulator_sample_pixels);
         self.cpu_fallback_composites =
             self.cpu_fallback_composites.saturating_add(other.cpu_fallback_composites);
         self.gpu_composited_pixels =
@@ -1309,6 +1336,7 @@ pub enum GpuCompositeError {
 /// Runtime for recording GPU working-space composites.
 pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
+    opaque_normal_pipeline: wgpu::RenderPipeline,
     matte_mix_pipeline: wgpu::RenderPipeline,
     matte_mix_texture_layout: wgpu::BindGroupLayout,
     layer_texture_layout: wgpu::BindGroupLayout,
@@ -1492,6 +1520,49 @@ impl GpuFrameCompositor {
             multiview_mask: None,
             cache: None,
         });
+        let opaque_normal_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian_gpu_working_compositor_opaque_normal_pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_opaque_normal"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: product_gpu_working_texture_format().to_wgpu(),
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         let matte_mix_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian_gpu_matte_mix_shader"),
             source: wgpu::ShaderSource::Wgsl(GPU_MATTE_MIX_SHADER.into()),
@@ -1589,6 +1660,7 @@ impl GpuFrameCompositor {
         });
         Ok(Self {
             pipeline,
+            opaque_normal_pipeline,
             matte_mix_pipeline,
             matte_mix_texture_layout,
             layer_texture_layout,
@@ -1685,6 +1757,7 @@ impl GpuFrameCompositor {
             residency: ColorFrameResidency::Gpu,
             alpha: composite_output_alpha(&request),
         };
+        let opaque_normal_accumulator = can_use_opaque_normal_accumulator(&request, &execution);
         let target_a = create_working_resource(
             device,
             ids,
@@ -1692,30 +1765,44 @@ impl GpuFrameCompositor {
             "gpu-composite-accum-a",
             resource_pool,
         )?;
-        let target_b = create_working_resource(
-            device,
-            ids,
-            output_descriptor,
-            "gpu-composite-accum-b",
-            resource_pool,
-        )?;
-        clear_working_texture(
-            encoder,
-            &target_a.resource().texture_view,
-            wgpu::Color::TRANSPARENT,
-        );
+        let target_b = if opaque_normal_accumulator {
+            None
+        } else {
+            Some(create_working_resource(
+                device,
+                ids,
+                output_descriptor,
+                "gpu-composite-accum-b",
+                resource_pool,
+            )?)
+        };
+        if !opaque_normal_accumulator {
+            clear_working_texture(
+                encoder,
+                &target_a.resource().texture_view,
+                wgpu::Color::TRANSPARENT,
+            );
+        }
 
         let mut transient_uploads = Vec::new();
         let mut uploaded_cpu_layers = false;
         let mut data_texture_uploads = 0_u64;
         let mut src_is_a = true;
-        for layer_execution in &execution.layers {
+        for (pass_index, layer_execution) in execution.layers.iter().enumerate() {
             let index = layer_execution.input_index;
             let layer = &request.layers[index];
-            let (accum, dst) = if src_is_a {
-                (&target_a, &target_b)
+            let (accum, dst) = if opaque_normal_accumulator {
+                (&target_a, &target_a)
+            } else if src_is_a {
+                (
+                    &target_a,
+                    target_b.as_ref().expect("ping-pong target must exist"),
+                )
             } else {
-                (&target_b, &target_a)
+                (
+                    target_b.as_ref().expect("ping-pong target must exist"),
+                    &target_a,
+                )
             };
             let (layer_binding, source_kind, solid_color, source_size) = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
@@ -1791,7 +1878,7 @@ impl GpuFrameCompositor {
             };
             let inv_transform = invert_affine(layer.transform)
                 .expect("validate_request rejects unsupported transforms");
-            if !layer_execution.initializes_accumulator {
+            if !opaque_normal_accumulator && !layer_execution.initializes_accumulator {
                 record_preserved_regions(
                     encoder,
                     &accum.resource().texture,
@@ -1803,7 +1890,11 @@ impl GpuFrameCompositor {
                 device,
                 queue,
                 encoder,
-                GpuCompositeTextureBinding::Resource(accum.resource()),
+                if opaque_normal_accumulator {
+                    GpuCompositeTextureBinding::ProceduralDummy
+                } else {
+                    GpuCompositeTextureBinding::Resource(accum.resource())
+                },
                 &dst.resource().texture_view,
                 layer_binding,
                 GpuCompositeUniforms {
@@ -1829,17 +1920,39 @@ impl GpuFrameCompositor {
                 },
                 layer.effect_plan,
                 layer_execution,
+                if opaque_normal_accumulator {
+                    &self.opaque_normal_pipeline
+                } else {
+                    &self.pipeline
+                },
+                opaque_normal_accumulator.then_some(if pass_index == 0 {
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                } else {
+                    wgpu::LoadOp::Load
+                }),
             )?;
-            src_is_a = !src_is_a;
+            if !opaque_normal_accumulator {
+                src_is_a = !src_is_a;
+            }
         }
 
-        let (output_resource, retained_resource) = if src_is_a {
-            (target_a, target_b)
+        let (output_resource, retained_resource) = if opaque_normal_accumulator {
+            (target_a, None)
+        } else if src_is_a {
+            (
+                target_a,
+                Some(target_b.expect("ping-pong target must exist")),
+            )
         } else {
-            (target_b, target_a)
+            (
+                target_b.expect("ping-pong target must exist"),
+                Some(target_a),
+            )
         };
         let output = output_resource.handle().clone();
-        table.insert(retained_resource).map_err(GpuCompositeError::ResourceTable)?;
+        if let Some(retained_resource) = retained_resource {
+            table.insert(retained_resource).map_err(GpuCompositeError::ResourceTable)?;
+        }
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
         let mut diagnostics = GpuCompositingDiagnostics {
             gpu_composited_pixels: u64::from(width).saturating_mul(u64::from(height)),
@@ -1852,6 +1965,10 @@ impl GpuFrameCompositor {
             diagnostics.gpu_native_composites = 1;
         }
         diagnostics.data_texture_uploads = data_texture_uploads;
+        if opaque_normal_accumulator {
+            diagnostics.opaque_normal_single_accumulator_composites = 1;
+            diagnostics.avoided_accumulator_sample_pixels = execution.diagnostics.shaded_pixels;
+        }
         Ok(GpuCompositeRecord { output, diagnostics })
     }
 
@@ -2623,6 +2740,8 @@ impl GpuFrameCompositor {
             uniforms,
             effect_plan,
             &execution,
+            &self.pipeline,
+            None,
         )
     }
 
@@ -2638,6 +2757,8 @@ impl GpuFrameCompositor {
         mut uniforms: GpuCompositeUniforms,
         effect_plan: Option<&CompiledEffectGpuPlan>,
         execution: &GpuCompositeLayerExecution,
+        pipeline: &wgpu::RenderPipeline,
+        load_op: Option<wgpu::LoadOp<wgpu::Color>>,
     ) -> Result<(), GpuCompositeError> {
         let creative_lut_binding = self.creative_luts.prepare_plan(device, queue, effect_plan)?;
         uniforms.effect_count = effect_plan.map_or(0, |plan| plan.operations().len() as u32);
@@ -2733,13 +2854,15 @@ impl GpuFrameCompositor {
                 view: dst_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: if execution.initializes_accumulator
-                        || execution.preserved_regions.is_empty()
-                    {
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                    } else {
-                        wgpu::LoadOp::Load
-                    },
+                    load: load_op.unwrap_or({
+                        if execution.initializes_accumulator
+                            || execution.preserved_regions.is_empty()
+                        {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        }
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -2749,7 +2872,7 @@ impl GpuFrameCompositor {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &layer_bind_group, &[]);
         pass.set_bind_group(1, &accum_bind_group, &[]);
         pass.set_bind_group(2, &uniform_bind_group, &[uniform_offset as u32]);
@@ -3436,21 +3559,79 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
 }
 
 fn composite_output_alpha(request: &GpuCompositeRequest<'_>) -> crate::ColorFrameAlpha {
-    let has_opaque_canvas_base = request.layers.iter().any(|layer| {
-        matches!(
-            layer.source,
-            GpuCompositeLayerSource::SolidColor(color)
-                if color.a.clamp(0.0, 1.0) == 1.0
-        ) && layer.opacity.clamp(0.0, 1.0) == 1.0
-            && layer.blend_mode == BlendMode::Normal
-            && is_identity_transform(layer.transform)
-            && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
-    });
+    let has_opaque_canvas_base = request
+        .layers
+        .iter()
+        .any(|layer| layer_establishes_opaque_canvas(request.width, request.height, layer));
     if has_opaque_canvas_base {
         crate::ColorFrameAlpha::Opaque
     } else {
         crate::ColorFrameAlpha::StraightCoverage
     }
+}
+
+fn effect_plan_preserves_full_coverage(plan: Option<&CompiledEffectGpuPlan>) -> bool {
+    plan.is_none_or(|plan| {
+        plan.operations()
+            .iter()
+            .all(|operation| !matches!(operation, EffectGpuPointOp::Crop { .. }))
+    })
+}
+
+fn layer_establishes_opaque_canvas(
+    output_width: u32,
+    output_height: u32,
+    layer: &GpuCompositeLayer<'_>,
+) -> bool {
+    if layer.opacity.clamp(0.0, 1.0) != 1.0
+        || layer.blend_mode != BlendMode::Normal
+        || !is_identity_transform(layer.transform)
+        || !effect_plan_preserves_full_coverage(layer.effect_plan)
+    {
+        return false;
+    }
+    match layer.source {
+        GpuCompositeLayerSource::SolidColor(color) => color.a.clamp(0.0, 1.0) == 1.0,
+        GpuCompositeLayerSource::CpuFrame(frame) => {
+            let descriptor = frame.descriptor();
+            descriptor.width == output_width
+                && descriptor.height == output_height
+                && descriptor.alpha == crate::ColorFrameAlpha::Opaque
+        }
+        GpuCompositeLayerSource::GpuFrame(handle) => {
+            let descriptor = handle.descriptor();
+            descriptor.width == output_width
+                && descriptor.height == output_height
+                && descriptor.alpha == crate::ColorFrameAlpha::Opaque
+        }
+        GpuCompositeLayerSource::CpuDataTexture(_) | GpuCompositeLayerSource::Adjustment => false,
+    }
+}
+
+fn can_use_opaque_normal_accumulator(
+    request: &GpuCompositeRequest<'_>,
+    execution: &crate::gpu_composite_execution::GpuCompositeExecutionPlan,
+) -> bool {
+    let Some(first) = execution.layers.first() else {
+        return false;
+    };
+    let canvas = GpuCompositeRect {
+        x: 0,
+        y: 0,
+        width: request.width,
+        height: request.height,
+    };
+    first.damage == canvas
+        && layer_establishes_opaque_canvas(
+            request.width,
+            request.height,
+            &request.layers[first.input_index],
+        )
+        && execution.layers.iter().all(|scheduled| {
+            let layer = &request.layers[scheduled.input_index];
+            layer.blend_mode == BlendMode::Normal
+                && !matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+        })
 }
 
 fn composite_layer_footprint(
@@ -3711,6 +3892,8 @@ mod tests {
         let mut a = GpuCompositingDiagnostics {
             gpu_passthrough_frames: 2,
             gpu_native_composites: 3,
+            opaque_normal_single_accumulator_composites: 2,
+            avoided_accumulator_sample_pixels: 800,
             gpu_composited_pixels: 1000,
             execution: GpuCompositeExecutionDiagnostics {
                 render_passes: 3,
@@ -3722,6 +3905,8 @@ mod tests {
         let b = GpuCompositingDiagnostics {
             gpu_passthrough_frames: 1,
             cpu_fallback_composites: 1,
+            opaque_normal_single_accumulator_composites: 1,
+            avoided_accumulator_sample_pixels: 200,
             cpu_composited_pixels: 500,
             execution: GpuCompositeExecutionDiagnostics {
                 render_passes: 1,
@@ -3735,6 +3920,8 @@ mod tests {
         a.accumulate(b);
         assert_eq!(a.gpu_passthrough_frames, 3);
         assert_eq!(a.gpu_native_composites, 3);
+        assert_eq!(a.opaque_normal_single_accumulator_composites, 3);
+        assert_eq!(a.avoided_accumulator_sample_pixels, 1000);
         assert_eq!(a.cpu_fallback_composites, 1);
         assert_eq!(a.gpu_composited_pixels, 1000);
         assert_eq!(a.cpu_composited_pixels, 500);

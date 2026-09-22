@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Instant;
 
 fn install(watch: &PreviewWorkWatch, callback: impl Fn() + Send + Sync + 'static) {
     watch
@@ -30,6 +31,26 @@ fn racing_publication_cannot_be_lost_by_bounded_wait() {
     let observed = watch.wait_for_change(before, Duration::from_secs(1));
     let published = worker.join().expect("notification worker");
     assert_eq!(observed, published);
+}
+
+#[test]
+fn publication_wakes_a_bounded_wait_before_its_timeout() {
+    let (notifier, watch) = preview_work_notification_channel();
+    let before = watch.revision();
+    let worker = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        notifier.result_became_pollable()
+    });
+    let started = Instant::now();
+
+    let observed = watch.wait_for_change(before, Duration::from_millis(500));
+
+    let published = worker.join().expect("notification worker");
+    assert_eq!(observed, published);
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "publication should wake the bounded wait instead of paying its timeout"
+    );
 }
 
 #[test]

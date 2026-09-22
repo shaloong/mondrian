@@ -1999,6 +1999,8 @@ mod tests {
             let realtime = owners.realtime.as_mut().expect("paired realtime session");
             realtime.begin_realtime(&state, None).expect("begin realtime residency");
             assert!(realtime.preview().is_err());
+            #[cfg(feature = "validation")]
+            assert!(realtime.realtime_preview_diagnostics().is_ok());
             assert!(realtime.gpu().is_err());
             assert!(realtime.gpu_mut().is_err());
             assert!(realtime.bound_resources().is_err());

@@ -25,7 +25,7 @@ cargo install cargo-audit      # 安全审计
 # 3. 安装 FFmpeg（Windows，推荐与 CI 对齐）
 git clone --branch 2026.07.29 --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse --overlay-ports=vcpkg-overlay
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows" --recurse --overlay-ports=vcpkg-overlay
 # 设置环境变量（PowerShell）
 $env:VCPKG_ROOT="C:\vcpkg"
 $env:VCPKGRS_TRIPLET="x64-windows"

@@ -1017,6 +1017,24 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         }
     }
 
+    /// Reuse an active-generation prepared artifact after current evaluation
+    /// proves its complete output identity. The caller must still publish with
+    /// the current demand's ticket; matching content does not transfer authority.
+    pub(crate) fn promote_prepared_output_for_key(
+        &mut self,
+        key: &K,
+    ) -> Option<PreviewPreparedPromotion<K>>
+    where
+        K: Clone + PartialEq,
+    {
+        let (intent, prepared) = self.prepared_successor.as_ref()?;
+        if !matches!(prepared, PreparedPreviewOutput::Gpu { key: prepared_key, .. } if prepared_key == key)
+        {
+            return None;
+        }
+        self.promote_prepared_successor_for_intent(*intent)
+    }
+
     /// Prove an immediate successor by aliasing the exact retained artifact.
     ///
     /// The opaque payload is cloneable metadata only; the presentation Adapter
@@ -1322,6 +1340,40 @@ mod tests {
         assert!(!coordinator.clear_output_if(&10, |output| *output == "physical:new"));
         assert!(coordinator.clear_output_if(&9, |output| *output == "physical:new"));
         assert!(coordinator.current_output().is_none());
+    }
+
+    #[test]
+    fn evaluated_content_can_promote_prepared_output_without_reusing_its_intent() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "physical:current");
+        let successor = PreviewPlaybackIntent::new(
+            mondrian_playback::PlaybackEngine::default().snapshot().epoch,
+            3,
+            10,
+        );
+        coordinator.register_prepared_successor(successor, 10, "physical:successor");
+        assert_eq!(coordinator.promote_prepared_output_for_key(&11), None);
+        assert_eq!(
+            coordinator.current_output(),
+            Some((&9, &"physical:current"))
+        );
+        assert_eq!(
+            coordinator.promote_prepared_output_for_key(&10),
+            Some(PreviewPreparedPromotion::Gpu { key: 10, already_visible: false }),
+        );
+        assert_eq!(
+            coordinator.current_output(),
+            Some((&10, &"physical:successor"))
+        );
+        assert!(!coordinator.has_prepared_successor_for_intent(successor));
+        coordinator.register_prepared_successor(successor, 11, "physical:obsolete");
+        coordinator.bind_generation(2, || 42);
+        assert_eq!(coordinator.promote_prepared_output_for_key(&11), None);
+        assert_eq!(
+            coordinator.current_output(),
+            Some((&10, &"physical:successor"))
+        );
     }
 
     #[test]

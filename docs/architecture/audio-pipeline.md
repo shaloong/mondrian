@@ -1047,22 +1047,44 @@ speaker mask). The portable path therefore admits versioned Mono and Stereo
 device conventions plus explicit ordinal Discrete layouts. Windows named
 layouts whose positions fit the normative 18-bit Windows speaker set use a
 separate Media-owned WASAPI Adapter. It reopens the exact CPAL endpoint identity,
-requires an F32 exact channel/rate candidate, derives the mask from the canonical
-`AudioChannelLayout` order, and initializes an event-driven shared-mode stream
-with that exact `WAVEFORMATEXTENSIBLE` mask. Only successful initialization is
-position/order evidence; matching channel count is not. The render worker joins
-the `Pro Audio` MMCSS class and reuses the same bounded queue, activation
-revision, underrun accounting, and playback-delay telemetry as CPAL. Unsupported
-positions such as Wide, TopSide, and LFE2 fail closed instead of being projected
-onto reserved Windows bits. Non-Windows named multichannel remains rejected
-until an equivalent platform Adapter exists.
+derives the mask from the canonical `AudioChannelLayout` order, and initializes
+an event-driven stream with that exact `WAVEFORMATEXTENSIBLE` mask. Shared mode
+uses F32 at the Program rate with the Windows audio engine's explicit
+high-quality conversion flags. Exclusive mode first probes the Program rate
+across F32, PCM24-in-32, packed PCM24, PCM32, and PCM16, then probes the nearest
+standard device rates in deterministic distance order. Every format accepted by
+`IsFormatSupported` receives its own period/alignment initialization attempt;
+one driver's rejected initialization cannot hide a later valid combination.
+`RequireExclusive` fails with the complete structured negotiation reason, while
+`PreferExclusive` retains that reason and falls back to shared only after the
+exclusive candidates are exhausted.
+
+When exclusive negotiation selects another physical rate, the Program contract
+and all Timeline/media-clock coordinates remain at the requested rate. A
+stateful Blackman-Harris windowed-sinc converter runs at the single producer
+enqueue boundary before the lock-free physical queue. Its filter storage is
+preallocated, conversion never runs in the WASAPI callback, and clear/reprime
+resets its history. Physical callback, underrun, buffered, discard, and capacity
+counts are projected back to the Program-rate grid with checked integer-rational
+mapping. Prefix discard rounds toward the first physical boundary that is not
+earlier than the requested Program frame, so cross-rate activation has a bounded
+sub-frame quantization of less than one Program sample. The selected physical
+rate remains explicit in device evidence. Only
+successful stream initialization is position/order evidence; matching channel
+count is not. The render worker joins the `Pro Audio` MMCSS class and reuses the
+same activation revision, underrun accounting, and playback-delay telemetry as
+CPAL. Unsupported positions such as Wide, TopSide, and LFE2 fail closed instead
+of being projected onto reserved Windows bits. Non-Windows named multichannel
+remains rejected until an equivalent platform Adapter exists.
 
 Success publishes one `RealtimeAudioOutputContract` with semantic layout, exact
-rate, scalar format, buffer-range evidence, channel-semantics proof, and counts
-for enumerated/channel/rate/executable candidates. Low-frequency device
-evidence also retains CPAL host, stable device identity, resolved selection,
-whether it was the system default, optional device name, and any nonfatal name
-query failure. Every callback snapshot embeds that exact Contract; Audio
+Program rate, scalar format, buffer-range evidence, channel-semantics proof, and
+counts for enumerated/channel/rate/executable candidates. Low-frequency device
+evidence also retains the selected physical stream rate, container/valid-bit
+widths, share mode, negotiated period/buffer, CPAL host, stable device identity,
+resolved selection, whether it was the system default, optional device name,
+and any nonfatal name query failure. Every callback snapshot embeds that exact
+Contract; Audio
 Playback rejects disagreement between the open event and callback observation.
 Open failures carry a stable code, request, candidate counts, optional selected
 Contract, and backend detail. `AppState` composes physical evidence with
@@ -1144,11 +1166,14 @@ history to the current owner so counters remain monotonic even though the
 move-only execution owner has been dropped.
 
 The output queue has one non-cloneable Manager-owned producer handle and one
-callback consumer. Enqueue validates exact sample rate, semantic channel
-layout, complete interleaved-frame shape, and remaining sample capacity before
-admitting anything. Because the callback only removes samples, a successful
-whole-buffer capacity preflight proves every subsequent push; queued samples
-are never evicted to make room and media time is never silently shifted. A
+callback consumer. Enqueue validates the exact Program sample rate, semantic
+channel layout, complete interleaved-frame shape, and remaining physical sample
+capacity before admitting anything. If rate conversion is active, a
+worst-case output extent is proven before the stateful converter advances, then
+the complete converted result is admitted. Because the callback only removes
+samples, a successful whole-buffer capacity preflight proves every subsequent
+push; queued samples are never evicted to make room and media time is never
+silently shifted. A
 rejected complete buffer invalidates the Audio Playback generation and follows
 bounded reprime/blocked recovery, even when its renderer otherwise permits
 independent-window silence substitution. The playback chunk and high watermark

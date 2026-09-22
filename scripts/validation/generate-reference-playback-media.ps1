@@ -173,7 +173,7 @@ if ($Profile -in @("All", "Video")) {
                 "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=25:duration=12",
                 "-an", "-vf", "format=yuv420p10le",
                 "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
-                "-x265-params", "keyint=250:min-keyint=250:scenecut=0:open-gop=0:repeat-headers=1",
+                "-x265-params", "keyint=250:min-keyint=250:scenecut=0:open-gop=0:repeat-headers=1:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited",
                 "-tag:v", "hvc1", "-color_range", "tv", "-colorspace", "bt709",
                 "-color_primaries", "bt709", "-color_trc", "bt709",
                 $seedPath

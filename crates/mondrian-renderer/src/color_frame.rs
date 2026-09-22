@@ -875,43 +875,32 @@ impl GpuColorFrameWgpuResourcePool {
         plan: &GpuColorFrameAllocationPlan,
     ) -> GpuColorFrameResource<GpuColorFrameWgpuResource> {
         let key = GpuColorFrameWgpuResourcePoolKey::from_plan(plan);
-        let reused = {
+        {
             let mut state = self.state.lock();
-            let turnover_position =
-                state.ordered_turnover.iter().position(|entry| entry.key == key);
-            if let Some(position) = turnover_position
+            // Consume already-idle resources first. A short-lived native import
+            // intermediate may return here between two layer imports; taking a
+            // staged predecessor first would accumulate interchangeable idle
+            // textures and evict them under the smaller idle grant.
+            let position = state.idle.iter().position(|entry| entry.key == key);
+            if let Some(position) = position
+                && let Some(entry) = state.idle.remove(position)
+            {
+                state.retained_bytes = state.retained_bytes.saturating_sub(key.byte_len());
+                state.hits = state.hits.saturating_add(1);
+                return GpuColorFrameResource::new(plan.handle.clone(), entry.payload);
+            }
+            let position = state.ordered_turnover.iter().position(|entry| entry.key == key);
+            if let Some(position) = position
                 && let Some(entry) = state.ordered_turnover.remove(position)
             {
                 state.hits = state.hits.saturating_add(1);
                 return GpuColorFrameResource::new(plan.handle.clone(), entry.payload);
             }
-            // A contract miss proves that the incoming frame is not an exact
-            // physical successor of the staged set. Drop every unmatched
-            // predecessor before allocating the new contract. Sending them
-            // through the optional idle grant would still keep part of the old
-            // working set alive while the new one is created, which can exhaust
-            // device-local memory during quality or extent changes even though
-            // each request independently fits its active grant.
+            // Only a new allocation requires unmatched predecessor retirement.
             evict_gpu_color_frame_ordered_turnover(&mut state);
-            let position = state.idle.iter().position(|entry| entry.key == key);
-            if let Some(position) = position {
-                if let Some(entry) = state.idle.remove(position) {
-                    state.retained_bytes = state.retained_bytes.saturating_sub(key.byte_len());
-                    state.hits = state.hits.saturating_add(1);
-                    Some(entry.payload)
-                } else {
-                    state.misses = state.misses.saturating_add(1);
-                    None
-                }
-            } else {
-                state.misses = state.misses.saturating_add(1);
-                None
-            }
-        };
-        match reused {
-            Some(payload) => GpuColorFrameResource::new(plan.handle.clone(), payload),
-            None => GpuColorFrameUploader::allocate(device, plan),
+            state.misses = state.misses.saturating_add(1);
         }
+        GpuColorFrameUploader::allocate(device, plan)
     }
 
     /// Return one renderer-owned texture after its previous queue use was ordered.
@@ -5175,6 +5164,87 @@ mod tests {
         assert!(plan.usage.contains(wgpu::TextureUsages::COPY_SRC));
         assert!(plan.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
         assert!(plan.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit GPU allocation-turnover regression; requires a real adapter"]
+    async fn idle_texture_hit_preserves_ordered_successor_resources() {
+        let context = crate::GpuContext::new().await.expect("GPU required for allocator test");
+        let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
+        let plan = |id, width| {
+            GpuColorFrameAllocationPlan::for_handle(gpu_handle(
+                id,
+                ColorFrameDescriptor { width, height: 8, ..working_descriptor() },
+                GpuColorFrameTextureFormat::Rgba16Float,
+            ))
+        };
+        let idle_plan = plan(900, 8);
+        let successor_plan = plan(901, 16);
+        let idle = pool.acquire(&context.device, &idle_plan);
+        let successor = pool.acquire(&context.device, &successor_plan);
+        pool.release(idle);
+        let turnover = pool.begin_ordered_turnover();
+        pool.release_for_ordered_turnover(successor);
+        let before = pool.diagnostics();
+
+        let _idle = pool.acquire(&context.device, &idle_plan);
+        let successor = pool.acquire(&context.device, &successor_plan);
+        let after = pool.diagnostics();
+        assert_eq!(
+            after.misses, before.misses,
+            "both contracts were already resident"
+        );
+        assert_eq!(
+            after.evictions, before.evictions,
+            "idle hit must preserve later passes"
+        );
+        assert_eq!(after.hits, before.hits + 2);
+        drop(turnover);
+
+        // A genuinely new contract still retires the predecessor before allocation.
+        let turnover = pool.begin_ordered_turnover();
+        pool.release_for_ordered_turnover(successor);
+        let _new = pool.acquire(&context.device, &plan(902, 32));
+        assert_eq!(pool.diagnostics().evictions, after.evictions + 1);
+        drop(turnover);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit GPU allocation-turnover regression; requires a real adapter"]
+    async fn transient_import_reuses_idle_before_consuming_staged_working_textures() {
+        let context = crate::GpuContext::new().await.expect("GPU required for allocator test");
+        let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
+            GpuColorFrameWgpuResourcePoolOptions {
+                max_per_contract: 1,
+                max_retained_bytes: 8 * 8 * 8,
+            },
+        ));
+        let plan = GpuColorFrameAllocationPlan::for_handle(gpu_handle(
+            910,
+            ColorFrameDescriptor { width: 8, height: 8, ..working_descriptor() },
+            GpuColorFrameTextureFormat::Rgba16Float,
+        ));
+        let predecessor: Vec<_> = (0..4).map(|_| pool.acquire(&context.device, &plan)).collect();
+        let turnover = pool.begin_ordered_turnover();
+        for resource in predecessor {
+            pool.release_for_ordered_turnover(resource);
+        }
+        let before = pool.diagnostics();
+        let mut working = Vec::new();
+        for _ in 0..2 {
+            let intermediate = pool.acquire(&context.device, &plan);
+            working.push(pool.acquire(&context.device, &plan));
+            pool.release(intermediate);
+        }
+        for _ in 0..2 {
+            working.push(pool.acquire(&context.device, &plan));
+        }
+        let after = pool.diagnostics();
+        assert_eq!(after.misses, before.misses);
+        assert_eq!(after.evictions, before.evictions);
+        assert_eq!(working.len(), 4);
+        assert!(after.retained_bytes <= pool.options().max_retained_bytes);
+        drop(turnover);
     }
 
     #[test]

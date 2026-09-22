@@ -694,6 +694,38 @@ pub struct AudioClockHandoffEvidence {
     pub status: AudioClockHandoffStatus,
 }
 
+/// Cause of the latest fail-closed transition away from Audio Device Clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioClockFallbackReason {
+    /// The active playback rate cannot use realtime audio.
+    UnsupportedRealtimeRate,
+    /// The output adapter reported no usable device clock.
+    DeviceUnavailable,
+    /// Counter, stream, or media-anchor continuity was violated.
+    StreamDiscontinuity,
+    /// A temporarily uncertain stream exceeded its grace interval.
+    UncertaintyGraceExpired,
+    /// Reported observation uncertainty exceeded policy.
+    UncertaintyLimitExceeded,
+    /// A new stream could not join the active phase continuously.
+    HandoffPhaseLimitExceeded,
+    /// Latency-corrected device position regressed beyond uncertainty.
+    EffectivePositionRegression,
+    /// Device consumption advanced faster than elapsed time permits.
+    ConsumptionRateExceeded,
+    /// Derived media phase regressed beyond adjacent uncertainty.
+    PhaseRegression {
+        /// Exact detected regression in nanoseconds.
+        regression_ns: u128,
+        /// Adjacent observation uncertainty allowed by policy.
+        allowed_ns: u128,
+    },
+    /// Preserving monotonic phase would exceed uncertainty policy.
+    CorrectedUncertaintyLimitExceeded,
+    /// The authoritative physical stream was retired or lost.
+    DeviceLost,
+}
+
 /// Atomic result of retiring one physical audio stream generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioDeviceLossApplication {
@@ -736,6 +768,8 @@ pub struct PlaybackSnapshot {
     pub audio_clock_observation: Option<AudioDeviceClockObservation>,
     /// Latest new-stream phase qualification evidence.
     pub audio_handoff: Option<AudioClockHandoffEvidence>,
+    /// Latest fail-closed reason in this contiguous Playback Session.
+    pub audio_clock_fallback: Option<AudioClockFallbackReason>,
 }
 
 /// Playback state-machine error. Invalid observations never mutate the Engine.
@@ -840,6 +874,7 @@ pub struct PlaybackEngine {
     audio_device_anchor: Option<AudioDeviceClockAnchor>,
     last_audio_observation: Option<AudioDeviceClockObservation>,
     last_audio_handoff: Option<AudioClockHandoffEvidence>,
+    last_audio_clock_fallback: Option<AudioClockFallbackReason>,
     audio_uncertain_since: Option<MonotonicTimestamp>,
 }
 
@@ -891,6 +926,7 @@ impl PlaybackEngine {
             audio_device_anchor: None,
             last_audio_observation: None,
             last_audio_handoff: None,
+            last_audio_clock_fallback: None,
             audio_uncertain_since: None,
         }
     }
@@ -1365,7 +1401,7 @@ impl PlaybackEngine {
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.advance_position(now)?;
-        self.handoff_to_synthetic(now)?;
+        self.fallback_audio_clock(AudioClockFallbackReason::DeviceLost, now)?;
         Ok(self.snapshot())
     }
 
@@ -1402,7 +1438,10 @@ impl PlaybackEngine {
         self.advance_position(observation.observed_at)?;
         self.last_audio_observation = Some(observation);
         if !self.rate.supports_realtime_audio() {
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::UnsupportedRealtimeRate,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         if self.state == TransportState::Ended {
@@ -1412,7 +1451,10 @@ impl PlaybackEngine {
         }
         if observation.state == AudioDeviceClockState::Unavailable {
             self.audio_uncertain_since = None;
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::DeviceUnavailable,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         // Uncertainty describes the sampled device point, not exact callback
@@ -1427,7 +1469,10 @@ impl PlaybackEngine {
             }
         }) {
             self.audio_uncertain_since = None;
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::StreamDiscontinuity,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         if observation.state == AudioDeviceClockState::Uncertain {
@@ -1443,14 +1488,20 @@ impl PlaybackEngine {
             {
                 return Ok(self.snapshot());
             }
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::UncertaintyGraceExpired,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         self.audio_uncertain_since = None;
         let uncertainty_ns =
             sample_frames_ns_ceil(u64::from(observation.uncertainty_frames), observation_rate)?;
         if uncertainty_ns > self.policy.max_audio_clock_uncertainty.as_nanos() {
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::UncertaintyLimitExceeded,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         if !matches!(
@@ -1477,8 +1528,36 @@ impl PlaybackEngine {
             let proven_phase_error_ns = phase_error_abs
                 .checked_add(uncertainty_ns)
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-            let accepted =
+            let phase_accepted =
                 proven_phase_error_ns <= self.policy.max_audio_handoff_phase_error.as_nanos();
+            // A qualified device point can still sit slightly behind the
+            // continuous Synthetic phase while both positions overlap within
+            // the handoff uncertainty. Installing that raw point would make a
+            // later tick move a forward Timeline backwards. Preserve the
+            // transport-direction high-water phase and carry the displacement
+            // into the device clock's uncertainty instead.
+            let handoff_phase_ns = if self.rate.is_forward() {
+                candidate_ns.max(reference_ns)
+            } else {
+                candidate_ns.min(reference_ns)
+            };
+            let handoff_correction_ns = handoff_phase_ns
+                .checked_sub(candidate_ns)
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?
+                .unsigned_abs();
+            let handoff_correction_frames = handoff_correction_ns
+                .checked_mul(u128::from(observation.sample_rate))
+                .and_then(|value| value.checked_add(999_999_999))
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?
+                / 1_000_000_000;
+            let handoff_uncertainty_frames = u128::from(observation.uncertainty_frames)
+                .checked_add(handoff_correction_frames)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+            let corrected_uncertainty_accepted =
+                sample_frames_ns_ceil(u64::from(handoff_uncertainty_frames), observation_rate)?
+                    <= self.policy.max_audio_clock_uncertainty.as_nanos();
+            let accepted = phase_accepted && corrected_uncertainty_accepted;
             self.last_audio_handoff = Some(AudioClockHandoffEvidence {
                 stream_generation: observation.stream_generation,
                 phase_error_ns: i64::try_from(phase_error_ns)
@@ -1492,7 +1571,14 @@ impl PlaybackEngine {
                 },
             });
             if !accepted {
-                self.handoff_to_synthetic(observation.observed_at)?;
+                self.fallback_audio_clock(
+                    if phase_accepted {
+                        AudioClockFallbackReason::CorrectedUncertaintyLimitExceeded
+                    } else {
+                        AudioClockFallbackReason::HandoffPhaseLimitExceeded
+                    },
+                    observation.observed_at,
+                )?;
                 return Ok(self.snapshot());
             }
             self.audio_device_anchor = Some(AudioDeviceClockAnchor {
@@ -1501,11 +1587,11 @@ impl PlaybackEngine {
                 last_consumed_frames: observation.consumed_frames,
                 last_effective_consumed_frames: measured_effective_consumed,
                 last_observed_at: observation.observed_at,
-                last_media_position_ns: candidate_ns,
-                last_uncertainty_frames: observation.uncertainty_frames,
+                last_media_position_ns: handoff_phase_ns,
+                last_uncertainty_frames: handoff_uncertainty_frames,
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
-            self.reanchor_at_phase(observation.observed_at, candidate_ns);
+            self.reanchor_at_phase(observation.observed_at, handoff_phase_ns);
             self.refresh_frame_demand_for_clock_handoff(observation.observed_at)?;
             return Ok(self.snapshot());
         };
@@ -1528,7 +1614,10 @@ impl PlaybackEngine {
                     .checked_sub(measured_effective_consumed)
                     .ok_or(PlaybackError::InvalidAudioClockPosition)?;
                 if regression > adjacent_uncertainty_frames {
-                    self.handoff_to_synthetic(observation.observed_at)?;
+                    self.fallback_audio_clock(
+                        AudioClockFallbackReason::EffectivePositionRegression,
+                        observation.observed_at,
+                    )?;
                     return Ok(self.snapshot());
                 }
                 anchor.last_effective_consumed_frames
@@ -1549,7 +1638,10 @@ impl PlaybackEngine {
             )?)
             .ok_or(PlaybackError::TransportArithmeticOverflow)?;
         if sample_frames_exceed_duration_ns(consumed_delta, observation_rate, allowed_elapsed_ns)? {
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::ConsumptionRateExceeded,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
 
@@ -1567,10 +1659,16 @@ impl PlaybackEngine {
             .max(0);
         let phase_regression_ns = u128::try_from(phase_regression_ns)
             .map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
-        if phase_regression_ns
-            > sample_frames_ns_ceil(adjacent_uncertainty_frames, observation_rate)?
-        {
-            self.handoff_to_synthetic(observation.observed_at)?;
+        let allowed_phase_regression_ns =
+            sample_frames_ns_ceil(adjacent_uncertainty_frames, observation_rate)?;
+        if phase_regression_ns > allowed_phase_regression_ns {
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::PhaseRegression {
+                    regression_ns: phase_regression_ns,
+                    allowed_ns: allowed_phase_regression_ns,
+                },
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         // Moving the point estimate must retain its displacement in the error
@@ -1588,7 +1686,10 @@ impl PlaybackEngine {
         if sample_frames_ns_ceil(u64::from(corrected_uncertainty_frames), observation_rate)?
             > self.policy.max_audio_clock_uncertainty.as_nanos()
         {
-            self.handoff_to_synthetic(observation.observed_at)?;
+            self.fallback_audio_clock(
+                AudioClockFallbackReason::CorrectedUncertaintyLimitExceeded,
+                observation.observed_at,
+            )?;
             return Ok(self.snapshot());
         }
         let media_position_ns = measured_media_position_ns.max(prior_phase_ns);
@@ -1615,6 +1716,48 @@ impl PlaybackEngine {
         Ok(self.snapshot())
     }
 
+    /// Classify one current presentation ticket against both its carried
+    /// deadline and the live Clock phase at the physical completion instant.
+    /// Generic late grace never authorizes output beyond the production A/V
+    /// phase budget.
+    pub fn frame_presentation_delivery_kind(
+        &self,
+        ticket: FramePresentationTicket,
+        completed_at: MonotonicTimestamp,
+    ) -> Result<Option<FrameDeliveryKind>, PlaybackError> {
+        let Some(demand) = self.pending_frame_demand() else {
+            return Ok(None);
+        };
+        if demand.identity() != ticket.identity() {
+            return Ok(None);
+        }
+        let carried_kind = ticket.delivery_kind_at(completed_at);
+        if carried_kind == FrameDeliveryKind::Late {
+            return Ok(Some(carried_kind));
+        }
+        let Some(phase) = self.playback_clock_phase_observation_at(completed_at)? else {
+            return Ok(Some(carried_kind));
+        };
+        if phase.master() != ClockMaster::AudioDevice {
+            return Ok(Some(carried_kind));
+        }
+        let target_ns = timeline_position_ns_floor(demand.target)?;
+        let point_error_ns = phase
+            .phase_ns()
+            .checked_sub(target_ns)
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?
+            .unsigned_abs();
+        let proven_error_ns = point_error_ns
+            .checked_add(phase.uncertainty_ns())
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        Ok(Some(
+            if proven_error_ns > self.policy.max_video_presentation_phase_error.as_nanos() {
+                FrameDeliveryKind::Late
+            } else {
+                carried_kind
+            },
+        ))
+    }
     /// Record a timestamp-bound Frame Delivery and apply bounded recovery policy.
     ///
     /// Rejected stale authority is returned as an authenticated application but
@@ -1812,6 +1955,7 @@ impl PlaybackEngine {
             quality_revision: self.quality_revision,
             audio_clock_observation: self.last_audio_observation,
             audio_handoff: self.last_audio_handoff,
+            audio_clock_fallback: self.last_audio_clock_fallback,
         }
     }
 
@@ -2175,6 +2319,15 @@ impl PlaybackEngine {
         self.clock_anchor = ClockAnchor { phase_ns, monotonic: now };
     }
 
+    fn fallback_audio_clock(
+        &mut self,
+        reason: AudioClockFallbackReason,
+        now: MonotonicTimestamp,
+    ) -> Result<(), PlaybackError> {
+        self.last_audio_clock_fallback = Some(reason);
+        self.handoff_to_synthetic(now)
+    }
+
     fn handoff_to_synthetic(&mut self, now: MonotonicTimestamp) -> Result<(), PlaybackError> {
         let handed_off = matches!(
             self.state,
@@ -2222,6 +2375,7 @@ impl PlaybackEngine {
         self.audio_device_anchor = None;
         self.last_audio_observation = None;
         self.last_audio_handoff = None;
+        self.last_audio_clock_fallback = None;
         self.audio_uncertain_since = None;
         Ok(())
     }

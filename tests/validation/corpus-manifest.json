@@ -42,7 +42,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "recipe_sha256": "1472bc0bb0afd5e66e23b4ec17f1aed44339d582c83f424a4224be065dfdcaec",
         "profile": "Video",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -84,7 +84,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
-        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "recipe_sha256": "1472bc0bb0afd5e66e23b4ec17f1aed44339d582c83f424a4224be065dfdcaec",
         "profile": "Audio",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -123,7 +123,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-realtime-performance-media.ps1",
-        "recipe_sha256": "50feb61dfbfd5c9def405b92daf1af34022798fe01d3ca0be6e960647b0fcc84",
+        "recipe_sha256": "258998886251321b5319759679ad8ae80f2097a41e9de4ebe98ace63684da59a",
         "profile": "Realtime4k60",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -164,7 +164,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-golden-editorial-video.ps1",
-        "recipe_sha256": "a93976780cee5ed6285edfc63ce4e5a0e0a97837f43a9dd6d734317afefa7cf4",
+        "recipe_sha256": "ba2a77b18510c709bb02b31d93a1e335da49c464e176e123baf5b2777ab03a15",
         "profile": "ProxyRelinkEditorial",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"
@@ -205,7 +205,7 @@
       "size_bytes": null,
       "generation": {
         "recipe_path": "scripts/validation/generate-golden-vfr-retime-video.ps1",
-        "recipe_sha256": "d09f6faae4aced87338d9a814329c5d9f26e4cd19040f0c2ae905d6a8e1dd773",
+        "recipe_sha256": "628b7d1dcadc7af413f12aedf70bf293413bfcb912c23028b6810088cfccc8e4",
         "profile": "SignedRetimeVfr",
         "attestation_suffix": ".attestation.json",
         "artifact_hash_scope": "reference-run"

@@ -30,3 +30,8 @@ windows-sys = { workspace = true, optional = true }
 name = "decklink_native_probe"
 path = "examples/decklink_native_probe.rs"
 required-features = ["native-decklink"]
+
+[[example]]
+name = "aja_native_probe"
+path = "examples/aja_native_probe.rs"
+required-features = ["native-aja"]

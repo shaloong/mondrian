@@ -360,22 +360,33 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_playback_cancel_return_latency_max_us",
-            summary.cancellation.playback.logical_cancellation_to_return.max_us,
+            summary.cancellation.playback.cooperative_logical_cancellation_to_return.max_us,
             cancellation_policy.max_playback_logical_cancellation_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_interactive_cancel_return_latency_max_us",
-            summary.cancellation.interactive.logical_cancellation_to_return.max_us,
+            summary
+                .cancellation
+                .interactive
+                .cooperative_logical_cancellation_to_return
+                .max_us,
             cancellation_policy.max_interactive_logical_cancellation_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_still_cancel_return_latency_max_us",
-            summary.cancellation.still.logical_cancellation_to_return.max_us,
+            summary.cancellation.still.cooperative_logical_cancellation_to_return.max_us,
             cancellation_policy.max_still_logical_cancellation_to_return.as_micros() as u64,
+        );
+        push_decode_max_check(
+            &mut checks,
+            PreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_uninterruptible_native_startup_return_latency_max_us",
+            summary.cancellation.all.uninterruptible_native_startup_to_return.max_us,
+            cancellation_policy.max_uninterruptible_native_startup_to_return.as_micros() as u64,
         );
         push_decode_max_check(
             &mut checks,

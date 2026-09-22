@@ -2670,7 +2670,13 @@ condition in the health report. The action code is
 ## Preview/Viewer GPU Output Boundary
 
 The preview/viewer path connects to the GPU color output boundary through
-the app-window `prepare_viewer_gpu_preview()` function. The call chain is:
+the app-window `prepare_viewer_gpu_preview()` function. The prepared Window
+Session constructs the device-scoped Viewer runtime and its spatial shader and
+render pipelines before the candidate Session is published. Spatial frame
+resources remain lazy and pooled, but one-time pipeline compilation is not
+allowed in the first interactive frame's 50 ms event-loop critical path. Device
+replacement builds a fresh prewarmed runtime for the new generation before
+activation. The call chain is:
 
 ```
 User scrub/play

@@ -12,6 +12,7 @@
   "complete_golden": {
     "contract_id": "windows-alpha-golden-v14",
     "report_schema_version": 3,
+    "process_report_schema_version": 2,
     "required_status": "passed",
     "baseline_eligible_required": true,
     "required_consecutive_passes": 3,

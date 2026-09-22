@@ -14,12 +14,15 @@ Do not replace the Visual Studio-managed vcpkg copy. From the checkout, use:
 $env:VCPKG_ROOT = Join-Path $env:SystemDrive 'vcpkg' # Or your installation directory.
 $env:VCPKG_MAX_CONCURRENCY = '2'
 & "$env:VCPKG_ROOT/vcpkg.exe" install `
-  'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' `
+  'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows' `
   pkgconf:x64-windows --recurse --overlay-ports=vcpkg-overlay
 ```
 
 This is the existing CI product profile, including the GPL codec components;
-it is not an LGPL-only distribution profile. Keep vcpkg's installed package
+it is not an LGPL-only distribution profile. The `nvcodec` feature supplies
+FFmpeg's NVIDIA codec headers and enables runtime loading of the installed
+NVIDIA driver; it does not require the CUDA SDK and does not change Mondrian's
+primary Windows decode/render path from D3D12. Keep vcpkg's installed package
 copyright notices. LLVM uses Apache-2.0 with LLVM Exceptions. This setup does
 not redistribute system fonts or change the title font policy.
 

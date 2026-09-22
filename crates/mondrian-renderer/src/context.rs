@@ -86,11 +86,8 @@ pub async fn request_device_with_native_video_support(
         .map_err(|error| mondrian_core::MondrianError::GpuInitFailed { reason: error.to_string() })
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 const TEST_GPU_CONTEXT_CAPACITY: usize = 1;
-
-#[cfg(all(test, not(target_os = "linux")))]
-const TEST_GPU_CONTEXT_CAPACITY: usize = 2;
 
 #[cfg(test)]
 static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar) =
@@ -99,12 +96,12 @@ static TEST_GPU_CONTEXT_ADMISSION: (std::sync::Mutex<usize>, std::sync::Condvar)
 /// Process-local admission for unit tests that own independent native devices.
 ///
 /// The Rust test harness otherwise provisions dozens of native devices at
-/// once. That is not representative of product execution and can terminate the
-/// test process in the platform driver before an assertion is reported. Linux
-/// uses an exclusive owner because device destruction and the following device
-/// creation can overlap inside Vulkan drivers; other platforms admit two. The
-/// permit remains attached to the context so the owner, not test scheduling,
-/// releases capacity.
+/// once. That is not representative of product execution, which owns one
+/// shared device, and can terminate the test process in the platform driver
+/// before an assertion is reported. Device destruction and the following
+/// device creation may overlap inside native drivers, so every platform uses
+/// one exclusive owner. The permit remains attached to the context so the
+/// owner, not test scheduling, releases capacity.
 #[cfg(test)]
 pub(crate) struct TestGpuContextPermit;
 
@@ -169,6 +166,11 @@ pub fn native_video_texture_device_features(adapter_features: wgpu::Features) ->
 /// every cached color transform without weakening sampler correctness.
 pub fn ocio_lut_filtering_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
     adapter_features & wgpu::Features::FLOAT32_FILTERABLE
+}
+
+/// Optional subgroup operations used to reduce exact Program Scope atomics.
+pub fn program_scopes_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    adapter_features & wgpu::Features::SUBGROUP
 }
 
 /// Request an adapter while preserving native-video import on platforms where
@@ -305,6 +307,7 @@ impl GpuContext {
         let device_descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(adapter.features())
                 | ocio_lut_filtering_device_features(adapter.features())
+                | program_scopes_device_features(adapter.features())
                 | working_texture_features,
             ..wgpu::DeviceDescriptor::default()
         };
@@ -325,7 +328,10 @@ impl GpuContext {
 mod tests {
     #[cfg(target_os = "windows")]
     use super::native_video_adapter_priority;
-    use super::{native_video_texture_device_features, ocio_lut_filtering_device_features};
+    use super::{
+        native_video_texture_device_features, ocio_lut_filtering_device_features,
+        program_scopes_device_features,
+    };
 
     #[test]
     fn ocio_lut_filtering_feature_is_requested_only_when_supported() {
@@ -335,6 +341,17 @@ mod tests {
                 wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::TIMESTAMP_QUERY,
             ),
             wgpu::Features::FLOAT32_FILTERABLE
+        );
+    }
+
+    #[test]
+    fn program_scope_subgroups_are_requested_only_when_supported() {
+        assert!(program_scopes_device_features(wgpu::Features::empty()).is_empty());
+        assert_eq!(
+            program_scopes_device_features(
+                wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY,
+            ),
+            wgpu::Features::SUBGROUP
         );
     }
 

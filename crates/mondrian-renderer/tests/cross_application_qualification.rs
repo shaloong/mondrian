@@ -576,6 +576,34 @@ fn checked_in_supervisor_policy_binds_the_stimulus_and_fail_closed_runner() {
 }
 
 #[test]
+fn checked_in_local_blender_premiere_policy_binds_its_stimulus() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("renderer crate must be inside the workspace");
+    let policy_path = repository
+        .join("tests/validation/cross-application-color-blender-premiere-qualification.json");
+    let policy: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&policy_path).expect("read local Blender/Premiere policy"),
+    )
+    .expect("parse local Blender/Premiere policy");
+    let stimulus_relative = policy["stimulus"]["path"].as_str().expect("stimulus path");
+    let stimulus = std::fs::read(repository.join(stimulus_relative)).expect("read local stimulus");
+    let actual_stimulus_sha = format!("{:x}", Sha256::digest(&stimulus));
+
+    assert_eq!(policy["schema_version"], 2);
+    assert_eq!(policy["producer_scope"], "blender_and_premiere");
+    assert_eq!(policy["stimulus"]["sha256"], actual_stimulus_sha);
+    let validator = std::fs::read_to_string(
+        repository.join("scripts/validation/validate-reference-assets.ps1"),
+    )
+    .expect("read reference asset validator");
+    assert!(validator.contains("cross-application-color-blender-premiere-qualification.json"));
+    assert!(validator.contains("cross-application-color-stimulus-blender-premiere-v1.json"));
+    assert!(validator.contains("cross-application.local-stimulus"));
+}
+
+#[test]
 fn local_blender_premiere_scope_is_explicit_and_never_weakens_legacy_matrix() {
     let mut local = profile();
     local

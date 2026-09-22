@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Read;
 
 const MAXIMUM_TEST_EXECUTABLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Evidence emitted from inside the exact GPU test process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -98,7 +99,7 @@ fn hash_file(path: &std::path::Path) -> Result<String> {
         bail!("GPU gate executable is empty, non-file, or oversized");
     }
     let mut file = File::open(path).context("open GPU gate executable")?;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     let mut digest = Sha256::new();
     loop {
         let read = file.read(&mut buffer).context("hash GPU gate executable")?;
@@ -112,4 +113,28 @@ fn hash_file(path: &std::path::Path) -> Result<String> {
 
 fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_file, HASH_BUFFER_BYTES};
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn test_executable_hashing_fits_a_small_windows_style_stack() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("gpu-gate.bin");
+        let bytes = vec![0xa5; HASH_BUFFER_BYTES * 3 + 31];
+        std::fs::write(&path, &bytes).expect("write fixture");
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+
+        let observed = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || hash_file(&path).expect("hash fixture"))
+            .expect("spawn constrained-stack hashing thread")
+            .join()
+            .expect("hashing thread must not overflow");
+
+        assert_eq!(observed, expected);
+    }
 }

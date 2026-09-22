@@ -310,7 +310,8 @@ mod windows_impl {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, RECT, WAIT_OBJECT_0};
     use windows::Win32::Graphics::Direct3D12::{
         ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12Device, ID3D12Fence,
-        ID3D12PipelineState, ID3D12Resource, D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS,
+        ID3D12GraphicsCommandList, ID3D12PipelineState, ID3D12Resource,
+        D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS,
         D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
         D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_FENCE_FLAG_NONE, D3D12_RESOURCE_BARRIER,
         D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
@@ -345,8 +346,11 @@ mod windows_impl {
     const COMMAND_SLOT_WAIT: Duration = Duration::from_secs(30);
 
     struct CommandSlot {
-        allocator: ID3D12CommandAllocator,
-        list: ID3D12VideoProcessCommandList,
+        transition_allocator: ID3D12CommandAllocator,
+        to_common: ID3D12GraphicsCommandList,
+        to_render_target: ID3D12GraphicsCommandList,
+        video_allocator: ID3D12CommandAllocator,
+        video_list: ID3D12VideoProcessCommandList,
         completion_value: u64,
     }
 
@@ -356,6 +360,7 @@ mod windows_impl {
         video_queue: ID3D12CommandQueue,
         processor: ID3D12VideoProcessor,
         render_ready_fence: ID3D12Fence,
+        video_done_fence: ID3D12Fence,
         completion_fence: ID3D12Fence,
         next_render_ready_value: u64,
         next_completion_value: u64,
@@ -405,6 +410,8 @@ mod windows_impl {
                     .map_err(|error| create_error("CreateCommandQueue(VIDEO_PROCESS)", error))?;
             let render_ready_fence = unsafe { raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
                 .map_err(|error| create_error("CreateFence(render_ready)", error))?;
+            let video_done_fence = unsafe { raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
+                .map_err(|error| create_error("CreateFence(video_done)", error))?;
             let completion_fence = unsafe { raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
                 .map_err(|error| create_error("CreateFence(completion)", error))?;
             let encoder_device_root = RendererHwAccelDeviceContext::from_d3d12_device(
@@ -419,6 +426,7 @@ mod windows_impl {
                 video_queue,
                 processor,
                 render_ready_fence,
+                video_done_fence,
                 completion_fence,
                 next_render_ready_value: 1,
                 next_completion_value: 1,
@@ -460,6 +468,7 @@ mod windows_impl {
             if destination_device.as_raw() != self.raw_device.as_raw() {
                 return Err(D3D12ResidentEncodeSubmissionError::DestinationContract);
             }
+            record_source_transitions(&self.slots[slot_index], &source_resource)?;
             record_process(
                 &self.slots[slot_index],
                 &self.processor,
@@ -467,6 +476,11 @@ mod windows_impl {
                 &source_resource,
                 &destination_resource,
             )?;
+            let to_common: ID3D12CommandList =
+                self.slots[slot_index].to_common.cast().map_err(|error| {
+                    submit_error("QueryInterface<ID3D12CommandList>(to_common)", error)
+                })?;
+            unsafe { self.raw_direct_queue.ExecuteCommandLists(&[Some(to_common)]) };
             if let Err(error) = unsafe {
                 self.raw_direct_queue.Signal(&self.render_ready_fence, render_ready_value)
             } {
@@ -479,11 +493,11 @@ mod windows_impl {
                 self.poisoned_sources.push(source);
                 return Err(submit_error("video_queue.Wait(render_ready)", error));
             }
-            let command_list: ID3D12CommandList = self.slots[slot_index]
-                .list
+            let video_list: ID3D12CommandList = self.slots[slot_index]
+                .video_list
                 .cast()
-                .map_err(|error| submit_error("QueryInterface<ID3D12CommandList>", error))?;
-            unsafe { self.video_queue.ExecuteCommandLists(&[Some(command_list)]) };
+                .map_err(|error| submit_error("QueryInterface<ID3D12CommandList>(video)", error))?;
+            unsafe { self.video_queue.ExecuteCommandLists(&[Some(video_list)]) };
             if let Err(error) =
                 unsafe { self.video_queue.Signal(destination.fence(), destination.fence_value()) }
             {
@@ -492,22 +506,34 @@ mod windows_impl {
                 return Err(submit_error("video_queue.Signal(encoder_surface)", error));
             }
             if let Err(error) =
-                unsafe { self.video_queue.Signal(&self.completion_fence, completion_value) }
+                unsafe { self.video_queue.Signal(&self.video_done_fence, completion_value) }
             {
                 self.poisoned_sources.push(source);
                 self.poisoned_destinations.push(destination);
-                return Err(submit_error("video_queue.Signal(completion)", error));
+                return Err(submit_error("video_queue.Signal(video_done)", error));
+            }
+            if let Err(error) =
+                unsafe { self.raw_direct_queue.Wait(&self.video_done_fence, completion_value) }
+            {
+                self.poisoned_sources.push(source);
+                self.poisoned_destinations.push(destination);
+                return Err(submit_error("direct_queue.Wait(video_done)", error));
+            }
+            let to_render_target: ID3D12CommandList =
+                self.slots[slot_index].to_render_target.cast().map_err(|error| {
+                    submit_error("QueryInterface<ID3D12CommandList>(to_render_target)", error)
+                })?;
+            unsafe { self.raw_direct_queue.ExecuteCommandLists(&[Some(to_render_target)]) };
+            if let Err(error) =
+                unsafe { self.raw_direct_queue.Signal(&self.completion_fence, completion_value) }
+            {
+                self.poisoned_sources.push(source);
+                self.poisoned_destinations.push(destination);
+                return Err(submit_error("direct_queue.Signal(completion)", error));
             }
             self.slots[slot_index].completion_value = completion_value;
-            if let Err(error) =
-                unsafe { self.raw_direct_queue.Wait(&self.completion_fence, completion_value) }
-            {
-                self.poisoned_sources.push(source);
-                self.poisoned_destinations.push(destination);
-                return Err(submit_error("direct_queue.Wait(completion)", error));
-            }
-            // The direct-queue wait precedes future wgpu work and the native
-            // list restored RENDER_TARGET, so exact-generation pool return is safe.
+            // The restore executes on wgpu's direct queue after the video read.
+            // Future pool reuse is ordered behind it on that same queue.
             drop(source);
             self.diagnostics.video_process_submissions =
                 self.diagnostics.video_process_submissions.saturating_add(1);
@@ -558,24 +584,92 @@ mod windows_impl {
     fn create_slot(
         device: &ID3D12Device,
     ) -> Result<CommandSlot, D3D12ResidentEncodeSubmissionError> {
-        let allocator = unsafe {
+        let transition_allocator = unsafe {
+            device.CreateCommandAllocator::<ID3D12CommandAllocator>(D3D12_COMMAND_LIST_TYPE_DIRECT)
+        }
+        .map_err(|error| submit_error("CreateCommandAllocator(DIRECT)", error))?;
+        let to_common = create_closed_direct_list(device, &transition_allocator)?;
+        let to_render_target = create_closed_direct_list(device, &transition_allocator)?;
+        let video_allocator = unsafe {
             device.CreateCommandAllocator::<ID3D12CommandAllocator>(
                 D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS,
             )
         }
         .map_err(|error| submit_error("CreateCommandAllocator(VIDEO_PROCESS)", error))?;
-        let list = unsafe {
+        let video_list = unsafe {
             device.CreateCommandList::<_, _, ID3D12VideoProcessCommandList>(
                 0,
                 D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS,
-                &allocator,
+                &video_allocator,
                 None::<&ID3D12PipelineState>,
             )
         }
         .map_err(|error| submit_error("CreateCommandList(VIDEO_PROCESS)", error))?;
-        unsafe { list.Close() }
+        unsafe { video_list.Close() }
             .map_err(|error| submit_error("VideoProcessCommandList.Close", error))?;
-        Ok(CommandSlot { allocator, list, completion_value: 0 })
+        Ok(CommandSlot {
+            transition_allocator,
+            to_common,
+            to_render_target,
+            video_allocator,
+            video_list,
+            completion_value: 0,
+        })
+    }
+
+    fn create_closed_direct_list(
+        device: &ID3D12Device,
+        allocator: &ID3D12CommandAllocator,
+    ) -> Result<ID3D12GraphicsCommandList, D3D12ResidentEncodeSubmissionError> {
+        let list = unsafe {
+            device.CreateCommandList::<_, _, ID3D12GraphicsCommandList>(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                allocator,
+                None::<&ID3D12PipelineState>,
+            )
+        }
+        .map_err(|error| submit_error("CreateCommandList(DIRECT)", error))?;
+        unsafe { list.Close() }
+            .map_err(|error| submit_error("GraphicsCommandList.Close", error))?;
+        Ok(list)
+    }
+
+    fn record_source_transitions(
+        slot: &CommandSlot,
+        source: &ID3D12Resource,
+    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+        unsafe { slot.transition_allocator.Reset() }
+            .map_err(|error| submit_error("TransitionCommandAllocator.Reset", error))?;
+        record_source_transition(
+            &slot.to_common,
+            &slot.transition_allocator,
+            source,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_COMMON,
+        )?;
+        record_source_transition(
+            &slot.to_render_target,
+            &slot.transition_allocator,
+            source,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+        )
+    }
+
+    fn record_source_transition(
+        list: &ID3D12GraphicsCommandList,
+        allocator: &ID3D12CommandAllocator,
+        source: &ID3D12Resource,
+        before: D3D12_RESOURCE_STATES,
+        after: D3D12_RESOURCE_STATES,
+    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+        unsafe { list.Reset(allocator, None::<&ID3D12PipelineState>) }
+            .map_err(|error| submit_error("GraphicsCommandList.Reset", error))?;
+        let mut barrier = [transition_barrier(source, before, after)];
+        unsafe { list.ResourceBarrier(&barrier) };
+        release_barriers(&mut barrier);
+        unsafe { list.Close() }.map_err(|error| submit_error("GraphicsCommandList.Close", error))
     }
 
     fn record_process(
@@ -585,14 +679,14 @@ mod windows_impl {
         source: &ID3D12Resource,
         destination: &ID3D12Resource,
     ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
-        unsafe { slot.allocator.Reset() }
+        unsafe { slot.video_allocator.Reset() }
             .map_err(|error| submit_error("CommandAllocator.Reset", error))?;
-        unsafe { slot.list.Reset(&slot.allocator) }
+        unsafe { slot.video_list.Reset(&slot.video_allocator) }
             .map_err(|error| submit_error("VideoProcessCommandList.Reset", error))?;
         let mut barriers = [
             transition_barrier(
                 source,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COMMON,
                 D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ,
             ),
             transition_barrier(
@@ -601,7 +695,7 @@ mod windows_impl {
                 D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE,
             ),
         ];
-        unsafe { slot.list.ResourceBarrier(&barriers) };
+        unsafe { slot.video_list.ResourceBarrier(&barriers) };
         release_barriers(&mut barriers);
         let rect = RECT {
             left: 0,
@@ -627,7 +721,7 @@ mod windows_impl {
             Subresource: 0,
         };
         output.TargetRectangle = rect;
-        unsafe { slot.list.ProcessFrames(processor, &output, std::slice::from_ref(&input)) };
+        unsafe { slot.video_list.ProcessFrames(processor, &output, std::slice::from_ref(&input)) };
         unsafe {
             ManuallyDrop::drop(&mut input.InputStream[0].pTexture2D);
             ManuallyDrop::drop(&mut output.OutputStream[0].pTexture2D);
@@ -636,7 +730,7 @@ mod windows_impl {
             transition_barrier(
                 source,
                 D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COMMON,
             ),
             transition_barrier(
                 destination,
@@ -644,9 +738,9 @@ mod windows_impl {
                 D3D12_RESOURCE_STATE_COMMON,
             ),
         ];
-        unsafe { slot.list.ResourceBarrier(&barriers) };
+        unsafe { slot.video_list.ResourceBarrier(&barriers) };
         release_barriers(&mut barriers);
-        unsafe { slot.list.Close() }
+        unsafe { slot.video_list.Close() }
             .map_err(|error| submit_error("VideoProcessCommandList.Close", error))
     }
 

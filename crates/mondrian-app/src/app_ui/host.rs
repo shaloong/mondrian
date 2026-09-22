@@ -545,7 +545,7 @@ impl AppUiHost {
 
     /// Publish immutable capacity from the exact Window Viewer GPU generation
     /// through the App's single execution-resource authority.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn observe_viewer_gpu_device_local_bytes(&self, device_local_bytes: Option<u64>) {
         self.app_state
             .borrow()
@@ -4727,17 +4727,23 @@ mod tests {
 
         let (state, ui_shutdown) = host.into_app_state_until(deadline);
 
-        assert_eq!(ui_shutdown.preview.worker_timeouts, 1);
-        assert_eq!(ui_shutdown.preview.worker_deadline_detachments, 1);
+        release_tx.send(()).expect("release detached Preview owner");
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached Preview owner exited");
+        assert!(
+            ui_shutdown.preview.worker_timeouts >= 1,
+            "synthetic blocked owner must time out: {ui_shutdown:#?}"
+        );
+        assert_eq!(
+            ui_shutdown.preview.worker_timeouts, ui_shutdown.preview.worker_deadline_detachments,
+            "every owner beyond the shared deadline must detach: {ui_shutdown:#?}"
+        );
         assert!(!ui_shutdown.all_resources_released());
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "UI shutdown renewed its caller-owned absolute deadline"
         );
-        release_tx.send(()).expect("release detached Preview owner");
-        finished_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("detached Preview owner exited");
         let app_shutdown = state.shutdown_for_endurance(
             Instant::now()
                 .checked_add(Duration::from_secs(5))

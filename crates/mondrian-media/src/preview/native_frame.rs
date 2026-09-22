@@ -658,7 +658,9 @@ pub(super) struct FfmpegAvD3D12VaSyncContext {
 #[cfg(mondrian_ffmpeg_7_1)]
 pub(super) struct FfmpegAvD3D12VaFrame {
     pub(super) texture: *mut c_void,
+    pub(super) subresource_index: i32,
     pub(super) sync_ctx: FfmpegAvD3D12VaSyncContext,
+    pub(super) flags: i32,
 }
 
 #[cfg(mondrian_ffmpeg_7_1)]

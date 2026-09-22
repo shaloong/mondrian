@@ -24,6 +24,7 @@ use mondrian_renderer::{
     ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision, ViewerGpuSourceLayer,
     ViewerSourceRect,
 };
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -48,6 +49,24 @@ struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
+
+#[derive(Debug)]
+struct GpuMemoryUnavailable {
+    scenario: RealtimeVisualScenarioId,
+    source: wgpu::Error,
+}
+
+impl fmt::Display for GpuMemoryUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "realtime visual scenario {:?} could not run because GPU memory was exhausted: {}",
+            self.scenario, self.source
+        )
+    }
+}
+
+impl std::error::Error for GpuMemoryUnavailable {}
 
 struct TimestampStageBridge<'a> {
     ring: &'a mut GpuTimestampQueryRing,
@@ -104,8 +123,19 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
         return Err(anyhow!("sealed realtime matrix requires {REPORT_ENV}"));
     }
 
+    let mut failed_scenarios = Vec::new();
     for scenario in RealtimeVisualScenarioId::ALL {
-        let report = run_scenario(&context, scenario)?;
+        let report = match run_scenario(&context, scenario).await {
+            Ok(report) => report,
+            Err(error)
+                if !policy.hardware_required()
+                    && error.downcast_ref::<GpuMemoryUnavailable>().is_some() =>
+            {
+                eprintln!("realtime visual GPU gate NotRun: {error:#}");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let json = serde_json::to_string(&report).context("serialize realtime visual report")?;
         if let Some(path) = output.as_deref() {
             append_jsonl(path, &json)?;
@@ -113,26 +143,41 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
             eprintln!("{json}");
         }
         if !report.report.passed {
-            return Err(anyhow!(
-                "realtime visual scenario {:?} failed: {:?}",
-                scenario,
-                report.report.root_causes
-            ));
+            failed_scenarios.push(format!("{scenario:?}: {:?}", report.report.root_causes));
         }
+    }
+    if !failed_scenarios.is_empty() {
+        return Err(anyhow!(
+            "realtime visual scenarios failed: {}",
+            failed_scenarios.join("; ")
+        ));
     }
     Ok(())
 }
 
-fn run_scenario(
+async fn run_scenario(
     context: &GpuContext,
     scenario: RealtimeVisualScenarioId,
 ) -> Result<RetiredScenarioReport> {
+    let out_of_memory_scope = context.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let mut runtime =
-        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+        match ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(source) = out_of_memory_scope.pop().await {
+                    return Err(GpuMemoryUnavailable { scenario, source }.into());
+                }
+                return Err(error.into());
+            }
+        };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         measure_scenario(context, scenario, &mut runtime)
     }));
     let retirement = retirement_support::retire_runtime(&context.device, runtime);
+    let out_of_memory = out_of_memory_scope.pop().await;
+    if let Some(source) = out_of_memory {
+        return Err(GpuMemoryUnavailable { scenario, source }.into());
+    }
     let measured = match result {
         Ok(measured) => measured,
         Err(panic) => {
@@ -272,9 +317,19 @@ fn measure_scenario(
         frames.program_scopes_frames = frames
             .program_scopes_frames
             .saturating_add(u64::from(record.program_scopes.is_some()));
+        frames.program_scope_subgroup_frames = frames.program_scope_subgroup_frames.saturating_add(
+            u64::from(record.program_scopes.as_ref().is_some_and(|scopes| scopes.used_subgroups)),
+        );
         frames.gpu_native_composites = frames
             .gpu_native_composites
             .saturating_add(record.compositing_diagnostics.gpu_native_composites);
+        frames.opaque_normal_single_accumulator_composites =
+            frames.opaque_normal_single_accumulator_composites.saturating_add(
+                record.compositing_diagnostics.opaque_normal_single_accumulator_composites,
+            );
+        frames.avoided_accumulator_sample_pixels = frames
+            .avoided_accumulator_sample_pixels
+            .saturating_add(record.compositing_diagnostics.avoided_accumulator_sample_pixels);
         frames.fused_point_operations = frames
             .fused_point_operations
             .saturating_add(record.compositing_diagnostics.execution.fused_point_operations);
@@ -433,6 +488,7 @@ async fn create_gpu_context() -> Result<Option<GpuContext>> {
     let required_features = timestamp_features
         | native_video_texture_device_features(adapter.features())
         | ocio_lut_filtering_device_features(adapter.features())
+        | mondrian_renderer::program_scopes_device_features(adapter.features())
         | working_texture_features;
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("mondrian-realtime-visual-matrix-device"),

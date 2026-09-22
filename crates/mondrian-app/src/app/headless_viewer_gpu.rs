@@ -926,6 +926,7 @@ impl HeadlessViewerGpuAdapter {
                 let descriptor = wgpu::DeviceDescriptor {
                     required_features: native_video_texture_device_features(supported_features)
                         | ocio_lut_filtering_device_features(supported_features)
+                        | mondrian_renderer::program_scopes_device_features(supported_features)
                         | working_texture_features
                         | viewer_suffix_timing_features
                         | native_import_timing_features,
@@ -1120,7 +1121,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Immutable device-local capacity for this exact GPU generation.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn device_local_memory_bytes(&self) -> Option<u64> {
         self.adapter_info.device_local_memory_bytes
     }
@@ -1983,7 +1984,7 @@ impl HeadlessViewerGpuAdapter {
         self.submission_lifecycle.is_occupied()
     }
 
-    /// Whether both bounded submitted-owner slots are occupied.
+    /// Whether the bounded submitted-owner cleanup horizon is occupied.
     pub(crate) fn submission_capacity_is_full(&self) -> bool {
         self.submission_lifecycle.is_at_capacity()
     }

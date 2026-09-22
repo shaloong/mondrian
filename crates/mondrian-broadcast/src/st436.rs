@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires official BMX 1.6 binaries via MONDRIAN_ST436_BMX_TOOL_DIR"]
+    #[ignore = "requires official BMX 1.7 binaries via MONDRIAN_ST436_BMX_TOOL_DIR"]
     fn official_bmx_wrap_and_actual_mxf_reimport_preserve_exact_sparse_anc() {
         use std::process::Command;
         let tools = std::path::PathBuf::from(
@@ -509,7 +509,7 @@ mod tests {
                 String::from_utf8_lossy(&version.stdout),
                 String::from_utf8_lossy(&version.stderr)
             );
-            assert!(text.contains("bmx v1.6.0"), "{text}");
+            assert!(text.contains("bmx v1.7.0"), "{text}");
         }
         let work = tempfile::tempdir().expect("private input/output directory");
         let input = work.path().join("canonical.klv");

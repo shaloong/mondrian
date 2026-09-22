@@ -4644,7 +4644,10 @@ fn execute_resident_hevc_export(
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
-    let resident_video_path = temp_dir.path().join("resident-video.mkv");
+    // D3D12VA emits HEVC parameter sets with its first packet rather than as
+    // codec extradata during open. MPEG-TS admits that standard Annex-B stream
+    // while preserving timestamps for the final pixel-free stream-copy mux.
+    let resident_video_path = temp_dir.path().join("resident-video.ts");
     let config = ResidentHevcEncoderConfig {
         output_path: resident_video_path.clone(),
         width,
@@ -4833,6 +4836,8 @@ fn execute_resident_hevc_export(
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-f")
+        .arg("mpegts")
         .arg("-i")
         .arg(&resident_video_path)
         .arg("-map")
@@ -12285,10 +12290,22 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
+    fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
+        run_production_export_queue_resident_hevc_qualification();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
     fn production_export_queue_runs_same_device_cuda_resident_hevc() {
+        run_production_export_queue_resident_hevc_qualification();
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn run_production_export_queue_resident_hevc_qualification() {
         let _gpu_visual = GpuVisualExecutionGuard::activate();
         let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
             .ok()
@@ -12296,7 +12313,7 @@ mod tests {
             .filter(|value| (1..=600).contains(value))
             .unwrap_or(3);
         let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
-        let mut sequence = Sequence::new("Linux CUDA resident Export");
+        let mut sequence = Sequence::new("same-device resident HEVC Export");
         sequence.settings.resolution = Resolution { width: 320, height: 180 };
         sequence.settings.frame_rate = Rational::new(30_000, 1_001);
         sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;

@@ -156,6 +156,16 @@ Output Transform. The exact upstream commit, blob and byte digests, domain,
 resolution, authored luminance contract, and BSD-3-Clause notice are recorded
 in `assets/ocio/MONDRIAN_STANDARD_HDR_V1_NOTICE.md`.
 
+For the package-pinned PQ View, OCIO represents the HLG-to-display-reference
+inverse OETF as a half-domain 1D texture. The wgpu compiler replaces only that
+fingerprinted texture operation with the normative inverse HLG expression after
+proving the selected package, View, shader language, LUT identity, and the
+preceding formation LUT's normalized output domain. The PQ OETF remains the
+OCIO-authored LUT. A changed package, custom config, resource payload, source
+identity, or domain retains the unmodified OCIO program. This removes three
+texture fetches per output pixel without moving the nonlinear operation across
+the tetrahedral formation LUT.
+
 Output-target resolution maps Rec.2100 HLG and PQ to that HDR View while SDR
 targets map to the SDR View. A display without its target-class Standard View
 fails closed; it must never borrow the sRGB Standard View or an inactive ACES
@@ -1819,9 +1829,13 @@ its admitted subset and fail closed outside it.
   the sequence output color space.
 - **HDR presentation without complete native evidence** — `ViewerDisplayMode::HdrPq` /
   `ViewerDisplayMode::HdrHlg` are explicit user selections. On Windows the app
-  probes DisplayConfig Advanced Color support/enabled/force-disabled state, bits
-  per channel, color encoding, and SDR white level through `mondrian-platform`;
-  known disabled or unsupported state blocks HDR preview. wgpu
+  probes the Windows 11 DisplayConfig SDR/WCG/HDR active color mode, separate HDR
+  and wide-color support flags, policy limitation, bits per channel, color
+  encoding, and SDR white level through `mondrian-platform`. It matches that
+  output to DXGI and reads the active transfer identity plus physical luminance
+  from `IDXGIOutput6`; the HDR enable bit is not treated as PQ evidence. The
+  legacy Advanced Color bitfield is used only on systems that explicitly reject
+  the INFO_2 packet. Known inactive or unsupported HDR state blocks HDR preview. wgpu
   `SurfaceColorSpace` compatibility is still only the swapchain side of the
   contract. macOS adds AppKit EDR headroom, Wayland consumes the active output
   image description, and Linux DRM/EDID remains hardware-only fallback evidence.
@@ -1878,6 +1892,21 @@ GPU artifacts therefore cannot alias changed mutable sources, while warm
 lookups perform no generation lock or filesystem check.
 
 ## Cross-Application Reference Qualification
+
+The product builds Mondrian Standard display views in memory, so its embedded
+base config alone is not a usable external-host contract. The SDR interchange
+export resolves the authoritative Linear Rec.2020 to Mondrian Standard SDR v2
+display processor, materializes that processor as a GroupTransform, and writes
+the exact graph as CTF beside a minimal OCIO config and hash manifest. A sampled
+cube is not used. An exhaustive 13 by 13 by 13 test domain from -0.125 through
+16 verifies the reloaded external processor against the authoritative processor
+to at most 1e-7 RGB error and bit-exact alpha.
+
+Cross-application capture preserves export intent. Scene-linear interchange
+uses a direct `Colorimetric(LinearRec2020)` target. SDR and PQ presentation
+artifacts use `RenderingView`, which resolves the selected Project engine view;
+rewriting those presets as direct colorimetric encodings would bypass Mondrian's
+display transform and invalidate the comparison.
 
 Renderer's `cross_application_qualification` Module deepens the existing
 `color_reference` import and `color_accuracy` Interfaces; App and validation

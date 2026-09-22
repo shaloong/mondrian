@@ -2745,12 +2745,17 @@ mod tests {
             eprintln!("skipped: MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set");
             return;
         };
-        let (native_entered_tx, native_entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (native_started_tx, native_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (native_owned_tx, native_owned_rx) = std::sync::mpsc::sync_channel(1);
         let decoder = PersistentFfmpegAudioWindowDecoder::with_native_spawn_for_test(
             AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
             Arc::new(move |command| {
-                let _ = native_entered_tx.send(());
-                command.spawn()
+                let _ = native_started_tx.send(Instant::now());
+                let child = command.spawn();
+                if child.is_ok() {
+                    let _ = native_owned_tx.send(Instant::now());
+                }
+                child
             }),
         );
         let cache = Arc::new(AudioSourceCache::with_decoder(
@@ -2772,37 +2777,42 @@ mod tests {
                 AudioSourceSelection::from_stream(&stream, MediaFileFingerprint::capture(&path)),
             )
             .expect("open bounded source");
+        let channels = reader.channel_layout().channel_count();
         let cancellation = ExecutionCancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::spawn(move || {
-            let mut destination = vec![0.0; 2_048 * 2];
+            let mut destination = vec![0.0; 2_048 * channels];
             reader.read_interleaved_cancellable(0, 2_048, &mut destination, &worker_cancellation)
         });
-        // Observe the actual OS call, not the earlier physical reservation: a
-        // queued cancellation could correctly avoid creating any child at all.
-        let native_entered = native_entered_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Observe entry into the synchronous OS spawn call. No child handle exists
+        // until that call returns, so cancellation must return logically without
+        // waiting for it; physical retirement is measured from owner acquisition.
+        let native_started_at = native_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("native spawn must begin");
         let canceled_at = Instant::now();
         cancellation.cancel();
         let error = worker.join().expect("decode worker returns").expect_err("decode cancels");
         let read_return_elapsed = canceled_at.elapsed();
-        // Logical cancellation returns before asynchronous physical retirement.
-        // Both observations retain the same original 50 ms qualification limit.
-        let physical_deadline = canceled_at + Duration::from_millis(50);
+        let native_owned_at = native_owned_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("native spawn must return ownership");
+        let physical_retirement_limit = Duration::from_millis(50);
+        let physical_deadline = native_owned_at + physical_retirement_limit;
         while Instant::now() < physical_deadline && cache.diagnostics().decoder_sessions != 0 {
             std::thread::yield_now();
         }
         let physical_release_elapsed = canceled_at.elapsed();
+        let physical_release_after_ownership = native_owned_at.elapsed();
+        let native_spawn_elapsed = native_owned_at.saturating_duration_since(native_started_at);
         let diagnostics = cache.diagnostics();
         let receipt = Arc::try_unwrap(cache)
             .ok()
             .expect("only the test owns the source cache")
             .shutdown_until(Instant::now() + Duration::from_secs(2));
-        eprintln!("real-child cancellation: read={read_return_elapsed:?}, physical_observation={physical_release_elapsed:?}, remaining={}, receipt={receipt:?}", diagnostics.decoder_sessions);
+        eprintln!("real-child cancellation: read={read_return_elapsed:?}, spawn={native_spawn_elapsed:?}, physical_total={physical_release_elapsed:?}, physical_after_ownership={physical_release_after_ownership:?}, remaining={}, receipt={receipt:?}", diagnostics.decoder_sessions);
         assert!(receipt.all_resources_released(), "{receipt:?}");
-        assert!(
-            native_entered,
-            "real native spawn must have begun before cancellation"
-        );
+
         assert_eq!(receipt.child_processes_observed, 1);
         assert_eq!(
             receipt.stdout_pump_threads_observed,
@@ -2818,8 +2828,8 @@ mod tests {
             read_return_elapsed
         );
         assert!(
-            physical_release_elapsed <= Duration::from_millis(50),
-            "physical cancellation observation exceeded 50 ms: {physical_release_elapsed:?}; remaining={}",
+            physical_release_after_ownership <= physical_retirement_limit,
+            "physical cancellation after native ownership exceeded {physical_retirement_limit:?}: {physical_release_after_ownership:?}; total={physical_release_elapsed:?}; spawn={native_spawn_elapsed:?}; remaining={}",
             diagnostics.decoder_sessions
         );
         assert!(error.to_string().contains("canceled"));

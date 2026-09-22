@@ -1375,14 +1375,14 @@ fn media_preview_job_queue_drops_expired_playback_current_at_dequeue() {
         .recv_for_worker_outcome(MediaPreviewWorkerLane::Playback)
         .expect("expired playback job should produce a structured queue outcome")
     {
-        MediaPreviewJobQueueReceive::DroppedExpired(expired_job) => {
+        MediaPreviewJobQueueReceive::DroppedExpired { job: expired_job, .. } => {
             assert_eq!(expired_job.key, expired_playback);
             assert_eq!(
                 expired_job.access_mode,
                 PreviewDecodeAccessMode::PlaybackCursor
             );
         }
-        MediaPreviewJobQueueReceive::Job(job) => {
+        MediaPreviewJobQueueReceive::Job { job, .. } => {
             panic!("expired playback job must not be dispatched for decode: {job:?}");
         }
     }

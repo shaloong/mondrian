@@ -41,9 +41,29 @@ frame, then serialize the observed settings plus `bpy.app.version_string` and
 build identity. Pin the external OCIO config bytes through `OCIO`; a missing
 view is a terminal failure and cannot fall back to another view.
 
+The embedded base config is not an external interoperability package because
+Mondrian assembles its product display views in memory. Generate the exact SDR
+package into a fresh directory before capture:
+
+```text
+cargo run -p mondrian-core --bin mondrian-ocio-package -- <fresh-output-directory>
+```
+
+The command publishes `config.ocio`, `mondrian-standard-sdr-v2.ctf`, and a
+hash manifest as one directory. The CTF serializes the authoritative OCIO
+processor graph; it is not a sampled LUT. Bind all three files into the capture
+request and retain the manifest hashes with the application evidence.
+
 Scene-linear EXR and display-transformed output are separate lanes. Blender's
 Windows file-output evidence does not qualify its Viewer, OS HDR, or physical
 display behavior.
+
+Blender 5.2.0 LTS build `fbe6228777e7` loaded the generated package and rendered
+the 120-frame analytic project with the requested display, view, look, and
+linear output-space read back exactly. Its scene-linear EXR matched Mondrian's
+EXR bit for bit. Its SDR PNG differed from Mondrian by at most one 8-bit code
+per RGBA channel after Mondrian used its rendering-view export contract. These
+results qualify the declared file-output path only.
 
 Official references:
 

@@ -416,8 +416,9 @@ impl PreviewDecodeSessionContext {
     /// A shared App worker may own a cold Playback source and interactive
     /// Sessions at different times. Family transitions therefore retire the
     /// obsolete codecs rather than destroying unrelated source locality. Healthy
-    /// isolated packet sources may remain within the existing source-slot budget;
-    /// full clearing consumes those sources and their child processes.
+    /// isolated packet sources may remain within the existing source-slot budget on
+    /// platforms whose file I/O permits replacement of an open source. Windows
+    /// closes them here so family retirement also releases the source file handle.
     /// Immutable device roots retain only the pool's existing idle allowance;
     /// full context clearing and explicit pressure trimming release those roots.
     pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
@@ -425,10 +426,16 @@ impl PreviewDecodeSessionContext {
         if !self.sessions.family_is_empty(family) {
             self.execution_observer
                 .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-            self.sessions.clear_family(
-                family,
-                self.resources.session_residency_config().source_capacity(),
-            );
+            // FFmpeg's default Windows file I/O does not grant delete sharing.
+            // Retaining an idle demux child would therefore prevent proxy rebuilds
+            // and atomic source replacement after the codec family is retired.
+            // Other platforms keep the bounded source-locality optimization.
+            let source_capacity = if cfg!(windows) {
+                0
+            } else {
+                self.resources.session_residency_config().source_capacity()
+            };
+            self.sessions.clear_family(family, source_capacity);
             self.execution_observer.finish_idle();
         }
     }
@@ -1088,6 +1095,31 @@ pub(super) fn select_decoded_temporal_candidate(
     }
 }
 
+pub(super) fn duration_only_selection_is_unconfirmed(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+    allow_unconfirmed_terminal_duration: bool,
+) -> bool {
+    access_mode != PreviewDecodeAccessMode::ScrubCursor
+        && !allow_unconfirmed_terminal_duration
+        && after.is_none()
+        && before
+            .is_some_and(|extent| requested_pts > extent.start_pts && extent.covers(requested_pts))
+}
+
+pub(super) fn retained_selection_is_exact_and_confirmed(
+    requested_pts: i64,
+    access_mode: PreviewDecodeAccessMode,
+    before: Option<DecodedTemporalExtent>,
+    after: Option<DecodedTemporalExtent>,
+) -> bool {
+    !duration_only_selection_is_unconfirmed(requested_pts, access_mode, before, after, false)
+        && select_decoded_temporal_candidate(requested_pts, access_mode, before, after)
+            .is_some_and(|(_, extent)| extent.covers(requested_pts))
+}
+
 pub(super) fn decoded_temporal_candidate_within_selection_distance(
     selected_extent: DecodedTemporalExtent,
     requested_pts: i64,
@@ -1435,19 +1467,6 @@ impl RetainedDecodedCandidateWindow {
         })
     }
 
-    fn selected_extent(
-        &self,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> Option<DecodedTemporalExtent> {
-        select_decoded_temporal_candidate(
-            self.target_pts,
-            access_mode,
-            self.before().map(|candidate| candidate.extent),
-            self.after().map(|candidate| candidate.extent),
-        )
-        .map(|(_, extent)| extent)
-    }
-
     fn take_successor(
         &mut self,
         selected_extent: DecodedTemporalExtent,
@@ -1774,6 +1793,52 @@ impl PreviewDecodeSession {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
         };
+        let mut preopened_software_decoder = None;
+        if let Some(candidate_backend) = hardware_decode_plan.probe.candidate_backend
+            && let Some(identity) = hardware_device_context_pool
+                .renderer_device_identity(candidate_backend, hardware_decode_device_selector)
+            && hardware_decode_plan.requires_stream_geometry_probe(
+                identity,
+                codec_id,
+                stream_profile,
+            )
+        {
+            let probe_context =
+                preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
+            let probe_decoder =
+                probe_context.decoder().video().map_err(|error| MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: format!(
+                        "software decoder geometry probe failed before hardware admission: {error}"
+                    ),
+                })?;
+            let (coded_width, coded_height) = unsafe {
+                let raw = probe_decoder.as_ptr();
+                (
+                    (*raw).coded_width.max(0) as u32,
+                    (*raw).coded_height.max(0) as u32,
+                )
+            };
+            if hardware_decode_plan.apply_stream_geometry(
+                identity,
+                codec_id,
+                stream_profile,
+                coded_width,
+                coded_height,
+            ) {
+                if hardware_decode_request.requires_gpu_residency() {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: hardware_decode_plan.probe.reason.clone(),
+                    });
+                }
+                preview_trace(format!(
+                    "[preview] {}, fallback software",
+                    hardware_decode_plan.probe.reason
+                ));
+                preopened_software_decoder = Some(probe_decoder);
+            }
+        }
 
         let mut hardware_decode_context_state = None;
         let mut hardware_device_context = None;
@@ -1868,13 +1933,18 @@ impl PreviewDecodeSession {
             Some(decoder) => decoder,
             None => {
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
-                preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
-                    .decoder()
-                    .video()
-                    .map_err(|error| MondrianError::DecodeFailed {
-                        asset_id: path.display().to_string(),
-                        reason: error.to_string(),
-                    })?
+                match preopened_software_decoder {
+                    Some(decoder) => decoder,
+                    None => {
+                        preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
+                            .decoder()
+                            .video()
+                            .map_err(|error| MondrianError::DecodeFailed {
+                                asset_id: path.display().to_string(),
+                                reason: error.to_string(),
+                            })?
+                    }
+                }
             }
         };
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
@@ -2673,7 +2743,8 @@ impl PreviewDecodeSession {
                                   target_height: u32,
                                   path: &Path,
                                   before: Option<&RetainedDecodedCandidate>,
-                                  after: Option<&RetainedDecodedCandidate>|
+                                  after: Option<&RetainedDecodedCandidate>,
+                                  allow_unconfirmed_terminal_duration: bool|
          -> Result<
             Option<(
                 DecodedTemporalExtent,
@@ -2686,6 +2757,15 @@ impl PreviewDecodeSession {
             }
             let before_extent = before.map(|candidate| candidate.extent);
             let after_extent = after.map(|candidate| candidate.extent);
+            if duration_only_selection_is_unconfirmed(
+                target_pts,
+                policy.access_mode,
+                before_extent,
+                after_extent,
+                allow_unconfirmed_terminal_duration,
+            ) {
+                return Ok(None);
+            }
             let Some((candidate, selected_extent)) = select_decoded_temporal_candidate(
                 target_pts,
                 policy.access_mode,
@@ -2736,9 +2816,12 @@ impl PreviewDecodeSession {
             Ok(Some((selected_extent, frame, retained_selected_frame)))
         };
 
-        let retained_selection_is_exact = candidates
-            .selected_extent(policy.access_mode)
-            .is_some_and(|extent| extent.covers(target_pts));
+        let retained_selection_is_exact = retained_selection_is_exact_and_confirmed(
+            target_pts,
+            policy.access_mode,
+            candidates.before().map(|candidate| candidate.extent),
+            candidates.after().map(|candidate| candidate.extent),
+        );
         if retained_selection_is_exact {
             self.duplicate_decoded_pts = candidates.duplicate_pts();
             candidates.validate_exact_ordering(self.path.as_path(), policy.access_mode)?;
@@ -2752,6 +2835,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )?
             else {
                 return Err(MondrianError::DecodeFailed {
@@ -2812,6 +2896,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            false,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -2941,6 +3026,7 @@ impl PreviewDecodeSession {
                 self.path.as_path(),
                 candidates.before(),
                 candidates.after(),
+                false,
             )? {
                 if should_cancel() {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -3021,6 +3107,7 @@ impl PreviewDecodeSession {
             self.path.as_path(),
             candidates.before(),
             candidates.after(),
+            true,
         )? {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));

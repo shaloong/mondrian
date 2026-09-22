@@ -94,11 +94,15 @@ across Platform and Viewer lanes.
 
 ## Required rows and native evidence
 
-- Windows uses the active DX12 hardware adapter. ICC evidence first uses the
-  active DisplayConfig adapter LUID/source ID with
-  `ColorProfileGetDisplayDefault`, including Advanced Color profiles, and only
-  then falls back to the WCS device default (`CPT_ICC + CPST_NONE`). Advanced
-  Color active state remains independently proven by DisplayConfig.
+- Windows uses the active DX12 hardware adapter. ICC evidence binds the active
+  DisplayConfig adapter LUID/source ID and its exact SDR/WCG/HDR mode, then asks
+  `ColorProfileGetDisplayDefault` for the matching association subtype. HDR uses
+  `CPST_EXTENDED_DISPLAY_COLOR_MODE`; SDR and Advanced Color WCG use
+  `CPST_STANDARD_DISPLAY_COLOR_MODE`. WCS (`CPT_ICC + CPST_NONE`) is a
+  standard-mode-only compatibility fallback. Missing HDR associations remain
+  missing rather than borrowing an SDR profile. Windows 11 qualification also
+  requires the INFO_2 active-mode result; the legacy Advanced Color bitfield is
+  admitted only when the OS explicitly reports INFO_2 as unsupported.
 - macOS uses the active Metal hardware adapter. CoreGraphics supplies ICC and
   display color-space evidence; AppKit supplies EDR state/headroom. A PQ program
   scenario is qualified through the linear extended-range EDR carrier; the row

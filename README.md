@@ -70,7 +70,7 @@ cd mondrian
 # 安装与 CI 同构的 Windows 媒体运行时
 git clone https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom,nvcodec]:x64-windows" --recurse
 
 # Debug 构建
 cargo build

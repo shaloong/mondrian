@@ -153,6 +153,7 @@ windows = { version = "0.62", features = [
     "Win32_Media_Multimedia",
     "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Performance",
     "Win32_System_Threading",
 ] }
 
