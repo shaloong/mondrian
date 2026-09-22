@@ -214,6 +214,9 @@ pub struct RealtimeVisualFrameEvidence {
     pub presentation_output_leases: u64,
     /// Frames producing GPU scope products.
     pub program_scopes_frames: u64,
+    /// Scope frames that used exact hardware subgroup atomic coalescing.
+    #[serde(default)]
+    pub program_scope_subgroup_frames: u64,
     /// Native working-linear composite operations.
     pub gpu_native_composites: u64,
     /// Composites that proved an opaque Normal stack and used one accumulator.

@@ -317,6 +317,9 @@ fn measure_scenario(
         frames.program_scopes_frames = frames
             .program_scopes_frames
             .saturating_add(u64::from(record.program_scopes.is_some()));
+        frames.program_scope_subgroup_frames = frames.program_scope_subgroup_frames.saturating_add(
+            u64::from(record.program_scopes.as_ref().is_some_and(|scopes| scopes.used_subgroups)),
+        );
         frames.gpu_native_composites = frames
             .gpu_native_composites
             .saturating_add(record.compositing_diagnostics.gpu_native_composites);
@@ -485,6 +488,7 @@ async fn create_gpu_context() -> Result<Option<GpuContext>> {
     let required_features = timestamp_features
         | native_video_texture_device_features(adapter.features())
         | ocio_lut_filtering_device_features(adapter.features())
+        | mondrian_renderer::program_scopes_device_features(adapter.features())
         | working_texture_features;
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("mondrian-realtime-visual-matrix-device"),

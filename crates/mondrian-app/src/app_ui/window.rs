@@ -2112,6 +2112,7 @@ fn request_app_ui_device(
     let descriptor = wgpu::DeviceDescriptor {
         required_features: native_video_texture_device_features(adapter.features())
             | ocio_lut_filtering_device_features(adapter.features())
+            | mondrian_renderer::program_scopes_device_features(adapter.features())
             | working_texture_features,
         ..wgpu::DeviceDescriptor::default()
     };

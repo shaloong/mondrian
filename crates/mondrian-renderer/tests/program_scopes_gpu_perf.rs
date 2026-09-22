@@ -43,7 +43,8 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("mondrian-program-scopes-4k-gate-device"),
-            required_features: timestamp_features,
+            required_features: timestamp_features
+                | mondrian_renderer::program_scopes_device_features(adapter.features()),
             ..wgpu::DeviceDescriptor::default()
         })
         .await

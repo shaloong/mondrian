@@ -5,6 +5,7 @@
 //! pass turns those counts into sampleable display textures without a normal
 //! CPU readback path.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -163,6 +164,8 @@ pub struct GpuProgramScopesRecord {
     pub waveform_view: wgpu::TextureView,
     /// Vectorscope visualization (`256 x 256`, RGBA8 linear carrier).
     pub vectorscope_view: wgpu::TextureView,
+    /// True when this frame used hardware subgroup atomic coalescing.
+    pub used_subgroups: bool,
     _counts: Arc<wgpu::Buffer>,
 }
 
@@ -184,6 +187,8 @@ pub struct GpuProgramScopesRuntimeDiagnostics {
     pub texture_allocations: u64,
     /// Frames for which aggregation and visualization were recorded.
     pub frames_recorded: u64,
+    /// Recorded frames that used exact hardware subgroup atomic coalescing.
+    pub subgroup_frames_recorded: u64,
 }
 
 /// Retained, device-local Program Output scopes executor.
@@ -301,11 +306,17 @@ impl GpuProgramScopesRuntime {
             };
             pass.set_pipeline(aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
-            pass.dispatch_workgroups(
-                input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
-                input_height.div_ceil(WORKGROUP_SIZE),
-                1,
-            );
+            if pipelines.use_subgroups {
+                let row_invocations = input_width.div_ceil(PIXELS_PER_INVOCATION);
+                let total_invocations = row_invocations.saturating_mul(input_height);
+                pass.dispatch_workgroups(total_invocations.div_ceil(256), 1, 1);
+            } else {
+                pass.dispatch_workgroups(
+                    input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
+                    input_height.div_ceil(WORKGROUP_SIZE),
+                    1,
+                );
+            }
         }
 
         {
@@ -332,12 +343,17 @@ impl GpuProgramScopesRuntime {
             );
         }
         self.diagnostics.frames_recorded = self.diagnostics.frames_recorded.saturating_add(1);
+        if pipelines.use_subgroups {
+            self.diagnostics.subgroup_frames_recorded =
+                self.diagnostics.subgroup_frames_recorded.saturating_add(1);
+        }
         Ok(GpuProgramScopesRecord {
             request,
             buffer_layout: resources.layout,
             histogram_view: resources.histogram_view.clone(),
             waveform_view: resources.waveform_view.clone(),
             vectorscope_view: resources.vectorscope_view.clone(),
+            used_subgroups: pipelines.use_subgroups,
             _counts: Arc::clone(&resources.counts),
         })
     }
@@ -510,6 +526,7 @@ struct ScopesPipelines {
     aggregate_rgb_pipeline: wgpu::ComputePipeline,
     reduce_histogram_pipeline: wgpu::ComputePipeline,
     display_pipeline: wgpu::ComputePipeline,
+    use_subgroups: bool,
 }
 
 impl ScopesPipelines {
@@ -543,9 +560,14 @@ impl ScopesPipelines {
                     storage_texture_layout_entry(4),
                 ],
             });
+        let use_subgroups = device.features().contains(wgpu::Features::SUBGROUP);
         let aggregate_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("program-scopes-aggregate-shader"),
-            source: wgpu::ShaderSource::Wgsl(AGGREGATE_SHADER.into()),
+            label: Some(if use_subgroups {
+                "program-scopes-subgroup-aggregate-shader"
+            } else {
+                "program-scopes-aggregate-shader"
+            }),
+            source: wgpu::ShaderSource::Wgsl(aggregate_shader_source(use_subgroups)),
         });
         let display_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("program-scopes-display-shader"),
@@ -605,6 +627,7 @@ impl ScopesPipelines {
             aggregate_rgb_pipeline,
             reduce_histogram_pipeline,
             display_pipeline,
+            use_subgroups,
         }
     }
 }
@@ -646,6 +669,126 @@ fn storage_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+const GROUPED_GLOBAL_SHADER: &str = r#"fn add_grouped_global(keys: vec4<u32>) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    if k0 != INVALID_KEY {
+        atomicAdd(
+            &counts[k0],
+            1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        );
+    }
+    if k1 != INVALID_KEY && k1 != k0 {
+        atomicAdd(
+            &counts[k1],
+            1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        );
+    }
+    if k2 != INVALID_KEY && k2 != k0 && k2 != k1 {
+        atomicAdd(&counts[k2], 1u + select(0u, 1u, k3 == k2));
+    }
+    if k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2 {
+        atomicAdd(&counts[k3], 1u);
+    }
+}"#;
+
+const GROUPED_SUBGROUP_SHADER: &str = r#"fn first_ballot_lane(mask: vec4<u32>) -> u32 {
+    if mask.x != 0u { return firstTrailingBit(mask.x); }
+    if mask.y != 0u { return 32u + firstTrailingBit(mask.y); }
+    if mask.z != 0u { return 64u + firstTrailingBit(mask.z); }
+    return 96u + firstTrailingBit(mask.w);
+}
+
+fn add_subgroup_key(key: u32, amount: u32, enabled: bool, subgroup_invocation_id: u32) {
+    let active_mask = subgroupBallot(enabled);
+    if all(active_mask == vec4<u32>(0u)) {
+        return;
+    }
+    let leader = first_ballot_lane(active_mask);
+    let leader_key = subgroupShuffle(key, leader);
+    let matches_leader = enabled && key == leader_key;
+    let leader_total = subgroupAdd(select(0u, amount, matches_leader));
+    if subgroup_invocation_id == leader {
+        atomicAdd(&counts[leader_key], leader_total);
+    }
+    if enabled && !matches_leader {
+        atomicAdd(&counts[key], amount);
+    }
+}
+
+fn add_grouped_subgroup(keys: vec4<u32>, subgroup_invocation_id: u32) {
+    let k0 = keys.x;
+    let k1 = keys.y;
+    let k2 = keys.z;
+    let k3 = keys.w;
+    add_subgroup_key(
+        k0,
+        1u + select(0u, 1u, k1 == k0) + select(0u, 1u, k2 == k0) + select(0u, 1u, k3 == k0),
+        k0 != INVALID_KEY,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k1,
+        1u + select(0u, 1u, k2 == k1) + select(0u, 1u, k3 == k1),
+        k1 != INVALID_KEY && k1 != k0,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k2,
+        1u + select(0u, 1u, k3 == k2),
+        k2 != INVALID_KEY && k2 != k0 && k2 != k1,
+        subgroup_invocation_id,
+    );
+    add_subgroup_key(
+        k3,
+        1u,
+        k3 != INVALID_KEY && k3 != k0 && k3 != k1 && k3 != k2,
+        subgroup_invocation_id,
+    );
+}"#;
+
+fn aggregate_shader_source(use_subgroups: bool) -> Cow<'static, str> {
+    if !use_subgroups {
+        return Cow::Borrowed(AGGREGATE_SHADER);
+    }
+    let mut shader = AGGREGATE_SHADER.replacen(GROUPED_GLOBAL_SHADER, GROUPED_SUBGROUP_SHADER, 1);
+    shader = shader.replacen(
+        "fn aggregate(gid: vec3<u32>, rgb_waveform: bool) {",
+        "fn aggregate(gid: vec3<u32>, rgb_waveform: bool, subgroup_invocation_id: u32) {",
+        1,
+    );
+    for name in [
+        "red_histogram",
+        "green_histogram",
+        "blue_histogram",
+        "luma_histogram",
+        "waveform_red_or_luma",
+        "waveform_green",
+        "waveform_blue",
+        "vectorscope",
+    ] {
+        shader = shader.replace(
+            &format!("add_grouped_global({name});"),
+            &format!("add_grouped_subgroup({name}, subgroup_invocation_id);"),
+        );
+    }
+    shader = shader.replacen(
+        "@compute @workgroup_size(16, 16, 1)\nfn main_luma(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, false);",
+        "@compute @workgroup_size(256, 1, 1)\nfn main_luma(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, false, subgroup_invocation_id);",
+        1,
+    );
+    shader = shader.replacen(
+        "@compute @workgroup_size(16, 16, 1)\nfn main_rgb(@builtin(global_invocation_id) gid: vec3<u32>) {\n    aggregate(gid, true);",
+        "@compute @workgroup_size(256, 1, 1)\nfn main_rgb(\n    @builtin(global_invocation_id) linear_gid: vec3<u32>,\n    @builtin(subgroup_invocation_id) subgroup_invocation_id: u32,\n) {\n    let row_invocations = (uniforms.input_width + 3u) / 4u;\n    let gid = vec3<u32>(linear_gid.x % row_invocations, linear_gid.x / row_invocations, 0u);\n    aggregate(gid, true, subgroup_invocation_id);",
+        1,
+    );
+    debug_assert!(!shader.contains("add_grouped_global("));
+    debug_assert!(shader.contains("@builtin(subgroup_invocation_id)"));
+    Cow::Owned(shader)
 }
 
 const AGGREGATE_SHADER: &str = r#"
@@ -994,6 +1137,21 @@ mod tests {
         assert_eq!(bounded.waveform_width(), 1024);
     }
 
+    #[test]
+    fn subgroup_shader_is_an_optional_exact_aggregation_variant() {
+        let fallback = aggregate_shader_source(false);
+        assert!(fallback.contains("fn add_grouped_global"));
+        assert!(!fallback.contains("@builtin(subgroup_invocation_id)"));
+        assert!(fallback.contains("@compute @workgroup_size(16, 16, 1)"));
+
+        let subgroup = aggregate_shader_source(true);
+        assert!(subgroup.contains("fn add_grouped_subgroup"));
+        assert!(subgroup.contains("@builtin(subgroup_invocation_id)"));
+        assert!(subgroup.contains("@compute @workgroup_size(256, 1, 1)"));
+        assert!(!subgroup.contains("fn add_grouped_global"));
+        assert!(!subgroup.contains("add_grouped_global("));
+    }
+
     #[tokio::test]
     async fn gpu_atomic_histograms_match_cpu_reference_without_frame_readback() {
         let Ok(context) = GpuContext::new().await else {
@@ -1107,6 +1265,14 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 1);
+        assert_eq!(
+            record.used_subgroups,
+            context.device.features().contains(wgpu::Features::SUBGROUP)
+        );
+        assert_eq!(
+            runtime.diagnostics().subgroup_frames_recorded,
+            u64::from(record.used_subgroups)
+        );
 
         let mut warm_encoder =
             context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1131,6 +1297,10 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 2);
+        assert_eq!(
+            runtime.diagnostics().subgroup_frames_recorded,
+            2 * u64::from(record.used_subgroups)
+        );
     }
 
     #[tokio::test]

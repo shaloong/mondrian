@@ -167,7 +167,7 @@ pub use color_transform::{
 pub use context::GpuContext;
 pub use context::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference,
+    program_scopes_device_features, request_adapter_with_native_video_preference,
 };
 pub use creative_lut_gpu::{
     GpuCreativeLutCacheConfig, GpuCreativeLutCacheDiagnostics, GpuCreativeLutError,

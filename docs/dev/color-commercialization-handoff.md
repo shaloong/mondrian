@@ -1486,3 +1486,35 @@ immutable hardware constant: fusing exact aggregation with the Program Output
 boundary, or using a benchmark-proven hierarchical/subgroup reduction on
 supported adapters, remain architectural opportunities. Neither may weaken the
 sealed exact-resolution, exact-bin, every-frame contract.
+
+The next scope optimization retained exact output while reducing global atomic
+contention on adapters with hardware subgroup support. Device creation now
+requests wgpu SUBGROUP only when the adapter advertises it. The subgroup
+shader preserves every input pixel and exact integer bin count: one matching
+key group is summed within each subgroup, while unmatched keys execute the
+original atomic operation. Unsupported devices use the unchanged 16x16
+fallback. The production App window, headless Viewer, standalone Renderer, and
+hardware qualification device paths all negotiate the same optional feature.
+Runtime and sealed-report evidence record subgroup use per frame.
+
+The final unchanged sealed workload measured 23.448 ms GPU p95 at 4K60
+(12.009 ms composite, 2.777 ms Program Output, 8.688 ms scopes) and 51.601 ms
+at 8K30 (21.192 ms composite, 8.999 ms Program Output, 21.729 ms scopes).
+All 60 measured 4K frames and all 30 measured 8K frames reported subgroup
+aggregation. Relative to the preceding single-accumulator result, scope time
+fell 6.5% at 4K and 2.5% at 8K; total time fell 1.4% and 1.6%. Relative to the
+unoptimized 28.822/79.623 ms baseline, total time is lower by 18.6%/35.2%.
+Every correctness, residency, native-DX12, zero-transfer, warm-reuse, CPU
+recording, and teardown check passed. Only the unchanged 16 ms/32 ms total-GPU
+deadlines failed. The temporary evidence JSONL SHA-256 was
+F248E42AD0E3E04B3CAD6E37A683837239F01081031D6070B9B5E73329802181.
+
+Several general alternatives were measured against the same sealed workload
+and reverted. Splitting display dispatches produced no stable gain and added
+pipeline switches. A 1,024-entry workgroup-local hash preserved exact counts
+but increased scopes to about 15.5 ms at 4K and 44.9 ms at 8K. A 32x8
+workgroup was mixed and regressed 8K. Fusing opaque-Normal layers into one
+render pass was pixel-correct but essentially unchanged or slightly slower.
+None of these experiments inspected fixture names, hashes, dimensions beyond
+ordinary dispatch geometry, or pixel patterns to select a qualification-only
+route; no workload-specific shortcut was retained.

@@ -926,6 +926,7 @@ impl HeadlessViewerGpuAdapter {
                 let descriptor = wgpu::DeviceDescriptor {
                     required_features: native_video_texture_device_features(supported_features)
                         | ocio_lut_filtering_device_features(supported_features)
+                        | mondrian_renderer::program_scopes_device_features(supported_features)
                         | working_texture_features
                         | viewer_suffix_timing_features
                         | native_import_timing_features,

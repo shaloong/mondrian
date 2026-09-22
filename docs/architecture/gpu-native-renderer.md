@@ -1623,6 +1623,17 @@ integer histogram counters before visualization; luma mode applies the inverse
 choice and derives its luma histogram from its waveform. CPU-reference readback
 tests cover both modes, high-entropy bins, excursions, vectors, and tail pixels.
 
+When the adapter advertises wgpu subgroup operations, device creation requests
+that optional feature and the aggregation shader uses a one-dimensional
+256-invocation workgroup. For each four-pixel key vector it elects one active
+key group in the hardware subgroup, sums that group's integer increments, and
+issues one exact global atomic; unmatched keys retain the original exact
+atomic operation. The result does not depend on media identity, pixel-pattern
+recognition, decimation, or relaxed binning. Adapters without subgroup support
+retain the original 16x16 shader and dispatch. Per-frame runtime evidence
+records which variant executed, and CPU-reference tests cover low-entropy,
+high-entropy, floating-point excursion, vector, and tail-pixel inputs.
+
 The producer uses the bounded asynchronous Viewer timestamp-query ring. It
 reports complete-frame and per-stage GPU timestamps separately from CPU
 command-recording time, and records composite, fusion, color-stage, scope,

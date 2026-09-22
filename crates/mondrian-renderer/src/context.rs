@@ -168,6 +168,11 @@ pub fn ocio_lut_filtering_device_features(adapter_features: wgpu::Features) -> w
     adapter_features & wgpu::Features::FLOAT32_FILTERABLE
 }
 
+/// Optional subgroup operations used to reduce exact Program Scope atomics.
+pub fn program_scopes_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    adapter_features & wgpu::Features::SUBGROUP
+}
+
 /// Request an adapter while preserving native-video import on platforms where
 /// the renderer has a backend-specific native import path.
 ///
@@ -302,6 +307,7 @@ impl GpuContext {
         let device_descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(adapter.features())
                 | ocio_lut_filtering_device_features(adapter.features())
+                | program_scopes_device_features(adapter.features())
                 | working_texture_features,
             ..wgpu::DeviceDescriptor::default()
         };
@@ -322,7 +328,10 @@ impl GpuContext {
 mod tests {
     #[cfg(target_os = "windows")]
     use super::native_video_adapter_priority;
-    use super::{native_video_texture_device_features, ocio_lut_filtering_device_features};
+    use super::{
+        native_video_texture_device_features, ocio_lut_filtering_device_features,
+        program_scopes_device_features,
+    };
 
     #[test]
     fn ocio_lut_filtering_feature_is_requested_only_when_supported() {
@@ -332,6 +341,17 @@ mod tests {
                 wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::TIMESTAMP_QUERY,
             ),
             wgpu::Features::FLOAT32_FILTERABLE
+        );
+    }
+
+    #[test]
+    fn program_scope_subgroups_are_requested_only_when_supported() {
+        assert!(program_scopes_device_features(wgpu::Features::empty()).is_empty());
+        assert_eq!(
+            program_scopes_device_features(
+                wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY,
+            ),
+            wgpu::Features::SUBGROUP
         );
     }
 
