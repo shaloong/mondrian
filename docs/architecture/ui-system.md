@@ -14,8 +14,15 @@ have no key identity and no menu. UI actions carry stable key IDs and resolve
 the current author time at dispatch, so a stale menu cannot silently edit a
 different key after the curve changes.
 
-The status bar remains the persistent summary of current work. User-visible
-notifications should start as a small App-owned transient projection for
+The status bar remains the persistent summary of current work. Its status
+history is available by clicking the bar; the App retains at most 64
+messages and the popover shows eight at a time with wheel navigation. Active
+export progress cannot conceal a newer error status. This gives professional
+users a quiet, recoverable message surface while editing. A transient toast
+projection is still pending for completed long-running work and failures that
+need immediate attention; the history surface does not imply that every
+status hint should become a toast. User-visible notifications should start
+as a small App-owned transient projection for
 completed background work, failed actions, and decisions requiring attention.
 Deduplicate repeated failures by stable reason and operation identity, cap
 visible items, and preserve details in the existing bounded status history.

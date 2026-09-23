@@ -9,7 +9,9 @@ use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatu
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_timeline::Sequence;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_widgets::dock_panel::DockPanel;
@@ -50,7 +52,7 @@ use crate::app::ui_actions::{
     VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::waveform_service::AudioWaveformSource;
-use crate::app::AppState;
+use crate::app::{AppState, StatusLogEntry};
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 use crate::app_ui::menu_bar::MenuBar;
@@ -148,11 +150,33 @@ struct StatusBar {
     id: WidgetId,
     bounds: Rect,
     model: StatusBarModel,
+    history: Vec<StatusLogEntry>,
+    history_open: bool,
+    history_offset: usize,
 }
 
 impl StatusBar {
     fn set_model(&mut self, model: StatusBarModel) {
         self.model = model;
+    }
+
+    fn sync_history(&mut self, history: &[StatusLogEntry]) {
+        if self.history != history {
+            self.history = history.to_vec();
+            self.history_offset = self.history_offset.min(self.history.len().saturating_sub(8));
+        }
+    }
+
+    fn history_rect(&self) -> Rect {
+        let rows = self.history.len().clamp(1, 8);
+        let height = 34.0 + rows as f32 * 26.0;
+        let width = (self.bounds.width - 24.0).clamp(0.0, 520.0);
+        Rect::new(
+            self.bounds.x + 12.0,
+            (self.bounds.y - height - 6.0).max(0.0),
+            width,
+            height,
+        )
     }
 }
 
@@ -169,8 +193,55 @@ impl Widget for StatusBar {
         self.bounds = bounds;
     }
 
-    fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
-        EventResult::Ignored
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
+                ctx.focus.request_focus(self.id);
+                self.history_open = !self.history_open;
+                self.history_offset = 0;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none()
+                    && ctx.focus.focused_widget() == Some(self.id) =>
+            {
+                self.history_open = !self.history_open;
+                self.history_offset = 0;
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { position, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, .. } | UiEvent::MouseMove { position, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { .. } if self.history_open => {
+                self.history_open = false;
+                EventResult::Ignored
+            }
+            UiEvent::MouseWheel { position, delta, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                let max_offset = self.history.len().saturating_sub(8);
+                if *delta > 0.0 {
+                    self.history_offset = self.history_offset.saturating_add(1).min(max_offset);
+                } else if *delta < 0.0 {
+                    self.history_offset = self.history_offset.saturating_sub(1);
+                }
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.history_open => {
+                self.history_open = false;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -233,10 +304,63 @@ impl Widget for StatusBar {
             );
         }
         ctx.pop_clip();
+        if self.history_open {
+            let panel = self.history_rect();
+            if panel.width < 48.0 {
+                return;
+            }
+            ctx.encoder.draw_rect(panel, colors.popover, 8.0);
+            ctx.encoder.draw_text(
+                "最近通知",
+                font_size,
+                Point::new(panel.x + 12.0, panel.y + 10.0),
+                colors.popover_foreground,
+            );
+            if self.history.is_empty() {
+                ctx.encoder.draw_text(
+                    "暂无通知",
+                    font_size,
+                    Point::new(panel.x + 12.0, panel.y + 36.0),
+                    colors.muted_foreground,
+                );
+            } else {
+                for (index, entry) in
+                    self.history.iter().rev().skip(self.history_offset).take(8).enumerate()
+                {
+                    let text = elide_text_to_width(&entry.message, font_size, panel.width - 24.0);
+                    ctx.encoder.draw_text(
+                        &text,
+                        font_size,
+                        Point::new(panel.x + 12.0, panel.y + 36.0 + index as f32 * 26.0),
+                        if entry.is_error {
+                            colors.destructive_foreground
+                        } else {
+                            colors.popover_foreground
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        self.bounds.contains(point)
+        self.bounds.contains(point) || self.history_open && self.history_rect().contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Button)
+                .with_name(format!("最近通知，当前状态：{}", self.model.message))
+                .with_state(AccessibilityState {
+                    focusable: true,
+                    pressed: Some(self.history_open),
+                    ..AccessibilityState::default()
+                }),
+        )
     }
 }
 
@@ -269,7 +393,9 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
     let jobs = state.export_jobs_snapshot();
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
-    let (message, is_error, is_busy) = if let Some(job) = active_jobs.first() {
+    let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
+        (message.clone(), true, false)
+    } else if let Some(job) = active_jobs.first() {
         let message = match &job.status {
             JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
             JobStatus::Running { phase } => match job.progress.detail {
@@ -793,6 +919,7 @@ impl AppUiAppRoot {
             preferences.custom_workspace_layout.clone(),
             status_bar_model(state),
         );
+        root.status_bar.sync_history(&state.status_log);
         root.active_sequence = state.active_sequence().cloned();
         root.project_color_environment = state.project_color_environment().clone();
         root.new_sequence_defaults = state.new_sequence_defaults().clone();
@@ -859,6 +986,9 @@ impl AppUiAppRoot {
                 id: WidgetId::new(),
                 bounds: Rect::ZERO,
                 model: status_bar_model,
+                history: Vec::new(),
+                history_open: false,
+                history_offset: 0,
             },
             models,
             asset_folder_id: None,
@@ -1051,6 +1181,7 @@ impl AppUiAppRoot {
     ) -> bool {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
+        self.status_bar.sync_history(&state.status_log);
         let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
             viewer.retain_presentation_from(&self.models.viewer, state);
@@ -1128,6 +1259,7 @@ impl AppUiAppRoot {
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.set_model(status_bar_model(state));
+        self.status_bar.sync_history(&state.status_log);
         self.active_sequence = state.active_sequence().cloned();
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
@@ -2163,6 +2295,9 @@ impl Widget for AppUiAppRoot {
             return EventResult::Handled;
         }
         if self.title_bar.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        if self.status_bar.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
         self.dock.event(event, ctx)
@@ -4129,6 +4264,75 @@ mod tests {
         let elided = elide_text_to_width("A very long project status", font_size, 70.0);
         assert!(elided.ends_with("..."));
         assert!(estimate_text_width(&elided, font_size) <= 70.0);
+    }
+
+    #[test]
+    fn status_history_opens_scrolls_and_closes_without_blocking_editing() {
+        let mut state = AppState::new();
+        for index in 0..12 {
+            state.set_status_hint(format!("Activity {index}"), index == 11);
+        }
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(root.status_bar.history.len(), 12);
+        let bar_center = root.status_bar.bounds.center();
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseDown {
+                    position: bar_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(root.status_bar.history_open);
+        let history_center = root.status_bar.history_rect().center();
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseWheel {
+                    delta: 1.0,
+                    position: history_center,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(root.status_bar.history_offset, 1);
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseUp {
+                    position: history_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(!root.status_bar.history_open);
     }
 
     #[test]
