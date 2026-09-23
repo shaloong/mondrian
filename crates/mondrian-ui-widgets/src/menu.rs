@@ -51,7 +51,6 @@ use geometry::{
 /// keyboard navigation skips disabled items and separators.
 pub struct Dropdown {
     id: WidgetId,
-    #[allow(dead_code)]
     label: String,
     items: Vec<MenuItem>,
     bounds: Rect,
@@ -125,6 +124,11 @@ impl Dropdown {
     /// Top-level menu rows owned by this dropdown.
     pub fn items(&self) -> &[MenuItem] {
         &self.items
+    }
+
+    /// Current trigger label.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// Update only the trigger label while retaining the open menu, submenu,

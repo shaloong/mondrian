@@ -926,14 +926,11 @@ impl AppUiAppRoot {
             preferences.locale_preference,
             sys_locale::get_locale().as_deref(),
         );
+        let mut menu_bar =
+            MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
+        menu_bar.set_locale(preferences_model.locale);
         let mut root = Self::new_with_preferences(
-            TitleBar::new(
-                window_title_for_app_state(state),
-                MenuBar::for_app_state_with_shortcut_overrides(
-                    state,
-                    &preferences.shortcut_overrides,
-                ),
-            ),
+            TitleBar::new(window_title_for_app_state(state), menu_bar),
             models,
             preferences_model,
             preferences.workspace_preset,
@@ -1331,6 +1328,7 @@ impl AppUiAppRoot {
         preferences_model
             .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
+        self.title_bar.menu_bar_mut().set_locale(preferences_model.locale);
         self.sync_notifications(state, preferences_model.locale);
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);

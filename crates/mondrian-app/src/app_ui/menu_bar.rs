@@ -15,6 +15,7 @@ use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem, MenuIt
 use crate::app::AppState;
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::commands::command_by_id;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::shortcuts::{
     shortcut_label_for_action, shortcut_label_for_action_with_overrides, AppUiShortcutOverride,
 };
@@ -24,6 +25,14 @@ use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 pub const MENU_BAR_HEIGHT: f32 = 24.0;
 
 const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
+const MENU_BAR_LABEL_IDS: [&str; 6] = [
+    "menu-file",
+    "menu-edit",
+    "menu-view",
+    "menu-graphics",
+    "menu-window",
+    "menu-help",
+];
 
 /// Default Mondrian menu structure for app UI shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
@@ -299,6 +308,7 @@ pub struct MenuBar {
     menus: Vec<Dropdown>,
     bounds: Rect,
     content_right: f32,
+    locale: AppUiLocale,
 }
 
 impl Default for MenuBar {
@@ -321,6 +331,24 @@ impl MenuBar {
             menus,
             bounds: Rect::ZERO,
             content_right: 0.0,
+            locale: AppUiLocale::ZhCn,
+        }
+    }
+
+    /// Change menu trigger language while retaining every Dropdown's open and
+    /// focus state. This first rollout localizes the top-level menu labels.
+    pub fn set_locale(&mut self, locale: AppUiLocale) {
+        self.locale = locale;
+        self.apply_locale_labels();
+        self.layout(self.bounds);
+    }
+
+    fn apply_locale_labels(&mut self) {
+        let Ok(localizer) = Localizer::new(self.locale) else {
+            return;
+        };
+        for (menu, message_id) in self.menus.iter_mut().zip(MENU_BAR_LABEL_IDS) {
+            menu.set_label(localizer.text(message_id));
         }
     }
 
@@ -354,12 +382,14 @@ impl MenuBar {
                     Dropdown::new(label, items).with_trigger_style(DropdownTriggerStyle::MenuBar)
                 })
                 .collect();
+            self.apply_locale_labels();
             self.layout(self.bounds);
             return;
         }
         for (menu, (label, items)) in self.menus.iter_mut().zip(definitions) {
             menu.set_model(label, items);
         }
+        self.apply_locale_labels();
         self.layout(self.bounds);
     }
 
@@ -542,6 +572,30 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locale_switch_updates_retained_menu_triggers_and_layout() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 900.0, MENU_BAR_HEIGHT));
+        let identities = menu.menus.iter().map(Widget::id).collect::<Vec<_>>();
+        assert_eq!(menu.menus[0].label(), "文件");
+
+        menu.set_locale(AppUiLocale::EnUs);
+        assert_eq!(
+            menu.menus.iter().map(Dropdown::label).collect::<Vec<_>>(),
+            ["File", "Edit", "View", "Graphics", "Window", "Help"]
+        );
+        assert_eq!(
+            menu.menus.iter().map(Widget::id).collect::<Vec<_>>(),
+            identities
+        );
+        assert!(menu.trigger_index_at(trigger_point(&menu, 5)).is_some());
+
+        menu.refresh_for_app_state_with_shortcut_overrides(&AppState::new(), &[]);
+        assert_eq!(menu.menus[0].label(), "File");
+        menu.set_locale(AppUiLocale::Pseudo);
+        assert!(menu.menus[0].label().starts_with('⟦'));
+    }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");

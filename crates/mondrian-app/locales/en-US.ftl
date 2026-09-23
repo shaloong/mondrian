@@ -1,4 +1,10 @@
 app-name = Mondrian
+menu-file = File
+menu-edit = Edit
+menu-view = View
+menu-graphics = Graphics
+menu-window = Window
+menu-help = Help
 preferences-language = Interface language
 preferences-language-system = Follow system
 preferences-language-zh-cn = 简体中文

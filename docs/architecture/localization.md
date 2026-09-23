@@ -7,7 +7,9 @@ dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
 locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
-The initial catalogs cover the language selector and notification copy. Other
+The initial catalogs cover the language selector, notification copy, and the
+six top-level menu triggers. Locale changes update retained menu widgets and
+remeasure their trigger hit regions. Nested menu rows and other
 product surfaces still contain literal Chinese and must migrate before English
 can be advertised as a complete product language.
 
