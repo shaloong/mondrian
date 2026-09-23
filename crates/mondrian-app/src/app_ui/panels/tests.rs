@@ -2660,6 +2660,19 @@ fn timeline_model_maps_asset_drop_payload_to_stable_track_id() {
             frame: 24,
         })
         .is_none());
+
+    let file = PathBuf::from("E:/media/external.wav");
+    let file_payload = model
+        .file_drop_payload(TimelineFileDrop {
+            path: file.clone(),
+            track_ref: first_audio_ref,
+            frame: 18,
+        })
+        .expect("file drop payload");
+    assert_eq!(file_payload.path, file);
+    assert_eq!(file_payload.target_track_id, target_track_id);
+    assert_eq!(file_payload.position.frame, 18);
+    assert_eq!(file_payload.position.time_base, sequence.time_base());
 }
 
 #[test]

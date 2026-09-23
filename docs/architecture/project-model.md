@@ -477,9 +477,13 @@ SQLite transaction while a dependent operation examines the staged `AssetRecord`
 An error from that operation rolls back the row entirely, including folder and
 membership changes for a path already present in the Library. The callback
 must not re-enter `AssetLibrary`, because the database lock remains held.
-Timeline placement must also keep its authoring effects unpublished until the
-SQLite transaction commits; the Library transaction alone does not make an
-authoring edit atomic.
+Timeline placement prepares its Authoring Session edit inside that callback
+and installs it only after SQLite commits. Coupled publication preserves an
+existing Asset's folder when there is no explicit folder target. The Library
+records the highest coupled revision before releasing its database lock;
+`snapshot_database` rejects a persistence request whose author document was
+captured before that revision. Ordinary forward drift from independent Asset
+imports remains allowed.
 
 Single and multi-selection removal share one Library transaction. It
 deduplicates and preflights every requested visible Asset and folder before

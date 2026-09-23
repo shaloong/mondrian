@@ -731,6 +731,14 @@ once per completed batch. UI panels must not call `probe_media_info` or commit
 Asset candidates directly from action handling, drag/drop, or paint/layout
 code.
 
+An external Timeline drop admits one deferred file through the same bounded
+probe lanes. Deferred results carry the immutable candidate back to `AppState`
+without committing it in the import service. The App repeats current Track
+and source validation, then coordinates the Asset Library transaction with a
+prepared authoring edit. Its terminal counters are finalized only after that
+coupled placement succeeds or fails. A canceled or superseded probe never
+crosses the Library commit seam.
+
 Prepared import results cross an additional publication gate before SQLite
 mutation. That gate serializes the irreversible commit with Project-generation
 rebinding and user cancellation, so an intent that loses authority before the

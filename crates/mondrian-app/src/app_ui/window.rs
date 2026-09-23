@@ -4234,6 +4234,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::HoveredFile(path) => {
+                        session.last_cursor = current_native_file_point(&session.window, session.last_cursor);
                         let result = session.ui_runtime.route_hovered_file(
                             &session.window,
                             &mut session.router,
@@ -4262,6 +4263,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::DroppedFile(path) => {
+                        session.last_cursor = current_native_file_point(&session.window, session.last_cursor);
                         let ui_path = path.clone();
                         let paths = vec![path];
                         let result = session.ui_runtime.route_dropped_file(
@@ -7815,6 +7817,27 @@ fn native_file_hover_diagnostic(result: EventResult) -> Option<NativeFileDndDiag
 
 fn native_file_hover_cancelled_diagnostic(result: EventResult) -> Option<NativeFileDndDiagnostic> {
     (result == EventResult::Ignored).then_some(NativeFileDndDiagnostic::HoverCancelUnhandled)
+}
+
+#[cfg(target_os = "windows")]
+fn current_native_file_point(window: &winit::window::Window, fallback: Point) -> Point {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let Ok(origin) = window.inner_position() else {
+        return fallback;
+    };
+    let mut cursor = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes one POINT to the valid stack address.
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return fallback;
+    }
+    Point::new((cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_native_file_point(_window: &winit::window::Window, fallback: Point) -> Point {
+    fallback
 }
 
 fn native_file_drop_handling(result: EventResult, paths: Vec<PathBuf>) -> NativeFileDropHandling {

@@ -503,6 +503,7 @@ impl AppState {
         self.proxy_generation.bind_project(None);
         self.media_import.bind_project(None);
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(None);
         #[cfg(test)]
         mondrian_media::clear_thread_local_preview_decode_session();

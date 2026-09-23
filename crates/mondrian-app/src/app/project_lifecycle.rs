@@ -792,6 +792,7 @@ impl AppState {
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         self.dragging_asset = None;
@@ -1594,6 +1595,7 @@ impl AppState {
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         Ok(())

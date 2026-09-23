@@ -1474,6 +1474,16 @@ impl AuthoringHistory {
                 ),
             ));
         }
+        Ok(self.commit_prepared_record_exclusive(prepared))
+    }
+
+    /// Install a ticket while the owning Session has held exclusive authoring
+    /// authority since preparation. No fallible work remains at this seam.
+    pub(crate) fn commit_prepared_record_exclusive(
+        &mut self,
+        prepared: PreparedAuthoringHistoryRecord,
+    ) -> AuthoringHistoryRecordOutcome {
+        debug_assert_eq!(self.state.revision, prepared.expected_revision);
         if let Some(unretained) = &prepared.unretained_command {
             match unretained.reason {
                 UnretainedHistoryCommandReason::RetentionDisabled => {
@@ -1500,7 +1510,7 @@ impl AuthoringHistory {
             self.footprint_index.total_bytes().ok(),
             Some(self.state.retained_bytes)
         );
-        Ok(outcome)
+        outcome
     }
 
     /// Prepare the next Undo payload without moving History.

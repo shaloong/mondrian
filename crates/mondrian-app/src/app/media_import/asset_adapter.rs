@@ -16,11 +16,25 @@ use super::execution::{
 use super::MediaImportFailureReason;
 
 #[derive(Debug)]
-pub(super) struct MediaImportPreparedCandidate {
-    pub(super) canonical_path: PathBuf,
-    pub(super) source_fingerprint: MediaFileFingerprint,
-    pub(super) info: MediaProbeSnapshot,
-    pub(super) folder_id: Option<String>,
+pub(in crate::app) struct MediaImportPreparedCandidate {
+    pub(in crate::app) canonical_path: PathBuf,
+    pub(in crate::app) source_fingerprint: MediaFileFingerprint,
+    pub(in crate::app) info: MediaProbeSnapshot,
+    pub(in crate::app) folder_id: Option<String>,
+}
+
+impl MediaImportPreparedCandidate {
+    pub(in crate::app) fn into_probe_candidate(self) -> Result<AssetMediaProbeCandidate> {
+        let current_fingerprint = MediaFileFingerprint::capture(&self.canonical_path);
+        if !current_fingerprint.authorizes_reuse() || current_fingerprint != self.source_fingerprint
+        {
+            return Err(MondrianError::MediaOpen {
+                path: self.canonical_path.display().to_string(),
+                reason: "媒体文件在导入提交前发生变化，拒绝写入过期元数据".to_owned(),
+            });
+        }
+        AssetMediaProbeCandidate::new(self.canonical_path, self.source_fingerprint, self.info)
+    }
 }
 
 pub(super) struct AssetLibraryMediaImportBackend {
@@ -104,20 +118,7 @@ fn commit_media_import_candidate(
     library: &AssetLibrary,
     candidate: MediaImportPreparedCandidate,
 ) -> Result<AssetId> {
-    let current_fingerprint = MediaFileFingerprint::capture(&candidate.canonical_path);
-    if !current_fingerprint.authorizes_reuse()
-        || current_fingerprint != candidate.source_fingerprint
-    {
-        return Err(MondrianError::MediaOpen {
-            path: candidate.canonical_path.display().to_string(),
-            reason: "媒体文件在导入提交前发生变化，拒绝写入过期元数据".to_owned(),
-        });
-    }
-    let folder_id = candidate.folder_id;
-    let candidate = AssetMediaProbeCandidate::new(
-        candidate.canonical_path,
-        candidate.source_fingerprint,
-        candidate.info,
-    )?;
+    let folder_id = candidate.folder_id.clone();
+    let candidate = candidate.into_probe_candidate()?;
     library.commit_media_probe(candidate, folder_id.as_deref())
 }

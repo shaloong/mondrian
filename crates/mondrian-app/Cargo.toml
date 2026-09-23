@@ -187,7 +187,7 @@ pollster = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { workspace = true, features = ["Win32_Security"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

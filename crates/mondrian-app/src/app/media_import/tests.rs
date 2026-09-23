@@ -214,6 +214,47 @@ fn wait_publications(
 }
 
 #[test]
+fn deferred_timeline_probe_never_commits_before_app_placement() {
+    let backend = FakeBackend::new(true);
+    let execution = MediaImportExecution::with_backend(1, backend.clone());
+    execution.bind_project(Some(ProjectId::new()));
+    execution
+        .admit_deferred_file(PathBuf::from("external.mov"))
+        .expect("admit drop");
+    backend.wait_started(1);
+    backend.release(1);
+
+    let publications = wait_publications(&execution, 1);
+    assert!(matches!(
+        publications[0].outcome,
+        MediaImportPublicationOutcome::Prepared(_)
+    ));
+    assert_eq!(backend.commits.load(Ordering::Acquire), 0);
+    execution.finalize_deferred_file(publications[0].batch_id, false);
+    let diagnostics = execution.diagnostics();
+    assert_eq!(diagnostics.imported_files, 0);
+    assert_eq!(diagnostics.failed_files, 1);
+}
+
+#[test]
+fn canceled_timeline_probe_never_publishes_prepared_asset() {
+    let backend = FakeBackend::new(true);
+    let execution = MediaImportExecution::with_backend(1, backend.clone());
+    execution.bind_project(Some(ProjectId::new()));
+    let admitted = execution
+        .admit_deferred_file(PathBuf::from("canceled.mov"))
+        .expect("admit drop");
+    backend.wait_started(1);
+    assert!(execution.cancel_batch(MediaImportBatchId(admitted.batch_id)));
+    let publications = wait_publications(&execution, 1);
+    assert!(matches!(
+        publications[0].outcome,
+        MediaImportPublicationOutcome::Canceled
+    ));
+    assert_eq!(backend.commits.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn typed_probe_failure_survives_worker_transport_and_terminal_evidence() {
     let backend = Arc::new(FailedPreparationBackend {
         failure: MediaImportFailureReason::ProbeDeadlineExceeded,

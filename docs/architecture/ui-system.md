@@ -32,20 +32,24 @@ not reinterpret an ignored `Drop` as a global media-import command. The
 Timeline widget must retain the target Track ID and exact Sequence frame in
 one typed action and only dispatch after release on a valid target.
 
-Timeline file placement is a pending cross-authority operation, not an Asset
-import followed by an unrelated Clip action. Probe into a bounded immutable
-candidate first. Before publication, resolve an existing Asset by canonical
-path without changing its metadata, and validate the candidate's media kind,
-Track lock and insertion interval. For a new Asset, publish the Asset record
-and Clip together under one recoverable operation ID; failure or cancellation
-must restore the prior library and author state. A compensating `retire_assets`
-call alone is insufficient because it changes the visible library history and
-cannot restore an existing Asset's prior metadata. Cross the durability seam
-with a staged/invisible library row or a recovery journal, then expose both
-results only after the Clip author transaction is accepted. Test canceled,
-missed, incompatible, locked, collision, probe failure, database failure,
-author failure, process interruption, and existing-Asset cases. Until this
-operation exists, a Timeline must not accept native file drops as successful.
+Timeline file placement uses the bounded media-import worker for isolated
+probing but requests a deferred result: the worker cannot commit an Asset.
+At drop release the Widget maps the track body and frame into a typed action;
+the App rechecks current Track lock, exact frame grid, source fingerprint,
+media kind and complete Clip edit after the probe. The Asset Library stages
+the new or refreshed row in a SQLite transaction and supplies its stable
+`AssetId` to a prepared, validated Authoring Session edit. A failed edit rolls
+back the SQLite row, including an existing Asset's folder and metadata. Once
+  SQLite commits, the prepared author edit installs while the Library lock is
+  still held, without another fallible validation or allocation step; only then do Clip/Asset notifications and
+post-commit proxy scheduling run. Existing Assets keep their folder placement.
+The Library fences saves captured before this coupled publication, so an old
+Project document cannot be archived with the newly placed Asset. A process
+restart opens a fresh Library generation from the last published `.mdp` or
+recovery snapshot, leaving an interrupted unsaved operation behind. The
+Window reads the current native cursor at Windows file-drop delivery because
+OS drag events need not carry winit `CursorMoved` events. Cancellation or a
+missed body dispatches no import at all.
 
 The first native Window/Surface/Renderer candidate uses the existing Host mode,
 through the same role mapping as subsequent window synchronization. A Host with

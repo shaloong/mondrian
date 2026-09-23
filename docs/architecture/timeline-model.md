@@ -314,6 +314,12 @@ replacement. History commit is followed by infallible ticket consumption and
 installation. Thus validation failure cannot change History descriptor state,
 and no validation, JSON conversion, allocation, or footprint discovery occurs
 between History commit and installing the paired document/certificate.
+When a Timeline edit depends on an Asset Library transaction, the Session may
+prepare the same validated Sequence replacement and History record without
+installing them. The Asset transaction receives the staged `AssetId`, and an
+edit failure rolls it back. After SQLite commit, the prepared Session edit is
+installed without fallible work while the Library lock remains held. A
+discarded preparation changes neither canonical author state nor Undo/Redo.
 Sequence snapshot commits compare the complete canonical `before` content as
 well as its revision, so a caller cannot forge same-revision History that would
 later Undo to a state that never existed.

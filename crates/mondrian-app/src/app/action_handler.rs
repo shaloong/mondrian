@@ -1220,6 +1220,7 @@ impl AppState {
                 self.create_basic_title_at_playhead().map(|_| ())
             }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
+            TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {
                 self.insert_asset_from_ui(*payload).map(|_| ())
             }
@@ -1816,9 +1817,11 @@ fn write_minimal_wav(path: &std::path::Path) {
 #[cfg(test)]
 fn poll_media_imports_until_idle(state: &mut AppState) {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while state.pending_media_import_batches() > 0 {
+    while state.pending_media_import_batches() > 0 || !state.pending_timeline_file_drops.is_empty()
+    {
         state.poll_media_imports();
-        if state.pending_media_import_batches() == 0 {
+        if state.pending_media_import_batches() == 0 && state.pending_timeline_file_drops.is_empty()
+        {
             return;
         }
         assert!(
@@ -1931,7 +1934,7 @@ mod tests {
         sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_insert_asset_action,
+        timeline_drop_asset_action, timeline_drop_file_action, timeline_insert_asset_action,
         timeline_link_selected_clips_action, timeline_move_clip_action,
         timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
         timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
@@ -1953,13 +1956,13 @@ mod tests {
         ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
         ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
         ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
-        TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineSeekSource,
-        TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TrackAddKind, TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl,
-        TrackMovePayload, TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
-        ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
-        VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+        TimelineExportRequest, TimelineInOutPointKind, TimelineInsertAssetPayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
+        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
+        VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
@@ -3242,6 +3245,56 @@ mod tests {
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("已添加素材")));
 
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_external_wav_drop_imports_and_places_after_background_probe() {
+        let media_root = unique_temp_path("timeline-external-wav-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("tone.wav");
+        write_minimal_wav(&media_path);
+        let library_root = unique_temp_path("timeline-external-wav-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let mut sequence = Sequence::new("external audio");
+        let target_track_id = sequence.add_audio_track();
+        let time_base = sequence.time_base();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library.clone()));
+        state.media_import =
+            crate::app::media_import::MediaImportExecution::with_in_process_test_backend();
+        state.media_import.bind_project(state.project_id());
+
+        state
+            .dispatch_action(timeline_drop_file_action(TimelineDropFilePayload {
+                path: media_path.clone(),
+                target_track_id,
+                position: FramePosition::new(20, time_base),
+            }))
+            .expect("queue external drop");
+        assert!(library.list_assets().expect("before probe").is_empty());
+        poll_media_imports_until_idle(&mut state);
+
+        let assets = library.list_assets().expect("assets after drop");
+        assert_eq!(
+            assets.len(),
+            1,
+            "status: {:?}; import: {:?}",
+            state.status_hint,
+            state.media_import_diagnostics()
+        );
+        let sequence = state.active_sequence().expect("sequence");
+        let target = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == target_track_id)
+            .expect("target audio track");
+        assert_eq!(target.clips.len(), 1);
+        assert_eq!(target.clips[0].library_asset_id(), Some(assets[0].id));
+        assert!(state.can_undo_action());
+
+        remove_temp_path(&media_root);
         remove_temp_path(&library_root);
     }
 

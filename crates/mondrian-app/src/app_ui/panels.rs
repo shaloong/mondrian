@@ -81,7 +81,7 @@ use mondrian_ui_widgets::{
     PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView,
     Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove,
     TimelineClipRef, TimelineClipSelectionMode, TimelineClipTrim, TimelineCutRef,
-    TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
+    TimelineEditCommand, TimelineFileDrop, TimelineInOutPoint, TimelineSeek,
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
@@ -113,18 +113,19 @@ use crate::app::ui_actions::{
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
-    timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
-    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-    timeline_seek_with_source_action, timeline_select_clip_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
-    track_set_author_control_action, track_set_edit_policy_action,
-    video_transition_create_cross_dissolve_action, video_transition_select_action,
-    video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
-    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
-    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
+    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_drop_file_action,
+    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
+    timeline_move_clip_action, timeline_open_nested_sequence_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
+    timeline_select_clip_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+    track_add_action, track_move_action, track_set_author_control_action,
+    track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
+    video_transition_select_action, video_transition_set_range_action,
+    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
+    visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
+    visual_effect_select_action, visual_effect_set_enabled_action,
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
     visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
@@ -143,13 +144,14 @@ use crate::app::ui_actions::{
     ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
     ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, DockDropAreaPayload,
     ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
-    TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
-    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
-    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
-    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+    TimelineExportRequest, TimelineInOutPointKind, TimelineMoveClipPayload,
+    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
+    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
+    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
+    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
     VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
@@ -1635,6 +1637,19 @@ impl TimelinePanelModel {
         let frame_rate = self.timeline_display.frame_rate();
         Some(TimelineDropAssetPayload {
             asset_id: drop.asset_id,
+            target_track_id: target.track_id,
+            position: FramePosition::new(
+                drop.frame.max(0),
+                Rational::new(frame_rate.den, frame_rate.num),
+            ),
+        })
+    }
+
+    fn file_drop_payload(&self, drop: TimelineFileDrop) -> Option<TimelineDropFilePayload> {
+        let target = self.track_identity(drop.track_ref)?;
+        let frame_rate = self.timeline_display.frame_rate();
+        Some(TimelineDropFilePayload {
+            path: drop.path,
             target_track_id: target.track_id,
             position: FramePosition::new(
                 drop.frame.max(0),
@@ -4635,6 +4650,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             move |drop, _track| {
                 action_model.asset_drop_payload(drop).map(timeline_drop_asset_action)
             }
+        })
+        .on_file_drop({
+            let action_model = action_model.clone();
+            move |drop, _track| action_model.file_drop_payload(drop).map(timeline_drop_file_action)
         })
         .on_edit_command({
             let action_model = action_model.clone();

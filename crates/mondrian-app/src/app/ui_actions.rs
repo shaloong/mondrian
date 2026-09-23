@@ -39,14 +39,14 @@ pub use super::product_action::{
     GallerySetComparisonPayload, GalleryStillTargetPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
     ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
-    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
-    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
-    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
-    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
-    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
-    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
-    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+    TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineMoveClipPayload,
+    TimelinePrecomposeSelectionPayload, TimelineSeekPayload, TimelineSeekSource,
+    TimelineSelectClipPayload, TimelineSelectionEdit, TimelineSetInOutPointPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
+    TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
+    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
@@ -760,6 +760,11 @@ pub fn track_move_action(payload: TrackMovePayload) -> Action {
 /// Build an action that drops an asset onto a timeline track.
 pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
     ProductAction::Timeline(TimelineProductAction::PlaceAsset(payload)).into_external_action()
+}
+
+/// Build an action that probes an external file before an atomic Timeline drop.
+pub fn timeline_drop_file_action(payload: TimelineDropFilePayload) -> Action {
+    ProductAction::Timeline(TimelineProductAction::PlaceFile(payload)).into_external_action()
 }
 
 /// Build an action that performs one professional Insert Edit from an Asset.

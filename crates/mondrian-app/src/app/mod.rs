@@ -510,6 +510,7 @@ pub struct AppState {
 
     media_import: MediaImportExecution,
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
+    pending_timeline_file_drops: HashMap<u64, product_action::TimelineDropFilePayload>,
     /// Ordered two-phase execution for relink and audio Component mutations.
     media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
     /// Instance-owned, bounded Mask tracking execution and result cache.
@@ -584,6 +585,7 @@ impl AppState {
             audio_idle_warmup_terminal_cursor: 0,
             media_import: MediaImportExecution::new(),
             media_import_batches: HashMap::new(),
+            pending_timeline_file_drops: HashMap::new(),
             media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
             visual_tracking: visual_tracking::VisualTrackingService::new(),
         }
@@ -876,6 +878,7 @@ impl AppState {
             self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
+            self.pending_timeline_file_drops.clear();
             self.media_asset_mutations.bind_project(None);
             self.authoring = None;
             self.project_runtime_lease = None;
@@ -988,6 +991,7 @@ impl AppState {
             self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
+            self.pending_timeline_file_drops.clear();
             self.media_asset_mutations.bind_project(None);
             self.authoring = None;
             self.project_runtime_lease = None;
@@ -1016,6 +1020,7 @@ impl AppState {
         self.synchronize_audio_idle_warmup_binding();
         self.media_import.bind_project(self.project_id());
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(self.project_id());
     }
 

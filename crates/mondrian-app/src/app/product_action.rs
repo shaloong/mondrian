@@ -59,6 +59,7 @@ pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
 /// External action name for placing one Asset on a stable Timeline Track.
 pub const TIMELINE_PLACE_ASSET: &str = "place_asset";
+pub const TIMELINE_PLACE_FILE: &str = "place_file";
 /// External action name for inserting one Asset through an explicit edit scope.
 pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
 /// External action name for replacing the current Clip selection with a nested Sequence.
@@ -465,6 +466,8 @@ pub enum TimelineProductAction {
     CreateBasicTitle,
     /// Place one Asset on one stable Track at an explicit evaluation coordinate.
     PlaceAsset(TimelineDropAssetPayload),
+    /// Probe and atomically place one external file on a Track.
+    PlaceFile(TimelineDropFilePayload),
     /// Insert one Asset through an exact author-time edit scope.
     InsertAsset(Box<TimelineInsertAssetPayload>),
     /// Replace the current Clip selection with one nested Sequence atomically.
@@ -625,6 +628,9 @@ impl ProductAction {
                     }
                     TIMELINE_PLACE_ASSET => {
                         TimelineProductAction::PlaceAsset(decode_payload(namespace, name, payload)?)
+                    }
+                    TIMELINE_PLACE_FILE => {
+                        TimelineProductAction::PlaceFile(decode_payload(namespace, name, payload)?)
                     }
                     TIMELINE_INSERT_ASSET => TimelineProductAction::InsertAsset(Box::new(
                         decode_payload(namespace, name, payload)?,
@@ -1127,6 +1133,11 @@ impl ProductAction {
             Self::Timeline(TimelineProductAction::PlaceAsset(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_PLACE_ASSET,
+                serde_json::json!(payload),
+            ),
+            Self::Timeline(TimelineProductAction::PlaceFile(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_PLACE_FILE,
                 serde_json::json!(payload),
             ),
             Self::Timeline(TimelineProductAction::InsertAsset(payload)) => (
@@ -1742,6 +1753,18 @@ pub struct TimelineSetInOutPointPayload {
 pub struct TimelineDropAssetPayload {
     /// Asset being placed.
     pub asset_id: AssetId,
+    /// Track that should receive the created Clip.
+    pub target_track_id: TrackId,
+    /// Exact input frame coordinate and its declared evaluation time base.
+    pub position: FramePosition,
+}
+
+/// One external file and exact Track target captured at pointer release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineDropFilePayload {
+    /// Source file to probe without importing first.
+    pub path: PathBuf,
     /// Track that should receive the created Clip.
     pub target_track_id: TrackId,
     /// Exact input frame coordinate and its declared evaluation time base.
@@ -2493,6 +2516,9 @@ impl<'a> ProductActionAvailability<'a> {
             TimelineProductAction::PlaceAsset(payload) => {
                 self.state.can_place_asset_on_timeline(*payload)
             }
+            TimelineProductAction::PlaceFile(payload) => {
+                self.state.can_queue_file_on_timeline(payload)
+            }
             TimelineProductAction::InsertAsset(payload) => {
                 self.state.can_insert_asset_from_product_action(payload)
             }
@@ -3074,6 +3100,11 @@ mod tests {
                     position: FramePosition::new(33, Rational::new(1, 25)),
                 },
             )),
+            ProductAction::Timeline(TimelineProductAction::PlaceFile(TimelineDropFilePayload {
+                path: PathBuf::from("E:/media/external.mov"),
+                target_track_id: track_id,
+                position: FramePosition::new(34, Rational::new(1, 25)),
+            })),
             ProductAction::Timeline(TimelineProductAction::InsertAsset(Box::new(
                 TimelineInsertAssetPayload {
                     asset_id: AssetId::new(),

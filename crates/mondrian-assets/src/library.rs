@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
@@ -282,6 +283,7 @@ pub struct FolderRecord {
 pub struct AssetLibrary {
     root: PathBuf,
     db: Arc<Mutex<Connection>>,
+    coupled_revision_high_water: AtomicU64,
 }
 
 /// Identity-bound online SQLite backup owned by one persistence request.
@@ -392,7 +394,11 @@ impl AssetLibrary {
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: format!("{e:#}") })?;
 
         info!("Asset library opened at {:?}", root);
-        Ok(Arc::new(Self { root, db: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            root,
+            db: Arc::new(Mutex::new(conn)),
+            coupled_revision_high_water: AtomicU64::new(0),
+        }))
     }
 
     /// Path of the live project-library database.
@@ -434,6 +440,14 @@ impl AssetLibrary {
         }
         let source = self.db.lock();
         let actual_revision = connection_revision(&source)?;
+        let coupled_revision = self.coupled_revision_high_water.load(Ordering::Acquire);
+        if expected_revision < coupled_revision {
+            return Err(MondrianError::AssetDbError {
+                reason: format!(
+                    "author snapshot predates coupled Asset/Timeline publication: captured {expected_revision}, coupled revision {coupled_revision}"
+                ),
+            });
+        }
         if actual_revision < expected_revision {
             return Err(MondrianError::AssetDbError {
                 reason: format!(
@@ -441,10 +455,9 @@ impl AssetLibrary {
                 ),
             });
         }
-        // Forward drift is safe and must not fail the save: imports only add
-        // assets and retirement is membership-only, so a newer snapshot remains
-        // a superset of the revision the author snapshot observed. Rejecting
-        // forward drift made every save race an in-flight import batch.
+        // Ordinary Asset Library forward drift remains safe. A coupled
+        // Asset/Timeline publication is fenced above because the older author
+        // snapshot would omit the Clip while including its new Asset.
         let _ = expected_revision;
         let staging =
             OwnedPublicationFile::create_sibling(&sibling_anchor, "asset-library-snapshot")
@@ -549,8 +562,15 @@ impl AssetLibrary {
         candidate: AssetMediaProbeCandidate,
         folder_id: Option<&str>,
     ) -> Result<AssetId> {
-        self.commit_media_probe_with(candidate, folder_id, |_| Ok(()))
-            .map(|(asset_id, ())| asset_id)
+        self.commit_media_probe_transaction(
+            candidate,
+            folder_id,
+            false,
+            false,
+            |_| Ok(()),
+            std::convert::identity,
+        )
+        .map(|(asset_id, ())| asset_id)
     }
 
     /// Keep a probed Asset unpublished until a dependent operation succeeds.
@@ -565,6 +585,39 @@ impl AssetLibrary {
         folder_id: Option<&str>,
         operation: impl FnOnce(&AssetRecord) -> Result<T>,
     ) -> Result<(AssetId, T)> {
+        self.commit_media_probe_transaction(
+            candidate,
+            folder_id,
+            true,
+            true,
+            operation,
+            std::convert::identity,
+        )
+    }
+
+    /// Commit a coupled Asset mutation and install an already prepared author
+    /// edit before releasing the Library lock. `install` must be infallible and
+    /// must not re-enter this Library. Other readers and save snapshots then
+    /// cannot observe a committed Asset before its author edit is installed.
+    pub fn commit_media_probe_with_install<T, U>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+        install: impl FnOnce(T) -> U,
+    ) -> Result<(AssetId, U)> {
+        self.commit_media_probe_transaction(candidate, folder_id, true, true, operation, install)
+    }
+
+    fn commit_media_probe_transaction<T, U>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        coupled: bool,
+        preserve_existing_folder: bool,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+        install: impl FnOnce(T) -> U,
+    ) -> Result<(AssetId, U)> {
         let AssetMediaProbeCandidate {
             path: canonical_path,
             path_text,
@@ -645,7 +698,8 @@ impl AssetLibrary {
              ON CONFLICT(path) DO UPDATE SET \
                 name = excluded.name, \
                 asset_type = excluded.asset_type, \
-                folder_id = excluded.folder_id, \
+                folder_id = CASE WHEN ?12 AND excluded.folder_id IS NULL \
+                    THEN assets.folder_id ELSE excluded.folder_id END, \
                 metadata = excluded.metadata, \
                 source_fingerprint = excluded.source_fingerprint, \
                 audio_components = excluded.audio_components, \
@@ -662,7 +716,8 @@ impl AssetLibrary {
                     source_fingerprint_json,
                     interpretation_json,
                     audio_components_json,
-                    now
+                    now,
+                    preserve_existing_folder,
                 ],
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -676,11 +731,19 @@ impl AssetLibrary {
             )
             .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
         let value = operation(&asset)?;
+        let coupled_revision = if coupled {
+            Some(connection_revision(&transaction)?)
+        } else {
+            None
+        };
         transaction
             .commit()
             .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        if let Some(revision) = coupled_revision {
+            self.coupled_revision_high_water.store(revision, Ordering::Release);
+        }
 
-        Ok((id, value))
+        Ok((id, install(value)))
     }
 
     pub fn create_adjustment_layer_asset(&self, name: Option<&str>) -> Result<AssetId> {
@@ -2295,6 +2358,53 @@ mod tests {
         assert_eq!(after.folder_id, before.folder_id);
         assert_eq!(after.membership, before.membership);
         assert!(lib.list_assets().expect("hidden list").is_empty());
+    }
+
+    #[test]
+    fn coupled_probe_rejects_a_save_snapshot_captured_before_timeline_placement() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("placed.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let before = lib.database_revision().expect("old revision");
+        let (asset_id, ()) = lib
+            .commit_media_probe_with(
+                probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+                None,
+                |_| Ok(()),
+            )
+            .expect("coupled publication");
+        let snapshot_anchor = media_dir.path().join("snapshot.db");
+        assert!(lib.snapshot_database(before, &snapshot_anchor).is_err());
+        let current = lib.database_revision().expect("current revision");
+        assert!(current > before);
+        assert!(lib.snapshot_database(current, &snapshot_anchor).is_ok());
+        assert!(lib.get_asset(asset_id).expect("query").is_some());
+    }
+
+    #[test]
+    fn coupled_reimport_keeps_existing_folder_when_drop_has_no_folder_target() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("already-organized.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let original_id = commit_info(&lib, &media_path, lightweight_audio_info(&media_path));
+        let folder_id = lib.create_folder("Organized", None).expect("folder");
+        lib.move_asset_to_folder(original_id, Some(&folder_id)).expect("move");
+
+        let (placed_id, ()) = lib
+            .commit_media_probe_with(
+                probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+                None,
+                |_| Ok(()),
+            )
+            .expect("coupled reimport");
+
+        assert_eq!(placed_id, original_id);
+        assert_eq!(
+            lib.get_asset(original_id).expect("query").expect("asset").folder_id.as_deref(),
+            Some(folder_id.as_str())
+        );
     }
 
     #[test]
