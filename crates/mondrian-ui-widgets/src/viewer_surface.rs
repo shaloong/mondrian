@@ -5,10 +5,13 @@
 //! decoding/rendering and pass already-renderable frame references across this
 //! domain-light boundary.
 
+mod clip_transform;
 mod model;
 mod paint;
 mod power_window;
 
+use clip_transform::ClipTransformEditor;
+pub use clip_transform::{ViewerClipTransform, ViewerClipTransformEdit};
 use power_window::PowerWindowEditor;
 pub use power_window::{ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape};
 
@@ -289,6 +292,9 @@ pub type ViewerZoomAction = dyn Fn(Option<f32>) -> Action;
 /// Maps one completed Viewer Power Window gesture to an authoring action.
 pub type ViewerPowerWindowAction = dyn Fn(ViewerPowerWindowShape) -> Action;
 
+/// Maps one completed Clip transform gesture to an App authoring action.
+pub type ViewerClipTransformAction = dyn Fn(ViewerClipTransformEdit) -> Action;
+
 /// One selectable viewer zoom mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerZoomOption {
@@ -351,6 +357,8 @@ pub struct ViewerSurface {
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
     power_window_editor: Option<PowerWindowEditor>,
     on_power_window_edit: Option<Box<ViewerPowerWindowAction>>,
+    clip_transform_editor: Option<ClipTransformEditor>,
+    on_clip_transform_edit: Option<Box<ViewerClipTransformAction>>,
     overlay_viewport: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
@@ -397,6 +405,8 @@ impl ViewerSurface {
             on_preview_quality: None,
             power_window_editor: None,
             on_power_window_edit: None,
+            clip_transform_editor: None,
+            on_clip_transform_edit: None,
             overlay_viewport: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
@@ -589,6 +599,21 @@ impl ViewerSurface {
         self
     }
 
+    /// Present the selected Clip transform in Sequence pixel coordinates.
+    pub fn with_clip_transform(mut self, transform: ViewerClipTransform) -> Self {
+        self.clip_transform_editor = Some(ClipTransformEditor::new(transform));
+        self
+    }
+
+    /// Map one completed gesture to a single stable-address authoring action.
+    pub fn on_clip_transform_edit(
+        mut self,
+        action: impl Fn(ViewerClipTransformEdit) -> Action + 'static,
+    ) -> Self {
+        self.on_clip_transform_edit = Some(Box::new(action));
+        self
+    }
+
     /// Set a vector icon used to paint one transport control.
     pub fn with_control_icon(mut self, control: ViewerControl, icon: VectorIcon) -> Self {
         if let Some((_, existing)) =
@@ -775,7 +800,8 @@ impl ViewerSurface {
             || self.pressed_dropdown_index.is_some()
             || self.focused
             || self.focus_visible
-            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel);
+            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
+            || self.clip_transform_editor.as_mut().is_some_and(ClipTransformEditor::cancel);
         self.hovered_control = None;
         self.pressed_control = None;
         self.hovered_zoom = false;
@@ -819,6 +845,17 @@ impl Widget for ViewerSurface {
                 if let Some(editor) = self.power_window_editor.as_mut()
                     && (editor.is_dragging() || canvas.contains(*position))
                     && editor.pointer_move(canvas, *position)
+                {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(editor) = self.clip_transform_editor.as_mut()
+                    && (editor.is_dragging() || canvas.contains(*position))
+                    && editor.pointer_move(
+                        canvas,
+                        [self.source_width as f32, self.source_height as f32],
+                        *position,
+                    )
                 {
                     ctx.request_repaint();
                     return EventResult::Handled;
@@ -871,6 +908,17 @@ impl Widget for ViewerSurface {
                 let canvas = self.canvas_rect();
                 if let Some(editor) = self.power_window_editor.as_mut()
                     && editor.pointer_down(canvas, *position)
+                {
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(editor) = self.clip_transform_editor.as_mut()
+                    && editor.pointer_down(
+                        canvas,
+                        [self.source_width as f32, self.source_height as f32],
+                        *position,
+                    )
                 {
                     ctx.request_pointer_capture(self.id);
                     ctx.request_repaint();
@@ -932,6 +980,27 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                if self
+                    .clip_transform_editor
+                    .as_ref()
+                    .is_some_and(ClipTransformEditor::is_dragging)
+                {
+                    let committed = self.clip_transform_editor.as_mut().and_then(|editor| {
+                        editor.pointer_up(
+                            canvas,
+                            [self.source_width as f32, self.source_height as f32],
+                            *position,
+                        )
+                    });
+                    ctx.release_pointer_capture(self.id);
+                    if let (Some(edit), Some(mapper)) =
+                        (committed, self.on_clip_transform_edit.as_ref())
+                    {
+                        (ctx.dispatch)(mapper(edit));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let pressed_dropdown_index = self.pressed_dropdown_index.take();
                 if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position)
                     && pressed_dropdown_index == Some(hovered_index)
@@ -987,7 +1056,12 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
-                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging)
+                    || self
+                        .clip_transform_editor
+                        .as_ref()
+                        .is_some_and(ClipTransformEditor::is_dragging)
+                {
                     ctx.release_pointer_capture(self.id);
                 }
                 if self.clear_interaction_state() {
@@ -996,6 +1070,17 @@ impl Widget for ViewerSurface {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if *key == KeyCode::Escape
+                    && (self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
+                        || self
+                            .clip_transform_editor
+                            .as_mut()
+                            .is_some_and(ClipTransformEditor::cancel))
+                {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(control) = self.keyboard_control(*key, *modifiers) {
                     self.dispatch_control(control, ctx);
                     EventResult::Handled
@@ -1160,6 +1245,13 @@ impl Widget for ViewerSurface {
         paint::paint_safe_guides(ctx, canvas, self.enabled);
         if let Some(editor) = &self.power_window_editor {
             editor.paint(ctx, canvas);
+        }
+        if let Some(editor) = &self.clip_transform_editor {
+            editor.paint(
+                ctx,
+                canvas,
+                [self.source_width as f32, self.source_height as f32],
+            );
         }
         ctx.pop_clip();
         ctx.pop_clip();
@@ -2023,6 +2115,73 @@ mod tests {
         assert_eq!(
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(viewer.id()))
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+    }
+
+    #[test]
+    fn clip_transform_escape_cancels_preview_and_release_commits_once() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_clip_transform(ViewerClipTransform {
+                position: [0.0, 0.0],
+                scale: [1.0, 1.0],
+                rotation_degrees: 0.0,
+                anchor: [0.0, 0.0],
+                editable: true,
+            })
+            .on_clip_transform_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let start = viewer.canvas_rect().center();
+        let end = Point::new(start.x + 20.0, start.y + 10.0);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        let down = UiEvent::MouseDown {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        assert_eq!(viewer.event(&down, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(viewer.id()))
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            viewer.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(viewer.id()))
+        );
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(viewer.event(&down, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: end,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
         );
         assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
     }

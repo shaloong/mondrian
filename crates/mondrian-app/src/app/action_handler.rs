@@ -6713,6 +6713,49 @@ mod tests {
     }
 
     #[test]
+    fn compensated_anchor_write_preserves_picture_and_undoes_as_one_action() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let anchor = clip_parameter_address(&state, clip_id, Transform2D::ANCHOR_POINT_PATH);
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let before = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .transform
+            .evaluate_matrix(TimelineTime::ZERO);
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![
+                        ClipParameterValueWrite {
+                            parameter: anchor,
+                            value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
+                        },
+                    ],
+                },
+            ))
+            .expect("commit compensated anchor");
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(clip.transform.evaluate_matrix(TimelineTime::ZERO), before);
+        assert_eq!(
+            clip.transform.get_anchor_point(TimelineTime::ZERO),
+            glam::Vec2::new(20.0, 10.0)
+        );
+        assert!(state.undo_timeline().expect("undo anchor gesture"));
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(
+            clip.transform.get_anchor_point(TimelineTime::ZERO),
+            glam::Vec2::ZERO
+        );
+        assert_eq!(
+            clip.transform.get_position(TimelineTime::ZERO),
+            glam::Vec2::ZERO
+        );
+    }
+
+    #[test]
     fn empty_clip_parameter_write_fails_before_author_state_changes() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let before = state.active_sequence().expect("sequence").clone();

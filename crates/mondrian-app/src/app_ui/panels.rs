@@ -86,9 +86,10 @@ use mondrian_ui_widgets::{
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
     TimelineView, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
-    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
-    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    ViewerCanvasBackground, ViewerClipTransform, ViewerClipTransformEdit, ViewerComparisonLayout,
+    ViewerComparisonReference, ViewerControl, ViewerFrameContent, ViewerPowerWindow,
+    ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerStatusTone, ViewerSurface,
+    WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -731,6 +732,8 @@ pub struct ViewerPanelModel {
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
     /// Selected Clip-local Power Window projected at the current author time.
     pub power_window: Option<ViewerPowerWindowModel>,
+    /// Selected visible Clip transform projected at the current author time.
+    pub clip_transform: Option<ViewerClipTransformModel>,
 }
 
 /// App-owned identity plus domain-light Viewer geometry for one Power Window.
@@ -739,6 +742,17 @@ pub struct ViewerPowerWindowModel {
     pub clip_id: ClipId,
     pub mask_id: MaskId,
     pub overlay: ViewerPowerWindow,
+}
+
+/// App-owned stable parameter addresses and domain-light Viewer transform geometry.
+#[derive(Debug, Clone)]
+pub struct ViewerClipTransformModel {
+    pub clip_id: ClipId,
+    pub position: AnimationParameterAddress,
+    pub scale: AnimationParameterAddress,
+    pub rotation: AnimationParameterAddress,
+    pub anchor: AnimationParameterAddress,
+    pub overlay: ViewerClipTransform,
 }
 
 /// Program Output scopes data independent from renderer GPU handles.
@@ -986,6 +1000,7 @@ impl ViewerPanelModel {
             color_pipeline_status: preview
                 .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
             power_window: viewer_power_window_model(state, sequence),
+            clip_transform: viewer_clip_transform_model(state, sequence),
         }
     }
 
@@ -1017,8 +1032,48 @@ impl ViewerPanelModel {
             color_rejection: None,
             color_pipeline_status: None,
             power_window: None,
+            clip_transform: None,
         }
     }
+}
+
+fn viewer_clip_transform_model(
+    state: &AppState,
+    sequence: &Sequence,
+) -> Option<ViewerClipTransformModel> {
+    let selection = state.primary_selected_clip()?;
+    let (selection, clip) = clip_for_selection(sequence, &selection)?;
+    if !selection.is_video_track
+        || state
+            .primary_selected_mask()
+            .is_some_and(|(_, clip_id, _)| clip_id == selection.clip_id)
+    {
+        return None;
+    }
+    let track = sequence.video_tracks.iter().find(|track| track.id == selection.track_id)?;
+    if !track.is_visible || track.is_muted || clip.is_disabled {
+        return None;
+    }
+    let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
+    if !clip.contains(time).ok()? {
+        return None;
+    }
+    let author_time = clip.clamped_visual_author_time(time).ok()?;
+    let parameters = clip.intrinsic_parameter_bag();
+    Some(ViewerClipTransformModel {
+        clip_id: clip.id,
+        position: parameters.address_for_path(Transform2D::POSITION_PATH)?,
+        scale: parameters.address_for_path(Transform2D::SCALE_PATH)?,
+        rotation: parameters.address_for_path(Transform2D::ROTATION_PATH)?,
+        anchor: parameters.address_for_path(Transform2D::ANCHOR_POINT_PATH)?,
+        overlay: ViewerClipTransform {
+            position: clip.transform.get_position(author_time).to_array(),
+            scale: clip.transform.get_scale(author_time).to_array(),
+            rotation_degrees: clip_rotation_degrees(clip, time),
+            anchor: clip.transform.get_anchor_point(author_time).to_array(),
+            editable: !state.is_playing() && !track.is_locked,
+        },
+    })
 }
 
 fn viewer_power_window_model(
@@ -3059,7 +3114,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         Some(reference) => surface.with_comparison_reference(reference),
         None => surface,
     };
-    if let Some(window) = model.power_window.clone() {
+    let surface = if let Some(window) = model.power_window.clone() {
         let clip_id = window.clip_id;
         let mask_id = window.mask_id;
         surface.with_power_window(window.overlay).on_power_window_edit(move |shape| {
@@ -3070,6 +3125,42 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
                 interpolation: MaskShapeInterpolation::Hold,
             })
         })
+    } else {
+        surface
+    };
+    if let Some(transform) = model.clip_transform.clone() {
+        surface
+            .with_clip_transform(transform.overlay)
+            .on_clip_transform_edit(move |edit| {
+                let writes = match edit {
+                    ViewerClipTransformEdit::Position(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.position.clone(),
+                        value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
+                    }],
+                    ViewerClipTransformEdit::Scale(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.scale.clone(),
+                        value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
+                    }],
+                    ViewerClipTransformEdit::Rotation(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.rotation.clone(),
+                        value: PropertyValue::Float(value),
+                    }],
+                    ViewerClipTransformEdit::Anchor { anchor, position } => vec![
+                        ClipParameterValueWrite {
+                            parameter: transform.anchor.clone(),
+                            value: PropertyValue::Vec2(glam::Vec2::from_array(anchor)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: transform.position.clone(),
+                            value: PropertyValue::Vec2(glam::Vec2::from_array(position)),
+                        },
+                    ],
+                };
+                clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                    clip_id: transform.clip_id,
+                    writes,
+                })
+            })
     } else {
         surface
     }

@@ -6379,6 +6379,117 @@ fn viewer_power_window_fails_closed_for_playback_track_lock_and_mask_lock() {
 }
 
 #[test]
+fn viewer_clip_transform_projects_selected_visible_clip_and_respects_lock_and_mask_mode() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Viewer Clip Transform");
+    let tb = sequence.time_base();
+    let clip = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(32, 64, 128, 255),
+        tt(0, tb),
+        tt(24, tb),
+    )
+    .expect("solid Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+
+    let projected = ViewerPanelModel::from_app_state(&state)
+        .clip_transform
+        .expect("selected Clip transform");
+    assert_eq!(projected.clip_id, clip_id);
+    assert!(projected.overlay.editable);
+    assert_eq!(projected.overlay.scale, [1.0, 1.0]);
+    assert_ne!(projected.position, projected.anchor);
+
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+    assert!(
+        !ViewerPanelModel::from_app_state(&state)
+            .clip_transform
+            .expect("locked selection remains visible")
+            .overlay
+            .editable
+    );
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_visible = false;
+    assert!(ViewerPanelModel::from_app_state(&state).clip_transform.is_none());
+}
+
+#[test]
+fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Viewer Anchor Gesture");
+    let tb = sequence.time_base();
+    let clip = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(32, 64, 128, 255),
+        tt(0, tb),
+        tt(24, tb),
+    )
+    .expect("solid Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+    let model = ViewerPanelModel::from_app_state(&state);
+    let expected = model.clip_transform.as_ref().expect("transform projection").clone();
+    let mut viewer = viewer_panel(&model);
+    viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+    let canvas = viewer.presentation_geometry().expect("visible canvas").canvas_rect;
+    let anchor = Point::new(canvas.x, canvas.y);
+    let end = Point::new(anchor.x + 20.0, anchor.y + 10.0);
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    assert_eq!(
+        viewer.event(
+            &UiEvent::MouseDown {
+                position: anchor,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(actions.borrow().is_empty());
+    assert_eq!(
+        viewer.event(
+            &UiEvent::MouseUp {
+                position: end,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    let recorded = actions.borrow();
+    assert_eq!(recorded.len(), 1);
+    let Action::Custom { namespace, name, payload } = &recorded[0] else {
+        panic!("expected one Clip authoring action");
+    };
+    assert_eq!(namespace, CLIP_NAMESPACE);
+    assert_eq!(name, CLIP_WRITE_PARAMETER_VALUES);
+    let payload: ClipWriteParameterValuesPayload =
+        serde_json::from_value(payload.clone()).expect("transform payload");
+    assert_eq!(payload.clip_id, clip_id);
+    assert_eq!(payload.writes.len(), 2);
+    assert_eq!(payload.writes[0].parameter, expected.anchor);
+    assert_eq!(payload.writes[1].parameter, expected.position);
+}
+
+#[test]
 fn inspector_bezier_power_window_creation_emits_complete_closed_shape() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),

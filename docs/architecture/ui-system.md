@@ -1154,11 +1154,23 @@ Viewer preview rendering remains an adapter concern. It consumes the current
 playback frame from `AppState`; it must not own playback state or mutate the
 timeline to request frames.
 
-Monitor direct manipulation uses viewer-scoped UI actions with sequence-space
-payloads. The viewer surface may emit absolute clip transform intents for
-position, scale, and rotation, but `AppState` remains the single mutation owner:
-it validates payloads, checks track locks, applies timeline property mutations,
-and records one undoable snapshot for each committed monitor edit.
+Monitor direct manipulation emits `ClipProductAction` parameter writes with
+absolute Sequence pixel or Clip-local values. `AppState` remains the single
+mutation owner: it validates stable addresses and payloads, checks Track locks,
+applies Timeline property mutations, and records one undoable snapshot for each
+committed monitor edit.
+The selected visible video Clip projects its evaluated position, scale, rotation,
+and source-pixel anchor through the same stable intrinsic parameter addresses as
+Inspector. The Viewer draws the transformed source-frame outline, corner scale
+handles, a rotation handle, and an anchor crosshair. The anchor has hit priority
+when it overlaps a corner. Pointer motion changes only the widget preview;
+pointer-up dispatches one `ClipWriteParameterValues` action. Anchor dragging
+inverts the current rotation and scale to find the new source anchor and writes
+the compensating Sequence position in the same author transaction, preserving
+the displayed image. Escape, capture loss, a locked/hidden Track, playback,
+disabled or non-current Clips, and Mask editing cannot publish a partial Clip
+transform. Viewer zoom and sample aspect ratio only affect screen mapping, not
+the persisted parameter values.
 
 ## Viewer Preview Scheduling
 

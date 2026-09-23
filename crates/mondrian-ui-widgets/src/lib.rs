@@ -95,7 +95,8 @@ pub use video_scopes_surface::{
     VideoScopesLayout, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
 };
 pub use viewer_surface::{
-    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
+    ViewerCanvasBackground, ViewerClipTransform, ViewerClipTransformAction,
+    ViewerClipTransformEdit, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
     ViewerControlAction, ViewerExternalTextureFrame, ViewerExternalTexturePresentation,
     ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow, ViewerPowerWindowAction,
     ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerPresentationGeometry,
