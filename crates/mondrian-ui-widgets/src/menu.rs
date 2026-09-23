@@ -127,13 +127,20 @@ impl Dropdown {
         &self.items
     }
 
+    /// Update only the trigger label while retaining the open menu, submenu,
+    /// keyboard focus, and pointer state. The parent must lay out the widget
+    /// again if the new label changes its measured width.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
     /// Replace presentation data without replacing this Widget's interaction identity.
     ///
     /// Trigger hover, focus, open state, bounds, and pointer-capture identity remain
     /// stable. Row-local press and submenu paths are cleared because their indices
     /// may no longer identify the same command in the replacement model.
     pub fn set_model(&mut self, label: impl Into<String>, items: Vec<MenuItem>) {
-        self.label = label.into();
+        self.set_label(label);
         self.items = items;
         self.pressed_index = None;
         self.submenu_chain.clear();
@@ -1008,6 +1015,32 @@ mod tests {
         assert_eq!(dropdown.id(), id);
         assert!(dropdown.trigger_hovered);
         assert_eq!(dropdown.items().len(), 2);
+    }
+
+    #[test]
+    fn changing_only_dropdown_label_keeps_active_menu_interaction() {
+        let mut dropdown = Dropdown::new(
+            "文件",
+            vec![MenuItem::submenu(
+                "导入",
+                vec![MenuItem::new("媒体", Action::SaveProject)],
+            )],
+        );
+        dropdown.open = true;
+        dropdown.focused = true;
+        dropdown.submenu_chain = vec![0];
+        dropdown.hover_depth = Some((1, 0));
+        let identity = dropdown.id();
+
+        dropdown.set_label("File");
+
+        assert_eq!(dropdown.label, "File");
+        assert_eq!(dropdown.id(), identity);
+        assert!(dropdown.is_open());
+        assert!(dropdown.focused);
+        assert_eq!(dropdown.submenu_chain, vec![0]);
+        assert_eq!(dropdown.hover_depth, Some((1, 0)));
+        assert_eq!(dropdown.items().len(), 1);
     }
 
     #[test]

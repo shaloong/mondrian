@@ -360,6 +360,7 @@ impl MenuBar {
         for (menu, (label, items)) in self.menus.iter_mut().zip(definitions) {
             menu.set_model(label, items);
         }
+        self.layout(self.bounds);
     }
 
     /// Refresh shell-local checked state without rebuilding menu availability

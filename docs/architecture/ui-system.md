@@ -476,6 +476,10 @@ Accessibility `focused` must reflect real focus ownership, not `focus_visible`.
 ## Overlay and Menus
 
 Dropdowns, context menus, popovers, and tooltips should render through overlay paint/hit-test so they are not clipped or hidden behind sibling panels. Menubar menus and context menus should share menu primitives.
+`Dropdown::set_label` changes only trigger copy and retains the current open
+submenu and focus path. `set_model` replaces the row model and clears row-index
+interaction state. The menu bar lays out its retained Dropdowns again after a
+model refresh so translated trigger widths receive correct hit regions.
 
 ## Commands
 
