@@ -744,7 +744,12 @@ mod tests {
                     5_178_821
                 );
                 requirement.counters.minimum_reference_completed_frames += 1;
-                assert!(PreparedEnduranceWorkload::load(&requirement, &path).is_err());
+                assert!(matches!(
+                    PreparedEnduranceWorkload::load(&requirement, &path),
+                    Err(EnduranceWorkloadError::RequirementMismatch(
+                        "exact rational program counter policy"
+                    ))
+                ));
             }
         }
     }

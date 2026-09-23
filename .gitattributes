@@ -6,3 +6,6 @@
 # Integrity-pinned embedded OCIO assets: bytes are part of the product identity
 *.cube -text
 *.ocio -text
+
+# Endurance profiles bind the exact raw workload bytes by SHA-256.
+tests/validation/endurance-workloads/*.json -text

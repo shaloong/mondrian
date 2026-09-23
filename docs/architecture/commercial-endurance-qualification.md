@@ -695,6 +695,9 @@ wall-clock soak.
 Each profile phase binds one raw checked-in contract under
 `tests/validation/endurance-workloads/`, the `mondrian-app` owner, the
 `mondrian-app-endurance-capture-v1` supervisor, and producer report schema 1.
+These workload files are marked `-text` in `.gitattributes`: checkout must
+preserve their exact bytes because the profile hashes the raw file, including
+line endings.
 Producer raw-evidence schema 2 makes the outer Window-run receipt mandatory on
 Surface/device recovery events and forbidden on the other three recovery steps;
 the summary report schema remains 1.
