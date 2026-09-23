@@ -56,3 +56,58 @@ Future UI plugin entries should integrate through:
 - platform services
 
 Plugins must not directly own app state, OS handles, or renderer internals.
+
+## Native-format adoption order
+
+Current status: the Timeline recognizes CLAP/VST3 definition identities and
+`mondrian-audio` defines a supervised processor-worker contract, but the only
+child-side factory is a test fixture. Production discovery, native loading,
+ABI processing, and a packaged worker entrypoint are absent. The visual
+Effect registry/DSL likewise does not host OpenFX binaries. These formats
+must report unavailable until the adapters below are qualified.
+
+The first real audio Adapter should host a user-installed CLAP effect inside
+the existing isolated Processor Worker. CLAP's C ABI and MIT-licensed headers
+make it a small first proof of discovery, bus/port negotiation, processing,
+state round-trip, deadlines, crash containment, and Preview/Export parity.
+The initial supported subset is audio effects with explicitly negotiated
+Float32 buffers and channel layouts; instruments, MIDI, plugin UI, and
+unimplemented extensions remain unavailable with typed reasons.
+
+VST3 follows through the same Worker, using the VST 3.8 or newer MIT-licensed
+SDK. Its Adapter must honor component/controller separation, bus activation,
+parameter timing, latency, tail, state, and offline/realtime process modes.
+Earlier SDK releases have different terms and are not an implicit substitute.
+The host must not ship third-party plugin binaries. Keep required SDK copyright
+and license notices, and review the trademark rules before using VST branding.
+
+The first OpenFX Adapter should run a user-installed CPU image effect behind a
+separate supervised worker and lower its declared image depth, components,
+premultiplication, pixel aspect, render scale, temporal extent, region of
+definition/interest, and parameter state into the canonical Effect contract.
+Begin with a reference plugin that accepts the supported Float32 working-frame
+contract; unsupported formats or color/premultiplication assumptions fail
+admission. Never silently round-trip through RGBA8 or substitute a differently
+interpreted effect in Export. Native GPU texture sharing and vendor overlays
+are separate qualifications.
+
+LV2 is a later Linux audio Adapter. Apple Audio Units belong to the macOS
+platform Adapter and hardware/release qualification. Do not plan VST2 as a new
+integration: the SDK was discontinued. AAX requires its own Avid agreement and
+distribution conditions, so it is outside the open-format path. Each
+third-party plugin retains its own license; support for a format does not
+authorize bundling a plugin.
+
+Every native Adapter needs a versioned corpus with one openly redistributable
+reference plugin, a host-versus-reference output comparison at matched sample
+or pixel contracts, automation/state save-reopen, Preview/Export parity,
+missing/upgraded plugin recovery, crash/hang quarantine, and a declared
+tolerance. Record the plugin binary identity and input/output contract in
+evidence. A "loaded" result without process and output evidence is not
+qualification.
+
+Format and license references: [CLAP](https://github.com/free-audio/clap),
+[VST3 licensing](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST%2B3%2BLicensing/Index.html),
+[OpenFX](https://github.com/AcademySoftwareFoundation/openfx),
+[LV2](https://github.com/lv2/lv2), and
+[AAX](https://developer.avid.com/aax/).

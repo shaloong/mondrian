@@ -5887,14 +5887,17 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         keys: vec![
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(0.0, 0.25),
             },
             InspectorCurveKeyModel {
                 keyframe_id: Some(keyframe_id),
+                interpolation: Some(mondrian_core::automation::InterpolationType::Linear),
                 point: CurvePoint::new(0.5, 0.5),
             },
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(1.0, 0.75),
             },
         ],
@@ -5934,10 +5937,12 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         keys: vec![
             InspectorCurveKeyModel {
                 keyframe_id: Some(boundary_keyframe_id),
+                interpolation: Some(mondrian_core::automation::InterpolationType::Linear),
                 point: CurvePoint::new(0.0, 0.25),
             },
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(1.0, 0.75),
             },
         ],

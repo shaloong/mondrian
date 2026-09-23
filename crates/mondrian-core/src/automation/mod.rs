@@ -2096,8 +2096,8 @@ impl AnimatedProperty {
             }
         })?;
 
-        let keyframe =
-            channel.keyframes.iter_mut().find(|keyframe| keyframe.time == time).ok_or_else(
+        let keyframe_index =
+            channel.keyframes.iter().position(|keyframe| keyframe.time == time).ok_or_else(
                 || MondrianError::WorkflowStepFailed {
                     step_id: "property_update_channel_keyframe_handles".to_string(),
                     reason: format!(
@@ -2106,10 +2106,43 @@ impl AnimatedProperty {
                     ),
                 },
             )?;
-
+        let previous = keyframe_index
+            .checked_sub(1)
+            .and_then(|index| channel.keyframes.get(index))
+            .cloned();
+        let next = channel.keyframes.get(keyframe_index + 1).cloned();
+        let keyframe = &mut channel.keyframes[keyframe_index];
+        let old_in = keyframe.interp_in;
+        let old_out = keyframe.interp_out;
         let cleared_auto = keyframe.temporal_flags.auto_bezier;
         keyframe.interp_in = interp_in;
         keyframe.interp_out = interp_out;
+        if keyframe.temporal_flags.continuous
+            && !keyframe.temporal_flags.broken_handles
+            && let (Some(previous), Some(next)) = (previous.as_ref(), next.as_ref())
+        {
+            if old_in != interp_in && old_out == interp_out {
+                let slope = tangent_slope_from_in(previous, keyframe, handle_for_in(interp_in));
+                if let Some(slope) = slope {
+                    keyframe.interp_out = KeyframeInterpolation::Bezier(continuous_handle_for_out(
+                        keyframe,
+                        next,
+                        slope,
+                        handle_for_out(old_out).time_offset,
+                    ));
+                }
+            } else if old_out != interp_out && old_in == interp_in {
+                let slope = tangent_slope_from_out(keyframe, next, handle_for_out(interp_out));
+                if let Some(slope) = slope {
+                    keyframe.interp_in = KeyframeInterpolation::Bezier(continuous_handle_for_in(
+                        previous,
+                        keyframe,
+                        slope,
+                        handle_for_in(old_in).time_offset,
+                    ));
+                }
+            }
+        }
         if cleared_auto {
             for channel in &mut self.channels {
                 if let Some(other) =
@@ -4810,6 +4843,74 @@ mod tests {
                 .expect("channel keyframe");
             assert!(!keyframe.temporal_flags.auto_bezier);
         }
+    }
+
+    #[test]
+    fn dragging_one_continuous_bezier_handle_aligns_the_opposite_tangent() {
+        let mut bag = PropertyBag::default();
+        bag.define(PropertyDescriptor::new(
+            "transform.opacity",
+            "Opacity",
+            PropertyValue::Float(0.0),
+        ));
+        let start = tt(0);
+        let middle = tt(5);
+        let end = tt(10);
+        for (time, value, mode) in [
+            (start, 0.0, InterpolationType::Linear),
+            (middle, 0.5, InterpolationType::ContinuousBezier),
+            (end, 1.0, InterpolationType::Linear),
+        ] {
+            bag.apply_mutation(PropertyMutation::SetKeyframe {
+                path: "transform.opacity".to_owned(),
+                keyframe: Keyframe::from_preset(time, PropertyValue::Float(value), mode),
+            })
+            .expect("seed keyframe");
+        }
+        let before = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .and_then(|channel| channel.keyframe_at(middle))
+            .cloned()
+            .expect("middle keyframe");
+        let new_out =
+            KeyframeInterpolation::Bezier(BezierHandle { time_offset: ht(0.3), value_offset: 0.4 });
+        bag.apply_mutation(PropertyMutation::UpdateChannelKeyframeHandles {
+            path: "transform.opacity".to_owned(),
+            time: middle,
+            channel_index: 0,
+            interp_in: before.interp_in,
+            interp_out: new_out,
+        })
+        .expect("drag outgoing handle");
+
+        let channel = bag
+            .property("transform.opacity")
+            .and_then(|property| property.channel(0))
+            .expect("opacity channel");
+        let keys = channel.keyframes();
+        let incoming = handle_for_in(keys[1].interp_in);
+        let outgoing = handle_for_out(keys[1].interp_out);
+        let in_slope = tangent_slope_from_in(&keys[0], &keys[1], incoming).expect("incoming slope");
+        let out_slope =
+            tangent_slope_from_out(&keys[1], &keys[2], outgoing).expect("outgoing slope");
+        assert!((in_slope - out_slope).abs() < 1e-6);
+        assert_eq!(keys[1].interp_out, new_out);
+        assert!(keys[1].temporal_flags.continuous);
+    }
+
+    #[test]
+    fn manual_bezier_preset_starts_with_incoming_left_and_outgoing_right() {
+        let keyframe =
+            Keyframe::from_preset(tt(5), PropertyValue::Float(0.5), InterpolationType::Bezier);
+        assert_eq!(
+            handle_for_in(keyframe.interp_in).time_offset,
+            TimelineTime::NEGATIVE_ONE_THIRD
+        );
+        assert_eq!(
+            handle_for_out(keyframe.interp_out).time_offset,
+            TimelineTime::ONE_THIRD
+        );
     }
 
     #[test]

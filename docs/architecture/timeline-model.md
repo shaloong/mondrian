@@ -1,5 +1,20 @@
 # Timeline Model
 
+Clip blend-mode enum schemas project options in Core's canonical display
+order. Ordering and UI-only separator rows never alter persisted `BlendMode`
+values, authoring identity, or composite semantics.
+
+Core numeric automation persists exact key times, incoming/outgoing handles,
+and temporal constraint flags. `AutoBezier` recomputes tangent handles from
+neighbors; `ContinuousBezier` keeps the two handles collinear while allowing
+different time lengths. Dragging one continuous handle updates the opposite
+side to the dragged slope and preserves that side's prior time length. These
+constraints run during author mutation, so Preview and Export evaluate the
+same persisted curve. Inspector interpolation commands resolve the current
+key by stable ID before committing one property mutation.
+Manual Bezier presets initialize the incoming handle toward earlier time and
+the outgoing handle toward later time.
+
 Color-context construction delegates target-qualified output View lookup to the
 owning Project's exact `ColorEngine`. Sequence preview and export planning never read an
 unqualified process-global OCIO default, so a failed ACES or Custom config

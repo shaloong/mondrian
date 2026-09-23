@@ -1,5 +1,52 @@
 # UI System
 
+Inspector enum dropdowns consume definition-owned stable option keys. The
+Dropdown widget supports non-action separator rows; Clip blend modes use the
+Core display order (inherit/base, darken, lighten, contrast, difference, and
+component groups) and place separators only in their UI projection. The
+persisted enum value and parameter schema do not contain presentation rows.
+`Dropdown::set_model` updates labels and options while preserving widget
+interaction identity.
+
+The shared Curve Editor may attach per-point context commands. Inspector
+opacity keys expose interpolation presets there; virtual Clip-boundary anchors
+have no key identity and no menu. UI actions carry stable key IDs and resolve
+the current author time at dispatch, so a stale menu cannot silently edit a
+different key after the curve changes.
+
+The status bar remains the persistent summary of current work. User-visible
+notifications should start as a small App-owned transient projection for
+completed background work, failed actions, and decisions requiring attention.
+Deduplicate repeated failures by stable reason and operation identity, cap
+visible items, and preserve details in the existing bounded status history.
+Do not toast every successful click or progress tick. A notification never
+owns a Project mutation, a worker, or the sole record of a failure. An
+expandable history panel is useful only when status history is exposed to users;
+the EventBus remains a post-commit notification seam, not notification state.
+See [localization](localization.md) for message formatting and locale ownership.
+
+An external file drop is target-specific. The Asset Library accepts a library
+drop; the Timeline accepts a valid unlocked Track/body position; a canceled
+drag or a drop outside an accepted target performs no import. The Window must
+not reinterpret an ignored `Drop` as a global media-import command. The
+Timeline widget must retain the target Track ID and exact Sequence frame in
+one typed action and only dispatch after release on a valid target.
+
+Timeline file placement is a pending cross-authority operation, not an Asset
+import followed by an unrelated Clip action. Probe into a bounded immutable
+candidate first. Before publication, resolve an existing Asset by canonical
+path without changing its metadata, and validate the candidate's media kind,
+Track lock and insertion interval. For a new Asset, publish the Asset record
+and Clip together under one recoverable operation ID; failure or cancellation
+must restore the prior library and author state. A compensating `retire_assets`
+call alone is insufficient because it changes the visible library history and
+cannot restore an existing Asset's prior metadata. Cross the durability seam
+with a staged/invisible library row or a recovery journal, then expose both
+results only after the Clip author transaction is accepted. Test canceled,
+missed, incompatible, locked, collision, probe failure, database failure,
+author failure, process interruption, and existing-Asset cases. Until this
+operation exists, a Timeline must not accept native file drops as successful.
+
 The first native Window/Surface/Renderer candidate uses the existing Host mode,
 through the same role mapping as subsequent window synchronization. A Host with
 an already-open Project therefore starts directly with a Workspace carrier;

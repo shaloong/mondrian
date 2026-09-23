@@ -224,6 +224,12 @@ fn numeric_curve_edit_from_payload(edit: &ClipCurveEditPayload) -> Result<ClipNu
         ClipCurveEditPayload::Remove { keyframe_id } => {
             Ok(ClipNumericCurveEdit::Remove { keyframe_id: *keyframe_id })
         }
+        ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation } => {
+            Ok(ClipNumericCurveEdit::SetInterpolation {
+                keyframe_id: *keyframe_id,
+                interpolation: *interpolation,
+            })
+        }
     }
 }
 

@@ -53,6 +53,11 @@ pub enum ClipNumericCurveEdit {
     },
     /// Remove one existing key by stable identity.
     Remove { keyframe_id: KeyframeId },
+    /// Change one complete key's interpolation using its stable identity.
+    SetInterpolation {
+        keyframe_id: KeyframeId,
+        interpolation: InterpolationType,
+    },
 }
 
 /// Result of one curve authoring request.
@@ -178,6 +183,78 @@ fn prepare_curve_edit(
     }
 
     match edit {
+        ClipNumericCurveEdit::SetInterpolation { keyframe_id, interpolation } => {
+            let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
+                curve_error(format!(
+                    "keyframe {keyframe_id} is stale or is not a complete key of parameter {}",
+                    address.parameter_id
+                ))
+            })?;
+            let unchanged = match interpolation {
+                InterpolationType::Hold => {
+                    matches!(
+                        keyframe.interp_in,
+                        mondrian_core::automation::KeyframeInterpolation::Hold
+                    ) && matches!(
+                        keyframe.interp_out,
+                        mondrian_core::automation::KeyframeInterpolation::Hold
+                    )
+                }
+                InterpolationType::Linear => {
+                    matches!(
+                        keyframe.interp_in,
+                        mondrian_core::automation::KeyframeInterpolation::Linear
+                    ) && matches!(
+                        keyframe.interp_out,
+                        mondrian_core::automation::KeyframeInterpolation::Linear
+                    )
+                }
+                InterpolationType::AutoBezier => keyframe.temporal_flags.auto_bezier,
+                InterpolationType::ContinuousBezier => {
+                    keyframe.temporal_flags.continuous
+                        && !keyframe.temporal_flags.auto_bezier
+                        && !keyframe.temporal_flags.broken_handles
+                }
+                InterpolationType::Bezier => {
+                    !keyframe.temporal_flags.auto_bezier
+                        && !keyframe.temporal_flags.continuous
+                        && matches!(
+                            keyframe.interp_in,
+                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
+                        )
+                        && matches!(
+                            keyframe.interp_out,
+                            mondrian_core::automation::KeyframeInterpolation::Bezier(_)
+                        )
+                }
+                InterpolationType::EaseIn => matches!(
+                    (keyframe.interp_in, keyframe.interp_out),
+                    (
+                        mondrian_core::automation::KeyframeInterpolation::Linear,
+                        mondrian_core::automation::KeyframeInterpolation::Bezier(_)
+                    )
+                ),
+                InterpolationType::EaseOut => matches!(
+                    (keyframe.interp_in, keyframe.interp_out),
+                    (
+                        mondrian_core::automation::KeyframeInterpolation::Bezier(_),
+                        mondrian_core::automation::KeyframeInterpolation::Linear
+                    )
+                ),
+            };
+            Ok(PreparedCurveEdit {
+                mutations: if unchanged {
+                    Vec::new()
+                } else {
+                    vec![PropertyMutation::UpdateKeyframeInterpolation {
+                        path: path.to_owned(),
+                        time: keyframe.time,
+                        interpolation,
+                    }]
+                },
+                keyframe_id,
+            })
+        }
         ClipNumericCurveEdit::Remove { keyframe_id } => {
             let keyframe = property.keyframe_by_id(keyframe_id).ok_or_else(|| {
                 curve_error(format!(
@@ -333,6 +410,51 @@ mod tests {
                     .and_then(|property| property.keyframe_by_id(keyframe_id))
             })
             .expect("opacity key")
+    }
+
+    #[test]
+    fn interpolation_preset_edit_uses_stable_key_and_skips_noop() {
+        let (mut state, selection, time_base) = state_with_clip();
+        let middle = Keyframe::linear(tt(10, time_base), PropertyValue::Float(0.5));
+        let keyframe_id = middle.id;
+        state
+            .mutate_clip_property(
+                selection,
+                PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe: middle,
+                },
+                "seed curve",
+            )
+            .expect("seed curve");
+        let address = opacity_address(&state, selection);
+        let before = state.project_author_generation();
+        let outcome = state
+            .edit_clip_numeric_curve(
+                selection.clip_id,
+                address.clone(),
+                ClipNumericCurveEdit::SetInterpolation {
+                    keyframe_id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            )
+            .expect("set auto bezier");
+        assert!(outcome.changed);
+        assert_eq!(state.project_author_generation(), before + 1);
+        assert!(opacity_key(&state, selection, keyframe_id).temporal_flags.auto_bezier);
+
+        let outcome = state
+            .edit_clip_numeric_curve(
+                selection.clip_id,
+                address,
+                ClipNumericCurveEdit::SetInterpolation {
+                    keyframe_id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            )
+            .expect("repeat auto bezier");
+        assert!(!outcome.changed);
+        assert_eq!(state.project_author_generation(), before + 1);
     }
 
     #[test]

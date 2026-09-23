@@ -2321,6 +2321,13 @@ pub enum ClipCurveEditPayload {
         /// Stable key identity captured by the current projection.
         keyframe_id: KeyframeId,
     },
+    /// Change the interpolation preset of one existing complete key.
+    SetInterpolation {
+        /// Stable key identity captured by the current projection.
+        keyframe_id: KeyframeId,
+        /// Authoring preset, including constrained Bezier modes.
+        interpolation: mondrian_core::automation::InterpolationType,
+    },
 }
 
 /// Edit one Clip-owned numeric curve through stable author identity.

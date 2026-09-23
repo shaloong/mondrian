@@ -5,6 +5,28 @@ stores editing decisions, project settings, sequence structure, and asset-librar
 metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
 must live outside `.mdp`.
 
+## Portable project package (planned)
+
+The current `.mdp` writer includes only `manifest.json`, `project.json`, and
+`library/index.db`; it does not collect external media, LUT files, OCIO configs,
+or other author resources. A portable package should be an explicit export,
+leaving the lightweight `.mdp` save semantics intact. Freeze one consistent
+Project and Asset Library snapshot, walk typed resource references, copy each
+selected dependency into a content-addressed package entry, and record original
+identity, package path, size, hash, and resource role in a versioned manifest.
+Opening validates the complete manifest and remaps references to unpacked
+resources before publishing the Project. No partially extracted package may
+become visible as a Project. Missing, changed, duplicate, or unsafe archive
+paths fail with resource-specific evidence.
+
+Include LUTs and user-selected media when packaging requests them; make linked
+media versus embedded media an explicit choice. Do not bundle installed
+third-party plugin binaries or fonts without a distributable license. Retain
+plugin identity and required version so the destination can report a missing
+plugin. Generated caches remain excluded. Test a package on a second machine
+with original source paths unavailable, and verify Preview/Export parity for
+LUTs and color configuration.
+
 Persistent Timeline render-cache artifacts live in a versioned machine-local
 cache namespace. Project/Sequence authoring persists only enablement and format
 intent; no artifact path, LRU state, checksum, cache hit, or rendered pixel is

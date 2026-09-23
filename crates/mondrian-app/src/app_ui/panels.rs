@@ -14,9 +14,9 @@ use mondrian_assets::library::FolderRecord;
 use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
-    AnimationParameterAddress, NormalizedCurve, NormalizedCurvePoint, ParameterResourceReference,
-    ParameterSchema, PropertyValue, QualifierSample, QualifierSampleOperation, QualifierSampleSet,
-    MAX_QUALIFIER_SAMPLES,
+    AnimationParameterAddress, InterpolationType, KeyframeInterpolation, NormalizedCurve,
+    NormalizedCurvePoint, ParameterResourceReference, ParameterSchema, PropertyValue,
+    QualifierSample, QualifierSampleOperation, QualifierSampleSet, MAX_QUALIFIER_SAMPLES,
 };
 use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
@@ -1692,6 +1692,8 @@ impl TimelinePanelModel {
 pub struct InspectorCurveKeyModel {
     /// Stable author identity. Virtual Clip-boundary points have no key yet.
     pub keyframe_id: Option<KeyframeId>,
+    /// Current authoring preset when one complete key exists.
+    pub interpolation: Option<InterpolationType>,
     /// Normalized screen-space position.
     pub point: CurvePoint,
 }
@@ -3413,6 +3415,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         start_tick,
         InspectorCurveKeyModel {
             keyframe_id: None,
+            interpolation: None,
             point: CurvePoint::new(0.0, normalized_value(opacity.evaluate(start_tick))?),
         },
     );
@@ -3420,6 +3423,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         end_tick,
         InspectorCurveKeyModel {
             keyframe_id: None,
+            interpolation: None,
             point: CurvePoint::new(1.0, normalized_value(opacity.evaluate(end_tick))?),
         },
     );
@@ -3432,6 +3436,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
             keyframe_time,
             InspectorCurveKeyModel {
                 keyframe_id: Some(keyframe.id),
+                interpolation: Some(interpolation_preset_for_keyframe(&keyframe)),
                 point: CurvePoint::new(
                     normalized_time(keyframe_time)?,
                     normalized_value(keyframe.value)?,
@@ -3458,6 +3463,28 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         keys: keys.into_values().collect(),
         display_points,
     })
+}
+
+fn interpolation_preset_for_keyframe(
+    keyframe: &mondrian_core::automation::Keyframe<PropertyValue>,
+) -> InterpolationType {
+    if keyframe.temporal_flags.auto_bezier {
+        return InterpolationType::AutoBezier;
+    }
+    if keyframe.temporal_flags.continuous && !keyframe.temporal_flags.broken_handles {
+        return InterpolationType::ContinuousBezier;
+    }
+    match (keyframe.interp_in, keyframe.interp_out) {
+        (KeyframeInterpolation::Hold, KeyframeInterpolation::Hold) => InterpolationType::Hold,
+        (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => InterpolationType::Linear,
+        (KeyframeInterpolation::Linear, KeyframeInterpolation::Bezier(_)) => {
+            InterpolationType::EaseIn
+        }
+        (KeyframeInterpolation::Bezier(_), KeyframeInterpolation::Linear) => {
+            InterpolationType::EaseOut
+        }
+        _ => InterpolationType::Bezier,
+    }
 }
 
 fn asset_grid_item_from_asset(

@@ -275,39 +275,15 @@ fn blend_mode_to_text(mode: Option<BlendMode>) -> String {
 }
 
 fn blend_mode_options() -> Vec<ParameterEnumOption> {
-    [
-        "inherit",
-        "Normal",
-        "Dissolve",
-        "Multiply",
-        "Screen",
-        "Overlay",
-        "Darken",
-        "Lighten",
-        "ColorDodge",
-        "ColorBurn",
-        "HardLight",
-        "SoftLight",
-        "Difference",
-        "Exclusion",
-        "Subtract",
-        "DarkerColor",
-        "LighterColor",
-        "LinearBurn",
-        "LinearDodge",
-        "VividLight",
-        "LinearLight",
-        "PinLight",
-        "HardMix",
-        "Divide",
-        "Hue",
-        "Saturation",
-        "Color",
-        "Luminosity",
-    ]
-    .into_iter()
-    .map(|key| ParameterEnumOption::new(key, format!("mondrian.blend_mode.{key}.label")))
-    .collect()
+    mondrian_core::display_labels::blend_mode_options()
+        .iter()
+        .map(|option| {
+            ParameterEnumOption::new(
+                option.value,
+                format!("mondrian.blend_mode.{}.label", option.value),
+            )
+        })
+        .collect()
 }
 
 fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {

@@ -391,9 +391,58 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
             })
             .collect();
         let display_points = curve_model.display_points.clone();
+        let interpolation_menus = curve_model
+            .keys
+            .iter()
+            .map(|key| {
+                let keyframe_id = key.keyframe_id?;
+                Some(
+                    [
+                        ("保持", mondrian_core::automation::InterpolationType::Hold),
+                        ("线性", mondrian_core::automation::InterpolationType::Linear),
+                        (
+                            "贝塞尔",
+                            mondrian_core::automation::InterpolationType::Bezier,
+                        ),
+                        (
+                            "自动贝塞尔",
+                            mondrian_core::automation::InterpolationType::AutoBezier,
+                        ),
+                        (
+                            "连续贝塞尔",
+                            mondrian_core::automation::InterpolationType::ContinuousBezier,
+                        ),
+                        ("缓入", mondrian_core::automation::InterpolationType::EaseIn),
+                        (
+                            "缓出",
+                            mondrian_core::automation::InterpolationType::EaseOut,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(label, interpolation)| {
+                        MenuItem::new(
+                            label,
+                            selected_clip.map(|selection| {
+                                clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                                    clip_id: selection.clip_id,
+                                    parameter: curve_model.property.clone(),
+                                    edit: ClipCurveEditPayload::SetInterpolation {
+                                        keyframe_id,
+                                        interpolation,
+                                    },
+                                })
+                            }),
+                        )
+                        .checked(key.interpolation == Some(interpolation))
+                    })
+                    .collect(),
+                )
+            })
+            .collect();
         CurveEditor::with_points(points)
             .with_point_policies(point_policies)
             .with_display_points(display_points)
+            .with_point_context_menus(interpolation_menus)
             .enabled(can_edit)
             .on_edit(move |edit| inspector_curve_edit_action(selected_clip, &curve_model, edit))
     } else {
@@ -2352,23 +2401,38 @@ pub(super) fn inspector_property_value_widget(
             }
         }
         PropertyValue::Enum(value) => {
-            let items = property
-                .schema
-                .enum_options
-                .iter()
-                .map(|option| {
-                    MenuItem::new(
-                        option.key.clone(),
-                        inspector_property_action(
-                            selection,
-                            target.clone(),
-                            &path,
-                            PropertyValue::Enum(option.key.clone()),
-                        ),
+            let is_blend_mode = path == mondrian_timeline::Clip::BLEND_MODE_PATH;
+            let mut items = Vec::with_capacity(property.schema.enum_options.len() + 6);
+            for option in &property.schema.enum_options {
+                if is_blend_mode
+                    && matches!(
+                        option.key.as_str(),
+                        "Normal" | "Darken" | "Lighten" | "Overlay" | "Difference" | "Hue"
                     )
-                })
-                .collect();
-            Box::new(Dropdown::new(value.clone(), items).enabled(can_edit))
+                {
+                    items.push(MenuItem::separator());
+                }
+                let label = if is_blend_mode {
+                    mondrian_core::display_labels::blend_mode_display_label(&option.key)
+                } else {
+                    option.key.clone()
+                };
+                items.push(MenuItem::new(
+                    label,
+                    inspector_property_action(
+                        selection,
+                        target.clone(),
+                        &path,
+                        PropertyValue::Enum(option.key.clone()),
+                    ),
+                ));
+            }
+            let label = if is_blend_mode {
+                mondrian_core::display_labels::blend_mode_display_label(value)
+            } else {
+                value.clone()
+            };
+            Box::new(Dropdown::new(label, items).enabled(can_edit))
         }
         PropertyValue::Resource(reference) => {
             let text = match reference {
