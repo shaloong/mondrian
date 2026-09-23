@@ -5,27 +5,27 @@ stores editing decisions, project settings, sequence structure, and asset-librar
 metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
 must live outside `.mdp`.
 
-## Portable project package (planned)
+## Portable project package
 
-The current `.mdp` writer includes only `manifest.json`, `project.json`, and
-`library/index.db`; it does not collect external media, LUT files, OCIO configs,
-or other author resources. A portable package should be an explicit export,
-leaving the lightweight `.mdp` save semantics intact. Freeze one consistent
-Project and Asset Library snapshot, walk typed resource references, copy each
-selected dependency into a content-addressed package entry, and record original
-identity, package path, size, hash, and resource role in a versioned manifest.
-Opening validates the complete manifest and remaps references to unpacked
-resources before publishing the Project. No partially extracted package may
-become visible as a Project. Missing, changed, duplicate, or unsafe archive
-paths fail with resource-specific evidence.
+The `.mdp` writer includes only `manifest.json`, `project.json`, and
+`library/index.db`; external media and LUT files remain external to an ordinary
+save. Explicit `.mdpkg` export captures one Project and Library snapshot,
+deduplicates canonical dependency paths, copies each local file to a bounded
+relative entry, and records exact source spellings, length, and SHA-256 in a
+versioned manifest. The directory is published atomically with create-only
+semantics. Missing resources and unsupported transitive Custom OCIO dependencies
+fail preflight rather than producing a partial package.
 
-Include LUTs and user-selected media when packaging requests them; make linked
-media versus embedded media an explicit choice. Do not bundle installed
-third-party plugin binaries or fonts without a distributable license. Retain
-plugin identity and required version so the destination can report a missing
-plugin. Generated caches remain excluded. Test a package on a second machine
-with original source paths unavailable, and verify Preview/Export parity for
-LUTs and color configuration.
+Package open verifies every file and the nested `.mdp` before Session handoff,
+then remaps typed LUT/resource references and SQLite file Assets in a private
+Library generation. Asset IDs and valid media/audio probe bindings survive
+rebinding to byte-identical files. The imported Session is unsaved; its first
+ordinary `.mdp` save targets a new sibling and never rewrites the package.
+
+The product still needs a dedicated export dialog, background progress and
+cancel, a linked-versus-embedded choice, and a second-machine Preview/Export
+parity run. Installed third-party plugin binaries and fonts must not be bundled
+without a distributable license. Generated caches remain excluded.
 
 Persistent Timeline render-cache artifacts live in a versioned machine-local
 cache namespace. Project/Sequence authoring persists only enablement and format

@@ -56,9 +56,16 @@ checks every source again through its retained handle before an atomic,
 create-only directory publication. SQLite is captured through its online
 snapshot API; its temporary backup is discarded before publication. The
 package verifier checks paths against traversal and symlinks, all file hashes,
-the nested archive, and Project identity. Moving the package still requires a
-dedicated open path that rebinds Project and Library references from the
-manifest; direct `project.mdp` opening does not perform that rebinding.
+the nested archive, and Project identity. Package open validates the manifest
+before interrupting the current Session, extracts the nested archive into a new
+runtime Library generation, and rewrites both typed Project resource values
+and SQLite file-source paths before installing the imported Session. Byte-
+identical media keeps its authored Asset identity, probe facts, and logical
+audio component bindings while filesystem revision evidence is refreshed.
+The import is unsaved and its first Save has create-only intent for a sibling
+`.mdp`; it never rewrites the portable package. Choosing `project.mdp` inside a
+`.mdpkg` directory in the ordinary Open dialog routes through this package
+path rather than directly opening the nested archive.
 
 ## Author Snapshot and Request Identity
 

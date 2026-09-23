@@ -374,6 +374,103 @@ fn validate_folder_reparent(
 }
 
 impl AssetLibrary {
+    /// Rebind byte-identical file sources while opening a verified portable package.
+    ///
+    /// The caller must first verify each bundled file against the package
+    /// manifest. This transaction preserves Asset IDs, probe facts, and logical
+    /// audio components while refreshing only filesystem revision evidence.
+    /// It is intended for a private, not-yet-installed Library generation.
+    pub fn rebind_verified_package_sources(&self, bindings: &[(PathBuf, PathBuf)]) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        let mut replacements = Vec::with_capacity(bindings.len());
+        for (source, bundled) in bindings {
+            let source_text =
+                persisted_path_text(source).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid package source path: {error}"),
+                })?;
+            if !seen.insert(source_text.clone()) {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("duplicate package source path: {}", source.display()),
+                });
+            }
+            let target =
+                ordinary_canonical_path(bundled).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid packaged file {}: {error}", bundled.display()),
+                })?;
+            let target_text =
+                persisted_path_text(&target).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid packaged file path: {error}"),
+                })?;
+            let fingerprint = MediaFileFingerprint::capture(&target);
+            replacements.push((source_text, target_text, fingerprint));
+        }
+        let mut db = self.db.lock();
+        let transaction = db
+            .transaction()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        for (source, target, fingerprint) in replacements {
+            let rows = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT id, metadata, source_fingerprint, audio_components FROM assets \
+                     WHERE path = ?1 AND asset_type IN ('video', 'still_image', 'audio')",
+                    )
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+                let rows = statement
+                    .query_map([&source], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?
+            };
+            for (id, metadata_raw, old_fingerprint, catalog_raw) in rows {
+                let mut catalog: AssetAudioComponentCatalog = serde_json::from_str(&catalog_raw)?;
+                let new_fingerprint = if let Some(old_fingerprint) = old_fingerprint {
+                    let probe: MediaInfo = serde_json::from_str(&metadata_raw)?;
+                    let admitted: MediaFileFingerprint = serde_json::from_str(&old_fingerprint)?;
+                    if !admitted.authorizes_reuse()
+                        || admitted.len != Some(probe.file_size)
+                        || catalog.source_fingerprint != admitted
+                    {
+                        None
+                    } else if !fingerprint.authorizes_reuse()
+                        || fingerprint.len != Some(probe.file_size)
+                    {
+                        return Err(MondrianError::AssetDbError {
+                            reason: format!(
+                                "packaged Asset {id} cannot retain verified probe evidence"
+                            ),
+                        });
+                    } else {
+                        catalog.source_fingerprint = fingerprint;
+                        Some(serde_json::to_string(&fingerprint)?)
+                    }
+                } else {
+                    None
+                };
+                transaction.execute(
+                    "UPDATE assets SET path = ?1, source_fingerprint = ?2, audio_components = ?3 WHERE id = ?4",
+                    rusqlite::params![target, new_fingerprint, serde_json::to_string(&catalog)?, id],
+                ).map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            }
+            if MediaFileFingerprint::capture(Path::new(&target)) != fingerprint {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("packaged source changed during Library rebinding: {target}"),
+                });
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        Ok(())
+    }
+
     /// 打开或创建素材库（root 为库根目录）
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
         let root = ordinary_absolute_path(&root).map_err(|error| MondrianError::AssetDbError {
@@ -1820,6 +1917,34 @@ mod tests {
 
     fn commit_info(lib: &AssetLibrary, path: &Path, info: MediaInfo) -> AssetId {
         lib.commit_media_probe(probe_candidate(path, info), None).expect("commit probe")
+    }
+
+    #[test]
+    fn packaged_source_rebind_preserves_admitted_probe_and_asset_identity() {
+        let library = open_test_library();
+        let root = tempfile::tempdir().expect("media root");
+        let original = root.path().join("original.mp4");
+        let packaged = root.path().join("packaged.mp4");
+        std::fs::write(&original, [0u8]).expect("original media");
+        std::fs::copy(&original, &packaged).expect("packaged media");
+        let asset_id = commit_info(&library, &original, lightweight_video_info(&original));
+        let before = library.get_asset(asset_id).expect("lookup").expect("Asset");
+        assert!(before.media_probe().is_some());
+
+        library
+            .rebind_verified_package_sources(&[(
+                before.file_path().expect("source path").to_path_buf(),
+                packaged.clone(),
+            )])
+            .expect("rebind package source");
+
+        let after = library.get_asset(asset_id).expect("lookup").expect("Asset");
+        assert_eq!(
+            after.file_path(),
+            Some(ordinary_canonical_path(&packaged).expect("canonical").as_path())
+        );
+        assert!(after.media_probe().is_some());
+        assert!(after.source_fingerprint().is_some());
     }
 
     fn lightweight_video_info(_path: &Path) -> MediaInfo {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use mondrian_assets::AssetLibrary;
 use mondrian_core::automation::{
-    ParameterResourceReference, PropertyBag, PropertyHost, PropertyValue,
+    ParameterResourceReference, PropertyBag, PropertyHost, PropertyMutation, PropertyValue,
 };
 use mondrian_core::grade_graph::GradeGraphNodeKind;
 use mondrian_core::{AssetId, AssetSource, ColorEngine, OcioConfigSource};
@@ -323,6 +323,127 @@ fn reject_link_or_non_file(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(super) fn package_source_bindings(
+    root: &Path,
+    manifest: &PortablePackageManifest,
+) -> anyhow::Result<BTreeMap<PathBuf, PathBuf>> {
+    let root = fs::canonicalize(root)?;
+    let mut bindings = BTreeMap::new();
+    for file in &manifest.files {
+        let bundled = mondrian_assets::canonical_native_path(&root.join(&file.bundled_path))?;
+        for source in &file.source_paths {
+            anyhow::ensure!(
+                bindings.insert(source.clone(), bundled.clone()).is_none(),
+                "duplicate package source binding"
+            );
+        }
+    }
+    Ok(bindings)
+}
+
+pub(super) fn rebind_document_resources(
+    document: &mut ProjectDocument,
+    bindings: &BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<()> {
+    for sequence in &mut document.sequences.sequences {
+        for track in sequence.video_tracks.iter_mut().chain(sequence.audio_tracks.iter_mut()) {
+            for clip in &mut track.clips {
+                for effect in &mut clip.effects {
+                    rebind_property_bag(&mut effect.properties, bindings)?;
+                }
+                for mask in &mut clip.masks {
+                    rebind_property_bag(&mut mask.properties, bindings)?;
+                }
+                let properties =
+                    clip.property_bag().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                ensure_no_old_references(&properties, bindings)?;
+            }
+        }
+        for definition in &mut sequence.grade_definitions {
+            for version in &mut definition.versions {
+                for node in &mut version.graph.nodes {
+                    if let GradeGraphNodeKind::Effect { effect, .. } = &mut node.kind {
+                        rebind_property_bag(&mut effect.properties, bindings)?;
+                    }
+                }
+            }
+        }
+    }
+    document.validate()?;
+    Ok(())
+}
+
+fn rebind_property_bag(
+    bag: &mut PropertyBag,
+    bindings: &BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<()> {
+    let mut mutations = Vec::new();
+    for (path, property) in bag.iter() {
+        if let Some(value) = relocated_resource_value(property.static_value(), bindings)? {
+            mutations.push(PropertyMutation::SetStaticValue { path: path.to_owned(), value });
+        }
+        for time in property.keyframe_times() {
+            if let Some(key) = property.keyframe_at(time)
+                && let Some(value) = relocated_resource_value(&key.value, bindings)?
+            {
+                mutations.push(PropertyMutation::EditKeyframe {
+                    path: path.to_owned(),
+                    keyframe_id: key.id,
+                    time,
+                    value,
+                });
+            }
+        }
+    }
+    for mutation in mutations {
+        bag.apply_mutation(mutation)?;
+    }
+    Ok(())
+}
+
+fn relocated_resource_value(
+    value: &PropertyValue,
+    bindings: &BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<Option<PropertyValue>> {
+    let PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) = value else {
+        return Ok(None);
+    };
+    let bundled = bindings.get(path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Project resource is absent from portable manifest: {}",
+            path.display()
+        )
+    })?;
+    Ok(Some(PropertyValue::Resource(
+        ParameterResourceReference::ExternalFile { path: bundled.clone() },
+    )))
+}
+
+fn ensure_no_old_references(
+    bag: &PropertyBag,
+    bindings: &BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<()> {
+    for (_, property) in bag.iter() {
+        for value in std::iter::once(property.static_value().clone()).chain(
+            property
+                .keyframe_times()
+                .iter()
+                .filter_map(|time| property.keyframe_at(*time).map(|key| key.value)),
+        ) {
+            if let PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }) =
+                value
+            {
+                anyhow::ensure!(
+                    !bindings.contains_key(&path),
+                    "Project retained an unbound original resource: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_project_dependencies(
     document: &ProjectDocument,
     library: &AssetLibrary,
@@ -529,14 +650,17 @@ impl<'a> DependencyCollector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_assets::AssetMediaProbeCandidate;
     use mondrian_core::automation::PropertyMutation;
     use mondrian_core::{
-        GradeDefinition, GradeGraph, GradeGraphNode, GradeGraphNodeId, GradeVersion,
-        ProjectColorEnvironment, ProjectSettings, TimelineTime,
+        AudioCodec, AudioSourceComponentId, AudioStreamInfo, ChannelLayout, GradeDefinition,
+        GradeGraph, GradeGraphNode, GradeGraphNodeId, GradeVersion, MediaFileFingerprint,
+        MediaInfo, ProjectColorEnvironment, ProjectSettings, TimelineTime,
     };
-    use mondrian_editor_state::AuthoringSession;
+    use mondrian_editor_state::{Action, AuthoringSession};
     use mondrian_effects::{EffectNodeExt, EffectType};
     use mondrian_timeline::{Clip, Sequence, SequenceCollection};
+    use std::time::Duration;
 
     fn lut_effect(path: PathBuf) -> mondrian_effects::EffectNode {
         let mut effect: mondrian_effects::EffectNode =
@@ -670,8 +794,46 @@ mod tests {
         assert_eq!(manifest.files[0].source_paths, vec![lut]);
         assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
 
+        fs::write(moved.with_extension("mdp"), b"existing project").expect("occupied sibling");
+        let mut imported = AppState::new();
+        imported
+            .dispatch_action(Action::OpenProject(moved.join("project.mdp")))
+            .expect("open moved package from dialog selection");
+        let rebound = imported.portable_project_dependency_inventory().expect("rebound inventory");
+        assert!(rebound.is_complete());
+        assert_eq!(
+            rebound.files[0].path,
+            fs::canonicalize(moved.join(&manifest.files[0].bundled_path)).expect("bundled LUT")
+        );
+        assert!(imported.has_unsaved_project_changes());
+        assert_eq!(
+            fs::read(moved.with_extension("mdp")).expect("existing sibling"),
+            b"existing project"
+        );
+        assert_eq!(
+            imported.authoring.as_ref().expect("Session").project_file(),
+            moved.with_file_name("moved-imported-1.mdp")
+        );
+        assert!(!moved.with_file_name("moved-imported-1.mdp").exists());
+
+        let mut unsafe_manifest = manifest.clone();
+        unsafe_manifest.files[0].bundled_path = PathBuf::from("files").join("..").join("escape");
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&unsafe_manifest).expect("encode"),
+        )
+        .expect("tamper manifest");
+        assert!(verify_portable_project_package(&moved).is_err());
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("encode"),
+        )
+        .expect("restore manifest");
         fs::write(moved.join(&manifest.files[0].bundled_path), b"corrupt").expect("tamper package");
         assert!(verify_portable_project_package(&moved).is_err());
+        let mut rejected = AppState::new();
+        assert!(rejected.open_portable_project_package(moved).is_err());
+        assert!(!rejected.has_open_project());
     }
 
     #[test]
@@ -689,5 +851,96 @@ mod tests {
         let package = root.path().join("incomplete.mdpkg");
         assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
         assert!(!package.exists());
+    }
+
+    #[test]
+    fn moved_package_rebinds_sqlite_file_asset_without_losing_probe() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let media = root.path().join("voice.m4a");
+        fs::write(&media, [1u8]).expect("media fixture");
+        let source = fs::canonicalize(&media).expect("canonical media");
+        let info = MediaInfo {
+            duration: Duration::from_secs(1),
+            file_size: 1,
+            container: "m4a".to_owned(),
+            video_streams: Vec::new(),
+            audio_streams: vec![AudioStreamInfo {
+                index: 0,
+                stream_id: Some(1),
+                language: None,
+                title: None,
+                is_default: true,
+                codec: AudioCodec::Aac,
+                duration: Some(Duration::from_secs(1)),
+                sample_rate: 48_000,
+                channels: 2,
+                channel_layout: ChannelLayout::Stereo,
+                bit_depth: 24,
+                avg_bitrate: 192_000,
+            }],
+            has_video: false,
+            has_audio: true,
+        };
+        let candidate = AssetMediaProbeCandidate::new(
+            source.clone(),
+            MediaFileFingerprint::capture(&source),
+            info,
+        )
+        .expect("probe candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("commit media");
+        let stored_source = library
+            .get_asset(asset_id)
+            .expect("lookup")
+            .expect("Asset")
+            .file_path()
+            .expect("file source")
+            .to_path_buf();
+        let lut = root.path().join("look.cube");
+        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        let document = document_with_lut(&library, lut, false);
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("portable.mdpkg");
+        export_snapshot_package(session.snapshot().expect("snapshot"), &package).expect("export");
+        fs::remove_file(&media).expect("remove original media");
+        let moved = root.path().join("moved.mdpkg");
+        fs::rename(&package, &moved).expect("move package");
+        let manifest = verify_portable_project_package(&moved).expect("package");
+        let packaged = manifest
+            .files
+            .iter()
+            .find(|file| file.source_paths.contains(&stored_source))
+            .map(|file| moved.join(&file.bundled_path))
+            .expect("media binding");
+
+        let mut imported = AppState::new();
+        imported.open_portable_project_package(moved).expect("open moved package");
+        let asset = imported
+            .authoring
+            .as_ref()
+            .expect("Session")
+            .asset_library()
+            .get_asset(asset_id)
+            .expect("lookup")
+            .expect("Asset");
+        assert_eq!(
+            asset.file_path(),
+            Some(
+                mondrian_assets::canonical_native_path(&packaged)
+                    .expect("packaged media")
+                    .as_path()
+            )
+        );
+        assert!(asset.media_probe().is_some());
+        assert!(asset.source_fingerprint().is_some());
+        assert!(asset
+            .admitted_audio_source_selection(AudioSourceComponentId::primary())
+            .is_some());
     }
 }

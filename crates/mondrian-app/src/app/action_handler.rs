@@ -41,7 +41,7 @@ use mondrian_timeline::audio::AudioComponentSource;
 #[cfg(test)]
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 enum AssetLibrarySubject {
@@ -254,7 +254,24 @@ impl AppState {
         if path.as_os_str().is_empty() {
             return Err(action_not_executed("open_project", "项目路径不能为空"));
         }
-        self.open_project_file(path).map_err(|err| {
+        let package_root = if path.is_dir()
+            && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
+        {
+            Some(path.clone())
+        } else if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("project.mdp")) {
+            path.parent()
+                .filter(|parent| {
+                    parent.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
+                })
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
+        let result = match package_root {
+            Some(root) => self.open_portable_project_package(root),
+            None => self.open_project_file(path),
+        };
+        result.map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("打开项目失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
