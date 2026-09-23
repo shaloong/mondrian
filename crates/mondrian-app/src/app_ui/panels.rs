@@ -15,8 +15,9 @@ use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
     AnimationParameterAddress, InterpolationType, KeyframeInterpolation, NormalizedCurve,
-    NormalizedCurvePoint, ParameterResourceReference, ParameterSchema, PropertyValue,
-    QualifierSample, QualifierSampleOperation, QualifierSampleSet, MAX_QUALIFIER_SAMPLES,
+    NormalizedCurvePoint, ParameterInterpolation, ParameterResourceReference, ParameterSchema,
+    PropertyValue, PropertyValueType, QualifierSample, QualifierSampleOperation,
+    QualifierSampleSet, MAX_QUALIFIER_SAMPLES,
 };
 use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
@@ -125,9 +126,10 @@ use crate::app::ui_actions::{
     track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
     video_transition_select_action, video_transition_set_range_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
-    visual_effect_select_action, visual_effect_set_enabled_action,
-    visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    visual_effect_add_to_clip_action, visual_effect_edit_numeric_curve_action,
+    visual_effect_remove_action, visual_effect_reorder_action, visual_effect_select_action,
+    visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
+    visual_effect_toggle_current_key_action, visual_mask_add_to_clip_action,
     visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
     visual_mask_set_enabled_action, visual_mask_set_locked_action,
@@ -154,7 +156,8 @@ use crate::app::ui_actions::{
     VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
     VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
-    VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+    VisualEffectAddToClipPayload, VisualEffectEditNumericCurvePayload,
+    VisualEffectParameterTargetPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
@@ -2016,6 +2019,15 @@ pub struct InspectorEffectPropertyModel {
     pub step: Option<f64>,
     /// Whether the property supports animation.
     pub is_animatable: bool,
+    /// Exact numeric key state and sampled curve for scalar Effect parameters.
+    pub numeric_curve: Option<InspectorPropertyCurveModel>,
+}
+
+/// One scalar parameter curve plus its exact current-time key identity.
+#[derive(Debug, Clone)]
+pub struct InspectorPropertyCurveModel {
+    pub curve: InspectorCurveModel,
+    pub current_keyframe_id: Option<KeyframeId>,
 }
 
 fn inspector_property_model(
@@ -2040,7 +2052,23 @@ fn inspector_property_model(
         hard_max: numeric.map(|contract| contract.hard_range.max),
         step: numeric.and_then(|contract| contract.step),
         is_animatable: property.descriptor.schema.is_animatable,
+        numeric_curve: None,
     }
+}
+
+fn inspector_effect_property_model(
+    path: &str,
+    property: &mondrian_core::automation::AnimatedProperty,
+    author_time: TimelineTime,
+    clip: &Clip,
+) -> InspectorEffectPropertyModel {
+    let mut model = inspector_property_model(path, property, author_time);
+    model.numeric_curve =
+        numeric_curve_model_for_property(property, clip).map(|curve| InspectorPropertyCurveModel {
+            curve,
+            current_keyframe_id: property.keyframe_at(author_time).map(|key| key.id),
+        });
+    model
 }
 
 fn inspector_grade_hierarchy_model(
@@ -2237,7 +2265,12 @@ impl InspectorPanelModel {
                         properties
                             .into_iter()
                             .map(|(path, property)| {
-                                inspector_property_model(path, property, clip_author_time)
+                                inspector_effect_property_model(
+                                    path,
+                                    property,
+                                    clip_author_time,
+                                    clip,
+                                )
                             })
                             .collect()
                     },
@@ -3495,7 +3528,23 @@ fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
 fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<InspectorCurveModel> {
     let bag = clip.transform.to_property_bag();
     let opacity = bag.property(Transform2D::OPACITY_PATH)?;
-    let numeric = opacity.descriptor.schema.numeric?;
+    numeric_curve_model_for_property(opacity, clip)
+}
+
+fn numeric_curve_model_for_property(
+    property: &mondrian_core::automation::AnimatedProperty,
+    clip: &Clip,
+) -> Option<InspectorCurveModel> {
+    if !property.descriptor.schema.is_animatable
+        || property.channel_count() != 1
+        || !matches!(
+            property.value_type(),
+            PropertyValueType::Float | PropertyValueType::Double
+        )
+    {
+        return None;
+    }
+    let numeric = property.descriptor.schema.numeric?;
     let value_span = numeric.soft_range.max - numeric.soft_range.min;
     if !value_span.is_finite() || value_span <= 0.0 {
         return None;
@@ -3508,7 +3557,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
     }
 
     let normalized_value = |value: PropertyValue| {
-        let value = f64::from(value.as_f32()?);
+        let value = value.as_f64()?;
         Some(((value - numeric.soft_range.min) / value_span).clamp(0.0, 1.0) as f32)
     };
     let normalized_time = |keyframe_time: TimelineTime| {
@@ -3522,7 +3571,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
-            point: CurvePoint::new(0.0, normalized_value(opacity.evaluate(start_tick))?),
+            point: CurvePoint::new(0.0, normalized_value(property.evaluate(start_tick))?),
         },
     );
     keys.insert(
@@ -3530,14 +3579,14 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         InspectorCurveKeyModel {
             keyframe_id: None,
             interpolation: None,
-            point: CurvePoint::new(1.0, normalized_value(opacity.evaluate(end_tick))?),
+            point: CurvePoint::new(1.0, normalized_value(property.evaluate(end_tick))?),
         },
     );
-    for keyframe_time in opacity.keyframe_times() {
+    for keyframe_time in property.keyframe_times() {
         if keyframe_time < start_tick || keyframe_time > end_tick {
             continue;
         }
-        let keyframe = opacity.keyframe_at(keyframe_time)?;
+        let keyframe = property.keyframe_at(keyframe_time)?;
         keys.insert(
             keyframe_time,
             InspectorCurveKeyModel {
@@ -3559,13 +3608,13 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
                 start_tick.checked_add(duration_ticks.checked_scale(scale).ok()?).ok()?;
             Some(CurvePoint::new(
                 index as f32 / DISPLAY_SEGMENTS as f32,
-                normalized_value(opacity.evaluate(sample_time))?,
+                normalized_value(property.evaluate(sample_time))?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
 
     Some(InspectorCurveModel {
-        property: opacity.address(),
+        property: property.address(),
         keys: keys.into_values().collect(),
         display_points,
     })

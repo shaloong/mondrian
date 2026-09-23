@@ -49,6 +49,7 @@ pub use super::product_action::{
     TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
     VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+    VisualEffectEditNumericCurvePayload, VisualEffectParameterTargetPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
@@ -72,13 +73,13 @@ pub use super::product_action::{
     TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
     VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
     VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
-    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
-    VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_CANCEL_TRACKING,
-    VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING, VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER,
-    VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED, VISUAL_MASK_SET_LOCKED,
-    VISUAL_MASK_SET_PARAMETER_VALUE, VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED,
-    VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
+    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_EDIT_NUMERIC_CURVE, VISUAL_EFFECT_NAMESPACE,
+    VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_EFFECT_TOGGLE_CURRENT_KEY, VISUAL_MASK_ADD_TO_CLIP,
+    VISUAL_MASK_CANCEL_TRACKING, VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING,
+    VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER, VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED,
+    VISUAL_MASK_SET_LOCKED, VISUAL_MASK_SET_PARAMETER_VALUE,
+    VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED, VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction,
@@ -861,6 +862,24 @@ pub fn visual_effect_set_parameter_value_action(
         payload,
     )))
     .into_external_action()
+}
+
+/// Build an action that edits one visual Effect numeric curve by stable key identity.
+pub fn visual_effect_edit_numeric_curve_action(
+    payload: VisualEffectEditNumericCurvePayload,
+) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
+        payload,
+    )))
+    .into_external_action()
+}
+
+/// Build an action that toggles one Effect parameter key at exact current author time.
+pub fn visual_effect_toggle_current_key_action(
+    payload: VisualEffectParameterTargetPayload,
+) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(payload))
+        .into_external_action()
 }
 
 /// Build an action that appends one Mask to a video Clip.

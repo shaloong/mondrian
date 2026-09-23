@@ -171,6 +171,10 @@ pub const VISUAL_EFFECT_REMOVE: &str = "remove";
 pub const VISUAL_EFFECT_REORDER: &str = "reorder";
 /// External action name for writing one stable-address visual Effect parameter.
 pub const VISUAL_EFFECT_SET_PARAMETER_VALUE: &str = "set_parameter_value";
+/// External action name for editing a visual Effect numeric curve by stable key identity.
+pub const VISUAL_EFFECT_EDIT_NUMERIC_CURVE: &str = "edit_numeric_curve";
+/// External action name for toggling a key at the current Effect author time.
+pub const VISUAL_EFFECT_TOGGLE_CURRENT_KEY: &str = "toggle_current_key";
 
 /// External custom-action namespace for Sequence grading hierarchy.
 pub const GRADE_NAMESPACE: &str = "ui.grade";
@@ -376,6 +380,10 @@ pub enum VisualEffectProductAction {
     Reorder(VisualEffectReorderPayload),
     /// Write one parameter value through its stable author instance address.
     SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
+    /// Edit one floating-point parameter curve using a stable Effect and key identity.
+    EditNumericCurve(Box<VisualEffectEditNumericCurvePayload>),
+    /// Toggle a key at the current author time without lossy UI time quantization.
+    ToggleCurrentKey(VisualEffectParameterTargetPayload),
 }
 
 /// Closed Sequence grading hierarchy operations.
@@ -890,6 +898,16 @@ impl ProductAction {
                         namespace, name, payload,
                     )?)),
                 ))),
+                VISUAL_EFFECT_EDIT_NUMERIC_CURVE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::EditNumericCurve(Box::new(decode_payload(
+                        namespace, name, payload,
+                    )?)),
+                ))),
+                VISUAL_EFFECT_TOGGLE_CURRENT_KEY => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::ToggleCurrentKey(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 _ => Ok(None),
             },
             GRADE_NAMESPACE => match name.as_str() {
@@ -1342,6 +1360,16 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::EditNumericCurve(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_EDIT_NUMERIC_CURVE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_TOGGLE_CURRENT_KEY,
                 serde_json::json!(payload),
             ),
             Self::Grade(GradeProductAction::CreateDefinition(payload)) => (
@@ -2093,6 +2121,32 @@ pub struct VisualEffectSetParameterValuePayload {
     pub value: PropertyValue,
 }
 
+/// Edit one numeric visual Effect curve over the owning Clip's author span.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectEditNumericCurvePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance owned by the Clip.
+    pub effect_id: EffectId,
+    /// Stable parameter instance and definition identity.
+    pub parameter: AnimationParameterAddress,
+    /// One stable-key normalized curve edit.
+    pub edit: ClipCurveEditPayload,
+}
+
+/// Stable identity for one Effect parameter key at the current author time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectParameterTargetPayload {
+    /// Canonical Clip identity.
+    pub clip_id: ClipId,
+    /// Stable Effect instance.
+    pub effect_id: EffectId,
+    /// Stable parameter instance and definition identity.
+    pub parameter: AnimationParameterAddress,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GradeCreateDefinitionPayload {
@@ -2825,6 +2879,28 @@ impl<'a> ProductActionAvailability<'a> {
                             })
                             .is_some()
                     },
+                )
+            }
+            VisualEffectProductAction::EditNumericCurve(payload) => {
+                super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)
+                    .ok()
+                    .and_then(|edit| {
+                        self.state
+                            .effect_numeric_curve_edit_would_change(
+                                payload.clip_id,
+                                payload.effect_id,
+                                &payload.parameter,
+                                edit,
+                            )
+                            .ok()
+                    })
+                    .unwrap_or(false)
+            }
+            VisualEffectProductAction::ToggleCurrentKey(payload) => {
+                self.state.effect_current_key_toggle_available(
+                    payload.clip_id,
+                    payload.effect_id,
+                    &payload.parameter,
                 )
             }
         }
@@ -3749,10 +3825,24 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
+                    parameter: parameter.clone(),
                     value: PropertyValue::Float(0.75),
                 },
             ))),
+            ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
+                VisualEffectEditNumericCurvePayload {
+                    clip_id,
+                    effect_id,
+                    parameter: parameter.clone(),
+                    edit: ClipCurveEditPayload::SetInterpolation {
+                        keyframe_id: KeyframeId::new(),
+                        interpolation: mondrian_core::automation::InterpolationType::AutoBezier,
+                    },
+                },
+            ))),
+            ProductAction::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(
+                VisualEffectParameterTargetPayload { clip_id, effect_id, parameter },
+            )),
         ];
 
         for expected in actions {

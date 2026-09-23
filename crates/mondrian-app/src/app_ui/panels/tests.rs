@@ -4527,6 +4527,57 @@ fn effects_add_refreshes_inspector_and_node_graph_selection_models() {
         target.target == NodeGraphTarget::Effect(selected.effect_id)
             && target.node_id == format!("effect:{}", selected.effect_id)
     }));
+
+    let scalar = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.numeric_curve.is_some())
+        .expect("animatable scalar effect parameter");
+    let address = scalar.address.clone();
+    let curve = scalar.numeric_curve.as_ref().expect("curve");
+    assert!(curve.current_keyframe_id.is_none());
+    assert!(curve.curve.keys.iter().all(|key| key.keyframe_id.is_none()));
+    state
+        .dispatch_action(visual_effect_toggle_current_key_action(
+            VisualEffectParameterTargetPayload {
+                clip_id,
+                effect_id: selected.effect_id,
+                parameter: address.clone(),
+            },
+        ))
+        .expect("add current key");
+    let models = AppUiPanelModels::from_app_state(&state);
+    let scalar = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.address == address)
+        .expect("same stable address");
+    let curve = scalar.numeric_curve.as_ref().expect("curve");
+    let key_id = curve.current_keyframe_id.expect("current key");
+    assert!(curve.curve.keys.iter().any(|key| key.keyframe_id == Some(key_id)));
+    state
+        .dispatch_action(visual_effect_edit_numeric_curve_action(
+            VisualEffectEditNumericCurvePayload {
+                clip_id,
+                effect_id: selected.effect_id,
+                parameter: address.clone(),
+                edit: ClipCurveEditPayload::SetInterpolation {
+                    keyframe_id: key_id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        ))
+        .expect("set effect key interpolation");
+    let models = AppUiPanelModels::from_app_state(&state);
+    let curve = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.address == address)
+        .and_then(|property| property.numeric_curve.as_ref())
+        .expect("same effect curve");
+    assert!(curve.curve.keys.iter().any(|key| {
+        key.keyframe_id == Some(key_id) && key.interpolation == Some(InterpolationType::AutoBezier)
+    }));
 }
 
 #[test]
@@ -4920,6 +4971,7 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     assert_eq!(
         effect_property_row_height(&property.value),
@@ -5008,6 +5060,7 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5088,6 +5141,7 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         hard_max: None,
         step: Some(0.01),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5169,6 +5223,7 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         hard_max: None,
         step: Some(0.25),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5255,6 +5310,7 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         hard_max: None,
         step: Some(0.1),
         is_animatable: true,
+        numeric_curve: None,
     };
     let disabled_effect = InspectorEffectModel {
         effect_id,
@@ -5346,6 +5402,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         hard_max: None,
         step: Some(0.25),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5429,6 +5486,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,

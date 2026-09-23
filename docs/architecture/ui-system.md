@@ -297,6 +297,16 @@ non-deletable, while real author keys remain movable and deletable even when
 their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
 
+Scalar floating-point visual Effect parameters use this same curve editor and
+stable-key Product Action path. The Inspector projects the definition-owned
+numeric range, exact current Clip-local key identity, and evaluated samples;
+the diamond beside a value toggles a key at the exact author time. A curve row
+appears once the parameter has authored keys. Inserts, moves, removals, and
+interpolation presets resolve through the Effect instance's stable parameter
+address and commit one Sequence transaction, preserving Undo/Redo and Track
+lock semantics. Auto and continuous Bezier constraints are evaluated by Core;
+the Widget owns only gesture state and normalized coordinates.
+
 The same `CurveEditor` also edits a static structured effect curve without
 pretending it is timeline automation. The Inspector converts its complete
 normalized point set to a validated `NormalizedCurve` and dispatches the normal

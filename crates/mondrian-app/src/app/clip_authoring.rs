@@ -215,7 +215,9 @@ fn authorable_clip<'a>(
     Ok((sequence, clip))
 }
 
-fn numeric_curve_edit_from_payload(edit: &ClipCurveEditPayload) -> Result<ClipNumericCurveEdit> {
+pub(super) fn numeric_curve_edit_from_payload(
+    edit: &ClipCurveEditPayload,
+) -> Result<ClipNumericCurveEdit> {
     match edit {
         ClipCurveEditPayload::Upsert { keyframe_id, point } => Ok(ClipNumericCurveEdit::Upsert {
             keyframe_id: *keyframe_id,

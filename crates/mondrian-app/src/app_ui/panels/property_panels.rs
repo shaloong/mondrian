@@ -378,73 +378,21 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         return panel;
     }
     let curve = if let Some(curve_model) = model.opacity_curve.clone() {
-        let points = curve_model.keys.iter().map(|key| key.point).collect();
-        let point_policies = curve_model
-            .keys
-            .iter()
-            .map(|key| {
-                if key.keyframe_id.is_some() {
-                    CurvePointPolicy::editable()
-                } else {
-                    CurvePointPolicy::anchor()
-                }
-            })
-            .collect();
-        let display_points = curve_model.display_points.clone();
-        let interpolation_menus = curve_model
-            .keys
-            .iter()
-            .map(|key| {
-                let keyframe_id = key.keyframe_id?;
-                Some(
-                    [
-                        ("保持", mondrian_core::automation::InterpolationType::Hold),
-                        ("线性", mondrian_core::automation::InterpolationType::Linear),
-                        (
-                            "贝塞尔",
-                            mondrian_core::automation::InterpolationType::Bezier,
-                        ),
-                        (
-                            "自动贝塞尔",
-                            mondrian_core::automation::InterpolationType::AutoBezier,
-                        ),
-                        (
-                            "连续贝塞尔",
-                            mondrian_core::automation::InterpolationType::ContinuousBezier,
-                        ),
-                        ("缓入", mondrian_core::automation::InterpolationType::EaseIn),
-                        (
-                            "缓出",
-                            mondrian_core::automation::InterpolationType::EaseOut,
-                        ),
-                    ]
-                    .into_iter()
-                    .map(|(label, interpolation)| {
-                        MenuItem::new(
-                            label,
-                            selected_clip.map(|selection| {
-                                clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
-                                    clip_id: selection.clip_id,
-                                    parameter: curve_model.property.clone(),
-                                    edit: ClipCurveEditPayload::SetInterpolation {
-                                        keyframe_id,
-                                        interpolation,
-                                    },
-                                })
-                            }),
-                        )
-                        .checked(key.interpolation == Some(interpolation))
+        numeric_curve_editor(
+            curve_model,
+            can_edit,
+            None,
+            move |curve, edit| inspector_curve_edit_action(selected_clip, curve, edit),
+            move |curve, keyframe_id, interpolation| {
+                selected_clip.map(|selection| {
+                    clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                        clip_id: selection.clip_id,
+                        parameter: curve.property.clone(),
+                        edit: ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation },
                     })
-                    .collect(),
-                )
-            })
-            .collect();
-        CurveEditor::with_points(points)
-            .with_point_policies(point_policies)
-            .with_display_points(display_points)
-            .with_point_context_menus(interpolation_menus)
-            .enabled(can_edit)
-            .on_edit(move |edit| inspector_curve_edit_action(selected_clip, &curve_model, edit))
+                })
+            },
+        )
     } else {
         CurveEditor::with_points(vec![
             CurvePoint::new(0.0, model.opacity / 100.0),
@@ -1374,6 +1322,40 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     selected_clip,
                     effect_id,
                 ));
+                if let Some(curve) = property.numeric_curve.as_ref()
+                    && curve.curve.keys.iter().any(|key| key.keyframe_id.is_some())
+                {
+                    let curve_model = curve.curve.clone();
+                    section = section.with_row(
+                        PropertyRow::new(
+                            format!("{} 曲线", property.label),
+                            Box::new(numeric_curve_editor(
+                                curve_model,
+                                can_edit,
+                                Some(property.schema.allowed_interpolations.clone()),
+                                move |curve, edit| {
+                                    effect_curve_edit_action(selected_clip, effect_id, curve, edit)
+                                },
+                                move |curve, keyframe_id, interpolation| {
+                                    selected_clip.map(|selection| {
+                                        visual_effect_edit_numeric_curve_action(
+                                            VisualEffectEditNumericCurvePayload {
+                                                clip_id: selection.clip_id,
+                                                effect_id,
+                                                parameter: curve.property.clone(),
+                                                edit: ClipCurveEditPayload::SetInterpolation {
+                                                    keyframe_id,
+                                                    interpolation,
+                                                },
+                                            },
+                                        )
+                                    })
+                                },
+                            )),
+                        )
+                        .with_height(118.0),
+                    );
+                }
             }
             panel = panel.with_section(section);
         }
@@ -2063,12 +2045,72 @@ pub(super) fn inspector_reorder_mask_action(
     })
 }
 
-pub(super) fn inspector_curve_edit_action(
-    selection: Option<SelectedClipRef>,
+fn numeric_curve_editor(
+    model: InspectorCurveModel,
+    can_edit: bool,
+    allowed_interpolations: Option<Vec<ParameterInterpolation>>,
+    on_edit: impl Fn(&InspectorCurveModel, CurveEdit) -> Option<Action> + 'static,
+    on_interpolation: impl Fn(&InspectorCurveModel, KeyframeId, InterpolationType) -> Option<Action>,
+) -> CurveEditor {
+    let points = model.keys.iter().map(|key| key.point).collect();
+    let point_policies = model
+        .keys
+        .iter()
+        .map(|key| {
+            if key.keyframe_id.is_some() {
+                CurvePointPolicy::editable()
+            } else {
+                CurvePointPolicy::anchor()
+            }
+        })
+        .collect();
+    let interpolation_menus = model
+        .keys
+        .iter()
+        .map(|key| {
+            let id = key.keyframe_id?;
+            Some(
+                [
+                    ("保持", InterpolationType::Hold),
+                    ("线性", InterpolationType::Linear),
+                    ("贝塞尔", InterpolationType::Bezier),
+                    ("自动贝塞尔", InterpolationType::AutoBezier),
+                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
+                    ("缓入", InterpolationType::EaseIn),
+                    ("缓出", InterpolationType::EaseOut),
+                ]
+                .into_iter()
+                .filter(|(_, interpolation)| {
+                    allowed_interpolations.as_ref().is_none_or(|allowed| {
+                        let schema_interpolation = match interpolation {
+                            InterpolationType::Hold => ParameterInterpolation::Hold,
+                            InterpolationType::Linear => ParameterInterpolation::Linear,
+                            _ => ParameterInterpolation::Bezier,
+                        };
+                        allowed.contains(&schema_interpolation)
+                    })
+                })
+                .map(|(label, interpolation)| {
+                    MenuItem::new(label, on_interpolation(&model, id, interpolation))
+                        .checked(key.interpolation == Some(interpolation))
+                })
+                .collect(),
+            )
+        })
+        .collect();
+    let display_points = model.display_points.clone();
+    CurveEditor::with_points(points)
+        .with_point_policies(point_policies)
+        .with_display_points(display_points)
+        .with_point_context_menus(interpolation_menus)
+        .enabled(can_edit)
+        .on_edit(move |edit| on_edit(&model, edit))
+}
+
+fn numeric_curve_edit_payload(
     model: &InspectorCurveModel,
     edit: CurveEdit,
-) -> Option<Action> {
-    let selection = selection?;
+) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
         CurveEdit::Insert { point, .. } => ClipCurveEditPayload::Upsert {
             keyframe_id: None,
@@ -2086,11 +2128,37 @@ pub(super) fn inspector_curve_edit_action(
             ClipCurveEditPayload::Remove { keyframe_id }
         }
     };
+    Some(edit)
+}
+
+pub(super) fn inspector_curve_edit_action(
+    selection: Option<SelectedClipRef>,
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Option<Action> {
+    let selection = selection?;
     Some(clip_edit_numeric_curve_action(
         ClipEditNumericCurvePayload {
             clip_id: selection.clip_id,
             parameter: model.property.clone(),
-            edit,
+            edit: numeric_curve_edit_payload(model, edit)?,
+        },
+    ))
+}
+
+fn effect_curve_edit_action(
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Option<Action> {
+    let selection = selection?;
+    Some(visual_effect_edit_numeric_curve_action(
+        VisualEffectEditNumericCurvePayload {
+            clip_id: selection.clip_id,
+            effect_id,
+            parameter: model.property.clone(),
+            edit: numeric_curve_edit_payload(model, edit)?,
         },
     ))
 }
@@ -2181,16 +2249,44 @@ pub(super) fn inspector_property_row(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> PropertyRow {
-    let row = PropertyRow::new(
-        property.label.clone(),
-        inspector_property_value_widget(
-            property,
-            can_edit,
-            selection,
-            target.clone(),
-            property.path.clone(),
-        ),
+    let value = inspector_property_value_widget(
+        property,
+        can_edit,
+        selection,
+        target.clone(),
+        property.path.clone(),
     );
+    let value: Box<dyn Widget> =
+        if let (InspectorPropertyTarget::Effect { effect_id, .. }, Some(curve), Some(selection)) =
+            (&target, &property.numeric_curve, selection)
+        {
+            let toggle =
+                visual_effect_toggle_current_key_action(VisualEffectParameterTargetPayload {
+                    clip_id: selection.clip_id,
+                    effect_id: *effect_id,
+                    parameter: property.address.clone(),
+                });
+            Box::new(
+                FlexContainer::row(vec![
+                    FlexChild::flex(value, 1.0),
+                    FlexChild::fixed(Box::new(
+                        Button::new(if curve.current_keyframe_id.is_some() {
+                            "◆"
+                        } else {
+                            "◇"
+                        })
+                        .minimal()
+                        .active(curve.current_keyframe_id.is_some())
+                        .enabled(can_edit)
+                        .on_click(Some(toggle)),
+                    )),
+                ])
+                .with_gap(4.0),
+            )
+        } else {
+            value
+        };
+    let row = PropertyRow::new(property.label.clone(), value);
     let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })
         && property.path == mondrian_core::BasicTitle::TEXT_PATH
     {

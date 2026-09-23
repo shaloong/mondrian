@@ -1346,6 +1346,46 @@ impl AppState {
                 "visual_effect_set_parameter_value",
                 "Effect parameter already has the requested value at the current author time",
             ),
+            VisualEffectProductAction::EditNumericCurve(payload) => {
+                let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
+                let clip_id = payload.clip_id;
+                let property = payload.parameter.clone();
+                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let outcome = self.edit_effect_numeric_curve(
+                    payload.clip_id,
+                    payload.effect_id,
+                    payload.parameter,
+                    edit,
+                )?;
+                require_action_executed(
+                    outcome.changed,
+                    "visual_effect_edit_numeric_curve",
+                    "Effect curve already contains the requested key state",
+                )?;
+                let key_selection = crate::app::AnimationKeyframeSelection {
+                    property: crate::app::AnimationPropertySelection {
+                        clip_id,
+                        property: property.clone(),
+                    },
+                    keyframe_id: outcome.keyframe_id,
+                };
+                if removing {
+                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                    self.set_active_animation_property(clip_id, property);
+                } else {
+                    self.select_animation_keyframe_only(key_selection);
+                }
+                Ok(())
+            }
+            VisualEffectProductAction::ToggleCurrentKey(payload) => require_action_executed(
+                self.toggle_effect_current_key(
+                    payload.clip_id,
+                    payload.effect_id,
+                    payload.parameter,
+                )?,
+                "visual_effect_toggle_current_key",
+                "Effect parameter key was not changed",
+            ),
         }
     }
 
