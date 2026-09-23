@@ -152,6 +152,21 @@ impl Dropdown {
         self.clamp_scroll_offset();
     }
 
+    /// Reformat keyed row labels without changing open, focus, or submenu state.
+    pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
+        fn visit(items: &mut [MenuItem], translate: &mut impl FnMut(&str) -> String) {
+            for item in items {
+                if let Some(message_id) = &item.message_id {
+                    item.label = translate(message_id);
+                }
+                if let MenuItemKind::Submenu { children } = &mut item.kind {
+                    visit(children, translate);
+                }
+            }
+        }
+        visit(&mut self.items, &mut translate);
+    }
+
     /// Select the visual style for the closed trigger.
     pub fn with_trigger_style(mut self, style: DropdownTriggerStyle) -> Self {
         self.trigger_style = style;
@@ -780,6 +795,34 @@ mod tests {
     use mondrian_platform_core::NoopPlatformService;
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use std::cell::RefCell;
+
+    #[test]
+    fn localizing_keyed_rows_keeps_open_submenu_and_focus() {
+        let mut menu = Dropdown::new(
+            "文件",
+            vec![MenuItem::submenu(
+                "导入",
+                vec![MenuItem::inert("文件夹...").with_message_id("folder")],
+            )
+            .with_message_id("import")],
+        );
+        menu.open = true;
+        menu.focused = true;
+        menu.submenu_chain.push(0);
+        menu.localize_item_labels(|id| match id {
+            "import" => "Import".to_owned(),
+            "folder" => "Folder...".to_owned(),
+            _ => panic!("unexpected message id"),
+        });
+        assert!(menu.open);
+        assert!(menu.focused);
+        assert_eq!(menu.submenu_chain, [0]);
+        assert_eq!(menu.items[0].label, "Import");
+        let MenuItemKind::Submenu { children } = &menu.items[0].kind else {
+            panic!("expected submenu");
+        };
+        assert_eq!(children[0].label, "Folder...");
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct SoftShadowCommand {

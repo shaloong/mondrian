@@ -193,6 +193,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_application_menu_row_has_chinese_and_english_copy() {
+        use mondrian_ui_widgets::menu::{MenuItem, MenuItemKind};
+
+        fn visit(items: &[MenuItem], chinese: &Localizer, english: &Localizer) {
+            for item in items {
+                if !matches!(item.kind, MenuItemKind::Separator) {
+                    let id = item.message_id.as_deref().expect("application menu row key");
+                    assert!(
+                        chinese.requested.get_message(id).is_some(),
+                        "missing zh-CN: {id}"
+                    );
+                    assert!(
+                        english.requested.get_message(id).is_some(),
+                        "missing en-US: {id}"
+                    );
+                }
+                if let MenuItemKind::Submenu { children } = &item.kind {
+                    visit(children, chinese, english);
+                }
+            }
+        }
+
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for (_, items) in crate::app_ui::menu_bar::default_menu_items() {
+            visit(&items, &chinese, &english);
+        }
+    }
+
+    #[test]
     fn locale_resolution_keeps_project_independent_and_falls_back() {
         assert_eq!(
             AppUiLocalePreference::System.resolve(Some("en-GB")),

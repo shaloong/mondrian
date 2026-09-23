@@ -211,6 +211,8 @@ pub enum MenuItemCommand {
 #[derive(Debug, Clone)]
 pub struct MenuItem {
     pub label: String,
+    /// Optional stable translation key owned by the menu's application adapter.
+    pub message_id: Option<String>,
     pub command: MenuItemCommand,
     pub enabled: bool,
     pub kind: MenuItemKind,
@@ -225,6 +227,7 @@ impl MenuItem {
         match action.into() {
             Some(action) => Self {
                 label,
+                message_id: None,
                 command: MenuItemCommand::Action(action),
                 enabled: true,
                 kind: MenuItemKind::Action,
@@ -241,6 +244,7 @@ impl MenuItem {
     pub fn local(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            message_id: None,
             command: MenuItemCommand::Local(command.into()),
             enabled: true,
             kind: MenuItemKind::Action,
@@ -254,6 +258,7 @@ impl MenuItem {
     pub fn submenu(label: impl Into<String>, children: Vec<MenuItem>) -> Self {
         Self {
             label: label.into(),
+            message_id: None,
             command: MenuItemCommand::None,
             enabled: true,
             kind: MenuItemKind::Submenu { children },
@@ -270,6 +275,7 @@ impl MenuItem {
     pub fn inert(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            message_id: None,
             command: MenuItemCommand::None,
             enabled: false,
             kind: MenuItemKind::Action,
@@ -283,6 +289,7 @@ impl MenuItem {
     pub fn separator() -> Self {
         Self {
             label: String::new(),
+            message_id: None,
             command: MenuItemCommand::None,
             enabled: false,
             kind: MenuItemKind::Separator,
@@ -290,6 +297,12 @@ impl MenuItem {
             shortcut: None,
             checked: false,
         }
+    }
+
+    /// Attach a stable translation key without coupling this widget to a locale source.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
     }
 
     /// Paint a vector icon before this item label.
