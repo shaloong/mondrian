@@ -22,7 +22,7 @@ decodes them under a 256 MiB per-still allocation cap and validates canonical
 RGBA8 structure and declared dimensions before admitting the Project.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v25, and library v6.
+version axes. The current values are archive v1, document v27, and library v6.
 Library v5 canonicalized persisted native audio layout evidence as exact,
 unspecified, or unsupported; its v4 migration was a field-scoped transactional
 JSON rewrite and never interpreted asset names or stream labels. Library v6
@@ -33,6 +33,21 @@ RAW settings. An archive is
 accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
+
+## Portable package dependency preflight
+
+The ordinary `.mdp` remains a lightweight authoring archive. The App's
+`portable_project_dependency_inventory` scans the complete Project document
+and one stable Asset Library revision before package publication. It includes
+visible Library Assets, Assets still referenced by Clips, external resource
+parameters on Clips and every saved Grade Version (including inactive ones),
+and explicit Custom OCIO config paths. Canonical regular-file paths are
+deduplicated while retaining every stable author owner and an observed byte
+count. Missing files, dangling Asset IDs, remote resources, environment-selected
+OCIO, and Custom OCIO with uncollected transitive resources produce explicit
+issues; an inventory with issues cannot authorize a complete package. This is
+read-only preflight: source files must be revalidated as retained objects while
+copying, and no portable artifact is published by the inventory itself.
 
 ## Author Snapshot and Request Identity
 

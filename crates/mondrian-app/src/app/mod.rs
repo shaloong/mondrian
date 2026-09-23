@@ -214,9 +214,13 @@ mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+mod project_packaging;
 #[cfg(any(test, feature = "validation"))]
 pub use project_lifecycle::PreparedEnduranceProjectFixture;
 pub(crate) use project_lifecycle::ProjectClosePoll;
+pub use project_packaging::{
+    PortableDependencyFile, PortableDependencyInventory, PortableDependencyIssue,
+};
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
