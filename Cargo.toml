@@ -168,6 +168,9 @@ url              = "2"
 walkdir          = "2"
 tempfile         = "3"
 memmap2          = "0.9.11"
+clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
+clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
+clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail"] }
 
 # ---- 颜色管理 ----
 ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933c65dc4e8e4e22767174f0e22b07fe7af42e07", features = ["bundled"] }
@@ -179,6 +182,9 @@ roxmltree        = "0.20"
 sha1             = "0.10"
 zip              = "0.6"
 zstd             = "0.11"
+
+[patch.crates-io]
+clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

@@ -686,6 +686,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "clack-common"
+version = "0.2.0"
+source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
+dependencies = [
+ "bitflags 2.12.1",
+ "clap-sys",
+]
+
+[[package]]
+name = "clack-extensions"
+version = "0.2.0"
+source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
+dependencies = [
+ "bitflags 2.12.1",
+ "clack-common",
+ "clack-host",
+ "clack-plugin",
+ "clap-sys",
+]
+
+[[package]]
+name = "clack-host"
+version = "0.2.0"
+source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
+dependencies = [
+ "clack-common",
+ "clack-plugin",
+ "clap-sys",
+ "libloading",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "clack-plugin"
+version = "0.2.0"
+source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
+dependencies = [
+ "clack-common",
+ "clap-sys",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -704,6 +746,11 @@ checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
 ]
+
+[[package]]
+name = "clap-sys"
+version = "0.5.0"
+source = "git+https://github.com/micahrj/clap-sys.git?rev=25d7f53fdb6363ad63fbd80049cb7a42a97ac156#25d7f53fdb6363ad63fbd80049cb7a42a97ac156"
 
 [[package]]
 name = "clap_builder"
@@ -2435,6 +2482,9 @@ name = "mondrian-audio"
 version = "0.2.0"
 dependencies = [
  "bytemuck",
+ "clack-extensions",
+ "clack-host",
+ "clack-plugin",
  "memmap2",
  "mondrian-core",
  "mondrian-timeline",

@@ -2,6 +2,16 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args_os().nth(1);
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_audio::ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_audio::run_isolated_audio_processor_worker(
+            &mondrian_audio::ClapAudioProcessorWorkerFactory,
+        )
+        .map_err(Into::into);
+    }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--internal-demux-worker-v2")) {
         return run_internal_demux_worker().map_err(Into::into);
     }

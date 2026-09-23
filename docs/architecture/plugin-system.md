@@ -59,12 +59,20 @@ Plugins must not directly own app state, OS handles, or renderer internals.
 
 ## Native-format adoption order
 
-Current status: the Timeline recognizes CLAP/VST3 definition identities and
-`mondrian-audio` defines a supervised processor-worker contract, but the only
-child-side factory is a test fixture. Production discovery, native loading,
-ABI processing, and a packaged worker entrypoint are absent. The visual
-Effect registry/DSL likewise does not host OpenFX binaries. These formats
-must report unavailable until the adapters below are qualified.
+Current status: the Timeline recognizes CLAP/VST3 definition identities.
+`mondrian-audio` has a supervised processor-worker contract and a CLAP child
+factory; the application dispatches its packaged executable into this worker
+before initializing graphics or media. A parent-side CLAP registry can refer
+to installed definitions without loading native code. The child loads a CLAP
+library, checks descriptor identity, exactly one main Float32 input/output
+port with the requested channel count, latency, and tail, and processes
+interleaved blocks through planar CLAP buffers. It rejects unsupported
+parameter lanes, opaque state, auxiliary buses, and incompatible layouts.
+The registry currently needs explicit entries; installed-plugin discovery,
+state/parameter round-trip, application wiring for Preview/Export, and
+reference-plugin signal acceptance are still required before CLAP is
+advertised as a complete product feature. VST3 and OpenFX binaries remain
+unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
 
 The first real audio Adapter should host a user-installed CLAP effect inside
 the existing isolated Processor Worker. CLAP's C ABI and MIT-licensed headers

@@ -5,6 +5,7 @@
 //! discovery and ABI loading live behind the Worker factory Interface; they do
 //! not enter Timeline compilation or the in-process Processor Host.
 
+mod clap_worker;
 mod protocol;
 mod supervisor;
 mod worker;
@@ -30,6 +31,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
+
+pub use clap_worker::{
+    ClapAudioProcessorSpecResolver, ClapAudioProcessorWorkerFactory, ClapPluginRegistration,
+};
 
 /// Hidden endpoint environment used only between a parent Adapter and its Worker.
 pub const ISOLATED_AUDIO_PROCESSOR_ENDPOINT_ENV: &str =

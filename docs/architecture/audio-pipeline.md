@@ -1,5 +1,17 @@
 # Audio pipeline
 
+The isolated CLAP adapter has a child-side implementation in
+`mondrian-audio::processor_isolation::clap_worker`. It runs only through the
+application's hidden audio-worker entrypoint. The parent supplies an exact
+installed-definition registration and schedules through the existing isolated
+processor transport. The child revalidates CLAP descriptor, main audio ports,
+latency, and tail, resets state at continuity entry, and interleaves Float32
+blocks at the ABI boundary. It stops and deactivates the native instance when
+the worker closes; a restart request fails the current instance. Unsupported
+plugin state, parameter automation,
+and auxiliary buses return typed errors; these are pending format work, not
+silent bypasses.
+
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different
 schedulers and downstream consumers, but they cannot reinterpret placement,
