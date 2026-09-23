@@ -1,11 +1,12 @@
-//! Inventory of every file dependency needed by a portable Project package.
+//! Portable Project dependency inventory, byte-complete export, and verification.
 //!
-//! This is a read-only preflight over the complete author snapshot and Asset
-//! Library. A later packager must revalidate each file object while copying;
-//! this inventory alone is not publication or content-identity evidence.
+//! Inventory is read-only preflight. Export revalidates each source while
+//! copying and publishes a complete directory atomically. Opening a moved
+//! package additionally requires rebinding its exact source references.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -15,8 +16,16 @@ use mondrian_core::automation::{
 };
 use mondrian_core::grade_graph::GradeGraphNodeKind;
 use mondrian_core::{AssetId, AssetSource, ColorEngine, OcioConfigSource};
+use mondrian_editor_state::AuthoringSnapshot;
 use mondrian_project::ProjectDocument;
+use mondrian_project::{
+    save_project_archive_from_open_library_with_publication, PreparedProjectArchive,
+    ProjectArchivePublication, ProjectArchiveReadBudget,
+};
+use mondrian_storage::OwnedPublicationDirectory;
 use mondrian_timeline::clip::Clip;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::AppState;
 
@@ -29,6 +38,34 @@ pub struct PortableDependencyFile {
     pub size_bytes: u64,
     /// Stable author identities referring to this file.
     pub owners: Vec<String>,
+    /// Exact persisted spellings that refer to this canonical source file.
+    pub source_paths: Vec<PathBuf>,
+}
+
+/// An immutable package file and its exact source-reference bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortablePackageFile {
+    /// Safe path relative to the package root.
+    pub bundled_path: PathBuf,
+    /// Paths to replace when opening the package on another machine.
+    pub source_paths: Vec<PathBuf>,
+    /// Complete SHA-256 digest of the copied file.
+    pub sha256: String,
+    /// Number of copied bytes.
+    pub size_bytes: u64,
+}
+
+/// Versioned manifest for a complete portable Project directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortablePackageManifest {
+    /// Package contract version.
+    pub version: u32,
+    /// Project identity in the nested `.mdp` archive.
+    pub project_id: mondrian_core::ProjectId,
+    /// SHA-256 digest of `project.mdp`.
+    pub project_sha256: String,
+    /// Copied media and resource files.
+    pub files: Vec<PortablePackageFile>,
 }
 
 /// One dependency that cannot currently be copied into a complete package.
@@ -71,6 +108,219 @@ impl AppState {
         let session = self.authoring.as_ref().context("no open Project")?;
         collect_project_dependencies(session.document(), session.asset_library())
     }
+
+    /// Export one self-contained `.mdpkg` directory from an author snapshot.
+    ///
+    /// An incomplete dependency graph or changed source rejects publication.
+    /// The destination must be absent; this never overwrites an existing package.
+    pub fn export_portable_project_package(&self, target: &Path) -> anyhow::Result<()> {
+        let session = self.authoring.as_ref().context("no open Project")?;
+        let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        export_snapshot_package(snapshot, target)
+    }
+}
+
+fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        snapshot.asset_library.database_revision()? == snapshot.asset_library_revision,
+        "Project Library changed after portable author snapshot"
+    );
+    let inventory = collect_project_dependencies(&snapshot.document, &snapshot.asset_library)?;
+    if !inventory.is_complete() {
+        let detail = inventory
+            .issues
+            .iter()
+            .map(|issue| format!("{}: {}", issue.owner, issue.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("portable package has unresolved dependencies: {detail}");
+    }
+    let staging = OwnedPublicationDirectory::create_sibling(target, "portable-project")?;
+    let files_root = staging.path().join("files");
+    fs::create_dir(&files_root).context("create portable package file directory")?;
+    let mut package_files = Vec::with_capacity(inventory.files.len());
+    for (index, dependency) in inventory.files.iter().enumerate() {
+        let extension = dependency
+            .path
+            .extension()
+            .and_then(|part| part.to_str())
+            .filter(|part| {
+                !part.is_empty()
+                    && part.len() <= 12
+                    && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .unwrap_or("bin");
+        let name = format!("{index:08}.{extension}");
+        let bundled_path = PathBuf::from("files").join(name);
+        let mut source = fs::File::open(&dependency.path)
+            .with_context(|| format!("open package source {}", dependency.path.display()))?;
+        let mut destination = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(staging.path().join(&bundled_path))?;
+        let copied = std::io::copy(&mut source, &mut destination)?;
+        anyhow::ensure!(
+            copied == dependency.size_bytes,
+            "source length changed during package copy: {}",
+            dependency.path.display()
+        );
+        destination.sync_all()?;
+        destination.seek(SeekFrom::Start(0))?;
+        source.seek(SeekFrom::Start(0))?;
+        let (copied_hash, copied_len) = hash_reader(&mut destination)?;
+        let (source_hash, source_len) = hash_reader(&mut source)?;
+        anyhow::ensure!(
+            copied_hash == source_hash && copied_len == source_len,
+            "source content changed during package copy: {}",
+            dependency.path.display()
+        );
+        package_files.push(PortablePackageFile {
+            bundled_path,
+            source_paths: dependency.source_paths.clone(),
+            sha256: copied_hash,
+            size_bytes: copied_len,
+        });
+    }
+    let archive_path = staging.path().join("project.mdp");
+    anyhow::ensure!(
+        snapshot.asset_library.database_revision()? == snapshot.asset_library_revision,
+        "Project Library changed during portable package copy"
+    );
+    let database_snapshot = snapshot
+        .asset_library
+        .snapshot_database(snapshot.asset_library_revision, &archive_path)?;
+    anyhow::ensure!(
+        snapshot.asset_library.database_revision()? == snapshot.asset_library_revision,
+        "Project Library changed during portable package snapshot"
+    );
+    let mut database_reader = database_snapshot.try_clone_reader()?;
+    save_project_archive_from_open_library_with_publication(
+        &snapshot.document,
+        &mut database_reader,
+        &archive_path,
+        ProjectArchivePublication::CreateNew,
+    )?;
+    drop(database_reader);
+    drop(database_snapshot);
+    let (project_sha256, _) = hash_reader(&mut fs::File::open(&archive_path)?)?;
+    let manifest = PortablePackageManifest {
+        version: 1,
+        project_id: snapshot.document.project_id,
+        project_sha256,
+        files: package_files,
+    };
+    fs::write(
+        staging.path().join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    staging.publish_create_new()?;
+    Ok(())
+}
+
+fn hash_reader(reader: &mut impl Read) -> anyhow::Result<(String, u64)> {
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        total = total.checked_add(count as u64).context("package file exceeds u64 length")?;
+    }
+    let digest = hasher.finalize();
+    Ok((
+        digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        total,
+    ))
+}
+
+/// Validate a portable directory and every bundled byte before its Project is opened.
+pub fn verify_portable_project_package(root: &Path) -> anyhow::Result<PortablePackageManifest> {
+    let root = fs::canonicalize(root).context("portable package directory is unavailable")?;
+    anyhow::ensure!(root.is_dir(), "portable package root is not a directory");
+    let manifest_path = root.join("manifest.json");
+    reject_link_or_non_file(&manifest_path)?;
+    let manifest_bytes = fs::read(&manifest_path)?;
+    anyhow::ensure!(
+        manifest_bytes.len() <= 16 * 1024 * 1024,
+        "portable package manifest is too large"
+    );
+    let manifest: PortablePackageManifest = serde_json::from_slice(&manifest_bytes)?;
+    anyhow::ensure!(
+        manifest.version == 1,
+        "unsupported portable package version {}",
+        manifest.version
+    );
+    anyhow::ensure!(
+        fs::symlink_metadata(root.join("files"))?.file_type().is_dir(),
+        "portable package files entry is not a real directory"
+    );
+    let mut source_paths = BTreeSet::new();
+    let mut bundled_paths = BTreeSet::new();
+    for file in &manifest.files {
+        let relative = &file.bundled_path;
+        let mut parts = relative.components();
+        anyhow::ensure!(
+            matches!(parts.next(), Some(std::path::Component::Normal(part)) if part == "files")
+                && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                && parts.next().is_none(),
+            "unsafe portable package file path: {}",
+            relative.display()
+        );
+        anyhow::ensure!(
+            bundled_paths.insert(relative.clone()),
+            "duplicate bundled file path"
+        );
+        anyhow::ensure!(
+            !file.source_paths.is_empty(),
+            "bundled file has no source references"
+        );
+        for source in &file.source_paths {
+            anyhow::ensure!(
+                source.is_absolute() && source_paths.insert(source.clone()),
+                "invalid or duplicate source reference: {}",
+                source.display()
+            );
+        }
+        let bundled = root.join(relative);
+        reject_link_or_non_file(&bundled)?;
+        let (sha256, length) = hash_reader(&mut fs::File::open(&bundled)?)?;
+        anyhow::ensure!(
+            sha256 == file.sha256 && length == file.size_bytes,
+            "portable package file checksum mismatch: {}",
+            relative.display()
+        );
+    }
+    let archive_path = root.join("project.mdp");
+    reject_link_or_non_file(&archive_path)?;
+    let mut archive = fs::File::open(&archive_path)?;
+    let (sha256, _) = hash_reader(&mut archive)?;
+    anyhow::ensure!(
+        sha256 == manifest.project_sha256,
+        "portable package Project checksum mismatch"
+    );
+    archive.seek(SeekFrom::Start(0))?;
+    let prepared =
+        PreparedProjectArchive::from_open_file(&mut archive, ProjectArchiveReadBudget::default())?;
+    anyhow::ensure!(
+        prepared.project_id() == manifest.project_id,
+        "portable package Project identity mismatch"
+    );
+    Ok(manifest)
+}
+
+fn reject_link_or_non_file(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect portable package entry {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "portable package entry is not a regular file: {}",
+        path.display()
+    );
+    Ok(())
 }
 
 fn collect_project_dependencies(
@@ -133,7 +383,7 @@ fn collect_project_dependencies(
 
 struct DependencyCollector<'a> {
     library: &'a AssetLibrary,
-    files: BTreeMap<PathBuf, (u64, BTreeSet<String>)>,
+    files: BTreeMap<PathBuf, (u64, BTreeSet<String>, BTreeSet<PathBuf>)>,
     seen_assets: BTreeSet<AssetId>,
     issues: Vec<PortableDependencyIssue>,
 }
@@ -244,9 +494,12 @@ impl<'a> DependencyCollector<'a> {
                 return;
             }
         };
-        let entry =
-            self.files.entry(canonical).or_insert_with(|| (metadata.len(), BTreeSet::new()));
+        let entry = self
+            .files
+            .entry(canonical)
+            .or_insert_with(|| (metadata.len(), BTreeSet::new(), BTreeSet::new()));
         entry.1.insert(owner);
+        entry.2.insert(path.to_path_buf());
     }
 
     fn issue(&mut self, owner: impl Into<String>, reason: impl Into<String>) {
@@ -259,11 +512,14 @@ impl<'a> DependencyCollector<'a> {
             files: self
                 .files
                 .into_iter()
-                .map(|(path, (size_bytes, owners))| PortableDependencyFile {
-                    path,
-                    size_bytes,
-                    owners: owners.into_iter().collect(),
-                })
+                .map(
+                    |(path, (size_bytes, owners, source_paths))| PortableDependencyFile {
+                        path,
+                        size_bytes,
+                        owners: owners.into_iter().collect(),
+                        source_paths: source_paths.into_iter().collect(),
+                    },
+                )
                 .collect(),
             issues: self.issues,
         }
@@ -278,6 +534,7 @@ mod tests {
         GradeDefinition, GradeGraph, GradeGraphNode, GradeGraphNodeId, GradeVersion,
         ProjectColorEnvironment, ProjectSettings, TimelineTime,
     };
+    use mondrian_editor_state::AuthoringSession;
     use mondrian_effects::{EffectNodeExt, EffectType};
     use mondrian_timeline::{Clip, Sequence, SequenceCollection};
 
@@ -385,5 +642,52 @@ mod tests {
         assert!(inventory.files.is_empty());
         assert!(inventory.issues.iter().any(|issue| issue.reason.contains("unavailable")));
         assert!(inventory.issues.iter().any(|issue| issue.reason.contains("missing")));
+    }
+
+    #[test]
+    fn package_survives_source_removal_and_detects_tampering() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let lut = root.path().join("look.cube");
+        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        let document = document_with_lut(&library, lut.clone(), true);
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("portable.mdpkg");
+        export_snapshot_package(session.snapshot().expect("snapshot"), &package)
+            .expect("export package");
+        fs::remove_file(&lut).expect("remove original LUT");
+        let moved = root.path().join("moved.mdpkg");
+        fs::rename(&package, &moved).expect("move package");
+        let manifest = verify_portable_project_package(&moved).expect("complete package");
+        assert_eq!(fs::read_dir(&moved).expect("package entries").count(), 3);
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].source_paths, vec![lut]);
+        assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
+
+        fs::write(moved.join(&manifest.files[0].bundled_path), b"corrupt").expect("tamper package");
+        assert!(verify_portable_project_package(&moved).is_err());
+    }
+
+    #[test]
+    fn unresolved_dependency_leaves_no_package() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let document = document_with_lut(&library, root.path().join("missing.cube"), false);
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("incomplete.mdpkg");
+        assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
+        assert!(!package.exists());
     }
 }

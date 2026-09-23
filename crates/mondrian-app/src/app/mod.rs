@@ -219,7 +219,8 @@ mod project_packaging;
 pub use project_lifecycle::PreparedEnduranceProjectFixture;
 pub(crate) use project_lifecycle::ProjectClosePoll;
 pub use project_packaging::{
-    PortableDependencyFile, PortableDependencyInventory, PortableDependencyIssue,
+    verify_portable_project_package, PortableDependencyFile, PortableDependencyInventory,
+    PortableDependencyIssue, PortablePackageFile, PortablePackageManifest,
 };
 mod project_persistence;
 mod project_recovery;

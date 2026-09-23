@@ -49,6 +49,17 @@ issues; an inventory with issues cannot authorize a complete package. This is
 read-only preflight: source files must be revalidated as retained objects while
 copying, and no portable artifact is published by the inventory itself.
 
+`export_portable_project_package` stages a new `.mdpkg` directory containing a
+validated `project.mdp`, deduplicated copied files, and a versioned manifest
+with exact original path spellings, file lengths, and SHA-256 digests. The copy
+checks every source again through its retained handle before an atomic,
+create-only directory publication. SQLite is captured through its online
+snapshot API; its temporary backup is discarded before publication. The
+package verifier checks paths against traversal and symlinks, all file hashes,
+the nested archive, and Project identity. Moving the package still requires a
+dedicated open path that rebinds Project and Library references from the
+manifest; direct `project.mdp` opening does not perform that rebinding.
+
 ## Author Snapshot and Request Identity
 
 `AuthoringSession::snapshot` captures one immutable persistence input:
