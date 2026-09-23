@@ -22,9 +22,9 @@ Library generation. Asset IDs and valid media/audio probe bindings survive
 rebinding to byte-identical files. The imported Session is unsaved; its first
 ordinary `.mdp` save targets a new sibling and never rewrites the package.
 
-The product still needs a dedicated export dialog, background progress and
-cancel, a linked-versus-embedded choice, and a second-machine Preview/Export
-parity run. Installed third-party plugin binaries and fonts must not be bundled
+The File menu exposes a destination dialog, background copy progress, and
+cancel. The product still needs a linked-versus-embedded choice and a
+second-machine Preview/Export parity run. Installed third-party plugin binaries and fonts must not be bundled
 without a distributable license. Generated caches remain excluded.
 
 Persistent Timeline render-cache artifacts live in a versioned machine-local

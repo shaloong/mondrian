@@ -58,7 +58,13 @@ impl AppState {
     pub fn dispatch_action(&mut self, action: mondrian_editor_state::Action) -> Result<()> {
         use mondrian_editor_state::Action;
 
-        if self.project_close_blocks_actions() {
+        let is_portable_cancel = matches!(
+            &action,
+            Action::Custom { namespace, name, .. }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT
+        );
+        if self.project_close_blocks_actions() && !is_portable_cancel {
             return Err(MondrianError::ActionNotExecuted {
                 action: "project_lifecycle_handoff".to_owned(),
                 reason: "项目正在安全关闭，或持久化所有权未能证明；作者操作保持冻结".to_owned(),
@@ -203,6 +209,29 @@ impl AppState {
                 Ok(())
             }
             Action::ImportMedia(paths) => self.import_media_from_action(paths),
+
+            Action::Custom { namespace, name, payload }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_EXPORT_PORTABLE_PACKAGE =>
+            {
+                let target: PathBuf = serde_json::from_value(payload).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "export_portable_package".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                self.request_portable_project_export(target).map_err(MondrianError::Other)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT =>
+            {
+                require_action_executed(
+                    self.cancel_portable_project_export(),
+                    "cancel_portable_package_export",
+                    "当前没有正在运行的项目打包",
+                )
+            }
 
             Action::Custom { namespace, name, .. } => {
                 if let Some(error) = ProductAction::unknown_external_action_error(&namespace, &name)

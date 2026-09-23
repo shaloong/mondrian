@@ -54,7 +54,15 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                         MenuItem::inert("文件夹..."),
                     ],
                 ),
-                MenuItem::submenu("导出", vec![MenuItem::inert("导出设置...")]),
+                MenuItem::submenu(
+                    "导出",
+                    vec![
+                        MenuItem::inert("导出设置..."),
+                        MenuItem::separator(),
+                        command_menu_item("file.export_portable_package"),
+                        command_menu_item("file.cancel_portable_package_export"),
+                    ],
+                ),
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
                 MenuItem::separator(),
@@ -1135,6 +1143,8 @@ mod tests {
         assert!(!menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(!menu_item(&menu_items, "文件", "保存").enabled);
         assert!(!menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "打包项目...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "取消项目打包").enabled);
         assert!(!menu_item(&menu_items, "文件", "关闭项目").enabled);
         assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
         assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
@@ -1157,6 +1167,8 @@ mod tests {
         assert!(menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(menu_item(&menu_items, "文件", "保存").enabled);
         assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(menu_item_deep(&menu_items, "文件", "打包项目...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "取消项目打包").enabled);
         assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);
     }
 

@@ -21,4 +21,6 @@ notification-autosave-warning = 自动保存完成，但恢复点清理异常：
 notification-autosave-failed = 自动保存失败：{ $reason }
 notification-export-complete = 导出完成：{ $path }
 notification-export-failed = 导出失败：{ $reason }
+notification-package-complete = 项目打包完成：{ $path }
+notification-package-failed = 项目打包失败：{ $reason }
 notification-action-failed = 操作失败：{ $reason }

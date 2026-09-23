@@ -55,6 +55,9 @@ with exact original path spellings, file lengths, and SHA-256 digests. The copy
 checks every source again through its retained handle before an atomic,
 create-only directory publication. SQLite is captured through its online
 snapshot API; its temporary backup is discarded before publication. The
+product command performs preflight and publication on a dedicated cancellable
+worker. Cancellation is checked during file copy and hashing and immediately
+before final publication; dropping staging removes incomplete output. The
 package verifier checks paths against traversal and symlinks, all file hashes,
 the nested archive, and Project identity. Package open validates the manifest
 before interrupting the current Session, extracts the nested archive into a new

@@ -139,6 +139,12 @@ pub const APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED: &str = "interpret_asset_draft
 pub const APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG: &str = "confirm_interpret_asset_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+/// App-shell request to choose a new portable Project directory.
+pub const APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG: &str = "export_portable_package_dialog";
+/// App-shell command after choosing the portable package destination.
+pub const APP_SHELL_EXPORT_PORTABLE_PACKAGE: &str = "export_portable_package";
+/// App-shell command to cancel an active portable package export.
+pub const APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT: &str = "cancel_portable_package_export";
 /// App-shell request to choose a timeline export output file.
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 /// Native file selection for one canonical ANC export attachment.
@@ -1398,6 +1404,21 @@ pub fn app_shell_confirm_interpret_asset_dialog_action() -> Action {
 /// Build an app-shell request for saving the current project to a chosen path.
 pub fn app_shell_save_project_as_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_SAVE_PROJECT_AS_DIALOG)
+}
+
+/// Ask the shell to choose a portable Project package destination.
+pub fn app_shell_export_portable_package_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG)
+}
+
+/// Start portable Project export at the selected destination.
+pub fn app_shell_export_portable_package_action(target: PathBuf) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_EXPORT_PORTABLE_PACKAGE, target)
+}
+
+/// Cancel the current portable Project export.
+pub fn app_shell_cancel_portable_package_export_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT)
 }
 
 /// Build an app-shell request for choosing an export output file.

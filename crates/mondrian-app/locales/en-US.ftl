@@ -32,4 +32,6 @@ notification-autosave-warning = Autosave completed, but recovery cleanup failed:
 notification-autosave-failed = Autosave failed: { $reason }
 notification-export-complete = Export complete: { $path }
 notification-export-failed = Export failed: { $reason }
+notification-package-complete = Portable project package ready: { $path }
+notification-package-failed = Could not package project: { $reason }
 notification-action-failed = Action failed: { $reason }

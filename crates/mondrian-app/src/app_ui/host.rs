@@ -1205,6 +1205,7 @@ impl AppUiHost {
             )
         };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
+        let portable_package_changed = self.app_state.borrow_mut().poll_portable_project_export();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let audio_devices_changed = self.audio_device_catalog.poll_finished();
         if audio_devices_changed {
@@ -1228,6 +1229,7 @@ impl AppUiHost {
             || proxy_generation_changed
             || visual_tracking_changed
             || export_queue_changed
+            || portable_package_changed
             || thumbnails_changed
             || waveform_changed;
         let mut outcome =

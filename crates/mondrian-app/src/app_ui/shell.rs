@@ -24,6 +24,7 @@ use mondrian_ui_widgets::{
 use std::path::Path;
 
 use crate::app::ui_actions::{
+    app_shell_export_portable_package_action,
     app_shell_preferences_display_management_changed_action, assets_import_files_action,
     assets_relink_asset_action, assets_set_interpretation_action, export_edit_draft_action,
     project_create_with_settings_action, project_recover_from_autosave_action,
@@ -39,7 +40,8 @@ use crate::app::ui_actions::{
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
     APP_SHELL_CONFIRM_PROJECT_SETTINGS, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
-    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
     APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
@@ -109,6 +111,11 @@ pub fn project_file_filters() -> Vec<FileFilter> {
         "Mondrian 项目",
         vec![PROJECT_FILE_EXTENSION],
     )]
+}
+
+/// File dialog filter for the portable package directory destination.
+pub fn portable_package_filters() -> Vec<FileFilter> {
+    vec![FileFilter::new("Mondrian 便携项目包", vec!["mdpkg"])]
 }
 
 /// File dialog filters for media import commands.
@@ -625,6 +632,26 @@ pub fn try_resolve_app_shell_action(
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
                 .map(Action::SaveProjectAs))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG =>
+        {
+            let stem = current_project_path
+                .and_then(Path::file_stem)
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("未命名项目");
+            let default_name = format!("{stem}.mdpkg");
+            Ok(platform
+                .save_file_dialog(
+                    "打包 Mondrian 项目",
+                    &default_name,
+                    &portable_package_filters(),
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+                .map(app_shell_export_portable_package_action))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_EXPORT_OUTPUT_DIALOG =>
@@ -2406,16 +2433,17 @@ mod tests {
         app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
         app_shell_confirm_new_project_dialog_action, app_shell_confirm_project_settings_action,
         app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
-        app_shell_import_media_dialog_action, app_shell_import_media_dialog_action_with_target,
-        app_shell_interpret_asset_dialog_action, app_shell_interpret_asset_draft_changed_action,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
-        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
-        app_shell_project_settings_action, app_shell_project_settings_draft_changed_action,
-        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
-        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-        app_shell_save_project_as_dialog_action, app_shell_select_custom_ocio_config_action,
-        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        app_shell_export_portable_package_dialog_action, app_shell_import_media_dialog_action,
+        app_shell_import_media_dialog_action_with_target, app_shell_interpret_asset_dialog_action,
+        app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_open_recent_project_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_project_settings_action,
+        app_shell_project_settings_draft_changed_action, app_shell_recover_project_action,
+        app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        app_shell_select_custom_ocio_config_action, app_shell_sequence_settings_action,
+        app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
@@ -3158,6 +3186,13 @@ mod tests {
             .extensions
             .iter()
             .any(|extension| extension == PROJECT_FILE_EXTENSION));
+    }
+
+    #[test]
+    fn portable_package_dialog_uses_distinct_directory_extension() {
+        let filters = portable_package_filters();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].extensions, vec!["mdpkg"]);
     }
 
     #[test]
@@ -4660,6 +4695,25 @@ mod tests {
         assert_eq!(
             action,
             Some(Action::SaveProjectAs(PathBuf::from("E:/projects/out.mdp")))
+        );
+    }
+
+    #[test]
+    fn resolve_app_shell_package_dialog_returns_export_action() {
+        let platform = FakePlatform {
+            save_path: Some(PathBuf::from("E:/projects/share.mdpkg")),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            app_shell_export_portable_package_dialog_action(),
+            &platform,
+            Some(Path::new("E:/projects/current.mdp")),
+        );
+        assert_eq!(
+            action,
+            Some(app_shell_export_portable_package_action(PathBuf::from(
+                "E:/projects/share.mdpkg"
+            )))
         );
     }
 

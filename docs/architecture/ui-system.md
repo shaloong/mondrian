@@ -20,7 +20,7 @@ messages and the popover shows eight at a time with wheel navigation. Active
 export progress cannot conceal a newer error status. This gives professional
 users a quiet, recoverable message surface while editing. The App emits
 language-neutral terminal notification facts for completed media imports,
-manual saves, Exports, and their failures; Autosave failures and failed Timeline
+manual saves, Exports, portable Project packages, and their failures; Autosave failures and failed Timeline
 file placement are also eligible. The UI formats them with the current Fluent
 locale and shows at most two nonblocking toasts. Success, warning, and error
 toasts expire after 5, 8, and 10 seconds; clicking one dismisses it. Stable
@@ -31,6 +31,13 @@ owns a Project mutation, a worker, or the sole record of a failure. An
 expandable history panel exposes status history to users; the EventBus remains
 a post-commit notification seam, not notification state.
 See [localization](localization.md) for message formatting and locale ownership.
+
+`File → Export → Package Project` opens a `.mdpkg` destination dialog. The
+App takes an author snapshot, then performs dependency preflight, file copying,
+hashing, and atomic publication on a cancellable background worker. The status
+bar shows bounded copy progress and the menu exposes cancellation while work
+is active. Cancellation and failure clean staging without publishing a partial
+package; completion or failure emits one localized terminal notification.
 
 An external file drop is target-specific. The Asset Library accepts a library
 drop; the Timeline accepts a valid unlocked Track/body position; a canceled

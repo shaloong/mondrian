@@ -11,7 +11,8 @@ use mondrian_ui_core::shortcut::ShortcutBinding;
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 
 use crate::app::ui_actions::{
-    app_shell_about_action, app_shell_gallery_capture_current_action,
+    app_shell_about_action, app_shell_cancel_portable_package_export_action,
+    app_shell_export_portable_package_dialog_action, app_shell_gallery_capture_current_action,
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
     app_shell_open_project_dialog_action, app_shell_preferences_action,
     app_shell_project_settings_action, app_shell_quit_action,
@@ -104,6 +105,22 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::File,
             Some(ShortcutBinding::ctrl_shift(KeyCode::S)),
             action_save_project_as,
+        ),
+        command(
+            "file.export_portable_package",
+            "打包项目",
+            "打包项目...",
+            AppUiCommandCategory::File,
+            None,
+            app_shell_export_portable_package_dialog_action,
+        ),
+        command(
+            "file.cancel_portable_package_export",
+            "取消项目打包",
+            "取消项目打包",
+            AppUiCommandCategory::File,
+            None,
+            app_shell_cancel_portable_package_export_action,
         ),
         command(
             "file.project_settings",

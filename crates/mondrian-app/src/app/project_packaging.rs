@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{mpsc, Arc};
 
 use anyhow::Context;
 use mondrian_assets::AssetLibrary;
@@ -28,6 +30,38 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::AppState;
+
+pub(super) struct PortablePackageExportTask {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU64>,
+    total: Arc<AtomicU64>,
+    phase: Arc<AtomicU8>,
+    last_phase: u8,
+    last_percent: u8,
+    result: mpsc::Receiver<anyhow::Result<()>>,
+    target: PathBuf,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("portable package export canceled")]
+struct PortableExportCanceled;
+
+fn ensure_export_active(cancel: &AtomicBool) -> anyhow::Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(PortableExportCanceled.into());
+    }
+    Ok(())
+}
+
+impl Drop for PortablePackageExportTask {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 /// One canonical regular file and all author references requiring its content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,9 +152,180 @@ impl AppState {
         let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
         export_snapshot_package(snapshot, target)
     }
+
+    /// Start a cancellable portable export without blocking the editor.
+    pub fn request_portable_project_export(&mut self, target: PathBuf) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.portable_package_export.is_none(),
+            "a portable package export is already running"
+        );
+        let session = self.authoring.as_ref().context("no open Project")?;
+        let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let target = target.with_extension("mdpkg");
+        match fs::symlink_metadata(&target) {
+            Ok(_) => anyhow::bail!(
+                "portable package target already exists: {}",
+                target.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect portable package destination"),
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+        let phase = Arc::new(AtomicU8::new(0));
+        let (sender, result) = mpsc::sync_channel(1);
+        let worker_target = target.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_progress = Arc::clone(&progress);
+        let worker_total = Arc::clone(&total);
+        let worker_phase = Arc::clone(&phase);
+        let worker = std::thread::Builder::new().name("portable-project-export".to_owned()).spawn(
+            move || {
+                let outcome = export_snapshot_package_with_progress(
+                    snapshot,
+                    &worker_target,
+                    &worker_cancel,
+                    &worker_progress,
+                    &worker_total,
+                    &worker_phase,
+                );
+                let _ = sender.send(outcome);
+            },
+        )?;
+        self.portable_package_export = Some(PortablePackageExportTask {
+            cancel,
+            progress,
+            total,
+            phase,
+            last_phase: 0,
+            last_percent: 0,
+            result,
+            target,
+            worker: Some(worker),
+        });
+        self.set_status_hint("正在打包项目…", false);
+        Ok(())
+    }
+
+    /// Request cancellation; the worker owns staging cleanup.
+    pub fn cancel_portable_project_export(&mut self) -> bool {
+        let Some(task) = &self.portable_package_export else {
+            return false;
+        };
+        task.cancel.store(true, Ordering::Release);
+        self.set_status_hint("正在取消项目打包…", false);
+        true
+    }
+
+    /// Whether one portable package export is still awaiting a terminal result.
+    pub fn portable_project_export_active(&self) -> bool {
+        self.portable_package_export.is_some()
+    }
+
+    /// Consume progress and terminal evidence from the portable export worker.
+    pub fn poll_portable_project_export(&mut self) -> bool {
+        let Some(task) = self.portable_package_export.as_mut() else {
+            return false;
+        };
+        match task.result.try_recv() {
+            Ok(result) => {
+                let target = task.target.clone();
+                self.portable_package_export = None;
+                match result {
+                    Ok(()) => {
+                        self.set_status_hint(format!("项目打包完成：{}", target.display()), false);
+                        self.notifications.publish(
+                            format!("portable-package:{}", target.display()),
+                            super::notifications::AppNotificationSeverity::Success,
+                            super::notifications::AppNotificationMessage::new(
+                                "notification-package-complete",
+                            )
+                            .with_text("path", target.display().to_string()),
+                        );
+                    }
+                    Err(error) if error.is::<PortableExportCanceled>() => {
+                        self.set_status_hint("已取消项目打包", false)
+                    }
+                    Err(error) => {
+                        let reason = format!("{error:#}");
+                        self.set_status_hint(format!("项目打包未完成：{reason}"), true);
+                        self.notifications.publish(
+                            format!("portable-package:{}", target.display()),
+                            super::notifications::AppNotificationSeverity::Error,
+                            super::notifications::AppNotificationMessage::new(
+                                "notification-package-failed",
+                            )
+                            .with_text("reason", reason),
+                        );
+                    }
+                }
+                true
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let target = task.target.clone();
+                self.portable_package_export = None;
+                self.set_status_hint("项目打包工作线程意外终止", true);
+                self.notifications.publish(
+                    format!("portable-package:{}", target.display()),
+                    super::notifications::AppNotificationSeverity::Error,
+                    super::notifications::AppNotificationMessage::new(
+                        "notification-package-failed",
+                    )
+                    .with_text("reason", "工作线程意外终止"),
+                );
+                true
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                if task.cancel.load(Ordering::Acquire) {
+                    return false;
+                }
+                let total = task.total.load(Ordering::Acquire);
+                let phase = task.phase.load(Ordering::Acquire);
+                let copied = task.progress.load(Ordering::Acquire).min(total);
+                let percent = if total > 0 {
+                    (u128::from(copied) * 100 / u128::from(total)).min(99) as u8
+                } else {
+                    0
+                };
+                if percent == task.last_percent && phase == task.last_phase {
+                    return false;
+                }
+                task.last_percent = percent;
+                task.last_phase = phase;
+                let status = match phase {
+                    1 => format!("正在复制项目资源… {percent}%"),
+                    2 => format!("正在校验项目资源… {percent}%"),
+                    3 => "正在写入工程快照…".to_owned(),
+                    4 => "正在发布项目包…".to_owned(),
+                    _ => "正在分析项目依赖…".to_owned(),
+                };
+                self.set_status_hint(status, false);
+                true
+            }
+        }
+    }
 }
 
 fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow::Result<()> {
+    export_snapshot_package_with_progress(
+        snapshot,
+        target,
+        &AtomicBool::new(false),
+        &AtomicU64::new(0),
+        &AtomicU64::new(0),
+        &AtomicU8::new(0),
+    )
+}
+
+fn export_snapshot_package_with_progress(
+    snapshot: AuthoringSnapshot,
+    target: &Path,
+    cancel: &AtomicBool,
+    progress: &AtomicU64,
+    total: &AtomicU64,
+    phase: &AtomicU8,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         snapshot.asset_library.database_revision()? == snapshot.asset_library_revision,
         "Project Library changed after portable author snapshot"
@@ -135,11 +340,16 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
             .join("; ");
         anyhow::bail!("portable package has unresolved dependencies: {detail}");
     }
+    total.store(
+        inventory.observed_size_bytes().unwrap_or(0),
+        Ordering::Release,
+    );
     let staging = OwnedPublicationDirectory::create_sibling(target, "portable-project")?;
     let files_root = staging.path().join("files");
     fs::create_dir(&files_root).context("create portable package file directory")?;
     let mut package_files = Vec::with_capacity(inventory.files.len());
     for (index, dependency) in inventory.files.iter().enumerate() {
+        phase.store(1, Ordering::Release);
         let extension = dependency
             .path
             .extension()
@@ -159,7 +369,20 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
             .write(true)
             .create_new(true)
             .open(staging.path().join(&bundled_path))?;
-        let copied = std::io::copy(&mut source, &mut destination)?;
+        let mut copied = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            ensure_export_active(cancel)?;
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            destination.write_all(&buffer[..count])?;
+            copied = copied.checked_add(count as u64).context("package copy exceeds u64 length")?;
+            let _ = progress.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_add(count as u64))
+            });
+        }
         anyhow::ensure!(
             copied == dependency.size_bytes,
             "source length changed during package copy: {}",
@@ -168,8 +391,9 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
         destination.sync_all()?;
         destination.seek(SeekFrom::Start(0))?;
         source.seek(SeekFrom::Start(0))?;
-        let (copied_hash, copied_len) = hash_reader(&mut destination)?;
-        let (source_hash, source_len) = hash_reader(&mut source)?;
+        phase.store(2, Ordering::Release);
+        let (copied_hash, copied_len) = hash_reader_with_cancel(&mut destination, cancel)?;
+        let (source_hash, source_len) = hash_reader_with_cancel(&mut source, cancel)?;
         anyhow::ensure!(
             copied_hash == source_hash && copied_len == source_len,
             "source content changed during package copy: {}",
@@ -182,7 +406,9 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
             size_bytes: copied_len,
         });
     }
+    phase.store(3, Ordering::Release);
     let archive_path = staging.path().join("project.mdp");
+    ensure_export_active(cancel)?;
     anyhow::ensure!(
         snapshot.asset_library.database_revision()? == snapshot.asset_library_revision,
         "Project Library changed during portable package copy"
@@ -203,7 +429,7 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
     )?;
     drop(database_reader);
     drop(database_snapshot);
-    let (project_sha256, _) = hash_reader(&mut fs::File::open(&archive_path)?)?;
+    let (project_sha256, _) = hash_reader_with_cancel(&mut fs::File::open(&archive_path)?, cancel)?;
     let manifest = PortablePackageManifest {
         version: 1,
         project_id: snapshot.document.project_id,
@@ -214,15 +440,25 @@ fn export_snapshot_package(snapshot: AuthoringSnapshot, target: &Path) -> anyhow
         staging.path().join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
+    ensure_export_active(cancel)?;
+    phase.store(4, Ordering::Release);
     staging.publish_create_new()?;
     Ok(())
 }
 
 fn hash_reader(reader: &mut impl Read) -> anyhow::Result<(String, u64)> {
+    hash_reader_with_cancel(reader, &AtomicBool::new(false))
+}
+
+fn hash_reader_with_cancel(
+    reader: &mut impl Read,
+    cancel: &AtomicBool,
+) -> anyhow::Result<(String, u64)> {
     let mut hasher = Sha256::new();
     let mut total = 0u64;
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = [0u8; 64 * 1024];
     loop {
+        ensure_export_active(cancel)?;
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -851,6 +1087,113 @@ mod tests {
         let package = root.path().join("incomplete.mdpkg");
         assert!(export_snapshot_package(session.snapshot().expect("snapshot"), &package).is_err());
         assert!(!package.exists());
+    }
+
+    #[test]
+    fn canceled_package_export_removes_its_staging_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let lut = root.path().join("look.cube");
+        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        let document = document_with_lut(&library, lut, false);
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let before = fs::read_dir(root.path()).expect("before entries").count();
+        let target = root.path().join("cancel.mdpkg");
+        let result = export_snapshot_package_with_progress(
+            session.snapshot().expect("snapshot"),
+            &target,
+            &AtomicBool::new(true),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+            &AtomicU8::new(0),
+        );
+        assert!(result.is_err_and(|error| error.is::<PortableExportCanceled>()));
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_dir(root.path()).expect("after entries").count(),
+            before
+        );
+    }
+
+    #[test]
+    fn background_package_export_reports_completion() {
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let document = document_with_lut(&library, root.path().join("unused.cube"), false);
+        let mut state = AppState::new();
+        state.authoring = Some(
+            AuthoringSession::new_unsaved(
+                document,
+                root.path().join("original.mdp"),
+                root.path().join("runtime"),
+                library,
+            )
+            .expect("session"),
+        );
+        let target = root.path().join("background.mdpkg");
+        // An unresolved LUT fails in the worker without blocking the editor.
+        state
+            .request_portable_project_export(target.clone())
+            .expect("start failed export");
+        for _ in 0..1000 {
+            state.poll_portable_project_export();
+            if !state.portable_project_export_active() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!state.portable_project_export_active());
+        assert!(!target.exists());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+        assert!(state
+            .notifications
+            .iter()
+            .any(|fact| fact.message.id == "notification-package-failed"));
+
+        let lut = root.path().join("look.cube");
+        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        let library = AssetLibrary::open(root.path().join("second-library")).expect("library");
+        let document = document_with_lut(&library, lut, false);
+        state.authoring = Some(
+            AuthoringSession::new_unsaved(
+                document,
+                root.path().join("second.mdp"),
+                root.path().join("second-runtime"),
+                library,
+            )
+            .expect("second session"),
+        );
+        state
+            .dispatch_action(
+                crate::app::ui_actions::app_shell_export_portable_package_action(target.clone()),
+            )
+            .expect("start export action");
+        assert!(state.portable_project_export_active());
+        assert!(state.request_portable_project_export(target.clone()).is_err());
+        for _ in 0..1000 {
+            state.poll_portable_project_export();
+            if !state.portable_project_export_active() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !state.portable_project_export_active(),
+            "worker did not complete"
+        );
+        assert!(target.is_dir());
+        verify_portable_project_package(&target).expect("complete background package");
+        assert!(state
+            .notifications
+            .iter()
+            .any(|fact| fact.message.id == "notification-package-complete"));
+        assert!(state.request_portable_project_export(target).is_err());
     }
 
     #[test]

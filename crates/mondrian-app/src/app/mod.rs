@@ -411,6 +411,8 @@ pub struct AppState {
     retired_project_libraries: Vec<project_library_generation::RetiredProjectLibraryGeneration>,
     /// UI-independent single-writer durable archive publisher.
     project_persistence: ProjectPersistenceService,
+    /// Independent cancellable portable-package copy worker.
+    portable_package_export: Option<project_packaging::PortablePackageExportTask>,
     /// Non-blocking Project-close handoff owned by the application lifecycle.
     ///
     /// While present, the Authoring Session remains readable for projection,
@@ -552,6 +554,7 @@ impl AppState {
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),
+            portable_package_export: None,
             pending_project_close: None,
             project_close_fault: None,
             manual_project_file_destination: None,
