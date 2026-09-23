@@ -11,6 +11,7 @@ use crate::{
 };
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::latency::PluginLatency;
+use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
 use clack_host::prelude::{
     AudioPortBuffer, AudioPortBufferType, AudioPorts, HostHandlers, HostInfo, InputChannel,
@@ -112,9 +113,9 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         if *schema_version != 1 {
             return Err(unavailable("CLAP definition schema version is unsupported"));
         }
-        if request.opaque_state().is_some() || !request.parameters().is_empty() {
+        if !request.parameters().is_empty() {
             return Err(unavailable(
-                "CLAP state and parameter restoration are not yet supported",
+                "CLAP parameter restoration is not yet supported",
             ));
         }
         let plugin = self
@@ -124,6 +125,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         let payload = serde_json::to_vec(&ClapPayload {
             library_path: plugin.library_path.clone(),
             plugin_id: plugin.plugin_id.clone(),
+            state: request.opaque_state().map(ToOwned::to_owned),
         })
         .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
         IsolatedAudioProcessorWorkerSpec::new(
@@ -142,6 +144,8 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
 struct ClapPayload {
     library_path: PathBuf,
     plugin_id: String,
+    #[serde(default)]
+    state: Option<Vec<u8>>,
 }
 
 impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
@@ -165,7 +169,12 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             .map_err(|_| invalid("CLAP plugin ID contains a NUL byte"))?;
         let entry = unsafe { PluginEntry::load(payload.library_path.as_os_str()) }
             .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
-        prepare_loaded(request, entry, plugin_id.as_c_str())
+        prepare_loaded(
+            request,
+            entry,
+            plugin_id.as_c_str(),
+            payload.state.as_deref(),
+        )
     }
 }
 
@@ -173,6 +182,7 @@ fn prepare_loaded(
     request: IsolatedAudioProcessorWorkerPrepareRequest,
     entry: PluginEntry,
     plugin_id: &CStr,
+    state: Option<&[u8]>,
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
     let factory = entry
         .get_plugin_factory()
@@ -204,6 +214,16 @@ fn prepare_loaded(
         return Err(invalid(
             "CLAP plugin requested restart during initialization",
         ));
+    }
+    if let Some(state) = state {
+        let handle = instance.plugin_handle();
+        let extension = handle
+            .get_extension::<PluginState>()
+            .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
+        let mut reader = state;
+        extension
+            .load(&handle, &mut reader)
+            .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
     }
 
     let channel_count = request.render_contract().channel_count();
@@ -607,7 +627,7 @@ mod tests {
             parameter_ids: Vec::new(),
             render_contract,
         };
-        let mut worker = prepare_loaded(request, entry, c"org.mondrian.test.gain")
+        let mut worker = prepare_loaded(request, entry, c"org.mondrian.test.gain", None)
             .expect("prepare test CLAP plugin");
         worker.enter_state(12).expect("enter CLAP state");
         let mut samples = [0.25, -0.5, 1.0, 0.125];

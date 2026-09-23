@@ -5,6 +5,7 @@
 //! discovery and ABI loading live behind the Worker factory Interface; they do
 //! not enter Timeline compilation or the in-process Processor Host.
 
+mod clap_discovery;
 mod clap_worker;
 mod protocol;
 mod supervisor;
@@ -32,6 +33,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
 
+pub use clap_discovery::{
+    run_clap_discovery_worker, scan_clap_library_descriptors, ClapPluginDescriptor,
+    CLAP_DISCOVERY_WORKER_ARGUMENT,
+};
 pub use clap_worker::{
     ClapAudioProcessorSpecResolver, ClapAudioProcessorWorkerFactory, ClapPluginRegistration,
 };

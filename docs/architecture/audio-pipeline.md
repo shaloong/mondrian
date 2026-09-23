@@ -5,12 +5,20 @@ The isolated CLAP adapter has a child-side implementation in
 application's hidden audio-worker entrypoint. The parent supplies an exact
 installed-definition registration and schedules through the existing isolated
 processor transport. The child revalidates CLAP descriptor, main audio ports,
-latency, and tail, resets state at continuity entry, and interleaves Float32
+latency, and tail, restores supplied opaque state before activation, resets
+processor history at continuity entry, and interleaves Float32
 blocks at the ABI boundary. It stops and deactivates the native instance when
 the worker closes; a restart request fails the current instance. Unsupported
-plugin state, parameter automation,
-and auxiliary buses return typed errors; these are pending format work, not
+plugin state capture, parameter automation, and auxiliary buses remain
+pending format work; unsupported requests return typed errors, not
 silent bypasses.
+
+CLAP descriptor discovery uses a separate hidden child mode. The editor
+process writes a bounded request into a private temporary directory, starts
+the child with a five-second deadline, and reads at most 256 KiB of validated
+descriptor metadata after successful exit. Plugin code is loaded only in the
+child. Discovery does not yet establish a render contract or make a plugin
+available for insertion.
 
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different

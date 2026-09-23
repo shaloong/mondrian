@@ -4,6 +4,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args_os().nth(1);
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
+            mondrian_audio::CLAP_DISCOVERY_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_audio::run_clap_discovery_worker().map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
             mondrian_audio::ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT,
         ))
     {

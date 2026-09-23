@@ -65,14 +65,26 @@ factory; the application dispatches its packaged executable into this worker
 before initializing graphics or media. A parent-side CLAP registry can refer
 to installed definitions without loading native code. The child loads a CLAP
 library, checks descriptor identity, exactly one main Float32 input/output
-port with the requested channel count, latency, and tail, and processes
+port with the requested channel count, latency, and tail, restores supplied
+opaque state through CLAP's state extension before activation, and processes
 interleaved blocks through planar CLAP buffers. It rejects unsupported
-parameter lanes, opaque state, auxiliary buses, and incompatible layouts.
-The registry currently needs explicit entries; installed-plugin discovery,
-state/parameter round-trip, application wiring for Preview/Export, and
+parameter lanes, auxiliary buses, and incompatible layouts.
+Descriptor discovery now executes one installed library in a separate
+deadline-bound child and validates its bounded response. The registry still
+needs explicit entries with an exact render contract; automatic installed
+path enumeration, contract probing, state capture and parameter automation, application
+wiring for Preview/Export, and
 reference-plugin signal acceptance are still required before CLAP is
 advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
+
+The ignored `installed_clap_reference_is_discovered_across_process_boundary`
+and `installed_clap_reference_processes_through_isolated_worker` acceptance
+tests use a built `mondrian` executable and the separately built MIT/Apache
+licensed Clack gain example DLL. They check dynamic-library discovery and
+Float32 signal processing at 0.5 gain restored from opaque state through the
+real child protocol; the in-process
+fixture separately tests continuity, sample values, and deactivation.
 
 The first real audio Adapter should host a user-installed CLAP effect inside
 the existing isolated Processor Worker. CLAP's C ABI and MIT-licensed headers

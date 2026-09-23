@@ -159,6 +159,48 @@ fn isolated_worker_transports_state_sidechain_parameters_and_pcm() {
 }
 
 #[test]
+#[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+fn installed_clap_reference_processes_through_isolated_worker() {
+    let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+    let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "library_path": plugin,
+        "plugin_id": "org.rust-audio.clack.gain",
+        "state": 0.5_f32.to_le_bytes(),
+    }))
+    .expect("CLAP worker payload");
+    let spec = IsolatedAudioProcessorWorkerSpec::new(
+        helper,
+        payload,
+        stateful_contract(),
+        AudioProcessorAuxiliaryInputContract::default(),
+        Vec::new(),
+        test_render_contract(),
+    )
+    .expect("CLAP worker specification");
+    let factory = IsolatedAudioProcessorFactory::prepare(spec)
+        .expect("prepare installed CLAP through child process");
+    let mut processor = factory.create().expect("create CLAP worker instance");
+    processor.enter_state(100).expect("enter CLAP state");
+    let input = vec![0.125, -0.25, 0.5, -0.75, 0.2, -0.4, 0.8, -1.0];
+    let mut audio = TestAudioIo { main: input.clone(), auxiliary: Vec::new() };
+    processor
+        .process(
+            test_context(100),
+            &mut audio,
+            AudioParameterEventBatch::new(100, 4, &[], &[], &[]),
+        )
+        .expect("process Clack gain through child process");
+    for (actual, source) in audio.main.iter().zip(input) {
+        assert!((actual - source * 0.5).abs() < 1.0e-6);
+    }
+}
+
+#[test]
 fn isolated_worker_abort_poisoning_does_not_terminate_parent() {
     let factory = prepare_test_factory(
         TestBehavior::Abort,
