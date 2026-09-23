@@ -1,5 +1,16 @@
 # Product localization
 
+## Implementation status
+
+The App UI now has a machine-local locale preference, a General settings
+dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
+locale. The preference is stored in `app_ui_preferences.json`; switching it
+reprojects the dialog model without changing Project authoring state. System
+resolution supports English language tags and otherwise falls back to Chinese.
+The initial catalogs cover the language selector and notification copy. Other
+product surfaces still contain literal Chinese and must migrate before English
+can be advertised as a complete product language.
+
 The application owns one machine-local UI locale. The Project, Timeline,
 Effects, Audio, Export, and plugin authoring contracts persist stable IDs,
 numeric values, exact time, and resource references; they never persist a

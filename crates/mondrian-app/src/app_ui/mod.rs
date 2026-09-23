@@ -23,6 +23,7 @@ pub mod host;
 pub mod icons;
 mod inspector_source_timing;
 pub mod interpret_asset_dialog;
+pub mod localization;
 pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;

@@ -3,6 +3,7 @@
 //! Reusable widget crates remain domain-light. UI adapters attach stable app ids
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
+use crate::app_ui::localization::AppUiLocalePreference;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, JobId};
 use mondrian_core::{
@@ -159,6 +160,8 @@ pub const APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED: &str = "sequence_settings_tab
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active app UI theme preset.
 pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
+/// App-shell request to switch the machine-local UI language.
+pub const APP_SHELL_PREFERENCES_LOCALE_CHANGED: &str = "preferences_locale_changed";
 /// App-shell request to switch the waveform display mode.
 pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
     "preferences_waveform_display_changed";
@@ -229,6 +232,13 @@ pub struct AppShellCopySystemInfoPayload {
 pub struct PreferencesThemePayload {
     /// Theme preference to apply and persist.
     pub preference: ThemePreference,
+}
+
+/// Machine-local UI language selected in product preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesLocalePayload {
+    /// Locale preference to apply and persist.
+    pub preference: AppUiLocalePreference,
 }
 
 /// Waveform display mode selected by the app UI preferences UI.
@@ -1430,6 +1440,14 @@ pub fn app_shell_preferences_theme_changed_action(preference: ThemePreference) -
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_THEME_CHANGED,
         PreferencesThemePayload { preference },
+    )
+}
+
+/// Build an app-shell request for switching the UI language preference.
+pub fn app_shell_preferences_locale_changed_action(preference: AppUiLocalePreference) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_LOCALE_CHANGED,
+        PreferencesLocalePayload { preference },
     )
 }
 

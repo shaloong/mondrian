@@ -39,7 +39,7 @@ use crate::app::preview_runtime::{
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload,
-    PreferencesDisplayManagementPayload, PreferencesShortcutPayload,
+    PreferencesDisplayManagementPayload, PreferencesLocalePayload, PreferencesShortcutPayload,
     PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
     PreferencesWaveformDisplayPayload, ScopesSettingsPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -48,7 +48,7 @@ use crate::app::ui_actions::{
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
     APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
-    APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
+    APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED, APP_SHELL_PREFERENCES_LOCALE_CHANGED,
     APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
@@ -1772,6 +1772,9 @@ impl AppUiHost {
                             self.preferences.theme_preference.resolve(self.system_theme_preset),
                         );
                     }
+                    PreferencesUpdate::Locale(payload) => {
+                        self.preferences.locale_preference = payload.preference;
+                    }
                     PreferencesUpdate::WaveformDisplay(payload) => {
                         self.preferences.waveform_display = payload.mode;
                     }
@@ -2487,6 +2490,7 @@ fn apply_shortcut_rebind(
 
 enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
+    Locale(PreferencesLocalePayload),
     WaveformDisplay(PreferencesWaveformDisplayPayload),
     ViewerBackground(PreferencesViewerBackgroundPayload),
     VideoScopes(ScopesSettingsPayload),
@@ -2506,6 +2510,11 @@ fn parse_preferences_update(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_THEME_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Theme))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_LOCALE_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Locale))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -4445,6 +4454,7 @@ mod tests {
             AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -4560,6 +4570,7 @@ mod tests {
             AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -5045,6 +5056,41 @@ mod tests {
     }
 
     #[test]
+    fn host_persists_ui_locale_without_mutating_project_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("locale-preferences");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                crate::app_ui::localization::AppUiLocalePreference::EnUs,
+            ),
+        );
+
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(
+            host.preferences().locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert_eq!(
+            load_app_ui_preferences_from(&path).locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert!(!host.app_state().has_open_project());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_persists_specific_audio_device_intent_without_authoring_state() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("audio-output-device-preferences");
@@ -5227,6 +5273,7 @@ mod tests {
             AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -5332,6 +5379,7 @@ mod tests {
             AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),

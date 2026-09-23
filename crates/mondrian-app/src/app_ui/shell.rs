@@ -763,15 +763,7 @@ impl AppUiAppRoot {
         apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
-        let mut root = Self::new_with_preferences(
-            TitleBar::new(
-                window_title_for_app_state(state),
-                MenuBar::for_app_state_with_shortcut_overrides(
-                    state,
-                    &preferences.shortcut_overrides,
-                ),
-            ),
-            models,
+        let mut preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
                 state,
                 preferences.workspace_preset,
@@ -782,7 +774,21 @@ impl AppUiAppRoot {
                 preferences.viewer_canvas_background,
                 preferences.audio_output_device.clone(),
                 AudioOutputDeviceCatalogState::Loading,
+            );
+        preferences_model.set_locale_preference(
+            preferences.locale_preference,
+            sys_locale::get_locale().as_deref(),
+        );
+        let mut root = Self::new_with_preferences(
+            TitleBar::new(
+                window_title_for_app_state(state),
+                MenuBar::for_app_state_with_shortcut_overrides(
+                    state,
+                    &preferences.shortcut_overrides,
+                ),
             ),
+            models,
+            preferences_model,
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
             status_bar_model(state),
@@ -1022,6 +1028,7 @@ impl AppUiAppRoot {
         let preferences = AppUiPreferences {
             version: 1,
             theme_preference: self.preferences_model.theme_preference,
+            locale_preference: self.preferences_model.locale_preference,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
@@ -1150,6 +1157,15 @@ impl AppUiAppRoot {
                 self.audio_output_device_catalog.clone(),
             );
         let mut preferences_model = preferences_model;
+        if preferences.locale_preference == self.preferences_model.locale_preference {
+            preferences_model.locale_preference = self.preferences_model.locale_preference;
+            preferences_model.locale = self.preferences_model.locale;
+        } else {
+            preferences_model.set_locale_preference(
+                preferences.locale_preference,
+                sys_locale::get_locale().as_deref(),
+            );
+        }
         preferences_model
             .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
@@ -3876,6 +3892,31 @@ mod tests {
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
         assert_eq!(dialog.model().proxy_mode, "已启用");
+    }
+
+    #[test]
+    fn app_root_refresh_preserves_machine_locale_choice() {
+        let state = AppState::new();
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::EnUs,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        assert_eq!(
+            root.preferences_model.locale,
+            crate::app_ui::localization::AppUiLocale::EnUs
+        );
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(
+            root.preferences_model.locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert_eq!(
+            root.preferences_model.locale,
+            crate::app_ui::localization::AppUiLocale::EnUs
+        );
     }
 
     #[test]

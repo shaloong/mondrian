@@ -13,6 +13,7 @@ use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformD
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
+use crate::app_ui::localization::AppUiLocalePreference;
 use crate::app_ui::shortcuts::{is_known_shortcut_id, AppUiShortcutOverride};
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
@@ -29,6 +30,9 @@ pub struct AppUiPreferences {
     /// Active product theme preference. `System` resolves to a concrete preset
     /// at runtime and is not persisted as a third theme token set.
     pub theme_preference: ThemePreference,
+    /// Machine-local UI language; never persisted in a Project.
+    #[serde(default)]
+    pub locale_preference: AppUiLocalePreference,
     /// Built-in workspace preset restored when the app UI shell opens.
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
@@ -66,6 +70,7 @@ impl Default for AppUiPreferences {
         Self {
             version: APP_UI_PREFERENCES_VERSION,
             theme_preference: ThemePreference::System,
+            locale_preference: AppUiLocalePreference::System,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
             shortcut_overrides: Vec::new(),
@@ -214,6 +219,7 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION + 1,
                 theme_preference: ThemePreference::Light,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -242,6 +248,7 @@ mod tests {
         let preferences = AppUiPreferences {
             version: 1,
             theme_preference: ThemePreference::Light,
+            locale_preference: AppUiLocalePreference::EnUs,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
             shortcut_overrides: vec![AppUiShortcutOverride {
@@ -319,6 +326,26 @@ mod tests {
     }
 
     #[test]
+    fn future_locale_value_preserves_other_machine_preferences() {
+        let path = temp_preferences_path("future-locale");
+        let mut value = serde_json::to_value(AppUiPreferences {
+            theme_preference: ThemePreference::Light,
+            ..AppUiPreferences::default()
+        })
+        .expect("serialize preferences");
+        value["locale_preference"] = serde_json::Value::String("FutureLocale".to_owned());
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("serialize future locale"),
+        )
+        .expect("write future locale");
+        let loaded = load_app_ui_preferences_from(&path);
+        fs::remove_file(path).ok();
+        assert_eq!(loaded.theme_preference, ThemePreference::Light);
+        assert_eq!(loaded.locale_preference, AppUiLocalePreference::Unknown);
+    }
+
+    #[test]
     fn legacy_preferences_without_display_policy_restore_safe_default() {
         let path = temp_preferences_path("legacy-display-policy");
         let mut value = serde_json::to_value(AppUiPreferences::default())
@@ -386,6 +413,7 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -451,6 +479,7 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
@@ -522,6 +551,7 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
                 shortcut_overrides: Vec::new(),
@@ -552,6 +582,7 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: 1,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 shortcut_overrides: vec![
