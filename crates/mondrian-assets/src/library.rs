@@ -549,6 +549,22 @@ impl AssetLibrary {
         candidate: AssetMediaProbeCandidate,
         folder_id: Option<&str>,
     ) -> Result<AssetId> {
+        self.commit_media_probe_with(candidate, folder_id, |_| Ok(()))
+            .map(|(asset_id, ())| asset_id)
+    }
+
+    /// Keep a probed Asset unpublished until a dependent operation succeeds.
+    ///
+    /// The callback receives the Asset record inside the SQLite transaction.
+    /// It must not call this library again, since the database lock is held.
+    /// A callback error rolls back both a new row and any changes to an
+    /// existing row at the same canonical path.
+    pub fn commit_media_probe_with<T>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+    ) -> Result<(AssetId, T)> {
         let AssetMediaProbeCandidate {
             path: canonical_path,
             path_text,
@@ -650,11 +666,21 @@ impl AssetLibrary {
                 ],
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let asset = transaction
+            .query_row(
+                "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                 , interpretation, audio_components, source_fingerprint, retired_at \
+                 FROM assets WHERE id = ?1 LIMIT 1",
+                rusqlite::params![id.0.to_string()],
+                parse_asset_row,
+            )
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let value = operation(&asset)?;
         transaction
             .commit()
             .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
 
-        Ok(id)
+        Ok((id, value))
     }
 
     pub fn create_adjustment_layer_asset(&self, name: Option<&str>) -> Result<AssetId> {
@@ -2215,6 +2241,60 @@ mod tests {
             AssetLibraryMembership::Visible
         );
         assert_eq!(lib.list_assets().expect("visible list").len(), 1);
+    }
+
+    #[test]
+    fn dependent_probe_failure_rolls_back_new_asset() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("not-placed.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let observed = std::cell::Cell::new(None);
+
+        let result = lib.commit_media_probe_with(
+            probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+            None,
+            |asset| {
+                observed.set(Some(asset.id));
+                Err::<(), _>(MondrianError::Cancelled)
+            },
+        );
+
+        assert!(matches!(result, Err(MondrianError::Cancelled)));
+        assert!(lib.list_assets().expect("asset list after rollback").is_empty());
+        assert!(lib
+            .get_asset(observed.get().expect("staged identity"))
+            .expect("query")
+            .is_none());
+    }
+
+    #[test]
+    fn dependent_probe_failure_preserves_existing_asset_folder_and_membership() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("existing.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let original_id = commit_info(&lib, &media_path, lightweight_audio_info(&media_path));
+        let folder_id = lib.create_folder("Destination", None).expect("folder");
+        lib.retire_assets(&[original_id]).expect("retire");
+        let before = lib.get_asset(original_id).expect("query").expect("original");
+
+        let result = lib.commit_media_probe_with(
+            probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+            Some(&folder_id),
+            |asset| {
+                assert_eq!(asset.id, original_id);
+                assert_eq!(asset.folder_id.as_deref(), Some(folder_id.as_str()));
+                assert_eq!(asset.membership, AssetLibraryMembership::Visible);
+                Err::<(), _>(MondrianError::Cancelled)
+            },
+        );
+
+        assert!(matches!(result, Err(MondrianError::Cancelled)));
+        let after = lib.get_asset(original_id).expect("query").expect("original");
+        assert_eq!(after.folder_id, before.folder_id);
+        assert_eq!(after.membership, before.membership);
+        assert!(lib.list_assets().expect("hidden list").is_empty());
     }
 
     #[test]

@@ -472,6 +472,15 @@ targets the preceding Author Transaction and leaves the Library membership
 retired. Reimporting the same canonical concrete path is the current restoration
 operation and preserves the same `AssetId`.
 
+`commit_media_probe_with` keeps a new or refreshed file row inside the same
+SQLite transaction while a dependent operation examines the staged `AssetRecord`.
+An error from that operation rolls back the row entirely, including folder and
+membership changes for a path already present in the Library. The callback
+must not re-enter `AssetLibrary`, because the database lock remains held.
+Timeline placement must also keep its authoring effects unpublished until the
+SQLite transaction commits; the Library transaction alone does not make an
+authoring edit atomic.
+
 Single and multi-selection removal share one Library transaction. It
 deduplicates and preflights every requested visible Asset and folder before
 retiring any row, unlinks surviving rows from the complete removed folder
