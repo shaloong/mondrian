@@ -6474,6 +6474,36 @@ fn viewer_clip_transform_projects_selected_visible_clip_and_respects_lock_and_ma
 }
 
 #[test]
+fn viewer_clip_transform_uses_media_display_extent_instead_of_sequence_extent() {
+    let root = unique_temp_dir("viewer-media-transform-extent");
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let library = AssetLibrary::open(root.join("library")).expect("asset library");
+    let path = root.join("small.mov");
+    std::fs::write(&path, [0u8]).expect("media fixture");
+    let mut info = test_video_media_info(&path);
+    info.video_streams[0].width = 640;
+    info.video_streams[0].height = 360;
+    info.video_streams[0].picture.sample_aspect_ratio =
+        Some(mondrian_core::SampleAspectRatio::new(2, 1).expect("wide pixels"));
+    let asset_id = commit_test_media_asset(&library, path, info);
+    let mut sequence = Sequence::new("Viewer Media Extent");
+    let clip =
+        Clip::new(asset_id, TimelineTime::ZERO, tt(24, sequence.time_base())).expect("media Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.test_set_asset_library(Some(library));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+
+    let overlay = ViewerPanelModel::from_app_state(&state)
+        .clip_transform
+        .expect("selected media transform")
+        .overlay;
+    assert_eq!(overlay.frame_extent, [1280.0, 360.0]);
+}
+
+#[test]
 fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
     let mut state = AppState::new();
     let mut sequence = Sequence::new("Viewer Anchor Gesture");

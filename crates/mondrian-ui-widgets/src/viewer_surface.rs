@@ -2123,6 +2123,7 @@ mod tests {
     fn clip_transform_escape_cancels_preview_and_release_commits_once() {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_clip_transform(ViewerClipTransform {
+                frame_extent: [1920.0, 1080.0],
                 position: [0.0, 0.0],
                 scale: [1.0, 1.0],
                 rotation_degrees: 0.0,

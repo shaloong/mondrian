@@ -9,6 +9,8 @@ const HANDLE_RADIUS: f32 = 4.5;
 /// Evaluated Clip transform in Sequence pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerClipTransform {
+    /// Display-space extent of the selected Clip before its authored transform.
+    pub frame_extent: [f32; 2],
     /// Sequence pixel position of the Clip anchor.
     pub position: [f32; 2],
     /// Relative scale in each source axis.
@@ -240,6 +242,10 @@ fn valid_canvas(canvas: Rect, source: [f32; 2]) -> bool {
 fn valid_geometry(transform: ViewerClipTransform, canvas: Rect, source: [f32; 2]) -> bool {
     valid_canvas(canvas, source)
         && transform
+            .frame_extent
+            .into_iter()
+            .all(|extent| extent.is_finite() && extent > 0.0)
+        && transform
             .position
             .into_iter()
             .chain(transform.scale)
@@ -284,18 +290,19 @@ fn transformed_point(
 
 fn corners(transform: ViewerClipTransform, canvas: Rect, source: [f32; 2]) -> [Point; 4] {
     std::array::from_fn(|index| {
-        transformed_point(transform, canvas, source, source_corner(index, source))
+        transformed_point(
+            transform,
+            canvas,
+            source,
+            source_corner(index, transform.frame_extent),
+        )
     })
 }
 
 fn rotation_handle(transform: ViewerClipTransform, canvas: Rect, source: [f32; 2]) -> Point {
-    let top = transformed_point(transform, canvas, source, [source[0] * 0.5, 0.0]);
-    let center = transformed_point(
-        transform,
-        canvas,
-        source,
-        [source[0] * 0.5, source[1] * 0.5],
-    );
+    let frame = transform.frame_extent;
+    let top = transformed_point(transform, canvas, source, [frame[0] * 0.5, 0.0]);
+    let center = transformed_point(transform, canvas, source, [frame[0] * 0.5, frame[1] * 0.5]);
     let dx = center.x - top.x;
     let dy = center.y - top.y;
     let length = dx.hypot(dy).max(1.0);
@@ -317,7 +324,7 @@ fn contains_transformed_frame(
     let (sin, cos) = theta.sin_cos();
     let x = (sequence_x * cos + sequence_y * sin) / transform.scale[0] + transform.anchor[0];
     let y = (-sequence_x * sin + sequence_y * cos) / transform.scale[1] + transform.anchor[1];
-    (0.0..=source[0]).contains(&x) && (0.0..=source[1]).contains(&y)
+    (0.0..=transform.frame_extent[0]).contains(&x) && (0.0..=transform.frame_extent[1]).contains(&y)
 }
 
 fn dragged_transform(
@@ -345,7 +352,7 @@ fn dragged_transform(
             let (sin, cos) = theta.sin_cos();
             let local_dx = dx * cos + dy * sin;
             let local_dy = -dx * sin + dy * cos;
-            let corner = source_corner(index, source);
+            let corner = source_corner(index, drag.origin.frame_extent);
             let denominator_x = corner[0] - drag.origin.anchor[0];
             let denominator_y = corner[1] - drag.origin.anchor[1];
             if denominator_x.abs() >= 1.0 {
@@ -399,6 +406,7 @@ mod tests {
 
     fn identity() -> ViewerClipTransform {
         ViewerClipTransform {
+            frame_extent: [1000.0, 500.0],
             position: [0.0, 0.0],
             scale: [1.0, 1.0],
             rotation_degrees: 0.0,
@@ -478,6 +486,35 @@ mod tests {
         let after = transformed_point(transform, canvas, source, [500.0, 250.0]);
         assert!((before.x - after.x).abs() < 0.001);
         assert!((before.y - after.y).abs() < 0.001);
+    }
+
+    #[test]
+    fn media_extent_controls_outline_and_hit_target_independently_of_sequence_extent() {
+        let canvas = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let sequence = [1000.0, 500.0];
+        let mut transform = identity();
+        transform.frame_extent = [500.0, 250.0];
+        transform.position = [250.0, 125.0];
+        let projected = corners(transform, canvas, sequence);
+        assert_eq!(projected[0], Point::new(50.0, 25.0));
+        assert_eq!(projected[2], Point::new(150.0, 75.0));
+        assert!(contains_transformed_frame(
+            transform,
+            canvas,
+            sequence,
+            Point::new(100.0, 50.0)
+        ));
+        assert!(!contains_transformed_frame(
+            transform,
+            canvas,
+            sequence,
+            Point::new(165.0, 85.0)
+        ));
+        assert!(ClipTransformEditor::new(transform).pointer_down(
+            canvas,
+            sequence,
+            Point::new(100.0, 50.0)
+        ));
     }
 
     #[test]

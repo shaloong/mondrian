@@ -1063,6 +1063,7 @@ fn viewer_clip_transform_model(
     }
     let author_time = clip.clamped_visual_author_time(time).ok()?;
     let parameters = clip.intrinsic_parameter_bag();
+    let frame_extent = viewer_clip_frame_extent(state, sequence, clip)?;
     Some(ViewerClipTransformModel {
         clip_id: clip.id,
         position: parameters.address_for_path(Transform2D::POSITION_PATH)?,
@@ -1070,6 +1071,7 @@ fn viewer_clip_transform_model(
         rotation: parameters.address_for_path(Transform2D::ROTATION_PATH)?,
         anchor: parameters.address_for_path(Transform2D::ANCHOR_POINT_PATH)?,
         overlay: ViewerClipTransform {
+            frame_extent,
             position: clip.transform.get_position(author_time).to_array(),
             scale: clip.transform.get_scale(author_time).to_array(),
             rotation_degrees: clip_rotation_degrees(clip, time),
@@ -1077,6 +1079,40 @@ fn viewer_clip_transform_model(
             editable: !state.is_playing() && !track.is_locked,
         },
     })
+}
+
+fn viewer_clip_frame_extent(
+    state: &AppState,
+    sequence: &Sequence,
+    clip: &Clip,
+) -> Option<[f32; 2]> {
+    let resolution = if let Some(asset_id) = clip.media_asset_id() {
+        let asset = state.asset_library()?.get_asset(asset_id).ok()??;
+        let video = asset.media_probe()?.primary_video()?;
+        let geometry = mondrian_core::ResolvedPictureGeometry::resolve_with_overrides(
+            mondrian_core::Resolution { width: video.width, height: video.height },
+            video.picture,
+            clip.media_interpretation()?.picture_overrides(),
+        )
+        .ok()?;
+        let [width, height] = geometry.display_extent();
+        [width as f32, height as f32]
+    } else if let Some(child_id) = clip.nested_sequence_id() {
+        let child = state.sequences().iter().find(|child| child.id == child_id)?;
+        [
+            child.settings.resolution.width as f32,
+            child.settings.resolution.height as f32,
+        ]
+    } else {
+        [
+            sequence.settings.resolution.width as f32,
+            sequence.settings.resolution.height as f32,
+        ]
+    };
+    resolution
+        .into_iter()
+        .all(|extent| extent.is_finite() && extent > 0.0)
+        .then_some(resolution)
 }
 
 fn viewer_power_window_model(

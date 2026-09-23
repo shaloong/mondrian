@@ -1183,7 +1183,11 @@ committed monitor edit.
 The selected visible video Clip projects its evaluated position, scale, rotation,
 and source-pixel anchor through the same stable intrinsic parameter addresses as
 Inspector. The Viewer draws the transformed source-frame outline, corner scale
-handles, a rotation handle, and an anchor crosshair. The anchor has hit priority
+handles, a rotation handle, and an anchor crosshair. File-backed media uses its
+resolved display extent after orientation and placement-local pixel-aspect
+interpretation; generated content uses its owning Sequence extent. The canvas
+still maps positions through the Sequence extent, so mixed-resolution Clips
+retain accurate hit targets and scale geometry. The anchor has hit priority
 when it overlaps a corner. Pointer motion changes only the widget preview;
 pointer-up dispatches one `ClipWriteParameterValues` action. Anchor dragging
 inverts the current rotation and scale to find the new source anchor and writes
