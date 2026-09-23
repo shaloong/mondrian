@@ -4056,6 +4056,11 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+        assert!(state.notifications.iter().any(|notification| {
+            notification.message.id == "notification-import-complete"
+                && notification.severity
+                    == crate::app::notifications::AppNotificationSeverity::Success
+        }));
 
         remove_temp_path(&library_root);
         remove_temp_path(&media_root);

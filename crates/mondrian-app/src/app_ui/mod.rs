@@ -27,6 +27,7 @@ pub mod localization;
 pub mod menu_bar;
 pub mod modal;
 pub mod new_project_dialog;
+mod notifications;
 pub mod panels;
 pub mod pending_close_dialog;
 pub mod playback_feedback;

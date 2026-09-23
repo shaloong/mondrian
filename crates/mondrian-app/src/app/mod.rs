@@ -166,6 +166,7 @@ mod interchange;
 pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;
+pub mod notifications;
 mod packaged_worker;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod perf_process_memory;
@@ -473,6 +474,8 @@ pub struct AppState {
     execution_resources: Arc<ExecutionResourceCoordinator>,
     /// Last export job-snapshot revision consumed by the app event-loop Adapter.
     export_jobs_observed_revision: u64,
+    /// Terminal Export jobs already projected into product notifications.
+    export_terminal_notifications_seen: HashSet<(mondrian_core::JobId, u64)>,
     /// UI-stable timeline export draft shared by app UI export panels.
     pub export_draft: TimelineExportDraft,
 
@@ -480,6 +483,8 @@ pub struct AppState {
     pub status_hint: Option<(String, bool)>,
     /// Bounded history of user-visible status messages for diagnostics panels.
     pub status_log: Vec<StatusLogEntry>,
+    /// Bounded, language-neutral facts for nonblocking terminal notifications.
+    pub notifications: notifications::AppNotificationFeed,
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
@@ -565,9 +570,11 @@ impl AppState {
             render_queue: RenderQueue::new(),
             execution_resources: ExecutionResourceCoordinator::new(Default::default()),
             export_jobs_observed_revision: 0,
+            export_terminal_notifications_seen: HashSet::new(),
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
             status_log: Vec::new(),
+            notifications: notifications::AppNotificationFeed::default(),
             animation_selection: AnimationSelectionState::default(),
             animation_clipboard: None,
             clip_clipboard: None,

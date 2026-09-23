@@ -15,7 +15,7 @@ use mondrian_export::preset::{
     TimelineExportRange, TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
-    ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
+    ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, JobStatus, RenderJob,
 };
 use serde::{Deserialize, Serialize};
 
@@ -316,8 +316,50 @@ impl AppState {
             return false;
         }
         self.export_jobs_observed_revision = revision;
+        let jobs = self.export_jobs_snapshot();
+        self.observe_export_terminal_jobs(&jobs);
         let _ = self.refresh_internal_execution_resource_decision();
         true
+    }
+
+    fn observe_export_terminal_jobs(&mut self, jobs: &[ExportJobSnapshot]) {
+        let current_ids = jobs.iter().map(|job| (job.id, job.generation)).collect::<HashSet<_>>();
+        self.export_terminal_notifications_seen.retain(|id| current_ids.contains(id));
+        for job in jobs {
+            if !job.status.is_terminal()
+                || !self.export_terminal_notifications_seen.insert((job.id, job.generation))
+            {
+                continue;
+            }
+            let key = format!("export:{}:{}", job.id, job.generation);
+            match &job.status {
+                JobStatus::Completed => {
+                    let path = job.output_path.display().to_string();
+                    self.set_status_hint(format!("导出完成：{path}"), false);
+                    self.notifications.publish(
+                        key,
+                        super::notifications::AppNotificationSeverity::Success,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-export-complete",
+                        )
+                        .with_text("path", path),
+                    );
+                }
+                JobStatus::Failed(failure) => {
+                    self.set_status_hint(format!("导出失败：{failure}"), true);
+                    self.notifications.publish(
+                        key,
+                        super::notifications::AppNotificationSeverity::Error,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-export-failed",
+                        )
+                        .with_text("reason", failure.detail.clone()),
+                    );
+                }
+                JobStatus::Cancelled => self.set_status_hint("导出已取消", false),
+                JobStatus::Pending | JobStatus::Running { .. } | JobStatus::Cancelling { .. } => {}
+            }
+        }
     }
 }
 
@@ -487,6 +529,49 @@ fn export_error(step_id: &'static str, reason: String) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_terminal_notifications_are_once_per_attempt_and_skip_cancellation() {
+        use mondrian_export::queue::{
+            ExportJobDiagnostics, ExportProgress, ExportProgressDetail, ExportProgressPhase,
+            ExportPublicationState,
+        };
+
+        let mut state = AppState::new();
+        let job_id = JobId::new();
+        let mut job = ExportJobSnapshot {
+            id: job_id,
+            generation: 1,
+            output_path: PathBuf::from("finished.mp4"),
+            output_policy: ExportOutputPolicy::CreateNew,
+            preset_name: "test".to_owned(),
+            status: JobStatus::Completed,
+            progress: ExportProgress {
+                phase: ExportProgressPhase::Validating,
+                fraction: 1.0,
+                detail: ExportProgressDetail::None,
+            },
+            publication: ExportPublicationState::Published,
+            diagnostics: ExportJobDiagnostics::default(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: Some(chrono::Utc::now()),
+            terminal_evidence: None,
+            artifact_publication: None,
+            executed: true,
+        };
+        state.observe_export_terminal_jobs(&[job.clone()]);
+        state.observe_export_terminal_jobs(&[job.clone()]);
+        assert_eq!(state.notifications.iter().count(), 1);
+
+        job.generation = 2;
+        state.observe_export_terminal_jobs(&[job.clone()]);
+        assert_eq!(state.notifications.iter().count(), 2);
+        job.generation = 3;
+        job.status = JobStatus::Cancelled;
+        state.observe_export_terminal_jobs(&[job]);
+        assert_eq!(state.notifications.iter().count(), 2);
+    }
 
     #[test]
     fn app_export_endurance_projection_matches_queue_owned_counters_and_gauges() {

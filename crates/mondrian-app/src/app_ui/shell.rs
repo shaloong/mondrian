@@ -4,7 +4,7 @@
 //! module owns the reusable root widget composition above the dock/panel layer.
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
-use mondrian_editor_state::Action;
+use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatus};
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_timeline::Sequence;
@@ -58,6 +58,7 @@ use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
+use crate::app_ui::notifications::NotificationOverlay;
 use crate::app_ui::panels::{
     build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
     AssetThumbnailSource, ScopesPanelModel, ViewerPanelModel, ViewerPreviewSource,
@@ -153,6 +154,7 @@ struct StatusBar {
     history: Vec<StatusLogEntry>,
     history_open: bool,
     history_offset: usize,
+    notifications: NotificationOverlay,
 }
 
 impl StatusBar {
@@ -165,6 +167,14 @@ impl StatusBar {
             self.history = history.to_vec();
             self.history_offset = self.history_offset.min(self.history.len().saturating_sub(8));
         }
+    }
+
+    fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
+        self.notifications.expire(now)
+    }
+
+    fn next_notification_deadline(&self) -> Option<std::time::Instant> {
+        self.notifications.next_deadline()
     }
 
     fn history_rect(&self) -> Rect {
@@ -194,6 +204,11 @@ impl Widget for StatusBar {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.history_open
+            && self.notifications.event(event, self.bounds) == EventResult::Handled
+        {
+            return EventResult::Handled;
+        }
         match event {
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
@@ -341,10 +356,15 @@ impl Widget for StatusBar {
                 }
             }
         }
+        if !self.history_open {
+            self.notifications.paint(ctx, self.bounds);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        self.bounds.contains(point) || self.history_open && self.history_rect().contains(point)
+        self.bounds.contains(point)
+            || self.history_open && self.history_rect().contains(point)
+            || !self.history_open && self.notifications.hit_test(point, self.bounds)
     }
 
     fn can_focus(&self) -> bool {
@@ -364,7 +384,7 @@ impl Widget for StatusBar {
     }
 }
 
-fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
     if text.is_empty() || max_width <= 0.0 {
         return String::new();
     }
@@ -825,6 +845,7 @@ pub struct AppUiAppRoot {
     title_bar: TitleBar,
     dock: DockSplitter,
     status_bar: StatusBar,
+    notification_session_id: Option<AuthoringSessionId>,
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
@@ -920,6 +941,9 @@ impl AppUiAppRoot {
             status_bar_model(state),
         );
         root.status_bar.sync_history(&state.status_log);
+        root.status_bar.notifications =
+            NotificationOverlay::from_existing(&state.notifications, root.preferences_model.locale);
+        root.notification_session_id = state.authoring_session_id();
         root.active_sequence = state.active_sequence().cloned();
         root.project_color_environment = state.project_color_environment().clone();
         root.new_sequence_defaults = state.new_sequence_defaults().clone();
@@ -989,7 +1013,12 @@ impl AppUiAppRoot {
                 history: Vec::new(),
                 history_open: false,
                 history_offset: 0,
+                notifications: NotificationOverlay::from_existing(
+                    &Default::default(),
+                    preferences_model.locale,
+                ),
             },
+            notification_session_id: None,
             models,
             asset_folder_id: None,
             preferences_model,
@@ -1182,6 +1211,7 @@ impl AppUiAppRoot {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
         self.status_bar.sync_history(&state.status_log);
+        self.sync_notifications(state, self.preferences_model.locale);
         let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
             viewer.retain_presentation_from(&self.models.viewer, state);
@@ -1301,10 +1331,39 @@ impl AppUiAppRoot {
         preferences_model
             .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
+        self.sync_notifications(state, preferences_model.locale);
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
         }
         self.refresh_shell_menu_checked_state();
+    }
+
+    /// Remove expired transient messages without changing authoring state.
+    pub(crate) fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
+        self.status_bar.expire_notifications(now)
+    }
+
+    fn sync_notifications(
+        &mut self,
+        state: &AppState,
+        locale: crate::app_ui::localization::AppUiLocale,
+    ) {
+        if self.notification_session_id != state.authoring_session_id() {
+            self.notification_session_id = state.authoring_session_id();
+            self.status_bar.notifications =
+                NotificationOverlay::from_existing(&state.notifications, locale);
+        } else {
+            self.status_bar.notifications.sync(
+                &state.notifications,
+                locale,
+                std::time::Instant::now(),
+            );
+        }
+    }
+
+    /// Earliest deadline at which a toast must be removed from the surface.
+    pub(crate) fn next_notification_deadline(&self) -> Option<std::time::Instant> {
+        self.status_bar.next_notification_deadline()
     }
 
     /// Publish one device-catalog observation without rebuilding editor panels.
@@ -4333,6 +4392,46 @@ mod tests {
             EventResult::Handled
         );
         assert!(!root.status_bar.history_open);
+    }
+
+    #[test]
+    fn root_projects_only_new_terminal_notifications_and_expires_them() {
+        let mut state = AppState::new();
+        state.notifications.publish(
+            "save:before-root",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        assert!(root.next_notification_deadline().is_none());
+
+        state.notifications.publish(
+            "save:after-root",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        root.refresh_from_app_state(&state);
+        let deadline = root.next_notification_deadline().expect("visible terminal toast");
+        assert!(root.expire_notifications(deadline));
+        assert!(root.next_notification_deadline().is_none());
+    }
+
+    #[test]
+    fn authoring_session_switch_discards_stale_toast() {
+        let mut state = AppState::new();
+        state.test_set_project_path(PathBuf::from("E:/projects/notification-first.mdp"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        state.notifications.publish(
+            "save:first-session",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        root.refresh_from_app_state(&state);
+        assert!(root.next_notification_deadline().is_some());
+
+        state.test_set_project_path(PathBuf::from("E:/projects/notification-second.mdp"));
+        root.refresh_from_app_state(&state);
+        assert!(root.next_notification_deadline().is_none());
     }
 
     #[test]

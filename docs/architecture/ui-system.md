@@ -18,18 +18,18 @@ The status bar remains the persistent summary of current work. Its status
 history is available by clicking the bar; the App retains at most 64
 messages and the popover shows eight at a time with wheel navigation. Active
 export progress cannot conceal a newer error status. This gives professional
-users a quiet, recoverable message surface while editing. A transient toast
-projection is still pending for completed long-running work and failures that
-need immediate attention; the history surface does not imply that every
-status hint should become a toast. User-visible notifications should start
-as a small App-owned transient projection for
-completed background work, failed actions, and decisions requiring attention.
-Deduplicate repeated failures by stable reason and operation identity, cap
-visible items, and preserve details in the existing bounded status history.
+users a quiet, recoverable message surface while editing. The App emits
+language-neutral terminal notification facts for completed media imports,
+manual saves, Exports, and their failures; Autosave failures and failed Timeline
+file placement are also eligible. The UI formats them with the current Fluent
+locale and shows at most two nonblocking toasts. Success, warning, and error
+toasts expire after 5, 8, and 10 seconds; clicking one dismisses it. Stable
+operation identities replace duplicate visible toasts, and an authoring-session switch
+clears stale toasts. The existing bounded status history retains details.
 Do not toast every successful click or progress tick. A notification never
 owns a Project mutation, a worker, or the sole record of a failure. An
-expandable history panel is useful only when status history is exposed to users;
-the EventBus remains a post-commit notification seam, not notification state.
+expandable history panel exposes status history to users; the EventBus remains
+a post-commit notification seam, not notification state.
 See [localization](localization.md) for message formatting and locale ownership.
 
 An external file drop is target-specific. The Asset Library accepts a library

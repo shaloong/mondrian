@@ -224,6 +224,12 @@ mod tests {
         args.set("count", 3);
         let plural = english.format("notification-import-complete", Some(&args));
         assert!(plural.contains('3') && plural.contains("media files"));
+        let mut partial = FluentArgs::new();
+        partial.set("imported", 1);
+        partial.set("failed", 1);
+        let partial_text = english.format("notification-import-partial", Some(&partial));
+        assert!(partial_text.contains("one media file"));
+        assert!(partial_text.contains("one failed"));
         assert_eq!(english.text("missing-message"), "missing-message");
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         assert!(chinese.format("notification-import-complete", Some(&args)).contains('3'));

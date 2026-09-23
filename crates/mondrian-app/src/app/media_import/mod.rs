@@ -279,7 +279,7 @@ impl AppState {
             self.media_import_batches.insert(result.batch_id, batch);
             return;
         }
-        self.finish_media_import_batch(batch);
+        self.finish_media_import_batch(result.batch_id, batch);
     }
 
     fn apply_timeline_file_drop_result(
@@ -302,19 +302,32 @@ impl AppState {
                 };
                 self.media_import.finalize_deferred_file(result.batch_id, placement.is_ok());
                 if let Err(error) = placement {
-                    self.set_status_hint(format!("文件放置失败：{error}"), true);
+                    self.report_timeline_drop_failure(result.batch_id, error.to_string());
                 }
             }
             MediaImportPublicationOutcome::Failed(error) => {
-                self.set_status_hint(format!("文件放置失败：{error}"), true);
+                self.report_timeline_drop_failure(result.batch_id, error.to_string());
             }
             MediaImportPublicationOutcome::Canceled => {
                 self.set_status_hint("文件放置已取消".to_owned(), false);
             }
             MediaImportPublicationOutcome::Imported(_) => {
-                self.set_status_hint("文件放置失败：媒体已提前导入".to_owned(), true);
+                self.report_timeline_drop_failure(result.batch_id, "媒体已提前导入");
             }
         }
+    }
+
+    fn report_timeline_drop_failure(&mut self, batch_id: u64, reason: impl Into<String>) {
+        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+
+        let reason = reason.into();
+        self.set_status_hint(format!("文件放置失败：{reason}"), true);
+        self.notifications.publish(
+            format!("timeline_drop:{batch_id}"),
+            AppNotificationSeverity::Error,
+            AppNotificationMessage::new("notification-timeline-drop-failed")
+                .with_text("reason", reason),
+        );
     }
 
     pub(super) fn configure_imported_asset(&mut self, asset_id: AssetId) -> bool {
@@ -376,7 +389,10 @@ impl AppState {
         }
     }
 
-    fn finish_media_import_batch(&mut self, batch: PendingMediaImportBatch) {
+    fn finish_media_import_batch(&mut self, batch_id: u64, batch: PendingMediaImportBatch) {
+        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+
+        let notification_key = format!("media_import:{batch_id}");
         if batch.imported > 0 {
             let mut message = format!("已导入 {} 个媒体文件", batch.imported);
             if batch.proxy_started > 0 {
@@ -391,6 +407,26 @@ impl AppState {
                 );
             }
             self.set_status_hint(message, !batch.failures.is_empty());
+            let imported = i64::try_from(batch.imported).unwrap_or(i64::MAX);
+            if batch.failures.is_empty() {
+                self.notifications.publish(
+                    notification_key,
+                    AppNotificationSeverity::Success,
+                    AppNotificationMessage::new("notification-import-complete")
+                        .with_number("count", imported),
+                );
+            } else {
+                self.notifications.publish(
+                    notification_key,
+                    AppNotificationSeverity::Warning,
+                    AppNotificationMessage::new("notification-import-partial")
+                        .with_number("imported", imported)
+                        .with_number(
+                            "failed",
+                            i64::try_from(batch.failures.len()).unwrap_or(i64::MAX),
+                        ),
+                );
+            }
             return;
         }
 
@@ -400,5 +436,10 @@ impl AppState {
             .cloned()
             .unwrap_or_else(|| "未导入任何媒体文件".to_string());
         self.set_status_hint(format!("导入失败：{reason}"), true);
+        self.notifications.publish(
+            notification_key,
+            AppNotificationSeverity::Error,
+            AppNotificationMessage::new("notification-import-failed").with_text("reason", reason),
+        );
     }
 }

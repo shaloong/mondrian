@@ -1035,6 +1035,8 @@ impl AppState {
         let mut changed = self.retired_project_libraries.len() != retired_before;
         for completion in completions {
             changed = true;
+            let notification_key = format!("manual_save:{}", completion.request_id.get());
+            let autosave_notification_key = format!("autosave:{}", completion.request_id.get());
             let purpose = completion.purpose.clone();
             let result = self.apply_persistence_completion(completion);
             match (purpose, result) {
@@ -1043,6 +1045,13 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::Applied),
                 ) => {
                     self.set_status_hint("项目已耐久保存", false);
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Success,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-complete",
+                        ),
+                    );
                 }
                 (
                     ProjectPersistencePurpose::Manual { .. },
@@ -1051,6 +1060,14 @@ impl AppState {
                     self.set_status_hint(
                         format!("项目已耐久保存，但恢复点清理失败：{reason}"),
                         true,
+                    );
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Warning,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-warning",
+                        )
+                        .with_text("reason", reason),
                     );
                 }
                 (
@@ -1068,12 +1085,36 @@ impl AppState {
                         format!("自动保存完成，但恢复点清理状态异常：{reason}"),
                         true,
                     );
+                    self.notifications.publish(
+                        autosave_notification_key,
+                        super::notifications::AppNotificationSeverity::Warning,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-autosave-warning",
+                        )
+                        .with_text("reason", reason),
+                    );
                 }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
                     self.set_status_hint(format!("保存项目失败：{error}"), true);
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Error,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-failed",
+                        )
+                        .with_text("reason", error.to_string()),
+                    );
                 }
                 (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
                     self.set_status_hint(format!("自动保存失败：{error}"), true);
+                    self.notifications.publish(
+                        autosave_notification_key,
+                        super::notifications::AppNotificationSeverity::Error,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-autosave-failed",
+                        )
+                        .with_text("reason", error.to_string()),
+                    );
                 }
             }
         }
@@ -2930,6 +2971,10 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(!state.authoring.as_ref().expect("session").is_current_autosaved());
+        assert!(state.notifications.iter().any(|notification| {
+            notification.message.id == "notification-autosave-failed"
+                && notification.severity == super::notifications::AppNotificationSeverity::Error
+        }));
 
         fs::remove_file(runtime_root.join("autosave")).expect("remove blocker");
         state.submit_autosave(2, 7).expect("retry autosave");
@@ -2940,6 +2985,42 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(state.authoring.as_ref().expect("session").is_current_autosaved());
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn polled_manual_save_emits_one_terminal_notification() {
+        let root = unique_root("manual-notification");
+        let mut state = test_state(&root);
+        state.request_project_save().expect("submit manual save");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state
+            .notifications
+            .iter()
+            .all(|notification| notification.message.id != "notification-save-complete")
+        {
+            state.poll_project_persistence();
+            assert!(Instant::now() < deadline, "manual save did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            state
+                .notifications
+                .iter()
+                .filter(|notification| notification.message.id == "notification-save-complete")
+                .count(),
+            1
+        );
+        state.poll_project_persistence();
+        assert_eq!(
+            state
+                .notifications
+                .iter()
+                .filter(|notification| notification.message.id == "notification-save-complete")
+                .count(),
+            1
+        );
         state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);
     }

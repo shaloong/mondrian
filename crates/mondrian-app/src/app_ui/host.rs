@@ -1233,6 +1233,7 @@ impl AppUiHost {
         let mut outcome =
             AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
         outcome.repaint_required |= audio_devices_changed;
+        outcome.repaint_required |= self.root.expire_notifications(Instant::now());
         outcome.quit_requested = quit_requested;
         if !full_model_changed {
             if preview_outcome.visible_change {
@@ -1296,11 +1297,14 @@ impl AppUiHost {
     pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
         let resource_deadline =
             self.app_state.borrow().next_execution_resource_observation_deadline();
-        if self.quiescing_close_action.is_some() {
+        let resource_deadline = if self.quiescing_close_action.is_some() {
             resource_deadline.min(Instant::now() + Duration::from_millis(16))
         } else {
             resource_deadline
-        }
+        };
+        self.root.next_notification_deadline().map_or(resource_deadline, |deadline| {
+            resource_deadline.min(deadline)
+        })
     }
 
     /// Advance active playback and refresh UI models when the visible frame changes.
