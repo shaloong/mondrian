@@ -7,7 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use mondrian_core::ProjectId;
@@ -2358,10 +2358,21 @@ fn startup_recent_projects_from_preferences(
     preferences
         .recent_projects
         .iter()
-        .map(|project_file| StartupRecentProject {
-            project_file: project_file.clone(),
-            title: recent_project_title(project_file),
-            subtitle: recent_project_subtitle(project_file),
+        .map(|project_file| {
+            let metadata = std::fs::metadata(project_file).ok();
+            StartupRecentProject {
+                project_file: project_file.clone(),
+                title: recent_project_title(project_file),
+                modified_at_unix_ms: metadata.as_ref().and_then(|metadata| {
+                    metadata
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                }),
+                size_bytes: metadata.map(|metadata| metadata.len()),
+            }
         })
         .collect()
 }
@@ -2387,57 +2398,6 @@ fn recent_project_title(project_file: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| project_file.display().to_string())
-}
-
-fn recent_project_subtitle(project_file: &Path) -> String {
-    let metadata = std::fs::metadata(project_file).ok();
-    let modified = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.modified().ok())
-        .map(recent_project_modified_label)
-        .unwrap_or_else(|| "未知时间".to_owned());
-    let size = metadata
-        .as_ref()
-        .map(|metadata| format_file_size(metadata.len()))
-        .unwrap_or_else(|| "--".to_owned());
-    format!("{modified} • {size}")
-}
-
-fn recent_project_modified_label(modified: SystemTime) -> String {
-    let age_secs = SystemTime::now()
-        .duration_since(modified)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    if age_secs < 60 {
-        "刚刚".to_owned()
-    } else if age_secs < 3600 {
-        format!("{} 分钟前", age_secs / 60)
-    } else if age_secs < 86_400 {
-        format!("{} 小时前", age_secs / 3600)
-    } else if age_secs < 172_800 {
-        "昨天".to_owned()
-    } else if age_secs < 604_800 {
-        format!("{} 天前", age_secs / 86_400)
-    } else {
-        format!("{} 周前", age_secs / 604_800)
-    }
-}
-
-fn format_file_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else if size >= 10.0 {
-        format!("{size:.0} {}", UNITS[unit])
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
 }
 
 fn take_shell_window_command(commands: &mut AppUiShellCommands, action: &Action) -> bool {
@@ -4489,6 +4449,26 @@ mod tests {
 
         assert_eq!(host.mode(), AppUiMode::Startup);
         assert_eq!(host.startup.recent_project_count(), 1);
+    }
+
+    #[test]
+    fn recent_projects_capture_file_facts_and_keep_missing_paths() {
+        let directory = tempfile::tempdir().expect("temporary recent-project directory");
+        let project_file = directory.path().join("recent.mdp");
+        std::fs::write(&project_file, b"mdp").expect("write recent-project fixture");
+        let mut preferences = AppUiPreferences::default();
+        preferences.record_recent_project(project_file.clone());
+
+        let present = startup_recent_projects_from_preferences(&preferences);
+        assert_eq!(present[0].project_file, project_file);
+        assert_eq!(present[0].size_bytes, Some(3));
+        assert!(present[0].modified_at_unix_ms.is_some());
+
+        std::fs::remove_file(&project_file).expect("remove recent-project fixture");
+        let missing = startup_recent_projects_from_preferences(&preferences);
+        assert_eq!(missing[0].project_file, project_file);
+        assert_eq!(missing[0].size_bytes, None);
+        assert_eq!(missing[0].modified_at_unix_ms, None);
     }
 
     #[test]

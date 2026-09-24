@@ -216,7 +216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recovery_messages_exist_in_both_catalogs() {
+    fn startup_recovery_messages_exist_in_both_catalogs() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
         for id in [
@@ -240,6 +240,11 @@ mod tests {
             "recovery-age-days",
             "recovery-row-single",
             "recovery-row-multiple",
+            "startup-recent-now",
+            "startup-recent-unknown-time",
+            "startup-recent-unknown-size",
+            "startup-recent-file-unavailable",
+            "startup-recent-detail",
         ] {
             assert!(
                 chinese.requested.get_message(id).is_some(),

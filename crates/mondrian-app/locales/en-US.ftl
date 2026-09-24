@@ -288,3 +288,8 @@ recovery-age-days =
     }
 recovery-row-single = { $age } · { $location }
 recovery-row-multiple = { $age } · { $count } recovery points · { $location }
+startup-recent-now = Just now
+startup-recent-unknown-time = Unknown modification time
+startup-recent-unknown-size = Unknown size
+startup-recent-file-unavailable = File unavailable
+startup-recent-detail = { $age } · { $size }

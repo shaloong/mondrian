@@ -59,6 +59,9 @@ passes the unchanged candidate to recovery admission. A newer target revision
 has its own warning copy. Locale changes reproject visible rows without changing
 candidate identity. These dialogs require an explicit locale at construction;
 the alpha UI does not retain duplicate default-language constructors.
+Recent project rows retain file modification time and size as raw metadata;
+the startup panel formats relative age and unavailable-file status at paint time
+in the active locale. Switching locales never changes the recent project path.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

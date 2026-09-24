@@ -75,8 +75,52 @@ pub struct StartupRecentProject {
     pub project_file: PathBuf,
     /// Primary row label.
     pub title: String,
-    /// Secondary row label, typically the parent directory.
-    pub subtitle: String,
+    /// File modification time captured when the recent list was refreshed.
+    pub modified_at_unix_ms: Option<u64>,
+    /// File length captured with the same metadata probe.
+    pub size_bytes: Option<u64>,
+}
+
+fn recent_project_detail_at(
+    project: &StartupRecentProject,
+    localizer: &Localizer,
+    now_ms: u64,
+) -> String {
+    if project.modified_at_unix_ms.is_none() && project.size_bytes.is_none() {
+        return localizer.text("startup-recent-file-unavailable");
+    }
+    let age = match project.modified_at_unix_ms {
+        Some(modified_at) if now_ms.saturating_sub(modified_at) < 60_000 => {
+            localizer.text("startup-recent-now")
+        }
+        Some(modified_at) => recovery_age_label_at(localizer, modified_at, now_ms),
+        None => localizer.text("startup-recent-unknown-time"),
+    };
+    let size = project.size_bytes.map_or_else(
+        || localizer.text("startup-recent-unknown-size"),
+        format_file_size,
+    );
+    let mut args = FluentArgs::new();
+    args.set("age", age);
+    args.set("size", size);
+    localizer.format("startup-recent-detail", Some(&args))
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else if size >= 10.0 {
+        format!("{size:.0} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 /// One autosave recovery row shown on the app UI startup surface.
@@ -654,8 +698,15 @@ impl Widget for AppUiStartupScreen {
                         startup_alpha(colors.muted_foreground, 0.92),
                     );
                     let detail_x = icon_rect.x + icon_rect.width + 6.0;
-                    let detail =
-                        startup_ellipsize(&project.subtitle, detail_font, text_right - detail_x);
+                    let detail = startup_ellipsize(
+                        &recent_project_detail_at(
+                            project,
+                            &self.localizer,
+                            unix_now_ms().unwrap_or(project.modified_at_unix_ms.unwrap_or(0)),
+                        ),
+                        detail_font,
+                        text_right - detail_x,
+                    );
                     ctx.encoder.draw_text(
                         &detail,
                         detail_font,
@@ -1140,7 +1191,8 @@ mod tests {
         screen.set_recent_projects(vec![StartupRecentProject {
             project_file: PathBuf::from("E:/projects/travel.mdp"),
             title: "旅行片".to_owned(),
-            subtitle: "E:/projects".to_owned(),
+            modified_at_unix_ms: None,
+            size_bytes: None,
         }]);
         screen.layout(Rect::new(
             0.0,
@@ -1220,7 +1272,8 @@ mod tests {
         screen.set_recent_projects(vec![StartupRecentProject {
             project_file: project_file.clone(),
             title: "recent".to_owned(),
-            subtitle: "E:/projects".to_owned(),
+            modified_at_unix_ms: None,
+            size_bytes: None,
         }]);
         screen.layout(Rect::new(
             0.0,
@@ -1344,6 +1397,37 @@ mod tests {
         assert!(zh_detail.contains("1 分钟前，共 2 个恢复点"));
         assert!(en_detail.contains("One minute ago · 2 recovery points"));
         assert_eq!(row.candidate, candidate);
+    }
+
+    #[test]
+    fn recent_row_reprojects_metadata_and_reports_unavailable_file() {
+        let path = PathBuf::from("E:/projects/recent.mdp");
+        let row = StartupRecentProject {
+            project_file: path.clone(),
+            title: "recent".to_owned(),
+            modified_at_unix_ms: Some(1_700_000_000_000),
+            size_bytes: Some(2_048),
+        };
+        let zh = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let zh_detail = recent_project_detail_at(&row, &zh, 1_700_000_060_000)
+            .replace(['\u{2068}', '\u{2069}'], "");
+        let en_detail = recent_project_detail_at(&row, &en, 1_700_000_060_000)
+            .replace(['\u{2068}', '\u{2069}'], "");
+        assert!(zh_detail.contains("1 分钟前"));
+        assert!(en_detail.contains("One minute ago"));
+        assert!(zh_detail.contains("2.0 KB"));
+        assert!(en_detail.contains("2.0 KB"));
+        assert_eq!(row.project_file, path);
+
+        let unavailable =
+            StartupRecentProject { modified_at_unix_ms: None, size_bytes: None, ..row };
+        assert_eq!(recent_project_detail_at(&unavailable, &zh, 0), "文件不可用");
+        assert_eq!(
+            recent_project_detail_at(&unavailable, &en, 0),
+            "File unavailable"
+        );
+        assert_eq!(unavailable.project_file, path);
     }
 
     #[test]
