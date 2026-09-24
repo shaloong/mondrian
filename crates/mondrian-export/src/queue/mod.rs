@@ -16636,6 +16636,151 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires MONDRIAN_CLAP_TEST_HELPER, MONDRIAN_CLAP_TEST_PLUGIN, and FFmpeg"]
+    fn export_audio_delivery_executes_installed_clap_on_nonzero_pcm() {
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        assert!(
+            ffmpeg_is_available_for_test(),
+            "FFmpeg is required for real CLAP export qualification"
+        );
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("installed Clack gain plugin");
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover installed CLAP");
+        let plugin_id = installed.descriptors()[0].plugin_id.clone();
+        let instance = installed
+            .create_instance(
+                &plugin_id,
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 16_384,
+                    processing_mode: AudioProcessingMode::Offline,
+                    processor_session_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                    public_output_lookahead_budget_frames:
+                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                    compensation_delay_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                },
+                Some(0.5_f32.to_le_bytes().to_vec()),
+            )
+            .expect("capture pinned installed instance");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+
+        let directory = tempfile::tempdir().expect("temporary source directory");
+        let source_path = directory.path().join("clap-constant-stereo.wav");
+        let sample_rate = 48_000_u32;
+        let frames = sample_rate as usize;
+        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
+        let mut wave = BufWriter::new(std::fs::File::create(&source_path).expect("create WAV"));
+        wave.write_all(b"RIFF").expect("RIFF");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("WAVE format");
+        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
+        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
+        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("block align");
+        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
+        wave.write_all(b"data").expect("data");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
+        for _ in 0..frames {
+            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
+            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        }
+        wave.flush().expect("complete WAV source");
+        drop(wave);
+
+        let asset_id = AssetId::new();
+        let component_id = AudioSourceComponentId::primary();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.audio_sample_rate = sample_rate;
+        timeline.sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 };
+        let track_id = timeline.sequence.audio_tracks[0].id;
+        timeline
+            .sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(asset_id, TimelineTime::ZERO, TimelineTime::ONE).expect("source Clip"),
+                component_id,
+            )
+            .expect("add source Clip");
+        timeline.sequence.audio_program.outputs[0]
+            .strip
+            .pre_fader
+            .processors
+            .push(instance);
+        let mut dependency = test_media_dependency(
+            source_path.clone(),
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.audio_components.insert(
+            component_id,
+            mondrian_media::AudioSourceSelection::new(
+                0,
+                mondrian_media::info::ChannelLayout::Stereo,
+                MediaFileFingerprint::capture(&source_path),
+            ),
+        );
+        timeline.media.insert(asset_id, dependency);
+        refresh_test_execution_snapshot(&mut timeline, true);
+        let prepared = timeline
+            .prepared_execution()
+            .and_then(|snapshot| snapshot.audio())
+            .and_then(|audio| audio.outputs().next())
+            .expect("prepared audio output");
+        let range = compute_timeline_render_range(&timeline).expect("export range");
+        let mut delivery = prepare_timeline_audio_delivery(
+            &timeline,
+            prepared,
+            range,
+            sample_rate,
+            AudioChannelLayout::Stereo,
+            &Arc::new(AudioSourceCache::new(sample_rate)),
+            service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
+            &resolver,
+        )
+        .expect("prepare offline export delivery with real CLAP");
+        if delivery.requires_state_entry() {
+            delivery
+                .enter_state(AudioContinuityEpoch::new(1), 0)
+                .expect("enter export continuity");
+        }
+        let mut output = [0.0_f32; 128];
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest { start_sample: 0, frames: 64 },
+                &mut output,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("execute installed CLAP through export queue delivery");
+        for (frame, pair) in output.chunks_exact(2).enumerate() {
+            assert!(
+                (pair[0] - 0.125).abs() <= 1e-6,
+                "left frame {frame}: {}",
+                pair[0]
+            );
+            assert!(
+                (pair[1] + 0.125).abs() <= 1e-6,
+                "right frame {frame}: {}",
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
     fn timeline_audio_sample_range_matches_frame_duration() {
         let range = TimelineRenderRange {
             source_start: TimelineTime::ZERO,

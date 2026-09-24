@@ -54,8 +54,16 @@ builder passes it to every nested Sequence occurrence. The App binds one
 shared resolver to Preview, idle audio warmup, and its Export queue. Export
 uses that queue resolver for normal audio and each stem, including the initial
 aggregate resource admission pass. Default construction still uses built-ins
-and rejects unresolved external definitions. Explicit revision rebinding and
-missing-plugin management remain product work.
+and rejects unresolved external definitions. An explicit rebind preserves
+instance author state after probing the selected binary and comparing parameter
+schemas; installed-plugin management remains product work.
+The ignored installed-reference tests render a nonzero constant Float32 stereo
+WAV through the App Preview adapter and Export's offline delivery adapter.
+Both must return left/right samples of `+0.125/-0.125` for the saved 0.5 gain
+state, within `1e-6`. A shared Runtime test also compares realtime two-block
+and offline one-block output sample by sample. This qualifies that reference
+gain contract and catches bypass, channel inversion, mode or block-boundary
+drift; other plugin algorithms still require their own signal corpus.
 
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different

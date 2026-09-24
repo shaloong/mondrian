@@ -102,8 +102,11 @@ state and participates in Undo/Redo. Missing binaries, changed parameter
 schemas, locked Tracks, and stale edits leave the Project untouched.
 The generic external Rack-edit transport rejects `RebindClap`; only the App's
 probe-backed product action may submit that Timeline mutation.
-An installed reference-plugin test verifies the Preview adapter launches the
-real CLAP worker and renders a block. A local CLAP fixture verifies that parameter
+Installed reference-plugin tests verify that the Preview and Export audio
+adapters each launch the real CLAP worker and produce `+0.125/-0.125` samples
+from the same nonzero stereo WAV pattern with saved 0.5 gain. The shared Runtime
+compares realtime and offline modes over different block partitions with a
+`1e-6` per-sample tolerance. A local CLAP fixture verifies that parameter
 events retain their sample offsets at the ABI. The Clack Gain example receives
 multiple events but applies each gain to the whole buffer, so its output is
 checked against that implementation rather than used as a sample-accuracy oracle.
@@ -121,7 +124,8 @@ binding during audio preparation; the App surfaces that preparation failure
 and clears stale audio. Neither case changes project author state.
 Installation and restoration do not
 advance the project author generation. Automatic installed-path enumeration,
-plugin management and relocation UI, state capture, parameter-control UI, and a full Preview/Export signal-parity test remain required before
+plugin management and relocation UI, state capture, expanded parameter-control UI,
+and broader vendor/plugin signal-parity coverage remain required before
 CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
 

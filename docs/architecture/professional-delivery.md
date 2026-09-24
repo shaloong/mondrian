@@ -20,6 +20,11 @@ commercial endurance qualification; see
 Frozen Export Snapshots retain any authored CLAP binary SHA-256. The audio
 resolver rejects an installed revision mismatch before worker admission;
 Export never silently uses a newer same-ID processor in place of authored sound.
+An ignored reference acceptance test prepares the ordinary offline audio
+delivery with a pinned installed CLAP gain, decodes a nonzero stereo Float32
+WAV, and checks the resulting samples against the saved gain state. This
+exercises the Export resolver and worker instead of proving only that a
+processor identity can be represented in a frozen snapshot.
 
 The job-scoped Audio Source Cache now returns schema-6 raw closure, including
 its independent native-startup worker and producer leases. Queue consumers do

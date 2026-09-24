@@ -526,6 +526,7 @@ mod tests {
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
+        use std::io::Write;
 
         let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
             .map(std::path::PathBuf::from)
@@ -559,12 +560,64 @@ mod tests {
             "mondrian-preview-clap-{}",
             mondrian_core::ProjectId::new()
         ));
+        std::fs::create_dir_all(&root).expect("preview test directory");
+        let source_path = root.join("clap-constant-stereo.wav");
+        let sample_rate = 48_000_u32;
+        let frames = sample_rate as usize;
+        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
+        let mut wave = std::io::BufWriter::new(
+            std::fs::File::create(&source_path).expect("create nonzero WAV source"),
+        );
+        wave.write_all(b"RIFF").expect("RIFF");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("format");
+        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
+        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
+        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("block alignment");
+        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
+        wave.write_all(b"data").expect("data");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
+        for _ in 0..frames {
+            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
+            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        }
+        wave.flush().expect("complete WAV source");
+        drop(wave);
+        let source_path = std::fs::canonicalize(source_path).expect("canonical WAV path");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let asset_id = library
+            .commit_media_probe(
+                mondrian_assets::AssetMediaProbeCandidate::new(
+                    source_path.clone(),
+                    mondrian_core::MediaFileFingerprint::capture(&source_path),
+                    mondrian_media::probe_media_info(&source_path).expect("probe WAV"),
+                )
+                .expect("audio source candidate"),
+                None,
+            )
+            .expect("register WAV source");
         let mut sequence = Sequence::new("CLAP preview");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    asset_id,
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("audio Clip"),
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("add WAV Clip");
         sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
         let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence,
             Vec::new(),
-            AssetLibrary::open(root.clone()).expect("asset library"),
+            library,
             Arc::new(AudioSourceCache::new(48_000)),
             test_runtime_grant(),
             AudioAuditionOverlay::default(),
@@ -587,7 +640,18 @@ mod tests {
             )
             .expect("render through actual CLAP worker");
         assert_eq!(output.samples.len(), 128);
-        assert!(output.samples.iter().all(|sample| *sample == 0.0));
+        for (frame, pair) in output.samples.chunks_exact(2).enumerate() {
+            assert!(
+                (pair[0] - 0.125).abs() <= 1e-6,
+                "left frame {frame}: {}",
+                pair[0]
+            );
+            assert!(
+                (pair[1] + 0.125).abs() <= 1e-6,
+                "right frame {frame}: {}",
+                pair[1]
+            );
+        }
         drop(renderer);
         let _ = std::fs::remove_dir_all(root);
     }
