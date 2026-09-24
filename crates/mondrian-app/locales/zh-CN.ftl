@@ -16,7 +16,7 @@ new-project-audio = 音频
 new-project-color-mode = 项目颜色模式
 new-project-resolution-hd = 高清 720p
 new-project-resolution-fhd = 全高清 1080p
-new-project-custom-ocio = 自定义 OpenColorIO
+color-custom-ocio = 自定义 OpenColorIO
 color-select-custom-ocio = 选择自定义 OpenColorIO…
 new-project-create-proxies = 创建代理
 new-project-preview-cache = 预览缓存
@@ -24,6 +24,16 @@ new-project-cancel = 取消
 new-project-create = 创建...
 color-choose-ocio-config = 选择 OpenColorIO 配置
 color-ocio-config-filter = OpenColorIO 配置
+project-settings-title = 项目色彩引擎
+project-settings-description = 此引擎作用于项目内全部序列。应用前会校验新建序列默认值和每个现有序列；任一不兼容都会整次拒绝，不会自动改写序列。
+project-settings-builtin-detail = 内置固定包：{ $package } · 当前工作空间：{ $workingSpaces }
+project-settings-aces-detail = 正式 OCIO 内置配置：{ $preset } · 当前工作空间：{ $workingSpaces }
+project-settings-custom-detail =
+    { $source }
+    输出绑定：{ $outputs }
+    配置 SHA-256：{ $sha256 }
+project-settings-cancel = 取消
+project-settings-apply = 应用
 menu-file = 文件
 menu-edit = 编辑
 menu-view = 视图

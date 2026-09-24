@@ -22,7 +22,8 @@ use crate::app::ui_actions::{
     ProjectCreateWithSettingsPayload,
 };
 use crate::app_ui::color_management_controls::{
-    choose_custom_ocio_config_with_locale, color_engine_label, color_engine_menu_items,
+    choose_custom_ocio_config_with_locale, color_engine_label_in_locale,
+    color_engine_menu_items_in_locale,
 };
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::localization::{AppUiLocale, Localizer};
@@ -303,29 +304,15 @@ fn color_engine_dropdown_for(
     draft: &AppUiNewProjectDraft,
     localizer: Option<&Localizer>,
 ) -> Dropdown {
-    let mut items = color_engine_menu_items(|engine| {
-        app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
-            engine,
-        ))
-    });
-    if let Some(custom_item) = items
-        .iter_mut()
-        .find(|item| item.message_id.as_deref() == Some("color-select-custom-ocio"))
-    {
-        custom_item.label = dialog_text(
-            localizer,
-            "color-select-custom-ocio",
-            "选择自定义 OpenColorIO…",
-        );
-    }
-    let label = if matches!(
-        draft.color_environment.engine(),
-        mondrian_core::ColorEngine::CustomOcio { .. }
-    ) {
-        dialog_text(localizer, "new-project-custom-ocio", "自定义 OpenColorIO")
-    } else {
-        color_engine_label(draft.color_environment.engine()).to_owned()
-    };
+    let items = color_engine_menu_items_in_locale(
+        |engine| {
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
+                engine,
+            ))
+        },
+        localizer,
+    );
+    let label = color_engine_label_in_locale(draft.color_environment.engine(), localizer);
     Dropdown::new(label, items).with_max_visible_items(4)
 }
 

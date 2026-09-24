@@ -6,6 +6,8 @@
 //! Existing Sequence settings are not rewritten; their resolved color contexts
 //! all use the accepted Project engine.
 
+use fluent_bundle::FluentArgs;
+use mondrian_core::display_labels::color_space_label;
 use mondrian_core::{ColorEngine, ColorSpace, WorkingColorSpace};
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
@@ -20,8 +22,10 @@ use crate::app::ui_actions::{
     app_shell_project_settings_draft_changed_action, ProjectSettingsDraftUpdatePayload,
 };
 use crate::app_ui::color_management_controls::{
-    choose_custom_ocio_config, color_engine_label, color_engine_menu_items,
+    choose_custom_ocio_config_with_locale, color_engine_label_in_locale,
+    color_engine_menu_items_in_locale,
 };
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 /// Shell-local project color-settings form state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,29 +53,37 @@ impl AppUiProjectSettingsDraft {
         }
     }
 
-    fn working_space_summary(&self) -> String {
+    fn working_space_summary(&self, locale: AppUiLocale) -> String {
         let mut working_spaces = Vec::new();
         for (working_space, _) in &self.sequence_color_contracts {
             if !working_spaces.contains(working_space) {
                 working_spaces.push(*working_space);
             }
         }
-        working_spaces
-            .into_iter()
-            .map(working_space_label)
-            .collect::<Vec<_>>()
-            .join("、")
+        working_spaces.into_iter().map(working_space_label).collect::<Vec<_>>().join(
+            if locale == AppUiLocale::EnUs {
+                ", "
+            } else {
+                "、"
+            },
+        )
     }
 }
 
-fn project_color_dropdown_for(draft: &AppUiProjectSettingsDraft) -> Dropdown {
+fn project_color_dropdown_for(
+    draft: &AppUiProjectSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        color_engine_label(&draft.engine),
-        color_engine_menu_items(|engine| {
-            app_shell_project_settings_draft_changed_action(
-                ProjectSettingsDraftUpdatePayload::ColorEngine(engine),
-            )
-        }),
+        color_engine_label_in_locale(&draft.engine, localizer),
+        color_engine_menu_items_in_locale(
+            |engine| {
+                app_shell_project_settings_draft_changed_action(
+                    ProjectSettingsDraftUpdatePayload::ColorEngine(engine),
+                )
+            },
+            localizer,
+        ),
     )
     .with_max_visible_items(4)
 }
@@ -85,38 +97,71 @@ fn working_space_label(working_space: WorkingColorSpace) -> &'static str {
     }
 }
 
-fn engine_detail(engine: &ColorEngine, working_space_summary: &str) -> String {
+fn engine_detail(
+    engine: &ColorEngine,
+    working_space_summary: &str,
+    localizer: Option<&Localizer>,
+) -> String {
     match engine {
-        ColorEngine::MondrianStandard { package } => format!(
-            "内置固定包：{} · 当前工作空间：{}",
-            package.package_id(),
-            working_space_summary
-        ),
-        ColorEngine::Aces { preset } => format!(
-            "正式 OCIO 内置配置：{} · 当前工作空间：{}",
-            preset.builtin_name(),
-            working_space_summary
-        ),
+        ColorEngine::MondrianStandard { package } => {
+            let fallback = format!(
+                "内置固定包：{} · 当前工作空间：{}",
+                package.package_id(),
+                working_space_summary
+            );
+            let mut args = FluentArgs::new();
+            args.set("package", package.package_id());
+            args.set("workingSpaces", working_space_summary);
+            localizer.map_or(fallback, |localizer| {
+                localizer.format("project-settings-builtin-detail", Some(&args))
+            })
+        }
+        ColorEngine::Aces { preset } => {
+            let fallback = format!(
+                "正式 OCIO 内置配置：{} · 当前工作空间：{}",
+                preset.builtin_name(),
+                working_space_summary
+            );
+            let mut args = FluentArgs::new();
+            args.set("preset", preset.builtin_name());
+            args.set("workingSpaces", working_space_summary);
+            localizer.map_or(fallback, |localizer| {
+                localizer.format("project-settings-aces-detail", Some(&args))
+            })
+        }
         ColorEngine::CustomOcio { identity } => {
             let outputs = identity
                 .outputs()
                 .iter()
                 .map(|output| {
                     format!(
-                        "{:?}：{} / {}",
-                        output.output_color_space(),
+                        "{}: {} / {}",
+                        color_space_label(output.output_color_space()),
                         output.display(),
                         output.view()
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("；");
-            format!(
+                .join(
+                    if localizer.is_some_and(|localizer| localizer.locale() == AppUiLocale::EnUs) {
+                        "; "
+                    } else {
+                        "；"
+                    },
+                );
+            let fallback = format!(
                 "{}\n输出绑定：{}\n配置 SHA-256：{}",
                 identity.source(),
                 outputs,
                 identity.config_sha256()
-            )
+            );
+            let mut args = FluentArgs::new();
+            args.set("source", identity.source().to_string());
+            args.set("outputs", outputs);
+            args.set("sha256", identity.config_sha256());
+            localizer.map_or(fallback, |localizer| {
+                localizer.format("project-settings-custom-detail", Some(&args))
+            })
         }
     }
 }
@@ -144,6 +189,7 @@ const BUTTON_BOTTOM_INSET: f32 = 20.0;
 pub struct ProjectSettingsDialog {
     id: WidgetId,
     draft: AppUiProjectSettingsDraft,
+    localizer: Option<Localizer>,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -160,15 +206,38 @@ pub struct ProjectSettingsDialog {
 impl ProjectSettingsDialog {
     /// Build a project-settings dialog from current state.
     pub fn new(draft: AppUiProjectSettingsDraft) -> Self {
-        let mode_dropdown = project_color_dropdown_for(&draft);
-        let detail_label = Label::new(engine_detail(&draft.engine, &draft.working_space_summary()))
-            .secondary()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped();
+        Self::with_locale(draft, AppUiLocale::ZhCn)
+    }
+
+    /// Build a project-settings dialog in the selected machine-local language.
+    pub fn with_locale(draft: AppUiProjectSettingsDraft, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).ok();
+        let text = |id: &str, fallback: &str| {
+            localizer
+                .as_ref()
+                .map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+        };
+        let mode_dropdown = project_color_dropdown_for(&draft, localizer.as_ref());
+        let detail_label = Label::new(engine_detail(
+            &draft.engine,
+            &draft.working_space_summary(locale),
+            localizer.as_ref(),
+        ))
+        .secondary()
+        .with_font_size(LABEL_FONT_SIZE)
+        .with_padding(0.0, 0.0)
+        .wrapped();
+        let title = text("project-settings-title", "项目色彩引擎");
+        let description = text(
+            "project-settings-description",
+            "此引擎作用于项目内全部序列。应用前会校验新建序列默认值和每个现有序列；任一不兼容都会整次拒绝，不会自动改写序列。",
+        );
+        let cancel = text("project-settings-cancel", "取消");
+        let apply = text("project-settings-apply", "应用");
         Self {
             id: WidgetId::new(),
             draft,
+            localizer,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
                 Size::new(CARD_WIDTH, CARD_HEIGHT),
@@ -176,18 +245,16 @@ impl ProjectSettingsDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
-            title_label: Label::new("项目色彩引擎")
+            title_label: Label::new(title.clone())
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            description_label: Label::new(
-                "此引擎作用于项目内全部序列。应用前会校验新建序列默认值和每个现有序列；任一不兼容都会整次拒绝，不会自动改写序列。",
-            )
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped(),
-            mode_label: Label::new("项目色彩引擎")
+            description_label: Label::new(description)
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
+            mode_label: Label::new(title)
                 .muted()
                 .with_font_size(LABEL_FONT_SIZE)
                 .with_padding(0.0, 0.0),
@@ -198,18 +265,21 @@ impl ProjectSettingsDialog {
                 .with_font_size(LABEL_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
-            apply_button: Button::new("应用").on_click(app_shell_confirm_project_settings_action()),
+            cancel_button: Button::new(cancel).on_click(app_shell_close_modal_action()),
+            apply_button: Button::new(apply).on_click(app_shell_confirm_project_settings_action()),
         }
     }
 
     /// Apply one draft update and rebuild derived controls.
     pub fn apply_update(&mut self, update: ProjectSettingsDraftUpdatePayload) {
         self.draft.apply_update(update);
-        self.mode_dropdown = project_color_dropdown_for(&self.draft);
+        self.mode_dropdown = project_color_dropdown_for(&self.draft, self.localizer.as_ref());
         self.detail_label.set_text(engine_detail(
             &self.draft.engine,
-            &self.draft.working_space_summary(),
+            &self.draft.working_space_summary(
+                self.localizer.as_ref().map(Localizer::locale).unwrap_or(AppUiLocale::ZhCn),
+            ),
+            self.localizer.as_ref(),
         ));
         self.error_label.set_text(String::new());
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -219,7 +289,11 @@ impl ProjectSettingsDialog {
 
     /// Run native Custom OCIO selection and update only after complete pinning.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_config(platform, &self.draft.sequence_color_contracts) {
+        match choose_custom_ocio_config_with_locale(
+            platform,
+            &self.draft.sequence_color_contracts,
+            self.localizer.as_ref(),
+        ) {
             Ok(Some(engine)) => {
                 self.apply_update(ProjectSettingsDraftUpdatePayload::ColorEngine(engine));
             }
@@ -375,5 +449,58 @@ impl Widget for ProjectSettingsDialog {
             7 => Some(&mut self.apply_button),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::{AcesConfigPreset, OcioConfigSource, ProjectColorEnvironment};
+    use std::path::PathBuf;
+
+    #[test]
+    fn english_project_color_dialog_reprojects_details_without_changing_draft() {
+        let draft = AppUiProjectSettingsDraft::new(
+            ColorEngine::mondrian_standard(),
+            vec![(WorkingColorSpace::LinearRec709, ColorSpace::Rec709)],
+        );
+        let mut dialog = ProjectSettingsDialog::with_locale(draft, AppUiLocale::EnUs);
+        assert_eq!(dialog.title_label.text(), "Project color engine");
+        assert!(dialog.description_label.text().contains("every sequence"));
+        assert!(dialog.detail_label.text().contains("Built-in package:"));
+        assert!(dialog
+            .mode_dropdown
+            .items()
+            .iter()
+            .any(|item| item.label == "Choose custom OpenColorIO…"));
+
+        let aces = ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 };
+        dialog.apply_update(ProjectSettingsDraftUpdatePayload::ColorEngine(aces.clone()));
+        assert_eq!(dialog.draft().engine, aces);
+        assert_eq!(dialog.mode_dropdown.label(), "ACES 2.0 Studio");
+        assert!(dialog.detail_label.text().contains("Built-in OCIO configuration:"));
+        assert!(dialog.detail_label.text().contains("Linear Rec. 709"));
+    }
+
+    #[test]
+    fn custom_ocio_identity_details_keep_their_exact_evidence_in_english() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
+        let contracts = vec![(WorkingColorSpace::LinearRec709, ColorSpace::Rec709)];
+        let engine =
+            ProjectColorEnvironment::custom_ocio(OcioConfigSource::Path { path }, &contracts)
+                .expect("valid bundled OCIO config")
+                .into_engine();
+        let identity = engine.custom_ocio_identity().expect("custom identity");
+        let expected_sha = identity.config_sha256().to_string();
+        let dialog = ProjectSettingsDialog::with_locale(
+            AppUiProjectSettingsDraft::new(engine, contracts),
+            AppUiLocale::EnUs,
+        );
+
+        assert_eq!(dialog.mode_dropdown.label(), "Custom OpenColorIO");
+        assert!(dialog.detail_label.text().contains("Output bindings:"));
+        assert!(dialog.detail_label.text().contains("Configuration SHA-256:"));
+        assert!(dialog.detail_label.text().contains(&expected_sha));
     }
 }

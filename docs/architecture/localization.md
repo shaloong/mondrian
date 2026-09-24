@@ -38,6 +38,10 @@ Custom OCIO file selection copy are formatted at the UI boundary; field edits
 continue to modify the same draft settings regardless of locale. A new draft
 uses the current language for its editable default name and empty-name
 fallback; the chosen name is then persisted as ordinary project author data.
+The Project Color Engine dialog uses the same UI locale and shared color-engine
+menu IDs as New Project. It formats engine package, working-space, output
+binding, and SHA-256 details through Fluent arguments while preserving the
+draft engine and exact compatibility checks.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

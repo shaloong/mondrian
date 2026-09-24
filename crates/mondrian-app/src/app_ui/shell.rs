@@ -1755,11 +1755,12 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
             {
-                self.modal = Some(ShellModal::project_settings(
+                self.modal = Some(ShellModal::project_settings_with_locale(
                     AppUiProjectSettingsDraft::new(
                         self.project_color_environment.engine().clone(),
                         self.project_sequence_color_contracts.clone(),
                     ),
+                    self.preferences_model.locale,
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);

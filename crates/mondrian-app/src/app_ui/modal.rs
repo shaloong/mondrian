@@ -73,6 +73,14 @@ impl ShellModal {
         Self::ProjectSettings(Box::new(ProjectSettingsDialog::new(draft)))
     }
 
+    /// Build project color settings in the selected machine-local UI language.
+    pub fn project_settings_with_locale(
+        draft: AppUiProjectSettingsDraft,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::ProjectSettings(Box::new(ProjectSettingsDialog::with_locale(draft, locale)))
+    }
+
     /// Build the startup recovery inspection modal.
     pub fn recovery(model: RecoveryConfirmationModel) -> Self {
         Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model)))

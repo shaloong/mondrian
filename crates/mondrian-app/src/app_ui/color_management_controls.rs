@@ -15,18 +15,10 @@ use mondrian_ui_widgets::menu::MenuItem;
 use crate::app::ui_actions::app_shell_select_custom_ocio_config_action;
 use crate::app_ui::localization::Localizer;
 
-/// Choose and fully pin a Custom OCIO config.
+/// Choose and fully pin a Custom OCIO config using machine-local dialog copy.
 ///
 /// Canceling returns `Ok(None)`. Invalid or incompatible configs fail before
 /// any partial Custom mode can enter a dialog draft.
-pub(crate) fn choose_custom_ocio_config(
-    platform: &dyn PlatformService,
-    sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
-) -> Result<Option<ColorEngine>, String> {
-    choose_custom_ocio_config_with_locale(platform, sequence_color_contracts, None)
-}
-
-/// Select a Custom OCIO config using the current machine-local dialog copy.
 pub(crate) fn choose_custom_ocio_config_with_locale(
     platform: &dyn PlatformService,
     sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
@@ -64,6 +56,21 @@ pub(crate) fn color_engine_label(engine: &ColorEngine) -> &'static str {
     }
 }
 
+/// Resolve one project color-engine label without changing its authored identity.
+pub(crate) fn color_engine_label_in_locale(
+    engine: &ColorEngine,
+    localizer: Option<&Localizer>,
+) -> String {
+    if matches!(engine, ColorEngine::CustomOcio { .. }) {
+        localizer.map_or_else(
+            || color_engine_label(engine).to_owned(),
+            |localizer| localizer.text("color-custom-ocio"),
+        )
+    } else {
+        color_engine_label(engine).to_owned()
+    }
+}
+
 /// Build the shared project color-engine catalog with workflow-local actions.
 pub(crate) fn color_engine_menu_items(
     color_engine_action: impl Fn(ColorEngine) -> Action,
@@ -85,4 +92,20 @@ pub(crate) fn color_engine_menu_items(
         )
         .with_message_id("color-select-custom-ocio"),
     ]
+}
+
+/// Build shared color-engine actions and localize their product-owned labels.
+pub(crate) fn color_engine_menu_items_in_locale(
+    color_engine_action: impl Fn(ColorEngine) -> Action,
+    localizer: Option<&Localizer>,
+) -> Vec<MenuItem> {
+    let mut items = color_engine_menu_items(color_engine_action);
+    if let Some(localizer) = localizer {
+        for item in &mut items {
+            if let Some(id) = item.message_id.as_deref() {
+                item.label = localizer.text(id);
+            }
+        }
+    }
+    items
 }

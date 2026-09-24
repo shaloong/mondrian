@@ -16,7 +16,7 @@ new-project-audio = Audio
 new-project-color-mode = Project color mode
 new-project-resolution-hd = HD 720p
 new-project-resolution-fhd = Full HD 1080p
-new-project-custom-ocio = Custom OpenColorIO
+color-custom-ocio = Custom OpenColorIO
 color-select-custom-ocio = Choose custom OpenColorIO…
 new-project-create-proxies = Create proxies
 new-project-preview-cache = Preview cache
@@ -24,6 +24,16 @@ new-project-cancel = Cancel
 new-project-create = Create...
 color-choose-ocio-config = Choose OpenColorIO configuration
 color-ocio-config-filter = OpenColorIO configuration
+project-settings-title = Project color engine
+project-settings-description = Applies to every sequence. Incompatible existing sequences or new-sequence defaults reject the whole change; no sequence is rewritten.
+project-settings-builtin-detail = Built-in package: { $package } · Current working spaces: { $workingSpaces }
+project-settings-aces-detail = Built-in OCIO configuration: { $preset } · Current working spaces: { $workingSpaces }
+project-settings-custom-detail =
+    { $source }
+    Output bindings: { $outputs }
+    Configuration SHA-256: { $sha256 }
+project-settings-cancel = Cancel
+project-settings-apply = Apply
 menu-file = File
 menu-edit = Edit
 menu-view = View
