@@ -1400,7 +1400,13 @@ preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
 CLAP and VST3 processor definitions may store the selected binary's SHA-256
-revision; an all-zero revision is invalid. An explicit CLAP rebind Rack edit
+revision; an all-zero revision is invalid. Processor parameters may also carry
+bounded plugin display metadata:
+the native default name and hidden-control flag. Older Projects omit this
+metadata and retain their stable parameter-ID fallback. The display snapshot
+does not alter `ParameterSchema`, automation identity, saved opaque state, or
+binary revision binding; malformed control text is rejected during validation.
+An explicit CLAP rebind Rack edit
 compares the old definition before replacing only that revision. It rejects a
 different plugin ID, schema version, or stale instance and commits only after
 complete Audio Program validation. The installed path remains machine-local.

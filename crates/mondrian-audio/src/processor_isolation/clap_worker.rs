@@ -31,6 +31,7 @@ use mondrian_core::{
 };
 use mondrian_timeline::audio::{
     AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
+    AudioProcessorParameterUiMetadata,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -311,34 +312,47 @@ impl DiscoveredClapAudioProcessorSpecResolver {
                 "CLAP binary changed after descriptor discovery",
             ));
         }
-        let mut parameters = AuthoringMap::new();
-        for descriptor in registration.parameters.iter().filter(|parameter| !parameter.read_only) {
-            let schema = descriptor.authoring_schema()?;
-            let parameter_id = schema.parameter_id.clone();
-            let mut parameter = AudioProcessorParameter::from_schema(schema)
-                .map_err(|error| invalid(format!("CLAP parameter schema is invalid: {error}")))?;
-            parameter
-                .set_automation(
-                    ExactAutomationCurve::new(parameter_id.clone(), descriptor.current_value)
-                        .map_err(|error| {
-                            invalid(format!("CLAP current parameter value is invalid: {error}"))
-                        })?,
-                )
-                .map_err(|error| invalid(format!("CLAP parameter value is invalid: {error}")))?;
-            parameters.insert(parameter_id, parameter);
-        }
-        Ok(AudioProcessorInstance {
-            id: AudioProcessorInstanceId::new(),
-            definition: AudioProcessorDefinitionRef::Clap {
-                plugin_id: plugin_id.to_owned(),
-                schema_version: 1,
-                binary_sha256: Some(*fingerprint),
-            },
-            bypassed: false,
-            parameters,
-            opaque_state: state.or(captured_state).map(Into::into),
-        })
+        author_instance_from_probe(registration, state.or(captured_state))
     }
+}
+
+fn author_instance_from_probe(
+    registration: ClapPluginRegistration,
+    opaque_state: Option<Vec<u8>>,
+) -> Result<AudioProcessorInstance, AudioProcessorHostError> {
+    validate_parameters(&registration.parameters)?;
+    let mut parameters = AuthoringMap::new();
+    for descriptor in registration.parameters.iter().filter(|parameter| !parameter.read_only) {
+        let schema = descriptor.authoring_schema()?;
+        let parameter_id = schema.parameter_id.clone();
+        let mut parameter = AudioProcessorParameter::from_schema(schema)
+            .map_err(|error| invalid(format!("CLAP parameter schema is invalid: {error}")))?;
+        parameter = parameter
+            .with_ui_metadata(AudioProcessorParameterUiMetadata {
+                display_name: Some(descriptor.name.clone()),
+                hidden: descriptor.hidden,
+            })
+            .map_err(|error| invalid(format!("CLAP parameter UI metadata is invalid: {error}")))?;
+        parameter
+            .set_automation(
+                ExactAutomationCurve::new(parameter_id.clone(), descriptor.current_value).map_err(
+                    |error| invalid(format!("CLAP current parameter value is invalid: {error}")),
+                )?,
+            )
+            .map_err(|error| invalid(format!("CLAP parameter value is invalid: {error}")))?;
+        parameters.insert(parameter_id, parameter);
+    }
+    Ok(AudioProcessorInstance {
+        id: AudioProcessorInstanceId::new(),
+        definition: AudioProcessorDefinitionRef::Clap {
+            plugin_id: registration.plugin_id,
+            schema_version: 1,
+            binary_sha256: Some(registration.binary_sha256),
+        },
+        bypassed: false,
+        parameters,
+        opaque_state: opaque_state.map(Into::into),
+    })
 }
 
 impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecResolver {
@@ -1155,6 +1169,51 @@ mod tests {
     fn contract() -> AudioProcessorExecutionContract {
         AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, true, true, 0)
             .expect("valid CLAP contract")
+    }
+
+    #[test]
+    fn probed_parameter_names_and_visibility_survive_author_instance_round_trip() {
+        let descriptor =
+            |id, name: &str, hidden, read_only| super::super::ClapParameterDescriptor {
+                id,
+                name: name.to_owned(),
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: 0.5,
+                current_value: 0.25,
+                automatable: true,
+                stepped: false,
+                enumeration: false,
+                read_only,
+                hidden,
+            };
+        let registration = ClapPluginRegistration {
+            plugin_id: "org.example.gain".to_owned(),
+            library_path: std::env::current_exe().expect("test executable path"),
+            binary_sha256: [3; 32],
+            execution_contract: contract(),
+            parameters: vec![
+                descriptor(1, "Output Gain", false, false),
+                descriptor(2, "Private meter", true, false),
+                descriptor(3, "Read only", false, true),
+            ],
+        };
+        let instance = author_instance_from_probe(registration, Some(vec![7, 8]))
+            .expect("authored CLAP instance");
+        assert_eq!(instance.parameters.len(), 2);
+        let visible = &instance.parameters
+            [&mondrian_core::ParameterId::new("clap.param.1").expect("visible ID")];
+        assert_eq!(visible.ui.display_name.as_deref(), Some("Output Gain"));
+        assert!(!visible.ui.hidden);
+        assert_eq!(visible.automation.default_value, 0.25);
+        let hidden = &instance.parameters
+            [&mondrian_core::ParameterId::new("clap.param.2").expect("hidden ID")];
+        assert!(hidden.ui.hidden);
+        let reopened: AudioProcessorInstance = serde_json::from_slice(
+            &serde_json::to_vec(&instance).expect("serialize CLAP instance"),
+        )
+        .expect("reopen CLAP instance");
+        assert_eq!(reopened, instance);
     }
 
     #[test]

@@ -319,6 +319,7 @@ fn project_processor(
         parameters: processor
             .parameters
             .values()
+            .filter(|parameter| !parameter.ui.hidden)
             .map(|parameter| {
                 let parameter_id = parameter.schema.parameter_id.clone();
                 let automation = viewport.and_then(|viewport| {
@@ -334,7 +335,11 @@ fn project_processor(
                 });
                 AudioProcessorParameterModel {
                     parameter_id: parameter_id.clone(),
-                    label: parameter_label(definition_id, &parameter_id),
+                    label: parameter
+                        .ui
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| parameter_label(definition_id, &parameter_id)),
                     schema: parameter.schema.clone(),
                     static_value: parameter.automation.default_value,
                     keyframe_count: parameter.automation.keyframes.len(),
@@ -497,6 +502,7 @@ fn rack_edit_action(address: AudioProcessorRackAddress, edit: AudioProcessorRack
 mod tests {
     use super::*;
     use crate::app::product_action::{AudioProductAction, ProductAction};
+    use mondrian_core::automation::PropertyValue;
     use mondrian_core::{AudioSourceComponentId, ExactAutomationKeyframe, TimelineTime};
 
     fn sequence_with_gain_scope() -> (Sequence, mondrian_core::ClipId) {
@@ -730,5 +736,56 @@ mod tests {
             AudioProcessorRackAddress::ProcessingScope { scope_id },
         );
         assert!(rebind_clap_action(&locked, &locked.processors[0]).is_none());
+    }
+
+    #[test]
+    fn clap_projection_uses_persisted_names_and_keeps_hidden_parameters_out_of_controls() {
+        let (mut sequence, _) = sequence_with_gain_scope();
+        let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+        let processor = &mut sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("scope")
+            .processors
+            .processors[0];
+        processor.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        processor.parameters.values_mut().next().expect("gain").ui =
+            mondrian_timeline::audio::AudioProcessorParameterUiMetadata {
+                display_name: Some("Output Gain".to_owned()),
+                hidden: false,
+            };
+        let hidden_id = ParameterId::new("clap.param.99").expect("hidden parameter ID");
+        let hidden = mondrian_timeline::audio::AudioProcessorParameter::from_schema(
+            ParameterSchema::v1(hidden_id.clone(), PropertyValue::Double(0.5)),
+        )
+        .expect("hidden parameter")
+        .with_ui_metadata(
+            mondrian_timeline::audio::AudioProcessorParameterUiMetadata {
+                display_name: Some("Private meter".to_owned()),
+                hidden: true,
+            },
+        )
+        .expect("hidden UI facts");
+        processor.parameters.insert(hidden_id, hidden);
+
+        let rack = project_audio_processor_rack(
+            &sequence,
+            AudioProcessorRackAddress::ProcessingScope { scope_id },
+        );
+        assert_eq!(rack.processors[0].parameters.len(), 1);
+        assert_eq!(rack.processors[0].parameters[0].label, "Output Gain");
+        let authored = sequence
+            .audio_program
+            .processing_scopes
+            .iter()
+            .find(|scope| scope.id == scope_id)
+            .expect("authored scope");
+        assert_eq!(authored.processors.processors[0].parameters.len(), 2);
     }
 }

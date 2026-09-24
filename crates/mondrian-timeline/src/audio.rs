@@ -204,6 +204,36 @@ pub struct AudioProcessorParameter {
     pub schema: ParameterSchema,
     /// Exact owner-local parameter curve, including its unkeyed value.
     pub automation: ExactAutomationCurve,
+    /// Captured plugin UI facts, separate from stable parameter identity and schema.
+    #[serde(
+        default,
+        skip_serializing_if = "AudioProcessorParameterUiMetadata::is_default"
+    )]
+    pub ui: AudioProcessorParameterUiMetadata,
+}
+
+/// Display facts captured from a native plugin for offline project inspection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioProcessorParameterUiMetadata {
+    /// Plugin-supplied default label, kept separate from stable message IDs.
+    pub display_name: Option<String>,
+    /// A hidden parameter remains authored and executable but leaves ordinary controls.
+    pub hidden: bool,
+}
+
+impl AudioProcessorParameterUiMetadata {
+    fn is_default(&self) -> bool {
+        self.display_name.is_none() && !self.hidden
+    }
+
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        if self.display_name.as_ref().is_some_and(|name| {
+            name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
+        }) {
+            return Err(AudioAuthoringError::InvalidProcessorParameterDisplayName);
+        }
+        Ok(())
+    }
 }
 
 impl AudioProcessorParameter {
@@ -214,9 +244,23 @@ impl AudioProcessorParameter {
             .map_err(|error| AudioAuthoringError::InvalidAutomation {
                 reason: error.to_string(),
             })?;
-        let parameter = Self { schema, automation };
+        let parameter = Self {
+            schema,
+            automation,
+            ui: AudioProcessorParameterUiMetadata::default(),
+        };
         parameter.validate()?;
         Ok(parameter)
+    }
+
+    /// Attach validated display facts without changing numeric or automation identity.
+    pub fn with_ui_metadata(
+        mut self,
+        ui: AudioProcessorParameterUiMetadata,
+    ) -> Result<Self, AudioAuthoringError> {
+        ui.validate()?;
+        self.ui = ui;
+        Ok(self)
     }
 
     /// Replace the complete exact-time curve after validating it against the schema.
@@ -224,13 +268,18 @@ impl AudioProcessorParameter {
         &mut self,
         automation: ExactAutomationCurve,
     ) -> Result<(), AudioAuthoringError> {
-        let candidate = Self { schema: self.schema.clone(), automation };
+        let candidate = Self {
+            schema: self.schema.clone(),
+            automation,
+            ui: self.ui.clone(),
+        };
         candidate.validate()?;
         self.automation = candidate.automation;
         Ok(())
     }
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
+        self.ui.validate()?;
         self.schema
             .validate()
             .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
@@ -308,7 +357,14 @@ impl AudioProcessorInstance {
                 default_value: 0.0,
                 keyframes: AuthoringList::new(),
             };
-            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+            parameters.insert(
+                parameter_id,
+                AudioProcessorParameter {
+                    schema,
+                    automation,
+                    ui: AudioProcessorParameterUiMetadata::default(),
+                },
+            );
         } else if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID && schema_version == 1 {
             let schema = sample_delay_frames_parameter_schema();
             let parameter_id = schema.parameter_id.clone();
@@ -317,7 +373,14 @@ impl AudioProcessorInstance {
                 default_value: 0.0,
                 keyframes: AuthoringList::new(),
             };
-            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+            parameters.insert(
+                parameter_id,
+                AudioProcessorParameter {
+                    schema,
+                    automation,
+                    ui: AudioProcessorParameterUiMetadata::default(),
+                },
+            );
         } else if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID && schema_version == 1 {
             for (schema, default_value) in [
                 (
@@ -339,7 +402,14 @@ impl AudioProcessorInstance {
                     default_value,
                     keyframes: AuthoringList::new(),
                 };
-                parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+                parameters.insert(
+                    parameter_id,
+                    AudioProcessorParameter {
+                        schema,
+                        automation,
+                        ui: AudioProcessorParameterUiMetadata::default(),
+                    },
+                );
             }
         }
         Self {
@@ -902,9 +972,10 @@ impl AuthoringFootprint for AudioProcessorParameter {
         &self,
         collector: &mut AuthoringFootprintCollector,
     ) -> Result<(), AuthoringFootprintError> {
-        let Self { schema, automation } = self;
+        let Self { schema, automation, ui } = self;
         collector.collect(schema)?;
-        collector.collect(automation)
+        collector.collect(automation)?;
+        collector.collect(&ui.display_name)
     }
 }
 
@@ -1816,6 +1887,9 @@ pub enum AudioAuthoringError {
     /// A captured processor parameter schema is malformed.
     #[error("invalid audio processor parameter schema: {reason}")]
     InvalidParameterSchema { reason: String },
+    /// A persisted plugin label is not safe to show in a single-line control.
+    #[error("invalid audio processor parameter display name")]
+    InvalidProcessorParameterDisplayName,
     /// Processor parameters use doubles or exactly representable integer host values.
     #[error("audio processor parameters require a double or exactly representable integer schema")]
     UnsupportedProcessorParameterType,
@@ -1929,6 +2003,44 @@ pub enum AudioAuthoringError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_parameter_ui_snapshot_is_backward_compatible_and_does_not_change_schema() {
+        let original =
+            AudioProcessorParameter::from_schema(gain_parameter_schema()).expect("gain parameter");
+        let mut old_json = serde_json::to_value(&original).expect("serialize old parameter");
+        assert!(old_json.get("ui").is_none());
+        let restored: AudioProcessorParameter =
+            serde_json::from_value(old_json.take()).expect("older project parameter");
+        assert_eq!(restored.ui, AudioProcessorParameterUiMetadata::default());
+
+        let ui = AudioProcessorParameterUiMetadata {
+            display_name: Some("Output Gain".to_owned()),
+            hidden: true,
+        };
+        let authored = restored.with_ui_metadata(ui.clone()).expect("plugin display facts");
+        assert_eq!(authored.schema, original.schema);
+        let reopened: AudioProcessorParameter = serde_json::from_slice(
+            &serde_json::to_vec(&authored).expect("serialize plugin parameter"),
+        )
+        .expect("restore plugin parameter");
+        assert_eq!(reopened.ui, ui);
+        assert_eq!(reopened.automation, original.automation);
+        assert!(matches!(
+            original.with_ui_metadata(AudioProcessorParameterUiMetadata {
+                display_name: Some("unsafe\nlabel".to_owned()),
+                hidden: false,
+            }),
+            Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
+        ));
+        let mut forged = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        forged.parameters.values_mut().next().expect("gain parameter").ui.display_name =
+            Some("unsafe\nlabel".to_owned());
+        assert_eq!(
+            forged.validate(),
+            Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
+        );
+    }
 
     #[test]
     fn clap_binary_revision_round_trips_and_legacy_definition_requires_rebinding() {

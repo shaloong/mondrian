@@ -674,6 +674,7 @@ pub(super) fn validate_parameters(
             || !seen.insert(parameter.id)
             || parameter.name.is_empty()
             || parameter.name.len() > 256
+            || parameter.name.chars().any(char::is_control)
             || !parameter.min_value.is_finite()
             || !parameter.max_value.is_finite()
             || !parameter.default_value.is_finite()
@@ -859,6 +860,11 @@ mod tests {
         .is_err());
         assert!(validate_parameters(&[ClapParameterDescriptor {
             id: u32::MAX,
+            ..parameter.clone()
+        }])
+        .is_err());
+        assert!(validate_parameters(&[ClapParameterDescriptor {
+            name: "unsafe\nlabel".to_owned(),
             ..parameter.clone()
         }])
         .is_err());

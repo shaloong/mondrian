@@ -14,6 +14,10 @@ IDs map author curves to CLAP IDs. The worker converts exact sample-offset
 events to CLAP value events in a preallocated, time-sorted buffer and rejects
 out-of-range or fractional stepped values. It stops and deactivates the native
 instance when the worker closes; a restart request fails the current instance.
+New insertions retain the validated plugin parameter name and hidden flag as
+display-only author metadata. Hidden parameters remain in the definition and
+execution lane but ordinary Inspector controls omit them. Reopening without
+the binary keeps the last captured names; older snapshots fall back to IDs.
 Selected-plugin instance creation captures the current values after restoring
 the same opaque state, so a first-block parameter event does not reset a saved
 setting to the plugin factory default. When no state is supplied, insertion

@@ -119,7 +119,10 @@ checks it again after descriptor discovery, after contract probing, and inside
 the processing child before native loading. A changed installed binary fails
 admission rather than silently changing the sound between Preview and Export.
 Each newly inserted CLAP processor also persists the selected binary SHA-256
-inside its definition reference. Both Preview and Export compare that authored
+inside its definition reference and a bounded name/visibility snapshot for each
+editable parameter. The latter is display-only, so automation and execution
+remain keyed by CLAP parameter ID; hidden parameters stay authored but do not
+appear in ordinary controls. Both Preview and Export compare that authored
 revision with the installed registration before preparing a worker. A legacy
 definition without a revision remains editable but needs explicit rebinding
 before native execution.
