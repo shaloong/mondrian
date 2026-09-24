@@ -61,6 +61,7 @@ use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{AppState, StatusLogEntry};
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
+use crate::app_ui::localization::Localizer;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
@@ -978,6 +979,12 @@ impl AppUiAppRoot {
             preferences.locale_preference,
             sys_locale::get_locale().as_deref(),
         );
+        if let Ok(localizer) = Localizer::new(preferences_model.locale) {
+            models.effects =
+                crate::app_ui::panels::PanelListModel::from_app_effect_registry_localized(
+                    state, &localizer,
+                );
+        }
         let mut menu_bar =
             MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         menu_bar.set_locale(preferences_model.locale);
@@ -1355,6 +1362,17 @@ impl AppUiAppRoot {
         apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+        let locale = if preferences.locale_preference == self.preferences_model.locale_preference {
+            self.preferences_model.locale
+        } else {
+            preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
+        };
+        if let Ok(localizer) = Localizer::new(locale) {
+            models.effects =
+                crate::app_ui::panels::PanelListModel::from_app_effect_registry_localized(
+                    state, &localizer,
+                );
+        }
         self.set_models(models);
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
@@ -4160,6 +4178,10 @@ mod tests {
             root.preferences_model.locale,
             crate::app_ui::localization::AppUiLocale::EnUs
         );
+        assert_eq!(
+            root.models.effects.filter_placeholder.as_deref(),
+            Some("Search effects")
+        );
 
         root.refresh_from_app_state(&state);
 
@@ -4171,6 +4193,18 @@ mod tests {
             root.preferences_model.locale,
             crate::app_ui::localization::AppUiLocale::EnUs
         );
+        assert!(root.models.effects.items.iter().any(|item| item.title == "Color"));
+
+        let chinese = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        root.refresh_from_app_state_with_preferences(&state, &chinese);
+        assert_eq!(
+            root.models.effects.filter_placeholder.as_deref(),
+            Some("搜索效果")
+        );
+        assert!(root.models.effects.items.iter().any(|item| item.title == "颜色"));
     }
 
     #[test]

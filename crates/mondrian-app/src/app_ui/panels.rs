@@ -210,6 +210,9 @@ use crate::app_ui::inspector_source_timing::{
 pub use crate::app_ui::inspector_source_timing::{
     InspectorSourceTimingMode, InspectorSourceTimingModel,
 };
+use crate::app_ui::localization::{
+    builtin_effect_message_id, effect_category_message_id, Localizer,
+};
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
@@ -640,6 +643,21 @@ impl PanelListModel {
     /// the current selection cannot receive an effect; only the apply action is
     /// withheld in those states.
     pub fn from_app_effect_registry(state: &AppState) -> Self {
+        Self::from_app_effect_registry_with_localizer(state, None)
+    }
+
+    /// Project effect labels from the current UI locale without changing effect identities.
+    pub(crate) fn from_app_effect_registry_localized(
+        state: &AppState,
+        localizer: &Localizer,
+    ) -> Self {
+        Self::from_app_effect_registry_with_localizer(state, Some(localizer))
+    }
+
+    fn from_app_effect_registry_with_localizer(
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let target = state.primary_selected_clip().filter(|selection| selection.is_video_track);
         let apply_blocker = match target {
             Some(selection) if selected_clip_track_is_locked(state, selection) => {
@@ -653,23 +671,38 @@ impl PanelListModel {
         } else {
             None
         };
-        Self::effect_registry_model(action_target, apply_blocker)
+        Self::effect_registry_model(action_target, apply_blocker, localizer)
     }
 
     /// Build the visible effect browser from the shared effect registry.
     pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
         let apply_blocker = effect_target.is_none().then_some("选择视频剪辑后应用效果");
-        Self::effect_registry_model(effect_target, apply_blocker)
+        Self::effect_registry_model(effect_target, apply_blocker, None)
     }
 
     fn effect_registry_model(
         effect_target: Option<SelectedClipRef>,
         _apply_blocker: Option<&'static str>,
+        localizer: Option<&Localizer>,
     ) -> Self {
-        let effects = effect_library_types();
+        let mut effects = effect_library_types();
+        effects.sort_by(|left, right| {
+            let left_categories = left.category_path();
+            let right_categories = right.category_path();
+            effect_category_order(&left_categories)
+                .cmp(&effect_category_order(&right_categories))
+                .then_with(|| {
+                    localized_effect_name(left, localizer)
+                        .cmp(&localized_effect_name(right, localizer))
+                })
+        });
         let items = if effects.is_empty() {
-            vec![PanelListItem::new("没有可用效果").disabled(true)]
+            vec![PanelListItem::new(localizer.map_or_else(
+                || "没有可用效果".to_owned(),
+                |localizer| localizer.text("effect-empty"),
+            ))
+            .disabled(true)]
         } else {
             let mut items = Vec::new();
             let mut emitted_categories = std::collections::BTreeSet::<String>::new();
@@ -683,14 +716,14 @@ impl PanelListModel {
                     prefix.push_str(category);
                     if emitted_categories.insert(prefix.clone()) {
                         items.push(
-                            PanelListItem::new((*category).to_owned())
+                            PanelListItem::new(localized_effect_category(category, localizer))
                                 .with_tree_depth(depth as u8)
                                 .with_tree_node(prefix.clone(), true),
                         );
                     }
                 }
 
-                let name = effect_display_name(&effect_type);
+                let name = localized_effect_name(&effect_type, localizer);
                 let depth = categories.len();
                 let mut item = PanelListItem::new(name).with_tree_depth(depth as u8);
                 if let Some(selection) = effect_target {
@@ -703,8 +736,52 @@ impl PanelListModel {
             items
         };
 
-        PanelListModel::new("Effects", items).with_filter_placeholder("搜索效果")
+        PanelListModel::new(
+            localizer.map_or_else(
+                || "Effects".to_owned(),
+                |localizer| localizer.text("panel-effects"),
+            ),
+            items,
+        )
+        .with_filter_placeholder(localizer.map_or_else(
+            || "搜索效果".to_owned(),
+            |localizer| localizer.text("effect-search"),
+        ))
     }
+}
+
+fn localized_effect_name(effect_type: &EffectType, localizer: Option<&Localizer>) -> String {
+    if let (Some(localizer), Some(message_id)) = (localizer, builtin_effect_message_id(effect_type))
+    {
+        localizer.text(&message_id)
+    } else {
+        effect_display_name(effect_type)
+    }
+}
+
+fn localized_effect_category(category: &str, localizer: Option<&Localizer>) -> String {
+    if let (Some(localizer), Some(message_id)) = (localizer, effect_category_message_id(category)) {
+        localizer.text(message_id)
+    } else {
+        category.to_owned()
+    }
+}
+
+fn effect_category_order(categories: &[&str]) -> (u8, u8) {
+    let primary = match categories.first().copied() {
+        Some("颜色") => 0,
+        Some("变换") => 1,
+        Some("抠像") => 2,
+        Some("插件") => 3,
+        _ => 4,
+    };
+    let secondary = match categories.get(1).copied() {
+        Some("调色") => 0,
+        Some("模糊与锐化") => 1,
+        Some("风格化") => 2,
+        _ => 3,
+    };
+    (primary, secondary)
 }
 
 /// Viewer panel data independent from preview texture plumbing.

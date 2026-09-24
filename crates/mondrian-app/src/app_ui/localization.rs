@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
+use mondrian_core::effect_data::EffectType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unic_langid::LanguageIdentifier;
@@ -133,6 +134,28 @@ impl Localizer {
     }
 }
 
+/// Stable UI message key for a built-in visual effect.
+pub(crate) fn builtin_effect_message_id(effect_type: &EffectType) -> Option<String> {
+    effect_type
+        .key()
+        .strip_prefix("builtin.")
+        .map(|key| format!("effect-{}", key.replace('_', "-")))
+}
+
+/// Category display key; the category path itself remains a stable tree node ID.
+pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str> {
+    match category {
+        "颜色" => Some("effect-category-color"),
+        "调色" => Some("effect-category-grading"),
+        "模糊与锐化" => Some("effect-category-blur-sharpen"),
+        "风格化" => Some("effect-category-stylize"),
+        "变换" => Some("effect-category-transform"),
+        "抠像" => Some("effect-category-keying"),
+        "插件" => Some("effect-category-plugins"),
+        _ => None,
+    }
+}
+
 fn build_bundle(
     locale: AppUiLocale,
 ) -> Result<FluentBundle<Arc<FluentResource>>, LocalizationError> {
@@ -191,6 +214,45 @@ fn pseudo_expand(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_builtin_effect_and_category_has_chinese_and_english_copy() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for effect_type in mondrian_effects::effect_library_types() {
+            if let Some(id) = builtin_effect_message_id(&effect_type) {
+                assert!(
+                    chinese.requested.get_message(&id).is_some(),
+                    "missing zh-CN: {id}"
+                );
+                assert!(
+                    english.requested.get_message(&id).is_some(),
+                    "missing en-US: {id}"
+                );
+            }
+            for category in effect_type.category_path() {
+                let id = effect_category_message_id(category).expect("known category key");
+                assert!(
+                    chinese.requested.get_message(id).is_some(),
+                    "missing zh-CN: {id}"
+                );
+                assert!(
+                    english.requested.get_message(id).is_some(),
+                    "missing en-US: {id}"
+                );
+            }
+        }
+        for id in ["effect-empty", "effect-search"] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
 
     #[test]
     fn every_application_menu_row_has_chinese_and_english_copy() {

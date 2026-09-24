@@ -31,6 +31,10 @@ owns a Project mutation, a worker, or the sole record of a failure. An
 expandable history panel exposes status history to users; the EventBus remains
 a post-commit notification seam, not notification state.
 See [localization](localization.md) for message formatting and locale ownership.
+The Effect Browser builds a locale-specific label projection from the registered
+effect definitions. Its category tree IDs remain canonical across locale
+switches, so expansion state and add-to-clip actions retain their identities;
+the browser does not persist translated names in authoring data.
 
 `File → Export → Package Project` opens a `.mdpkg` destination dialog. The
 App takes an author snapshot, then performs dependency preflight, file copying,

@@ -4418,6 +4418,56 @@ fn effect_panel_model_keeps_catalog_browsable_without_apply_target() {
 }
 
 #[test]
+fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
+    let state = AppState::new();
+    let localizer =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let model = PanelListModel::from_app_effect_registry_localized(&state, &localizer);
+    assert_eq!(model.title, "Effects");
+    assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
+    let root_categories: Vec<&str> = model
+        .items
+        .iter()
+        .filter(|item| item.tree_depth == 0 && item.tree_expanded.is_some())
+        .map(|item| item.title.as_str())
+        .collect();
+    assert_eq!(root_categories, ["Color", "Transform", "Keying"]);
+    let color = model
+        .items
+        .iter()
+        .find(|item| item.title == "Color")
+        .expect("translated Color category");
+    assert_eq!(color.tree_id.as_deref(), Some("颜色"));
+    assert!(model.items.iter().any(|item| item.title == "Gaussian Blur"));
+    assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+
+    let target = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let english = PanelListModel::effect_registry_model(Some(target), None, Some(&localizer));
+    let chinese_localizer =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("Chinese catalog");
+    let chinese =
+        PanelListModel::effect_registry_model(Some(target), None, Some(&chinese_localizer));
+    let english_blur = english
+        .items
+        .iter()
+        .find(|item| item.title == "Gaussian Blur")
+        .expect("English blur");
+    let chinese_blur = chinese
+        .items
+        .iter()
+        .find(|item| item.title == "高斯模糊")
+        .expect("Chinese blur");
+    assert_eq!(english_blur.activate_action, chinese_blur.activate_action);
+    assert!(english_blur.activate_action.is_some());
+}
+
+#[test]
 fn effect_panel_model_adds_effect_actions_for_selected_video_clip() {
     let mut sequence = Sequence::new("edit");
     let tb = sequence.time_base();

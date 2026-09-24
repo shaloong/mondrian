@@ -7,10 +7,17 @@ dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
 locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
-The initial catalogs cover the language selector, notification copy, and the
-complete application menu bar. Menu rows carry stable message IDs; locale
+The initial catalogs cover the language selector, notification copy, the
+complete application menu bar, and the Effect Browser's built-in effect names,
+categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
 changes update retained dropdown widgets, including nested rows, without
 discarding their open submenu or focus state, and remeasure trigger hit regions.
+Effect Browser projection uses definition keys for built-in messages and stable
+category path IDs for tree state and action payloads. Locale changes rebuild
+only displayed labels, then restore the retained panel state by stable IDs.
+Categories use a semantic order independent of translated spelling; effects
+within each category sort by their displayed name. Third-party effect names
+fall back to their declared display name until plugin catalogs are supported.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
