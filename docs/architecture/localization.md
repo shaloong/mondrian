@@ -69,7 +69,9 @@ the visible text changes, while accepted extensions, cancellation, and emitted
 typed actions stay identical.
 Dock tab labels use the same locale snapshot and existing panel message IDs.
 The Inspector's video Clip blend-mode row formats its label and every canonical
-mode option through Fluent. The UI model retains typed `BlendMode` values for
+mode option through Fluent. Inspector projection requires a concrete locale;
+callers without a machine preference resolve the Chinese product default at
+the panel-model boundary. The UI model retains typed `BlendMode` values for
 actions and checked state, so changing language cannot change the authored
 mode or menu grouping.
 The underlying `PanelKind` remains stable across language changes, so saved

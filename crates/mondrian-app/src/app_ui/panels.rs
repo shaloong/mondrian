@@ -212,7 +212,7 @@ pub use crate::app_ui::inspector_source_timing::{
     InspectorSourceTimingMode, InspectorSourceTimingModel,
 };
 use crate::app_ui::localization::{
-    builtin_effect_message_id, effect_category_message_id, Localizer,
+    builtin_effect_message_id, effect_category_message_id, AppUiLocale, Localizer,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
@@ -382,6 +382,12 @@ impl AppUiPanelModels {
         preview: Option<&dyn ViewerPreviewSource>,
         localizer: Option<&Localizer>,
     ) -> Self {
+        let default_localizer = localizer.is_none().then(|| {
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid")
+        });
+        let inspector_localizer = localizer
+            .or(default_localizer.as_ref())
+            .expect("explicit or default locale must exist");
         let viewer =
             ViewerPanelModel::from_app_state_with_preview_and_locale(state, preview, localizer);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
@@ -400,7 +406,7 @@ impl AppUiPanelModels {
             viewer,
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
-            inspector: InspectorPanelModel::from_app_state(state, localizer),
+            inspector: InspectorPanelModel::from_app_state(state, inspector_localizer),
             mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
@@ -411,6 +417,8 @@ impl AppUiPanelModels {
     /// inspector state from an `AppState` snapshot.
     #[cfg(test)]
     pub fn demo_from_app_state(state: &AppState) -> Self {
+        let localizer =
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid");
         let viewer = ViewerPanelModel::from_app_state(state);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
@@ -431,7 +439,7 @@ impl AppUiPanelModels {
                     .with_app_edit_availability(state)
                 })
                 .unwrap_or_else(demo_timeline_model),
-            inspector: InspectorPanelModel::from_app_state(state, None),
+            inspector: InspectorPanelModel::from_app_state(state, &localizer),
             mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
@@ -2469,18 +2477,13 @@ fn inspector_grade_hierarchy_model(
 
 fn inspector_blend_mode_model(
     selected: Option<BlendMode>,
-    localizer: Option<&Localizer>,
+    localizer: &Localizer,
 ) -> InspectorBlendModeModel {
     let options = mondrian_core::display_labels::blend_mode_options()
         .iter()
         .map(|option| InspectorBlendModeOption {
             mode: option.mode,
-            label: localizer.map_or_else(
-                || option.label.to_owned(),
-                |localizer| {
-                    localizer.text(&format!("blend-mode-{}", option.value.to_ascii_lowercase()))
-                },
-            ),
+            label: localizer.text(&format!("blend-mode-{}", option.value.to_ascii_lowercase())),
             separator_before: matches!(
                 option.value,
                 "Normal" | "Darken" | "Lighten" | "Overlay" | "Difference" | "Hue"
@@ -2495,17 +2498,14 @@ fn inspector_blend_mode_model(
         .clone();
     InspectorBlendModeModel {
         selected,
-        row_label: localizer.map_or_else(
-            || "混合模式".to_owned(),
-            |localizer| localizer.text("inspector-blend-mode"),
-        ),
+        row_label: localizer.text("inspector-blend-mode"),
         selected_label,
         options,
     }
 }
 
 impl InspectorPanelModel {
-    pub fn from_app_state(state: &AppState, localizer: Option<&Localizer>) -> Self {
+    pub fn from_app_state(state: &AppState, localizer: &Localizer) -> Self {
         let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
