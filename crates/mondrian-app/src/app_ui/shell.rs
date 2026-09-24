@@ -1682,7 +1682,10 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project_with_locale(
+                    AppUiNewProjectDraft::for_locale(self.preferences_model.locale),
+                    self.preferences_model.locale,
+                ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1736,7 +1739,7 @@ impl AppUiAppRoot {
                 let Some(path) = platform
                     .save_file_dialog(
                         "创建 Mondrian 项目",
-                        &default_project_file_name(&draft.name),
+                        &default_project_file_name(&draft.display_name()),
                         &project_file_filters(),
                     )
                     .map_err(|error| native_shell_error(&name, error))?

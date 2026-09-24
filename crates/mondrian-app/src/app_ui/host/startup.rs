@@ -523,6 +523,11 @@ impl AppUiHostStartupOwner {
         };
         let recovery_candidates = discover_crash_recovery_candidates();
         let mut startup = AppUiStartupScreen::new();
+        startup.set_locale(
+            preferences_snapshot
+                .locale_preference
+                .resolve(sys_locale::get_locale().as_deref()),
+        );
         startup.set_recent_projects(startup_recent_projects_from_preferences(
             &preferences_snapshot,
         ));

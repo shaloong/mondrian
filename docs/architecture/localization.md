@@ -8,7 +8,7 @@ locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
 The initial catalogs cover the language selector, notification copy, the
-complete application menu bar, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
+complete application menu bar, Startup screen chrome, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
 categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
 changes update retained dropdown widgets, including nested rows, without
 discarding their open submenu or focus state, and remeasure trigger hit regions.
@@ -29,6 +29,15 @@ do not parse catalogs on every frame. Timecode and diagnostic codes retain
 their stable representations. Free-form Preview failure details currently remain
 raw diagnostic evidence and need typed message codes before full English UI
 coverage can be claimed.
+The Startup screen resolves the saved machine-local locale at launch and
+reprojects its heading, actions, and section labels when the preference
+changes. Recent project names and paths remain user-authored data.
+The New Project dialog uses the same locale snapshot at either startup or
+workspace entry. Its labels, resolution presets, proxy/cache choices, and
+Custom OCIO file selection copy are formatted at the UI boundary; field edits
+continue to modify the same draft settings regardless of locale. A new draft
+uses the current language for its editable default name and empty-name
+fallback; the chosen name is then persisted as ordinary project author data.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

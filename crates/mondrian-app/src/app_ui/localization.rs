@@ -216,6 +216,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "startup-heading",
+            "startup-new-project",
+            "startup-open-project",
+            "startup-recoverable-projects",
+            "startup-recent-projects",
+            "startup-no-recent-projects",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_project_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "new-project-title",
+            "new-project-untitled",
+            "new-project-description",
+            "new-project-name",
+            "new-project-name-placeholder",
+            "new-project-frame-size",
+            "new-project-frame-rate",
+            "new-project-audio",
+            "new-project-color-mode",
+            "new-project-resolution-hd",
+            "new-project-resolution-fhd",
+            "new-project-custom-ocio",
+            "color-select-custom-ocio",
+            "new-project-create-proxies",
+            "new-project-preview-cache",
+            "new-project-cancel",
+            "new-project-create",
+            "color-choose-ocio-config",
+            "color-ocio-config-filter",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn viewer_messages_exist_in_both_catalogs() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");

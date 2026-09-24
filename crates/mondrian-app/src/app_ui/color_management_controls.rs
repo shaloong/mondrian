@@ -13,6 +13,7 @@ use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_widgets::menu::MenuItem;
 
 use crate::app::ui_actions::app_shell_select_custom_ocio_config_action;
+use crate::app_ui::localization::Localizer;
 
 /// Choose and fully pin a Custom OCIO config.
 ///
@@ -22,10 +23,25 @@ pub(crate) fn choose_custom_ocio_config(
     platform: &dyn PlatformService,
     sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
 ) -> Result<Option<ColorEngine>, String> {
+    choose_custom_ocio_config_with_locale(platform, sequence_color_contracts, None)
+}
+
+/// Select a Custom OCIO config using the current machine-local dialog copy.
+pub(crate) fn choose_custom_ocio_config_with_locale(
+    platform: &dyn PlatformService,
+    sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
+    localizer: Option<&Localizer>,
+) -> Result<Option<ColorEngine>, String> {
+    let text = |id, fallback: &str| {
+        localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+    };
     let Some(path) = platform
         .open_file_dialog(
-            "选择 OpenColorIO 配置",
-            &[FileFilter::new("OpenColorIO 配置", vec!["ocio"])],
+            &text("color-choose-ocio-config", "选择 OpenColorIO 配置"),
+            &[FileFilter::new(
+                text("color-ocio-config-filter", "OpenColorIO 配置"),
+                vec!["ocio"],
+            )],
         )
         .map_err(|error| error.to_string())?
         .into_selection()
@@ -66,6 +82,7 @@ pub(crate) fn color_engine_menu_items(
         MenuItem::new(
             "选择自定义 OpenColorIO…",
             app_shell_select_custom_ocio_config_action(),
-        ),
+        )
+        .with_message_id("color-select-custom-ocio"),
     ]
 }

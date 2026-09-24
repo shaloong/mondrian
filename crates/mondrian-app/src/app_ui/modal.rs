@@ -10,6 +10,7 @@ use mondrian_ui_core::{EventResult, Widget};
 
 use crate::app_ui::about_dialog::AboutDialog;
 use crate::app_ui::interpret_asset_dialog::{AppUiInterpretAssetDraft, InterpretAssetDialog};
+use crate::app_ui::localization::AppUiLocale;
 use crate::app_ui::new_project_dialog::{AppUiNewProjectDraft, NewProjectDialog};
 use crate::app_ui::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
 use crate::app_ui::preferences_dialog::{
@@ -45,6 +46,11 @@ impl ShellModal {
     /// Build the new-project modal from an initial draft.
     pub fn new_project(draft: AppUiNewProjectDraft) -> Self {
         Self::NewProject(Box::new(NewProjectDialog::new(draft)))
+    }
+
+    /// Build the new-project modal in the selected machine-local UI language.
+    pub fn new_project_with_locale(draft: AppUiNewProjectDraft, locale: AppUiLocale) -> Self {
+        Self::NewProject(Box::new(NewProjectDialog::with_locale(draft, locale)))
     }
 
     /// Build the pending-close confirmation modal.

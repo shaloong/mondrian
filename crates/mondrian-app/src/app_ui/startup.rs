@@ -29,6 +29,7 @@ use crate::app::ui_actions::{
 };
 use crate::app::CrashRecoveryCandidate;
 use crate::app_ui::icons::AppIcon;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
 use crate::app_ui::recovery_dialog::RecoveryConfirmationModel;
@@ -103,6 +104,7 @@ pub struct AppUiStartupScreen {
     close_rect: Rect,
     hover: Option<StartupHit>,
     pressed: Option<StartupHit>,
+    localizer: Option<Localizer>,
 }
 
 impl AppUiStartupScreen {
@@ -124,7 +126,19 @@ impl AppUiStartupScreen {
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
+            localizer: Localizer::new(AppUiLocale::ZhCn).ok(),
         }
+    }
+
+    /// Set the machine-local language used by startup chrome.
+    pub fn set_locale(&mut self, locale: AppUiLocale) {
+        self.localizer = Localizer::new(locale).ok();
+    }
+
+    fn text(&self, id: &str, fallback: &str) -> String {
+        self.localizer
+            .as_ref()
+            .map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
     }
 
     /// Replace startup autosave recovery rows.
@@ -156,7 +170,12 @@ impl AppUiStartupScreen {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project_with_locale(
+                    AppUiNewProjectDraft::for_locale(
+                        self.localizer.as_ref().map(Localizer::locale).unwrap_or(AppUiLocale::ZhCn),
+                    ),
+                    self.localizer.as_ref().map(Localizer::locale).unwrap_or(AppUiLocale::ZhCn),
+                ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -221,7 +240,7 @@ impl AppUiStartupScreen {
                 let Some(path) = platform
                     .save_file_dialog(
                         "Create Mondrian Project",
-                        &default_project_file_name(&draft.name),
+                        &default_project_file_name(&draft.display_name()),
                         &project_file_filters(),
                     )
                     .map_err(|error| MondrianError::WorkflowStepFailed {
@@ -492,7 +511,7 @@ impl Widget for AppUiStartupScreen {
         let content_y = self.right_rect.y + CONTENT_PAD_Y;
         let content_width = self.right_rect.width - CONTENT_PAD_X * 2.0;
         ctx.encoder.draw_text(
-            "开始工作",
+            &self.text("startup-heading", "开始工作"),
             typography.heading_h2.font_size,
             Point::new(content_x, content_y),
             colors.popover_foreground,
@@ -501,7 +520,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.new_project_rect,
-            "新建项目",
+            &self.text("startup-new-project", "新建项目"),
             true,
             Some(AppIcon::PlusFilled),
             StartupHit::NewProject,
@@ -509,7 +528,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.open_project_rect,
-            "打开项目",
+            &self.text("startup-open-project", "打开项目"),
             false,
             Some(AppIcon::FolderOpenFilled),
             StartupHit::OpenProject,
@@ -518,7 +537,7 @@ impl Widget for AppUiStartupScreen {
         let mut section_y = self.right_rect.y + CONTENT_PAD_Y + 72.0;
         if !self.recovery_projects.is_empty() {
             ctx.encoder.draw_text(
-                "可恢复项目",
+                &self.text("startup-recoverable-projects", "可恢复项目"),
                 typography.large.font_size,
                 Point::new(content_x, section_y),
                 colors.popover_foreground,
@@ -559,7 +578,7 @@ impl Widget for AppUiStartupScreen {
 
         let recent_y = section_y;
         ctx.encoder.draw_text(
-            "最近项目",
+            &self.text("startup-recent-projects", "最近项目"),
             typography.large.font_size,
             Point::new(content_x, recent_y),
             colors.popover_foreground,
@@ -573,7 +592,7 @@ impl Widget for AppUiStartupScreen {
             );
             ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
             ctx.encoder.draw_text(
-                "暂无最近项目",
+                &self.text("startup-no-recent-projects", "暂无最近项目"),
                 typography.body.font_size,
                 Point::new(recent_rect.x + 14.0, recent_rect.y + 20.0),
                 colors.muted_foreground,
@@ -1060,6 +1079,62 @@ mod tests {
     }
 
     #[test]
+    fn startup_chrome_uses_selected_language_without_changing_project_rows() {
+        let mut screen = AppUiStartupScreen::new();
+        screen.set_locale(AppUiLocale::EnUs);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = StartupPaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
+        };
+
+        screen.paint(&mut ctx);
+
+        for label in [
+            "Get started",
+            "New project",
+            "Open project",
+            "Recent projects",
+            "No recent projects",
+        ] {
+            assert!(
+                encoder.texts.iter().any(|text| text == label),
+                "missing startup label: {label}"
+            );
+        }
+        assert!(!encoder.texts.iter().any(|text| text == "开始工作"));
+
+        screen.set_recent_projects(vec![StartupRecentProject {
+            project_file: PathBuf::from("E:/projects/travel.mdp"),
+            title: "旅行片".to_owned(),
+            subtitle: "E:/projects".to_owned(),
+        }]);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+        let mut rows_encoder = StartupPaintRecorder::default();
+        let mut rows_ctx = PaintContext {
+            encoder: &mut rows_encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
+        };
+        screen.paint(&mut rows_ctx);
+        assert!(rows_encoder.texts.iter().any(|text| text == "旅行片"));
+        assert!(!rows_encoder.texts.iter().any(|text| text == "No recent projects"));
+    }
+
+    #[test]
     fn startup_screen_dispatches_project_actions() {
         let mut screen = AppUiStartupScreen::new();
         screen.layout(Rect::new(
@@ -1255,6 +1330,40 @@ mod tests {
             payload.project_file,
             PathBuf::from("E:/projects/modal-create.mdp")
         );
+    }
+
+    #[test]
+    fn english_startup_passes_localized_default_name_to_project_creation() {
+        let mut screen = AppUiStartupScreen::new();
+        screen.set_locale(AppUiLocale::EnUs);
+        let platform = SaveProjectPlatform {
+            project_file: PathBuf::from("E:/projects/Untitled.mdp"),
+            open_file: None,
+        };
+        screen
+            .try_handle_shell_action(app_shell_new_project_dialog_action(), &platform)
+            .expect("open English new-project modal");
+        let draft = screen
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_new_project)
+            .expect("modal")
+            .draft();
+        assert_eq!(draft.name, "Untitled");
+
+        let confirmed = screen
+            .try_handle_shell_action(
+                crate::app::ui_actions::app_shell_confirm_new_project_dialog_action(),
+                &platform,
+            )
+            .expect("confirm English new-project modal")
+            .expect("creation action");
+        let Action::Custom { payload, .. } = confirmed else {
+            panic!("expected project create action");
+        };
+        let payload: crate::app::ui_actions::ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project payload");
+        assert_eq!(payload.name, "Untitled");
     }
 
     #[test]

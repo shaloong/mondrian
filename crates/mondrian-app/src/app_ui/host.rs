@@ -1802,6 +1802,9 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::Locale(payload) => {
                         self.preferences.locale_preference = payload.preference;
+                        self.startup.set_locale(
+                            payload.preference.resolve(sys_locale::get_locale().as_deref()),
+                        );
                     }
                     PreferencesUpdate::WaveformDisplay(payload) => {
                         self.preferences.waveform_display = payload.mode;
