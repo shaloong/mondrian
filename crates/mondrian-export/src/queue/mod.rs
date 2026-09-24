@@ -42,8 +42,8 @@ use crate::{
 use chrono::Utc;
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
-    AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
+    AudioMediaResolver, AudioProcessingMode, AudioProcessorResolver, AudioProgramDeliveryRuntime,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
     AudioRuntimeResourceGrant, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
@@ -5546,6 +5546,7 @@ fn prepare_timeline_audio_delivery(
     channel_layout: AudioChannelLayout,
     cache: &Arc<AudioSourceCache>,
     resource_grant: AudioRuntimeResourceGrant,
+    processor_resolver: &dyn AudioProcessorResolver,
 ) -> Result<AudioProgramDeliveryRuntime, String> {
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(cache) };
     let contract = AudioRenderContract {
@@ -5562,10 +5563,11 @@ fn prepare_timeline_audio_delivery(
     };
     let public_time_range = range.time_range()?;
     let runtime =
-        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
+        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
             &timeline.sequence,
             &timeline.sequences,
             &resolver,
+            processor_resolver,
             contract,
             Some(prepared_audio.root_program().output_id()),
             public_time_range,
@@ -5682,6 +5684,7 @@ fn render_audio_stems_to_pcm_f32(
             channel_layout,
             &cache,
             resource_grant,
+            execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
         aggregate_footprint =
@@ -5729,6 +5732,7 @@ fn render_audio_stems_to_pcm_f32(
             channel_layout,
             &cache,
             resource_grant,
+            execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
         if delivery.requires_state_entry() {
@@ -5875,6 +5879,7 @@ fn render_timeline_audio_to_pcm_f32(
             channel_layout,
             &cache,
             execution_gate.resource_policy().audio_runtime_grant,
+            execution_gate.audio_processor_resolver(),
         ) {
             Ok(delivery) => delivery,
             Err(error) => return JobExecutionResult::Failed(error),
@@ -16572,6 +16577,60 @@ mod tests {
 
         assert!(resolver.resolve(asset_id, component_id, 48_000,).is_ok());
         assert!(resolver.resolve(asset_id, AudioSourceComponentId::new(), 48_000,).is_err());
+    }
+
+    #[test]
+    fn export_audio_prepare_uses_the_queue_selected_processor_resolver() {
+        struct RejectingProcessorResolver;
+
+        impl AudioProcessorResolver for RejectingProcessorResolver {
+            fn prepare(
+                &self,
+                _request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                Err(mondrian_audio::AudioProcessorHostError::Unavailable(
+                    "selected export resolver reached".to_owned(),
+                ))
+            }
+        }
+
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 };
+        timeline.sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::AudioProcessorInstance {
+                id: mondrian_core::AudioProcessorInstanceId::new(),
+                definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "org.example.export-test".to_owned(),
+                    schema_version: 1,
+                },
+                bypassed: false,
+                parameters: Default::default(),
+                opaque_state: None,
+            },
+        );
+        refresh_test_execution_snapshot(&mut timeline, true);
+        let prepared = timeline
+            .prepared_execution()
+            .and_then(|snapshot| snapshot.audio())
+            .and_then(|audio| audio.outputs().next())
+            .expect("frozen audio output");
+        let range = compute_timeline_render_range(&timeline).expect("selected range");
+        let result = prepare_timeline_audio_delivery(
+            &timeline,
+            prepared,
+            range,
+            48_000,
+            AudioChannelLayout::Stereo,
+            &Arc::new(AudioSourceCache::new(48_000)),
+            service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
+            &RejectingProcessorResolver,
+        );
+        assert!(
+            matches!(result, Err(detail) if detail.contains("selected export resolver reached"))
+        );
     }
 
     #[test]

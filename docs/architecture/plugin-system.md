@@ -75,10 +75,13 @@ child and validates its bounded response. The same child can probe a selected
 definition for exact Mono/Stereo port, latency, and tail facts after restoring
 its author state. `DiscoveredClapAudioProcessorSpecResolver` binds explicitly
 selected libraries to those probes during preparation; the processing child
-checks the facts again before admission. Automatic installed-path enumeration,
-state capture, parameter automation, application wiring for Preview/Export, and
-reference-plugin signal acceptance are still required before CLAP is
-advertised as a complete product feature. VST3 and OpenFX binaries remain
+checks the facts again before admission. The App's Preview, idle warmup, and
+Export queue now share one injected resolver; the default remains built-in only.
+An installed reference-plugin test verifies the Preview adapter launches the
+real CLAP worker and renders a block. Automatic installed-path enumeration,
+project insertion UI, state capture, parameter automation, binary revision
+binding, and a full Preview/Export signal-parity test remain required before
+CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
 
 The ignored installed-reference acceptance tests use a built `mondrian`

@@ -12,7 +12,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
-use mondrian_audio::AudioRuntimeResourceGrant;
+#[cfg(test)]
+use mondrian_audio::BuiltInAudioProcessorResolver;
+use mondrian_audio::{AudioProcessorResolver, AudioRuntimeResourceGrant};
 use mondrian_core::{
     AudioChannelLayout, ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, ProjectId, SequenceId,
@@ -247,7 +249,9 @@ trait AudioIdleWarmupExecutor: Send + Sync + 'static {
     ) -> Result<AudioIdleWarmupExecutionOutcome, String>;
 }
 
-struct ProductionAudioIdleWarmupExecutor;
+struct ProductionAudioIdleWarmupExecutor {
+    processor_resolver: Arc<dyn AudioProcessorResolver>,
+}
 
 impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
     fn execute(
@@ -268,7 +272,7 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             return Ok(AudioIdleWarmupExecutionOutcome::Completed);
         };
         let revision_probe = Arc::clone(&library);
-        let renderer = TimelineAudioPcmRenderer::new(
+        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence,
             sequences,
             library,
@@ -277,6 +281,7 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             mondrian_audio::AudioAuditionOverlay::default(),
             key.sample_rate,
             key.channel_layout,
+            self.processor_resolver.as_ref(),
         );
         if !asset_library_revision_matches(&revision_probe, key.binding.asset_library_revision)? {
             return Ok(AudioIdleWarmupExecutionOutcome::Superseded);
@@ -363,8 +368,17 @@ pub(super) struct AudioIdleWarmupService {
 
 impl AudioIdleWarmupService {
     /// Start the single production worker with dispatch initially suspended.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
-        Self::with_executor(Arc::new(ProductionAudioIdleWarmupExecutor))
+        Self::new_with_processor_resolver(Arc::new(BuiltInAudioProcessorResolver))
+    }
+
+    pub(super) fn new_with_processor_resolver(
+        processor_resolver: Arc<dyn AudioProcessorResolver>,
+    ) -> Self {
+        Self::with_executor(Arc::new(ProductionAudioIdleWarmupExecutor {
+            processor_resolver,
+        }))
     }
 
     fn with_executor(executor: Arc<dyn AudioIdleWarmupExecutor>) -> Self {
@@ -1081,9 +1095,11 @@ mod tests {
             .create_folder("new revision", None)
             .expect("advance library revision");
 
-        let outcome = ProductionAudioIdleWarmupExecutor
-            .execute(demand, &ExecutionCancellationToken::new())
-            .expect("revision check");
+        let outcome = ProductionAudioIdleWarmupExecutor {
+            processor_resolver: Arc::new(BuiltInAudioProcessorResolver),
+        }
+        .execute(demand, &ExecutionCancellationToken::new())
+        .expect("revision check");
 
         assert_eq!(outcome, AudioIdleWarmupExecutionOutcome::Superseded);
     }

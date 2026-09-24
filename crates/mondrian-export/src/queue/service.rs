@@ -8,7 +8,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use mondrian_audio::AudioRuntimeResourceGrant;
+use mondrian_audio::{
+    AudioProcessorResolver, AudioRuntimeResourceGrant, BuiltInAudioProcessorResolver,
+};
 use mondrian_core::{
     ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, JobId,
@@ -850,6 +852,7 @@ struct ExportQueueState {
 
 struct RenderQueueInner {
     state: Mutex<ExportQueueState>,
+    audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
     wake: Condvar,
     shutdown: AtomicBool,
     revision: AtomicU64,
@@ -1017,6 +1020,17 @@ impl ExportExecutionGate {
         }
     }
 
+    /// Immutable processor registry shared by every audio output of this attempt.
+    pub(crate) fn audio_processor_resolver(&self) -> &dyn AudioProcessorResolver {
+        match &self.authority {
+            ExportExecutionGateAuthority::Queue { inner, .. } => {
+                inner.audio_processor_resolver.as_ref()
+            }
+            #[cfg(test)]
+            ExportExecutionGateAuthority::AlwaysOpen => &BuiltInAudioProcessorResolver,
+        }
+    }
+
     /// Wait until execution is admitted at this safe boundary.
     ///
     /// `false` means cancellation or queue shutdown was observed before the
@@ -1153,16 +1167,27 @@ pub struct RenderQueue {
 impl RenderQueue {
     /// Create a queue with the production executor and one dedicated offline worker.
     pub fn new() -> Arc<Self> {
-        Self::new_with_executor(Arc::new(super::FfmpegExportExecutor))
+        Self::new_with_audio_processor_resolver(Arc::new(BuiltInAudioProcessorResolver))
     }
 
+    /// Bind one immutable processor resolver for every job in this queue.
+    /// Preview must use the same resolver to preserve audio interpretation.
+    pub fn new_with_audio_processor_resolver(
+        processor_resolver: Arc<dyn AudioProcessorResolver>,
+    ) -> Arc<Self> {
+        let queue = Self::new_unstarted(processor_resolver);
+        queue.spawn_worker(Arc::new(super::FfmpegExportExecutor));
+        queue
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_executor(executor: Arc<dyn ExportExecutor>) -> Arc<Self> {
-        let queue = Self::new_unstarted();
+        let queue = Self::new_unstarted(Arc::new(BuiltInAudioProcessorResolver));
         queue.spawn_worker(executor);
         queue
     }
 
-    fn new_unstarted() -> Arc<Self> {
+    fn new_unstarted(processor_resolver: Arc<dyn AudioProcessorResolver>) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(RenderQueueInner {
                 state: Mutex::new(ExportQueueState {
@@ -1171,6 +1196,7 @@ impl RenderQueue {
                     resource_policy: ExportExecutionResourcePolicy::default(),
                     ..ExportQueueState::default()
                 }),
+                audio_processor_resolver: processor_resolver,
                 wake: Condvar::new(),
                 shutdown: AtomicBool::new(false),
                 revision: AtomicU64::new(0),
@@ -1186,7 +1212,7 @@ impl RenderQueue {
         entry_hook: Option<ExportWorkerEntryHook>,
         spawner: impl FnOnce(ExportWorkerTask) -> std::io::Result<JoinHandle<()>>,
     ) -> Arc<Self> {
-        let queue = Self::new_unstarted();
+        let queue = Self::new_unstarted(Arc::new(BuiltInAudioProcessorResolver));
         queue.spawn_worker_with(executor, entry_hook, spawner);
         queue
     }

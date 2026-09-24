@@ -1,9 +1,12 @@
 use super::*;
+#[cfg(any(test, feature = "validation"))]
+use mondrian_audio::BuiltInAudioProcessorResolver;
 use mondrian_audio::{
     AudioAuditionOverlay, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
     AudioDeliveryEvidence, AudioMediaResolver, AudioMeterObserver, AudioProcessingMode,
-    AudioProgramDeliveryRuntime, AudioProgramExecutionDemand, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant, ResolvedAudioSource,
+    AudioProcessorResolver, AudioProgramDeliveryRuntime, AudioProgramExecutionDemand,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant,
+    ResolvedAudioSource,
 };
 use mondrian_core::{AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken};
 use mondrian_media::{AudioSourceReader, AudioSourceSelection};
@@ -62,6 +65,7 @@ impl TimelineAudioPcmRenderer {
         Ok(renderer)
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn new(
         sequence: Sequence,
         sequences: Vec<Sequence>,
@@ -71,6 +75,31 @@ impl TimelineAudioPcmRenderer {
         audition: AudioAuditionOverlay,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
+    ) -> mondrian_core::Result<Self> {
+        Self::new_with_processor_resolver(
+            sequence,
+            sequences,
+            library,
+            source_cache,
+            runtime_grant,
+            audition,
+            sample_rate,
+            channel_layout,
+            &BuiltInAudioProcessorResolver,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_processor_resolver(
+        sequence: Sequence,
+        sequences: Vec<Sequence>,
+        library: Arc<AssetLibrary>,
+        source_cache: Arc<AudioSourceCache>,
+        runtime_grant: AudioRuntimeResourceGrant,
+        audition: AudioAuditionOverlay,
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+        processor_resolver: &dyn AudioProcessorResolver,
     ) -> mondrian_core::Result<Self> {
         let program_channel_layout = sequence.settings.audio_channel_layout;
         let contract = AudioRenderContract {
@@ -90,15 +119,17 @@ impl TimelineAudioPcmRenderer {
             sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
                 audio_render_error("timeline_audio_prepare", "Sequence has no Program Output")
             })?;
-        let runtime = AudioProgramRuntime::build_with_compile_request_and_resource_grant(
-            &sequence,
-            &sequences,
-            &resolver,
-            contract,
-            AudioCompileRequest { output_id, audition },
-            runtime_grant,
-        )
-        .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
+        let runtime =
+            AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+                &sequence,
+                &sequences,
+                &resolver,
+                processor_resolver,
+                contract,
+                AudioCompileRequest { output_id, audition },
+                runtime_grant,
+            )
+            .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
         let continuity_model = if runtime.requires_state_entry() {
             AudioPcmContinuityModel::GenerationState
         } else {
@@ -485,6 +516,74 @@ mod tests {
             mondrian_audio::AudioDeliveryMappingKind::Identity
                 | mondrian_audio::AudioDeliveryMappingKind::ProvenSilence
         ));
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn preview_runtime_executes_installed_clap_through_selected_resolver() {
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+        use mondrian_timeline::audio::{AudioProcessorDefinitionRef, AudioProcessorInstance};
+
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to the app executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to the Clack gain DLL");
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover reference plugin");
+        let descriptor = installed.descriptors()[0].clone();
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-clap-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let mut sequence = Sequence::new("CLAP preview");
+        sequence.audio_program.outputs[0]
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance {
+                id: mondrian_core::AudioProcessorInstanceId::new(),
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: descriptor.plugin_id,
+                    schema_version: 1,
+                },
+                bypassed: false,
+                parameters: Default::default(),
+                opaque_state: Some(0.5_f32.to_le_bytes().into_iter().collect()),
+            });
+        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
+            sequence,
+            Vec::new(),
+            AssetLibrary::open(root.clone()).expect("asset library"),
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+            AudioAuditionOverlay::default(),
+            48_000,
+            AudioChannelLayout::Stereo,
+            &resolver,
+        )
+        .expect("prepare actual CLAP preview");
+        assert!(renderer.execution_demand().requires_execution());
+        let output = renderer
+            .render(
+                AudioPcmRenderRequest {
+                    start_sample: 0,
+                    frame_count: 64,
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
+                },
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("render through actual CLAP worker");
+        assert_eq!(output.samples.len(), 128);
+        assert!(output.samples.iter().all(|sample| *sample == 0.0));
         drop(renderer);
         let _ = std::fs::remove_dir_all(root);
     }

@@ -2209,6 +2209,10 @@ validation: AAC/PCM admit the explicit Mono, Stereo, 5.1(side), 5.1(back), and
 7.1 lowerings; MP3 admits only Mono/Stereo. Unsupported named/custom or
 Discrete pairs fail during preset resolution with codec plus Program/target
 layout evidence instead of being reduced to a matching `-ac` count.
+The queue binds one immutable `AudioProcessorResolver` at construction. Normal
+audio output and every audio stem use it when realizing the frozen selected-range
+Program closure. The stem aggregate-resource pass uses the same resolver as
+the subsequent stem renders; an unresolved external processor fails the job.
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip

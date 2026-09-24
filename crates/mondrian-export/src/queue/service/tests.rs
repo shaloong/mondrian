@@ -1527,7 +1527,7 @@ fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
 #[test]
 fn regulatory_pse_missing_provider_is_notrun_before_any_export_owner_or_job() {
     let work = tempfile::tempdir().expect("work");
-    let queue = RenderQueue::new_unstarted();
+    let queue = RenderQueue::new_unstarted(Arc::new(BuiltInAudioProcessorResolver));
     let mut config = dummy_config(work.path().join("never-started.mp4"));
     let delivery = crate::delivery::resolve_export_delivery(
         &config.preset,
@@ -1569,7 +1569,7 @@ fn regulatory_pse_missing_provider_is_notrun_before_any_export_owner_or_job() {
 #[test]
 fn broadcast_qc_on_unimplemented_final_artifact_families_is_rejected_before_enqueue() {
     let work = tempfile::tempdir().expect("work");
-    let queue = RenderQueue::new_unstarted();
+    let queue = RenderQueue::new_unstarted(Arc::new(BuiltInAudioProcessorResolver));
     for (index, preset) in [
         ExportPreset::png_sequence(),
         ExportPreset::audio_stems_pcm24(),
