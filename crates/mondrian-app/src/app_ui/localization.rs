@@ -216,6 +216,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sequence_settings_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "sequence-apply",
+            "sequence-audio",
+            "sequence-audio-discrete",
+            "sequence-audio-milliseconds",
+            "sequence-audio-mono",
+            "sequence-audio-samples",
+            "sequence-audio-speakers",
+            "sequence-audio-stereo",
+            "sequence-auto-tone-map",
+            "sequence-cancel",
+            "sequence-color-display-referred",
+            "sequence-color-management",
+            "sequence-color-scene-referred",
+            "sequence-custom-frame-size",
+            "sequence-display-frames",
+            "sequence-edit-custom",
+            "sequence-field-lower",
+            "sequence-field-progressive",
+            "sequence-field-upper",
+            "sequence-format",
+            "sequence-height",
+            "sequence-metadata-assume-709",
+            "sequence-metadata-reject",
+            "sequence-name",
+            "sequence-name-placeholder",
+            "sequence-name-required",
+            "sequence-pixel-square",
+            "sequence-pixel-unknown",
+            "sequence-preview",
+            "sequence-preview-cache",
+            "sequence-preview-resolution",
+            "sequence-project-color-engine",
+            "sequence-range-full",
+            "sequence-range-legal",
+            "sequence-resolution-fhd",
+            "sequence-resolution-hd",
+            "sequence-settings-description",
+            "sequence-settings-title",
+            "sequence-start-frame",
+            "sequence-static-hdr",
+            "sequence-tab-color",
+            "sequence-tab-format",
+            "sequence-tab-preview",
+            "sequence-timecode-start",
+            "sequence-tone-map-always",
+            "sequence-tone-map-auto",
+            "sequence-tone-map-never",
+            "sequence-width",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn startup_messages_exist_in_both_catalogs() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");

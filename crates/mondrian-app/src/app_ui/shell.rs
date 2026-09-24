@@ -1899,7 +1899,10 @@ impl AppUiAppRoot {
                     )
                 });
                 if let Some(draft) = draft {
-                    self.modal = Some(ShellModal::sequence_settings(draft));
+                    self.modal = Some(ShellModal::sequence_settings_with_locale(
+                        draft,
+                        self.preferences_model.locale,
+                    ));
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                         self.layout(self.bounds);
                     }
@@ -1944,7 +1947,12 @@ impl AppUiAppRoot {
                 else {
                     return Ok(None);
                 };
-                if draft.validate().is_err() {
+                if let Err(error) = draft.validate() {
+                    if let Some(dialog) =
+                        self.modal.as_mut().and_then(ShellModal::as_sequence_settings_mut)
+                    {
+                        dialog.set_validation_error(&error);
+                    }
                     return Ok(None);
                 }
                 self.modal = None;
@@ -4077,6 +4085,64 @@ mod tests {
         );
         assert_eq!(payload.settings.preview.resolution_scale, 0.25);
         assert!(!payload.settings.preview.cache_enabled);
+    }
+
+    #[test]
+    fn invalid_sequence_name_keeps_modal_and_explains_rejection() {
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Scene 01");
+        state.test_set_active_sequence(sequence.id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Name(String::new()),
+            ),
+            &platform,
+            None,
+        );
+        assert_eq!(
+            root.handle_shell_action(
+                app_shell_confirm_sequence_settings_action(),
+                &platform,
+                None,
+            ),
+            None
+        );
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_sequence_settings)
+            .expect("modal remains open");
+        assert_eq!(dialog.error_text(), "序列名称不能为空");
+
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Name("Scene 02".to_owned()),
+            ),
+            &platform,
+            None,
+        );
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .and_then(ShellModal::as_sequence_settings)
+                .expect("modal")
+                .error_text(),
+            ""
+        );
+        assert!(root
+            .handle_shell_action(
+                app_shell_confirm_sequence_settings_action(),
+                &platform,
+                None
+            )
+            .is_some());
+        assert!(root.modal.is_none());
     }
 
     #[test]

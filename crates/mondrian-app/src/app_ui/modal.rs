@@ -91,6 +91,14 @@ impl ShellModal {
         Self::SequenceSettings(Box::new(SequenceSettingsDialog::new(draft)))
     }
 
+    /// Build the sequence-settings modal in the selected machine-local UI language.
+    pub fn sequence_settings_with_locale(
+        draft: AppUiSequenceSettingsDraft,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::SequenceSettings(Box::new(SequenceSettingsDialog::with_locale(draft, locale)))
+    }
+
     /// Access the product about modal when it is active.
     pub fn as_about(&self) -> Option<&AboutDialog> {
         match self {

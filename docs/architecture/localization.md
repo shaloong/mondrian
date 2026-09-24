@@ -42,6 +42,13 @@ The Project Color Engine dialog uses the same UI locale and shared color-engine
 menu IDs as New Project. It formats engine package, working-space, output
 binding, and SHA-256 details through Fluent arguments while preserving the
 draft engine and exact compatibility checks.
+The Sequence Settings dialog now formats chrome, editable enum choices,
+preview scale, and the owning Project color-engine label in the selected
+locale. Technical frame rates, color-space names, and codec names keep their
+standard notation. The active draft is unchanged when labels are projected;
+validation retains the modal and shows a localized empty-name error. Other
+sequence validation diagnostics still need typed localization instead of raw
+backend error text.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
