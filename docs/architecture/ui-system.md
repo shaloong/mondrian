@@ -955,6 +955,11 @@ plugins in the status area. The folder picker resolves only a `.vst3` directory
 with one native binary for the running architecture; the file picker retains
 direct binary selection. Both paths enter the same product action and
 machine-local preference list.
+Rack and Mixer projection require the App's current Fluent locale snapshot.
+Built-in processor, parameter, ownership, route-port, empty-state, and lock
+copy changes with the locale, while plugin-supplied names, typed Rack/Route
+addresses, and authored values stay unchanged. The Inspector and Mixer consume
+the same localized Rack projector; neither persists translated labels.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact

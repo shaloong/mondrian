@@ -202,7 +202,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 PropertySection::new(format!("Route · {}", route.destination_label))
                     .with_row(PropertyRow::new(
                         "Tap",
-                        Box::new(Label::new(route.source_port_label).muted()),
+                        Box::new(Label::new(route.source_port_label.clone()).muted()),
                     ))
                     .with_row(PropertyRow::new(
                         "启用",

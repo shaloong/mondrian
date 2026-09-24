@@ -132,6 +132,13 @@ impl Localizer {
             value
         }
     }
+
+    /// Format one display-only text argument for a UI message.
+    pub(crate) fn format_text(&self, message_id: &str, argument: &str, value: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set(argument, value);
+        self.format(message_id, Some(&args))
+    }
 }
 
 /// Stable UI message key for a built-in visual effect.

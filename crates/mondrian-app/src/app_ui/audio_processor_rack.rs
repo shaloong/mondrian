@@ -3,6 +3,7 @@
 //! Inspector and future Mixer surfaces consume this Module instead of
 //! traversing or interpreting the Sequence audio author model independently.
 
+use fluent_bundle::FluentArgs;
 use mondrian_audio::{ClapPluginDescriptor, Vst3PluginDescriptor};
 use mondrian_core::automation::{ParameterSchema, PropertyValueType};
 use mondrian_core::{AudioProcessorInstanceId, ParameterId};
@@ -26,6 +27,7 @@ use super::audio_automation::{
     processing_scope_automation_viewport, project_audio_automation, sequence_automation_viewport,
     AudioAutomationCurveModel, AudioAutomationViewport,
 };
+use super::localization::Localizer;
 use crate::app::product_action::{
     AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
     AudioProcessorInsertClapPayload, AudioProcessorInsertVst3Payload,
@@ -111,6 +113,7 @@ pub(crate) struct AudioProcessorRackModel {
 pub(crate) fn clip_processing_scope_racks(
     sequence: &Sequence,
     clip: &Clip,
+    localizer: &Localizer,
 ) -> Vec<AudioProcessorRackModel> {
     let mut scope_ids = clip
         .audio_components
@@ -125,6 +128,7 @@ pub(crate) fn clip_processing_scope_racks(
             project_audio_processor_rack(
                 sequence,
                 AudioProcessorRackAddress::ProcessingScope { scope_id },
+                localizer,
             )
         })
         .collect()
@@ -135,32 +139,34 @@ pub(crate) fn clip_processing_scope_racks(
 pub(crate) fn project_audio_processor_rack(
     sequence: &Sequence,
     address: AudioProcessorRackAddress,
+    localizer: &Localizer,
 ) -> AudioProcessorRackModel {
     let automation_viewport = rack_automation_viewport(sequence, address);
     let inspection = inspect_audio_processor_rack(sequence, &address);
-    let ownership_label = rack_ownership_label(sequence, address, inspection.as_ref().ok());
+    let ownership_label =
+        rack_ownership_label(sequence, address, inspection.as_ref().ok(), localizer);
     let (is_editable, edit_disabled_reason, processors) = match inspection {
         Ok(inspection) => (
             inspection.is_editable(),
-            inspection.edit_blocker().map(edit_blocker_label),
+            inspection.edit_blocker().map(|blocker| edit_blocker_label(blocker, localizer)),
             inspection
                 .rack()
                 .processors
                 .iter()
                 .map(|processor| {
-                    project_processor(sequence, address, automation_viewport, processor)
+                    project_processor(sequence, address, automation_viewport, processor, localizer)
                 })
                 .collect(),
         ),
         Err(error) => (
             false,
-            Some(format!("作者状态无法解析此 Rack：{error}")),
+            Some(localizer.format_text("audio-rack-invalid-state", "error", &error.to_string())),
             Vec::new(),
         ),
     };
     AudioProcessorRackModel {
         address,
-        title: rack_title(address).to_owned(),
+        title: rack_title(address, localizer),
         ownership_label,
         is_editable,
         edit_disabled_reason,
@@ -180,11 +186,11 @@ pub(crate) fn project_audio_processor_rack(
         },
         insert_options: vec![
             AudioProcessorInsertOptionModel {
-                label: "增益".to_owned(),
+                label: localizer.text("audio-processor-gain"),
                 choice: AudioProcessorInsertChoice::BuiltIn(AudioProcessorBuiltInPreset::Gain),
             },
             AudioProcessorInsertOptionModel {
-                label: "前瞻限制器（Sample Peak）".to_owned(),
+                label: localizer.text("audio-processor-lookahead-limiter"),
                 choice: AudioProcessorInsertChoice::BuiltIn(
                     AudioProcessorBuiltInPreset::LookaheadLimiter,
                 ),
@@ -256,37 +262,52 @@ pub(crate) fn insert_option_action(
     }
 }
 
-fn rack_title(address: AudioProcessorRackAddress) -> &'static str {
-    match address {
-        AudioProcessorRackAddress::ProcessingScope { .. } => "音频处理器 Rack",
+fn rack_title(address: AudioProcessorRackAddress, localizer: &Localizer) -> String {
+    localizer.text(match address {
+        AudioProcessorRackAddress::ProcessingScope { .. } => "audio-rack-scope-title",
         AudioProcessorRackAddress::ChannelStrip {
             rack: AudioChannelStripRack::PreFader, ..
-        } => "推子前处理器 Rack",
+        } => "audio-rack-prefader-title",
         AudioProcessorRackAddress::ChannelStrip {
             rack: AudioChannelStripRack::PostFader, ..
-        } => "推子后处理器 Rack",
-    }
+        } => "audio-rack-postfader-title",
+    })
 }
 
 fn rack_ownership_label(
     sequence: &Sequence,
     address: AudioProcessorRackAddress,
     inspection: Option<&AudioProcessorRackInspection<'_>>,
+    localizer: &Localizer,
 ) -> String {
     match address {
         AudioProcessorRackAddress::ProcessingScope { scope_id } => {
             match inspection.and_then(AudioProcessorRackInspection::processing_scope_binding_count)
             {
-                Some(0) => "未绑定的 Processing Scope".to_owned(),
-                Some(1) => "仅由一个 Component 使用".to_owned(),
-                Some(count) => format!("共享 Processing Scope · {count} 个 Component"),
-                None => format!("Processing Scope · {scope_id}"),
+                Some(0) => localizer.text("audio-rack-scope-unbound"),
+                Some(1) => localizer.text("audio-rack-scope-single"),
+                Some(count) => {
+                    let mut args = FluentArgs::new();
+                    args.set("count", count);
+                    localizer.format("audio-rack-scope-shared", Some(&args))
+                }
+                None => localizer.format_text(
+                    "audio-rack-scope-identity",
+                    "identity",
+                    &scope_id.to_string(),
+                ),
             }
         }
         AudioProcessorRackAddress::ChannelStrip { owner, .. } => match owner {
             AudioChannelStripOwner::Track { track_id } => {
                 sequence.audio_tracks.iter().find(|track| track.id == track_id).map_or_else(
-                    || format!("音频轨道 · {track_id}"),
+                    || {
+                        localizer.format_text(
+                            "audio-rack-track-identity",
+                            "identity",
+                            &track_id.to_string(),
+                        )
+                    },
                     |track| track.name.clone(),
                 )
             }
@@ -302,21 +323,30 @@ fn rack_ownership_label(
                 .iter()
                 .find(|output| output.id == output_id)
                 .map_or_else(
-                    || format!("Program Output · {output_id}"),
-                    |output| format!("Program Output · {}", output.name),
+                    || {
+                        localizer.format_text(
+                            "audio-mixer-missing-output",
+                            "identity",
+                            &output_id.to_string(),
+                        )
+                    },
+                    |output| localizer.format_text("audio-mixer-output", "identity", &output.name),
                 ),
         },
     }
 }
 
-fn edit_blocker_label(error: &AudioProcessorRackEditError) -> String {
+fn edit_blocker_label(error: &AudioProcessorRackEditError, localizer: &Localizer) -> String {
     match error {
         AudioProcessorRackEditError::LockedTrack(track_id) => {
-            format!("轨道 {track_id} 已锁定，必须先解锁")
+            localizer.format_text("audio-rack-locked-track", "identity", &track_id.to_string())
         }
-        AudioProcessorRackEditError::LockedProcessingScopeBinding { track_id, .. } => {
-            format!("共享 Scope 同时绑定到已锁定轨道 {track_id}，必须先解锁")
-        }
+        AudioProcessorRackEditError::LockedProcessingScopeBinding { track_id, .. } => localizer
+            .format_text(
+                "audio-rack-locked-scope-track",
+                "identity",
+                &track_id.to_string(),
+            ),
         error => error.to_string(),
     }
 }
@@ -338,6 +368,7 @@ fn project_processor(
     address: AudioProcessorRackAddress,
     viewport: Option<AudioAutomationViewport>,
     processor: &AudioProcessorInstance,
+    localizer: &Localizer,
 ) -> AudioProcessorInstanceModel {
     let definition_id = match &processor.definition {
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => Some(definition_id.as_str()),
@@ -345,7 +376,7 @@ fn project_processor(
     };
     AudioProcessorInstanceModel {
         processor_id: processor.id,
-        label: processor_label(&processor.definition),
+        label: processor_label(&processor.definition, localizer),
         bypassed: processor.bypassed,
         native_format: match processor.definition {
             AudioProcessorDefinitionRef::Clap { .. } => Some(NativeAudioFormat::Clap),
@@ -371,11 +402,9 @@ fn project_processor(
                 });
                 AudioProcessorParameterModel {
                     parameter_id: parameter_id.clone(),
-                    label: parameter
-                        .ui
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| parameter_label(definition_id, &parameter_id)),
+                    label: parameter.ui.display_name.clone().unwrap_or_else(|| {
+                        parameter_label(definition_id, &parameter_id, localizer)
+                    }),
                     schema: parameter.schema.clone(),
                     static_value: parameter.automation.default_value,
                     keyframe_count: parameter.automation.keyframes.len(),
@@ -386,22 +415,22 @@ fn project_processor(
     }
 }
 
-fn processor_label(definition: &AudioProcessorDefinitionRef) -> String {
+fn processor_label(definition: &AudioProcessorDefinitionRef, localizer: &Localizer) -> String {
     match definition {
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. }
             if definition_id == BUILTIN_GAIN_DEFINITION_ID =>
         {
-            "增益".to_owned()
+            localizer.text("audio-processor-gain")
         }
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. }
             if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID =>
         {
-            "前瞻限制器（Sample Peak）".to_owned()
+            localizer.text("audio-processor-lookahead-limiter")
         }
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. }
             if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID =>
         {
-            "Sample Delay".to_owned()
+            localizer.text("audio-processor-sample-delay")
         }
         AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version } => {
             format!("{definition_id} · schema {schema_version}")
@@ -414,23 +443,29 @@ fn processor_label(definition: &AudioProcessorDefinitionRef) -> String {
     }
 }
 
-fn parameter_label(definition_id: Option<&str>, parameter_id: &ParameterId) -> String {
+fn parameter_label(
+    definition_id: Option<&str>,
+    parameter_id: &ParameterId,
+    localizer: &Localizer,
+) -> String {
     match (definition_id, parameter_id.as_str()) {
-        (Some(BUILTIN_GAIN_DEFINITION_ID), GAIN_DB_PARAMETER_ID) => "增益".to_owned(),
+        (Some(BUILTIN_GAIN_DEFINITION_ID), GAIN_DB_PARAMETER_ID) => {
+            localizer.text("audio-parameter-gain")
+        }
         (
             Some(BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID),
             LOOKAHEAD_LIMITER_CEILING_DB_PARAMETER_ID,
-        ) => "上限".to_owned(),
+        ) => localizer.text("audio-parameter-ceiling"),
         (
             Some(BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID),
             LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID,
-        ) => "前瞻".to_owned(),
+        ) => localizer.text("audio-parameter-lookahead"),
         (
             Some(BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID),
             LOOKAHEAD_LIMITER_RELEASE_MS_PARAMETER_ID,
-        ) => "释放".to_owned(),
+        ) => localizer.text("audio-parameter-release"),
         (Some(BUILTIN_SAMPLE_DELAY_DEFINITION_ID), SAMPLE_DELAY_FRAMES_PARAMETER_ID) => {
-            "延迟采样".to_owned()
+            localizer.text("audio-parameter-delay-samples")
         }
         _ => parameter_id.as_str().to_owned(),
     }
@@ -547,8 +582,13 @@ fn rack_edit_action(address: AudioProcessorRackAddress, edit: AudioProcessorRack
 mod tests {
     use super::*;
     use crate::app::product_action::{AudioProductAction, ProductAction};
+    use crate::app_ui::localization::AppUiLocale;
     use mondrian_core::automation::PropertyValue;
     use mondrian_core::{AudioSourceComponentId, ExactAutomationKeyframe, TimelineTime};
+
+    fn chinese() -> Localizer {
+        Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog")
+    }
 
     fn sequence_with_gain_scope() -> (Sequence, mondrian_core::ClipId) {
         let mut sequence = Sequence::new("Rack projection");
@@ -593,11 +633,11 @@ mod tests {
             .find(|clip| clip.id == clip_id)
             .expect("Clip");
 
-        let racks = clip_processing_scope_racks(&sequence, clip);
+        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
 
         assert_eq!(racks.len(), 1);
         assert_eq!(
-            racks[0].ownership_label,
+            racks[0].ownership_label.replace(['\u{2068}', '\u{2069}'], ""),
             "共享 Processing Scope · 2 个 Component"
         );
         assert_eq!(racks[0].processors[0].label, "增益");
@@ -606,9 +646,26 @@ mod tests {
 
         sequence.audio_tracks[0].is_locked = true;
         let clip = &sequence.audio_tracks[0].clips[0];
-        let locked = clip_processing_scope_racks(&sequence, clip);
+        let locked = clip_processing_scope_racks(&sequence, clip, &chinese());
         assert!(!locked[0].is_editable);
         assert!(locked[0].edit_disabled_reason.is_some());
+    }
+
+    #[test]
+    fn english_projection_translates_builtin_copy_without_changing_rack_identity() {
+        let (sequence, _) = sequence_with_gain_scope();
+        let clip = &sequence.audio_tracks[0].clips[0];
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let english_rack = &clip_processing_scope_racks(&sequence, clip, &english)[0];
+        let chinese_rack = &clip_processing_scope_racks(&sequence, clip, &chinese())[0];
+        assert_eq!(english_rack.title, "Audio Processor Rack");
+        assert_eq!(english_rack.processors[0].label, "Gain");
+        assert_eq!(english_rack.processors[0].parameters[0].label, "Gain");
+        assert_eq!(english_rack.address, chinese_rack.address);
+        assert_eq!(
+            english_rack.processors[0].processor_id,
+            chinese_rack.processors[0].processor_id
+        );
     }
 
     #[test]
@@ -637,14 +694,15 @@ mod tests {
             },
         ];
 
-        let projected = addresses.map(|address| project_audio_processor_rack(&sequence, address));
+        let projected =
+            addresses.map(|address| project_audio_processor_rack(&sequence, address, &chinese()));
         assert_eq!(projected[0].ownership_label, sequence.audio_tracks[0].name);
         assert_eq!(projected[1].ownership_label, "Bus · Dialog");
-        assert!(projected[2].ownership_label.starts_with("Program Output · "));
+        assert!(projected[2].ownership_label.starts_with("节目输出 · "));
         assert!(projected.iter().all(|rack| rack.is_editable));
 
         sequence.audio_tracks[0].is_locked = true;
-        let locked = project_audio_processor_rack(&sequence, addresses[0]);
+        let locked = project_audio_processor_rack(&sequence, addresses[0], &chinese());
         assert!(!locked.is_editable);
         assert!(locked
             .edit_disabled_reason
@@ -656,7 +714,7 @@ mod tests {
     fn actions_preserve_typed_addresses_and_do_not_fake_automated_static_edits() {
         let (mut sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip);
+        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
         let rack = &racks[0];
         let processor = &rack.processors[0];
         let parameter = &processor.parameters[0];
@@ -692,7 +750,7 @@ mod tests {
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0))
             .expect("keyframe");
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip);
+        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
         let processor = &racks[0].processors[0];
         let parameter = &processor.parameters[0];
         assert_eq!(parameter.keyframe_count, 1);
@@ -703,7 +761,7 @@ mod tests {
     fn insertion_action_carries_a_preset_without_allocating_author_identity_in_projection() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let racks = clip_processing_scope_racks(&sequence, clip);
+        let racks = clip_processing_scope_racks(&sequence, clip, &chinese());
         let action = insert_action(&racks[0], AudioProcessorBuiltInPreset::LookaheadLimiter);
 
         assert!(matches!(
@@ -721,7 +779,7 @@ mod tests {
     fn installed_clap_option_preserves_plugin_identity_and_rack_address() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let mut racks = clip_processing_scope_racks(&sequence, clip);
+        let mut racks = clip_processing_scope_racks(&sequence, clip, &chinese());
         append_clap_insert_options(
             &mut racks,
             &[ClapPluginDescriptor {
@@ -750,7 +808,7 @@ mod tests {
     fn installed_vst3_option_preserves_class_identity_and_rack_address() {
         let (sequence, _) = sequence_with_gain_scope();
         let clip = &sequence.audio_tracks[0].clips[0];
-        let mut racks = clip_processing_scope_racks(&sequence, clip);
+        let mut racks = clip_processing_scope_racks(&sequence, clip, &chinese());
         let class_id = "0123456789ABCDEF0123456789ABCDEF".to_owned();
         append_vst3_insert_options(
             &mut racks,
@@ -792,6 +850,7 @@ mod tests {
         let rack = project_audio_processor_rack(
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
+            &chinese(),
         );
         let instance = &rack.processors[0];
         assert_eq!(instance.native_format, Some(NativeAudioFormat::Clap));
@@ -805,6 +864,7 @@ mod tests {
         let locked = project_audio_processor_rack(
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
+            &chinese(),
         );
         assert!(rebind_native_action(&locked, &locked.processors[0]).is_none());
     }
@@ -848,6 +908,7 @@ mod tests {
         let rack = project_audio_processor_rack(
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
+            &chinese(),
         );
         assert_eq!(rack.processors[0].parameters.len(), 1);
         assert_eq!(rack.processors[0].parameters[0].label, "Output Gain");

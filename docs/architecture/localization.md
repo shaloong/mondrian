@@ -68,6 +68,10 @@ suggested untitled names, and extension-filter labels come from Fluent; only
 the visible text changes, while accepted extensions, cancellation, and emitted
 typed actions stay identical.
 Dock tab labels use the same locale snapshot and existing panel message IDs.
+Audio Processor Rack and Mixer projection now use the same locale snapshot for
+built-in names, parameter labels, route ports, ownership, empty state, and lock
+copy. Installed plugin names remain plugin-supplied text; Route and Rack action
+identities are unchanged when the locale switches.
 The Inspector's video Clip blend-mode row formats its label and every canonical
 mode option through Fluent. Inspector projection requires a concrete locale;
 callers without a machine preference resolve the Chinese product default at

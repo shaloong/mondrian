@@ -409,7 +409,7 @@ impl AppUiPanelModels {
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
             inspector: InspectorPanelModel::from_app_state(state, inspector_localizer),
-            mixer: AudioMixerPanelModel::from_app_state(state),
+            mixer: AudioMixerPanelModel::from_app_state(state, inspector_localizer),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -442,7 +442,7 @@ impl AppUiPanelModels {
                 })
                 .unwrap_or_else(demo_timeline_model),
             inspector: InspectorPanelModel::from_app_state(state, &localizer),
-            mixer: AudioMixerPanelModel::from_app_state(state),
+            mixer: AudioMixerPanelModel::from_app_state(state, &localizer),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -2611,7 +2611,7 @@ impl InspectorPanelModel {
             opacity_curve: opacity_curve_model_for_clip(clip, time),
             audio_components: inspector_audio_components(state, sequence, resolved_selection, clip),
             audio_processor_racks: {
-                let mut racks = clip_processing_scope_racks(sequence, clip);
+                let mut racks = clip_processing_scope_racks(sequence, clip, localizer);
                 if let Ok(descriptors) = state.installed_clap_processors() {
                     append_clap_insert_options(&mut racks, &descriptors);
                 }
