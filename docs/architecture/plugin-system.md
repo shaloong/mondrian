@@ -100,6 +100,8 @@ then submits one optimistic Rack edit that changes only the binary revision.
 The edit preserves processor identity, bypass, parameter curves, and opaque
 state and participates in Undo/Redo. Missing binaries, changed parameter
 schemas, locked Tracks, and stale edits leave the Project untouched.
+The generic external Rack-edit transport rejects `RebindClap`; only the App's
+probe-backed product action may submit that Timeline mutation.
 An installed reference-plugin test verifies the Preview adapter launches the
 real CLAP worker and renders a block. A local CLAP fixture verifies that parameter
 events retain their sample offsets at the ABI. The Clack Gain example receives

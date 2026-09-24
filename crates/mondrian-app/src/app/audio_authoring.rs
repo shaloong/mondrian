@@ -32,6 +32,11 @@ impl AppState {
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
             AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
             AudioProductAction::EditProcessorRack(request) => {
+                if matches!(request.edit, AudioProcessorRackEdit::RebindClap { .. }) {
+                    return Err(clap_unavailable(
+                        "CLAP 重新绑定必须通过已安装插件探测入口完成",
+                    ));
+                }
                 self.edit_audio_processor_rack(request)
             }
             AudioProductAction::InsertBuiltInProcessor(payload) => {
@@ -685,6 +690,52 @@ mod tests {
                 .processors
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn generic_rack_action_cannot_bypass_clap_rebind_probe() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("CLAP rebind admission");
+        let track_id = sequence.audio_tracks[0].id;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        processor.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: None,
+        };
+        let processor_id = processor.id;
+        let expected_definition = processor.definition.clone();
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        state.test_set_sequence(Some(sequence));
+        let before = state.active_sequence().expect("sequence").clone();
+        let generation = state.project_author_generation();
+        let action = audio_processor_rack_edit_action(request(
+            address,
+            AudioProcessorRackEdit::RebindClap {
+                processor_id,
+                expected_definition,
+                new_definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "org.example.gain".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: Some([7; 32]),
+                },
+            },
+        ));
+        assert!(state.dispatch_action(action).is_err());
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(state.active_sequence().expect("sequence"), &before);
     }
 
     #[test]
