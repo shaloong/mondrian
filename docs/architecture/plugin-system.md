@@ -18,6 +18,36 @@ The generic boundary proves crash/hang/protocol containment only. It does not by
 itself advertise that a native format, plugin, vendor UI, or security sandbox is
 available.
 
+## Native format admission
+
+The current upstream VST3 SDK is MIT licensed; CLAP is MIT and OpenFX is
+BSD-3-Clause. Product support may use their APIs while retaining each
+dependency's license notices. The VST name and logo have separate Steinberg
+trademark rules. Mondrian should load user-selected installed plugin binaries
+and must not bundle third-party plugins as if the format license covered their
+content. Verify the license of any reference plugin shipped with tests or an
+installer separately. Sources: [Steinberg SDK README](https://github.com/steinbergmedia/vst3sdk/blob/master/README.md),
+[CLAP repository](https://github.com/free-audio/clap), and
+[OpenFX license](https://github.com/AcademySoftwareFoundation/openfx/blob/main/LICENSE.md).
+
+VST3 currently has an authoring identity and optional binary SHA-256 revision,
+but no discovery, rebind, or executable Adapter. A missing revision in an older
+Project remains editable and cannot authorize native execution. The first
+supported VST3 slice must discover and validate one selected installed effect
+in a bounded child, recheck its class, buses, parameter IDs, latency/tail,
+state, and exact binary revision in the existing supervised processing child,
+then prove saved-state and automation output through both Preview and Export
+against a reference plugin. No independent VST3 audio mixer or export path is
+admitted. Vendor editors and auxiliary buses require separate qualified slices.
+
+OpenFX has no implemented ABI Adapter today. Its image-effect host needs
+property, parameter, clip/image, memory, progress, threading, and render suites
+with explicit pixel-depth, region-of-interest, frame-time, and render-thread
+contracts. Admission must preserve the same compiled visual graph semantics
+for Viewer and Export, run native plugin code outside the editor process, and
+compare real reference-plugin pixels over time, color, alpha, and failure cases.
+An effect definition alone does not qualify OpenFX support.
+
 ## Effect Plugins
 
 Plugin effects are represented as `EffectType::Plugin(String)` and registered through `EffectDefinition`.
