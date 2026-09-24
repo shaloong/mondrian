@@ -65,6 +65,15 @@ runtime Library generation, and rewrites both typed Project resource values
 and SQLite file-source paths before installing the imported Session. Byte-
 identical media keeps its authored Asset identity, probe facts, and logical
 audio component bindings while filesystem revision evidence is refreshed.
+Before the imported Session is installed, every SQLite file Asset must point
+to one verified bundled source and no remote Asset may remain. A manifest that
+omits a Library file row is rejected even when its remaining hashes are valid;
+the previous Session is restored after a failed import.
+The moved-package regression uses a valid nonidentity `.cube` and compares its
+prepared LUT sample before packaging and after removing the original source;
+this checks executable resource rebinding, not merely path presence. A separate
+Preview/Export pixel-parity qualification remains necessary before claiming
+cross-machine rendering parity.
 The import is unsaved and its first Save has create-only intent for a sibling
 `.mdp`; it never rewrites the portable package. Choosing `project.mdp` inside a
 `.mdpkg` directory in the ordinary Open dialog routes through this package

@@ -787,6 +787,10 @@ impl AppState {
                     .map(|(source, target)| (source.clone(), target.clone()))
                     .collect::<Vec<_>>(),
             )?;
+            super::project_packaging::ensure_package_asset_sources_rebound(
+                &asset_library,
+                bindings,
+            )?;
         }
         let session = if install_policy.opens_canonical_project() {
             AuthoringSession::open_saved(

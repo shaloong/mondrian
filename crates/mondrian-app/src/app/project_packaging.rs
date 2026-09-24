@@ -577,6 +577,28 @@ pub(super) fn package_source_bindings(
     Ok(bindings)
 }
 
+pub(super) fn ensure_package_asset_sources_rebound(
+    library: &AssetLibrary,
+    bindings: &BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<()> {
+    let bundled_sources = bindings.values().collect::<BTreeSet<_>>();
+    for asset in library.list_assets()? {
+        match &asset.source {
+            AssetSource::File(path) => anyhow::ensure!(
+                bundled_sources.contains(path),
+                "packaged Asset {} retains an unbound file source: {}",
+                asset.id,
+                path.display()
+            ),
+            AssetSource::Remote(uri) => {
+                anyhow::bail!("packaged Asset {} retains a remote source: {uri}", asset.id)
+            }
+            AssetSource::Generated(_) => {}
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn rebind_document_resources(
     document: &mut ProjectDocument,
     bindings: &BTreeMap<PathBuf, PathBuf>,
@@ -894,9 +916,21 @@ mod tests {
         MediaInfo, ProjectColorEnvironment, ProjectSettings, TimelineTime,
     };
     use mondrian_editor_state::{Action, AuthoringSession};
-    use mondrian_effects::{EffectNodeExt, EffectType};
+    use mondrian_effects::{
+        build_effect_render_graph, EffectGraphNodeKind, EffectNodeExt, EffectRenderOp, EffectType,
+    };
     use mondrian_timeline::{Clip, Sequence, SequenceCollection};
     use std::time::Duration;
+
+    const RED_INVERT_CUBE_2: &str = "LUT_3D_SIZE 2\n\
+1 0 0\n\
+0 0 0\n\
+1 1 0\n\
+0 1 0\n\
+1 0 1\n\
+0 0 1\n\
+1 1 1\n\
+0 1 1\n";
 
     fn lut_effect(path: PathBuf) -> mondrian_effects::EffectNode {
         let mut effect: mondrian_effects::EffectNode =
@@ -915,7 +949,39 @@ mod tests {
                 value: PropertyValue::Resource(ParameterResourceReference::ExternalFile { path }),
             })
             .expect("bind LUT");
+        let processing_space_id =
+            EffectType::Lut3D.parameter_id("processing_space").expect("processing space ID");
         effect
+            .set_static_value_by_parameter(
+                &processing_space_id,
+                PropertyValue::Enum("scene_linear".to_owned()),
+            )
+            .expect("bind LUT processing space");
+        effect
+    }
+
+    fn sample_document_lut(document: &ProjectDocument) -> [f32; 3] {
+        let sequence = &document.sequences.sequences[0];
+        let clip = &sequence.video_tracks[0].clips[0];
+        let graph = build_effect_render_graph(
+            &clip.effects,
+            TimelineTime::ZERO,
+            sequence.settings.color.working_color_space,
+        )
+        .expect("prepare authored LUT for visual execution");
+        graph
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::Lut3D { lut, .. }, ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::Lut3D { lut, .. }, ..
+                } => Some(lut.sample([0.25, 0.5, 0.75])),
+                _ => None,
+            })
+            .expect("prepared LUT operation")
     }
 
     fn document_with_lut(
@@ -961,7 +1027,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
         let lut = root.path().join("look.cube");
-        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut.clone(), true);
 
         let inventory = collect_project_dependencies(&document, &library).expect("inventory");
@@ -1009,8 +1075,13 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
         let lut = root.path().join("look.cube");
-        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut.clone(), true);
+        let expected = sample_document_lut(&document);
+        assert!(
+            (expected[0] - 0.75).abs() < 1.0e-6,
+            "LUT must change red: {expected:?}"
+        );
         let session = AuthoringSession::new_unsaved(
             document,
             root.path().join("original.mdp"),
@@ -1036,6 +1107,11 @@ mod tests {
             .dispatch_action(Action::OpenProject(moved.join("project.mdp")))
             .expect("open moved package from dialog selection");
         let rebound = imported.portable_project_dependency_inventory().expect("rebound inventory");
+        let imported_document = imported.authoring.as_ref().expect("Session").document();
+        let actual = sample_document_lut(imported_document);
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
         assert!(rebound.is_complete());
         assert_eq!(
             rebound.files[0].path,
@@ -1094,7 +1170,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
         let lut = root.path().join("look.cube");
-        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut, false);
         let session = AuthoringSession::new_unsaved(
             document,
@@ -1157,7 +1233,7 @@ mod tests {
             .any(|fact| fact.message.id == "notification-package-failed"));
 
         let lut = root.path().join("look.cube");
-        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let library = AssetLibrary::open(root.path().join("second-library")).expect("library");
         let document = document_with_lut(&library, lut, false);
         state.authoring = Some(
@@ -1240,7 +1316,7 @@ mod tests {
             .expect("file source")
             .to_path_buf();
         let lut = root.path().join("look.cube");
-        fs::write(&lut, b"TITLE \"look\"\nLUT_3D_SIZE 2\n").expect("LUT fixture");
+        fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut, false);
         let session = AuthoringSession::new_unsaved(
             document,
@@ -1263,7 +1339,9 @@ mod tests {
             .expect("media binding");
 
         let mut imported = AppState::new();
-        imported.open_portable_project_package(moved).expect("open moved package");
+        imported
+            .open_portable_project_package(moved.clone())
+            .expect("open moved package");
         let asset = imported
             .authoring
             .as_ref()
@@ -1285,5 +1363,26 @@ mod tests {
         assert!(asset
             .admitted_audio_source_selection(AudioSourceComponentId::primary())
             .is_some());
+        drop(imported);
+
+        let mut omitted = manifest;
+        omitted.files.retain(|file| !file.source_paths.contains(&stored_source));
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&omitted).expect("encode tampered manifest"),
+        )
+        .expect("omit media binding");
+        // All remaining files and the nested Project are byte-valid. Import
+        // must still reject a Library row that would keep its original path.
+        verify_portable_project_package(&moved).expect("byte-valid subset");
+        let mut rejected = AppState::new();
+        let error = rejected
+            .open_portable_project_package(moved)
+            .expect_err("omitted SQLite media source must reject import");
+        assert!(
+            error.to_string().contains("unbound file source"),
+            "{error:#}"
+        );
+        assert!(!rejected.has_open_project());
     }
 }
