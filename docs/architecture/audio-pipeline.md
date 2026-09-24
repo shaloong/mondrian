@@ -7,11 +7,18 @@ installed-definition registration and schedules through the existing isolated
 processor transport. The child revalidates CLAP descriptor, main audio ports,
 latency, and tail, restores supplied opaque state before activation, resets
 processor history at continuity entry, and interleaves Float32
-blocks at the ABI boundary. It stops and deactivates the native instance when
-the worker closes; a restart request fails the current instance. Unsupported
-plugin state capture, parameter automation, and auxiliary buses remain
-pending format work; unsupported requests return typed errors, not
-silent bypasses.
+blocks at the ABI boundary. The probe captures bounded CLAP parameter metadata;
+the parent requires each authored schema to match the selected binary and the
+worker checks the same metadata after state restoration. Stable definition-local
+IDs map author curves to CLAP IDs. The worker converts exact sample-offset
+events to CLAP value events in a preallocated, time-sorted buffer and rejects
+out-of-range or fractional stepped values. It stops and deactivates the native
+instance when the worker closes; a restart request fails the current instance.
+Selected-plugin instance creation captures the current values after restoring
+the same opaque state, so a first-block parameter event does not reset a saved
+setting to the plugin factory default.
+Plugin state capture and auxiliary buses remain pending format work;
+unsupported requests return typed errors, not silent bypasses.
 
 CLAP descriptor discovery and execution-contract probing use a separate hidden child mode. The editor
 process writes a bounded request into a private temporary directory, starts

@@ -167,18 +167,31 @@ fn installed_clap_reference_processes_through_isolated_worker() {
     let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
         .map(PathBuf::from)
         .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+    let state = 0.5_f32.to_le_bytes();
+    let registration = probe_clap_plugin_registration(
+        &helper,
+        &plugin,
+        "org.rust-audio.clack.gain",
+        test_render_contract(),
+        Some(&state),
+    )
+    .expect("probe installed gain contract");
     let payload = serde_json::to_vec(&serde_json::json!({
-        "library_path": plugin,
-        "plugin_id": "org.rust-audio.clack.gain",
-        "state": 0.5_f32.to_le_bytes(),
+        "library_path": registration.library_path,
+        "plugin_id": registration.plugin_id,
+        "binary_sha256": registration.binary_sha256,
+        "state": state,
+        "parameters": registration.parameters,
+        "parameter_ids": [1],
     }))
     .expect("CLAP worker payload");
+    let parameter_id = ParameterId::new("clap.param.1").expect("volume parameter ID");
     let spec = IsolatedAudioProcessorWorkerSpec::new(
         helper,
         payload,
-        stateful_contract(),
+        registration.execution_contract,
         AudioProcessorAuxiliaryInputContract::default(),
-        Vec::new(),
+        vec![parameter_id.clone()],
         test_render_contract(),
     )
     .expect("CLAP worker specification");
@@ -188,16 +201,39 @@ fn installed_clap_reference_processes_through_isolated_worker() {
     processor.enter_state(100).expect("enter CLAP state");
     let input = vec![0.125, -0.25, 0.5, -0.75, 0.2, -0.4, 0.8, -1.0];
     let mut audio = TestAudioIo { main: input.clone(), auxiliary: Vec::new() };
+    let empty_ranges = [Range { start: 0, end: 0 }];
     processor
         .process(
             test_context(100),
             &mut audio,
-            AudioParameterEventBatch::new(100, 4, &[], &[], &[]),
+            AudioParameterEventBatch::new(
+                100,
+                4,
+                std::slice::from_ref(&parameter_id),
+                &empty_ranges,
+                &[],
+            ),
         )
         .expect("process Clack gain through child process");
     for (actual, source) in audio.main.iter().zip(input) {
         assert!((actual - source * 0.5).abs() < 1.0e-6);
     }
+    let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: Vec::new() };
+    let event_ranges = [Range { start: 0, end: 1 }];
+    processor
+        .process(
+            test_context(104),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                104,
+                4,
+                std::slice::from_ref(&parameter_id),
+                &event_ranges,
+                &[AudioParameterEvent { sample_offset: 0, value: 0.25 }],
+            ),
+        )
+        .expect("send automated volume through isolated worker");
+    assert!(audio.main.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
 }
 
 #[test]

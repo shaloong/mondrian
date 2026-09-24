@@ -10,12 +10,17 @@ use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
 };
 use clack_extensions::latency::PluginLatency;
+use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
 use clack_host::prelude::{
-    HostInfo, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry, PluginInstance,
+    ClapId, HostInfo, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry, PluginInstance,
 };
-use mondrian_core::AudioChannelLayout;
+use mondrian_core::automation::{
+    ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract, ParameterSchema,
+    ParameterUnit, PropertyValue,
+};
+use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::{CString, OsStr};
@@ -34,6 +39,7 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
+const MAX_PARAMETERS: u32 = 1024;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(super) fn fingerprint_clap_binary(
@@ -82,6 +88,67 @@ pub struct ClapPluginDescriptor {
     pub version: Option<String>,
 }
 
+/// Stable numeric parameter facts captured from one selected CLAP definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClapParameterDescriptor {
+    /// Definition-local CLAP parameter ID, independent of scan order.
+    pub id: u32,
+    /// Plugin-supplied display name.
+    pub name: String,
+    /// Lowest admitted plain value.
+    pub min_value: f64,
+    /// Highest admitted plain value.
+    pub max_value: f64,
+    /// Definition default in plain units.
+    pub default_value: f64,
+    /// Current plain value after the probed state has been restored.
+    pub current_value: f64,
+    /// Whether the parameter supports host automation.
+    pub automatable: bool,
+    /// Whether values represent integer steps.
+    pub stepped: bool,
+    /// Whether the parameter is an integer-valued enumeration.
+    pub enumeration: bool,
+    /// Whether the plugin marks this parameter read-only.
+    pub read_only: bool,
+    /// Whether the plugin hides this parameter from ordinary controls.
+    pub hidden: bool,
+}
+
+impl ClapParameterDescriptor {
+    /// Stable definition-local authoring identity for this CLAP parameter.
+    pub fn parameter_id(&self) -> Result<ParameterId, AudioProcessorHostError> {
+        ParameterId::new(format!("clap.param.{}", self.id))
+            .map_err(|error| invalid(format!("invalid CLAP parameter ID: {error}")))
+    }
+
+    /// Captured authoring contract for an editable parameter.
+    pub fn authoring_schema(&self) -> Result<ParameterSchema, AudioProcessorHostError> {
+        let default_value = if self.stepped {
+            PropertyValue::Int(self.default_value as i64)
+        } else {
+            PropertyValue::Double(self.default_value)
+        };
+        let mut schema = ParameterSchema::v1(self.parameter_id()?, default_value);
+        schema.is_animatable = self.automatable && !self.read_only;
+        if self.stepped {
+            schema.allowed_interpolations = vec![ParameterInterpolation::Hold];
+        }
+        let numeric = ParameterNumericContract::closed(
+            self.min_value,
+            self.max_value,
+            self.stepped.then_some(1.0),
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .map_err(|error| invalid(format!("invalid CLAP numeric contract: {error}")))?;
+        schema = schema.with_numeric_contract(ParameterUnit::Unitless, numeric);
+        schema
+            .validate()
+            .map_err(|error| invalid(format!("invalid CLAP authoring schema: {error}")))?;
+        Ok(schema)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscoveryRequest {
@@ -114,6 +181,7 @@ struct ProbeResult {
     plugin_id: String,
     latency_frames: u32,
     tail: ProbeTail,
+    parameters: Vec<ClapParameterDescriptor>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,6 +250,7 @@ pub fn probe_clap_plugin_registration(
     if probe.plugin_id != plugin_id {
         return Err(invalid("CLAP probe response changed plugin identity"));
     }
+    validate_parameters(&probe.parameters)?;
     let tail = match probe.tail {
         ProbeTail::None => AudioProcessorTail::None,
         ProbeTail::Finite(frames) => AudioProcessorTail::Finite(frames as usize),
@@ -200,6 +269,7 @@ pub fn probe_clap_plugin_registration(
         library_path,
         binary_sha256: fingerprint,
         execution_contract,
+        parameters: probe.parameters,
     })
 }
 
@@ -418,6 +488,7 @@ fn probe_loaded(
         shared.service_callbacks(&mut instance)?;
     }
     let handle = instance.plugin_handle();
+    let parameters = list_parameters(&handle)?;
     let ports = handle
         .get_extension::<PluginAudioPorts>()
         .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
@@ -471,7 +542,82 @@ fn probe_loaded(
         plugin_id: plugin_id.to_owned(),
         latency_frames,
         tail,
+        parameters,
     })
+}
+
+pub(super) fn list_parameters(
+    handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
+) -> Result<Vec<ClapParameterDescriptor>, AudioProcessorHostError> {
+    let Some(extension) = handle.get_extension::<PluginParams>() else {
+        return Ok(Vec::new());
+    };
+    let count = extension.count(handle);
+    if count > MAX_PARAMETERS {
+        return Err(invalid("CLAP parameter count exceeds the supported bound"));
+    }
+    let mut parameters = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let mut buffer = ParamInfoBuffer::new();
+        let info = extension
+            .get_info(handle, index, &mut buffer)
+            .ok_or_else(|| invalid("CLAP parameter metadata is missing"))?;
+        let name = std::str::from_utf8(info.name)
+            .map_err(|_| invalid("CLAP parameter name is not UTF-8"))?;
+        parameters.push(ClapParameterDescriptor {
+            id: info.id.get(),
+            name: name.to_owned(),
+            min_value: info.min_value,
+            max_value: info.max_value,
+            default_value: info.default_value,
+            current_value: extension
+                .get_value(handle, info.id)
+                .ok_or_else(|| invalid("CLAP parameter current value is unavailable"))?,
+            automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
+            stepped: info.flags.contains(ParamInfoFlags::IS_STEPPED),
+            enumeration: info.flags.contains(ParamInfoFlags::IS_ENUM),
+            read_only: info.flags.contains(ParamInfoFlags::IS_READONLY),
+            hidden: info.flags.contains(ParamInfoFlags::IS_HIDDEN),
+        });
+    }
+    validate_parameters(&parameters)?;
+    Ok(parameters)
+}
+
+pub(super) fn validate_parameters(
+    parameters: &[ClapParameterDescriptor],
+) -> Result<(), AudioProcessorHostError> {
+    if parameters.len() > MAX_PARAMETERS as usize {
+        return Err(invalid("CLAP parameter count exceeds the supported bound"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for parameter in parameters {
+        if ClapId::from_raw(parameter.id).is_none()
+            || !seen.insert(parameter.id)
+            || parameter.name.is_empty()
+            || parameter.name.len() > 256
+            || !parameter.min_value.is_finite()
+            || !parameter.max_value.is_finite()
+            || !parameter.default_value.is_finite()
+            || !parameter.current_value.is_finite()
+            || parameter.min_value > parameter.max_value
+            || !(parameter.min_value..=parameter.max_value).contains(&parameter.default_value)
+            || !(parameter.min_value..=parameter.max_value).contains(&parameter.current_value)
+            || (parameter.enumeration && !parameter.stepped)
+            || (parameter.stepped
+                && [
+                    parameter.min_value,
+                    parameter.max_value,
+                    parameter.default_value,
+                    parameter.current_value,
+                ]
+                .into_iter()
+                .any(|value| value.fract() != 0.0 || value.abs() > 9_007_199_254_740_992.0))
+        {
+            return Err(invalid("CLAP parameter metadata is invalid or ambiguous"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_descriptors(
@@ -606,6 +752,43 @@ mod tests {
     }
 
     #[test]
+    fn parameter_metadata_has_stable_ids_and_exact_numeric_contracts() {
+        let parameter = ClapParameterDescriptor {
+            id: 7,
+            name: "Mix".to_owned(),
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 0.5,
+            current_value: 0.5,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        };
+        validate_parameters(std::slice::from_ref(&parameter)).expect("valid CLAP parameter");
+        let schema = parameter.authoring_schema().expect("authoring schema");
+        assert_eq!(schema.parameter_id.as_str(), "clap.param.7");
+        assert_eq!(schema.default_value, PropertyValue::Double(0.5));
+        assert!(schema.is_animatable);
+        assert_eq!(schema.numeric.expect("numeric bounds").hard_range.max, 1.0);
+        assert!(validate_parameters(&[parameter.clone(), parameter.clone()]).is_err());
+        assert!(validate_parameters(&[ClapParameterDescriptor {
+            default_value: 2.0,
+            ..parameter.clone()
+        }])
+        .is_err());
+        assert!(validate_parameters(&[ClapParameterDescriptor {
+            id: u32::MAX,
+            ..parameter.clone()
+        }])
+        .is_err());
+        assert!(
+            validate_parameters(&[ClapParameterDescriptor { stepped: true, ..parameter }]).is_err()
+        );
+    }
+
+    #[test]
     fn bounded_reader_rejects_oversized_worker_response() {
         let temp = tempfile::tempdir().expect("temporary discovery directory");
         let response_path = temp.path().join("response.json");
@@ -702,5 +885,14 @@ mod tests {
             AudioProcessorTail::None
         );
         assert!(registration.execution_contract.requires_state_entry());
+        assert_eq!(registration.parameters.len(), 1);
+        let volume = &registration.parameters[0];
+        assert_eq!(
+            volume.parameter_id().expect("volume identity").as_str(),
+            "clap.param.1"
+        );
+        assert_eq!(volume.name, "Volume");
+        assert_eq!((volume.min_value, volume.max_value), (0.0, 1.0));
+        assert!(volume.automatable);
     }
 }

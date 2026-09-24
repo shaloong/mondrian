@@ -1,6 +1,6 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
-use super::clap_discovery::fingerprint_clap_binary;
+use super::clap_discovery::{fingerprint_clap_binary, list_parameters, validate_parameters};
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -17,13 +17,18 @@ use clack_extensions::audio_ports::{
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
+use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::{
-    AudioPortBuffer, AudioPortBufferType, AudioPorts, HostHandlers, HostInfo, InputChannel,
-    InputEvents, OutputEvents, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry,
+    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, EventBuffer, HostHandlers, HostInfo,
+    InputChannel, OutputEvents, Pckn, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry,
     PluginInstance, SharedHandler,
 };
-use mondrian_core::AudioChannelLayout;
-use mondrian_timeline::audio::AudioProcessorDefinitionRef;
+use mondrian_core::{
+    AudioChannelLayout, AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve,
+};
+use mondrian_timeline::audio::{
+    AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorParameter,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
@@ -103,6 +108,8 @@ pub struct ClapPluginRegistration {
     pub binary_sha256: [u8; 32],
     /// Exact scheduling contract supplied by the caller and rechecked in the child.
     pub execution_contract: AudioProcessorExecutionContract,
+    /// Definition-local parameter IDs and plain-value contracts from the probe.
+    pub parameters: Vec<super::ClapParameterDescriptor>,
 }
 
 /// Parent-side registry that packages an installed CLAP reference for the child.
@@ -163,6 +170,60 @@ impl DiscoveredClapAudioProcessorSpecResolver {
     pub fn descriptors(&self) -> Vec<&ClapPluginDescriptor> {
         self.plugins.values().map(|(descriptor, _, _)| descriptor).collect()
     }
+
+    /// Capture one selected plugin's current plain values into a portable author instance.
+    ///
+    /// The selected binary is probed again for this render contract and state;
+    /// a later Preview or Export preparation repeats the same probe.
+    pub fn create_instance(
+        &self,
+        plugin_id: &str,
+        render_contract: crate::AudioRenderContract,
+        state: Option<Vec<u8>>,
+    ) -> Result<AudioProcessorInstance, AudioProcessorHostError> {
+        let (_, library_path, fingerprint) = self
+            .plugins
+            .get(plugin_id)
+            .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
+        let registration = probe_clap_plugin_registration(
+            &self.helper_executable,
+            library_path,
+            plugin_id,
+            render_contract,
+            state.as_deref(),
+        )?;
+        if registration.binary_sha256 != *fingerprint {
+            return Err(unavailable(
+                "CLAP binary changed after descriptor discovery",
+            ));
+        }
+        let mut parameters = AuthoringMap::new();
+        for descriptor in registration.parameters.iter().filter(|parameter| !parameter.read_only) {
+            let schema = descriptor.authoring_schema()?;
+            let parameter_id = schema.parameter_id.clone();
+            let mut parameter = AudioProcessorParameter::from_schema(schema)
+                .map_err(|error| invalid(format!("CLAP parameter schema is invalid: {error}")))?;
+            parameter
+                .set_automation(
+                    ExactAutomationCurve::new(parameter_id.clone(), descriptor.current_value)
+                        .map_err(|error| {
+                            invalid(format!("CLAP current parameter value is invalid: {error}"))
+                        })?,
+                )
+                .map_err(|error| invalid(format!("CLAP parameter value is invalid: {error}")))?;
+            parameters.insert(parameter_id, parameter);
+        }
+        Ok(AudioProcessorInstance {
+            id: AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: plugin_id.to_owned(),
+                schema_version: 1,
+            },
+            bypassed: false,
+            parameters,
+            opaque_state: state.map(|bytes| bytes.into_iter().collect()),
+        })
+    }
 }
 
 impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecResolver {
@@ -212,6 +273,7 @@ impl ClapAudioProcessorSpecResolver {
                 || !plugin.library_path.is_absolute()
                 || plugin.binary_sha256 == [0; 32]
                 || !plugin.execution_contract.requires_state_entry()
+                || validate_parameters(&plugin.parameters).is_err()
                 || by_id.insert(plugin.plugin_id.clone(), plugin).is_some()
             {
                 return Err(invalid("CLAP registrations need unique IDs, absolute libraries, and explicit state entry"));
@@ -235,20 +297,33 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         if *schema_version != 1 {
             return Err(unavailable("CLAP definition schema version is unsupported"));
         }
-        if !request.parameters().is_empty() {
-            return Err(unavailable(
-                "CLAP parameter restoration is not yet supported",
-            ));
-        }
         let plugin = self
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not registered")))?;
+        let mut parameter_ids = Vec::with_capacity(request.parameters().len());
+        let mut clap_parameter_ids = Vec::with_capacity(request.parameters().len());
+        for (parameter_id, parameter) in request.parameters() {
+            let descriptor = plugin
+                .parameters
+                .iter()
+                .find(|descriptor| descriptor.parameter_id().as_ref().ok() == Some(parameter_id))
+                .ok_or_else(|| invalid("authored CLAP parameter is absent from the plugin"))?;
+            if descriptor.read_only || parameter.schema != descriptor.authoring_schema()? {
+                return Err(invalid(
+                    "authored CLAP parameter contract differs from the plugin",
+                ));
+            }
+            parameter_ids.push(parameter_id.clone());
+            clap_parameter_ids.push(descriptor.id);
+        }
         let payload = serde_json::to_vec(&ClapPayload {
             library_path: plugin.library_path.clone(),
             plugin_id: plugin.plugin_id.clone(),
             binary_sha256: plugin.binary_sha256,
             state: request.opaque_state().map(ToOwned::to_owned),
+            parameters: plugin.parameters.clone(),
+            parameter_ids: clap_parameter_ids,
         })
         .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
         IsolatedAudioProcessorWorkerSpec::new(
@@ -256,7 +331,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             payload,
             plugin.execution_contract,
             AudioProcessorAuxiliaryInputContract::default(),
-            Vec::new(),
+            parameter_ids,
             request.render_contract(),
         )
     }
@@ -270,6 +345,8 @@ struct ClapPayload {
     binary_sha256: [u8; 32],
     #[serde(default)]
     state: Option<Vec<u8>>,
+    parameters: Vec<super::ClapParameterDescriptor>,
+    parameter_ids: Vec<u32>,
 }
 
 impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
@@ -277,10 +354,8 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-        if !request.auxiliary_inputs().buses.is_empty() || !request.parameter_ids().is_empty() {
-            return Err(invalid(
-                "CLAP auxiliary buses and parameter lanes are not yet supported",
-            ));
+        if !request.auxiliary_inputs().buses.is_empty() {
+            return Err(invalid("CLAP auxiliary buses are not yet supported"));
         }
         let payload: ClapPayload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid CLAP worker payload: {error}")))?;
@@ -288,6 +363,22 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             return Err(invalid(
                 "CLAP library path must be absolute and plugin ID nonempty",
             ));
+        }
+        validate_parameters(&payload.parameters)?;
+        if payload.parameter_ids.len() != request.parameter_ids().len() {
+            return Err(invalid(
+                "CLAP parameter lane count differs from the worker request",
+            ));
+        }
+        for (parameter_id, clap_id) in request.parameter_ids().iter().zip(&payload.parameter_ids) {
+            let descriptor = payload
+                .parameters
+                .iter()
+                .find(|parameter| parameter.id == *clap_id)
+                .ok_or_else(|| invalid("CLAP parameter lane has no descriptor"))?;
+            if descriptor.read_only || descriptor.parameter_id()? != *parameter_id {
+                return Err(invalid("CLAP parameter lane identity is invalid"));
+            }
         }
         if fingerprint_clap_binary(&payload.library_path)? != payload.binary_sha256 {
             return Err(unavailable("CLAP binary changed since processor admission"));
@@ -301,6 +392,8 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             entry,
             plugin_id.as_c_str(),
             payload.state.as_deref(),
+            &payload.parameters,
+            &payload.parameter_ids,
         )
     }
 }
@@ -310,6 +403,8 @@ fn prepare_loaded(
     entry: PluginEntry,
     plugin_id: &CStr,
     state: Option<&[u8]>,
+    expected_parameters: &[super::ClapParameterDescriptor],
+    parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
     let factory = entry
         .get_plugin_factory()
@@ -355,6 +450,11 @@ fn prepare_loaded(
     };
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
+    if list_parameters(&handle)? != expected_parameters {
+        return Err(invalid(
+            "CLAP parameter metadata changed since contract probe",
+        ));
+    }
     let ports = handle
         .get_extension::<PluginAudioPorts>()
         .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
@@ -417,6 +517,27 @@ fn prepare_loaded(
         ));
     }
     let frames = render.max_block_frames;
+    let event_capacity = frames
+        .checked_mul(parameter_ids.len())
+        .filter(|capacity| *capacity <= 1_048_576)
+        .ok_or_else(|| invalid("CLAP parameter event capacity exceeds the supported bound"))?;
+    let parameter_lanes = parameter_ids
+        .iter()
+        .map(|id| {
+            let descriptor = expected_parameters
+                .iter()
+                .find(|parameter| parameter.id == *id)
+                .ok_or_else(|| invalid("CLAP parameter lane is missing"))?;
+            let clap_id = ClapId::from_raw(*id)
+                .ok_or_else(|| invalid("CLAP parameter lane ID is invalid"))?;
+            Ok((
+                clap_id,
+                descriptor.min_value,
+                descriptor.max_value,
+                descriptor.stepped,
+            ))
+        })
+        .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
     let input = vec![vec![0.0; frames]; channel_count];
     let output = vec![vec![0.0; frames]; channel_count];
     Ok(Box::new(ClapWorker {
@@ -427,6 +548,8 @@ fn prepare_loaded(
         output,
         input_ports: AudioPorts::with_capacity(channel_count, 1),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
+        parameter_lanes,
+        input_events: EventBuffer::with_capacity(event_capacity),
         last_end: None,
         shared,
     }))
@@ -440,6 +563,8 @@ struct ClapWorker {
     output: Vec<Vec<f32>>,
     input_ports: AudioPorts,
     output_ports: AudioPorts,
+    parameter_lanes: Vec<(ClapId, f64, f64, bool)>,
+    input_events: EventBuffer,
     last_end: Option<i64>,
     shared: ClapHostShared,
 }
@@ -484,6 +609,36 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                 "CLAP plugin requested a host restart; prepare a new instance".to_owned(),
             ));
         }
+        if block.parameter_lane_count() != self.parameter_lanes.len() {
+            return Err(AudioProcessorHostError::Process(
+                "CLAP parameter lane count changed during processing".to_owned(),
+            ));
+        }
+        self.input_events.clear();
+        for (lane, &(clap_id, min, max, stepped)) in self.parameter_lanes.iter().enumerate() {
+            let events = block.parameter_events(lane).ok_or_else(|| {
+                AudioProcessorHostError::Process("CLAP parameter lane is missing".to_owned())
+            })?;
+            for event in events {
+                if event.sample_offset as usize >= frames
+                    || !event.value.is_finite()
+                    || event.value < min
+                    || event.value > max
+                    || (stepped && event.value.fract() != 0.0)
+                {
+                    return Err(AudioProcessorHostError::Process(
+                        "CLAP parameter event violates its admitted contract".to_owned(),
+                    ));
+                }
+                self.input_events.push(&ParamValueEvent::new(
+                    event.sample_offset,
+                    clap_id,
+                    Pckn::match_all(),
+                    event.value,
+                ));
+            }
+        }
+        self.input_events.sort();
         for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
             for (channel, sample) in samples.iter().copied().enumerate() {
                 self.input[channel][frame] = sample;
@@ -518,7 +673,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             .process(
                 &input_audio,
                 &mut output_audio,
-                &InputEvents::empty(),
+                &self.input_events.as_input(),
                 &mut OutputEvents::void(),
                 u64::try_from(block.start_sample()).ok(),
                 None,
@@ -570,13 +725,19 @@ mod tests {
     use clack_extensions::audio_ports::{
         AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPortsImpl,
     };
+    use clack_extensions::params::{
+        ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
+        PluginMainThreadParams, PluginParams,
+    };
+    use clack_plugin::events::spaces::CoreEventSpace;
     use clack_plugin::prelude::{
         Audio, ChannelPair, ClapId, DefaultPluginFactory, Events, HostAudioProcessorHandle,
         HostMainThreadHandle, HostSharedHandle, Plugin, PluginAudioConfiguration as PluginConfig,
-        PluginDescriptor, PluginError, PluginExtensions, PluginMainThread, Process, ProcessStatus,
-        SinglePluginEntry,
+        PluginDescriptor, PluginError, PluginExtensions, PluginMainThread, PluginShared, Process,
+        ProcessStatus, SinglePluginEntry,
     };
     use mondrian_core::AudioChannelLayout;
+    use std::sync::atomic::AtomicU32;
     use std::sync::atomic::{AtomicUsize, Ordering as TestOrdering};
 
     static DEACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -584,6 +745,171 @@ mod tests {
     struct GainPlugin;
     struct GainMain;
     struct GainProcessor;
+
+    struct AutomatedGainPlugin;
+    struct AutomatedGainShared(AtomicU32);
+    struct AutomatedGainMain<'a>(&'a AutomatedGainShared);
+    struct AutomatedGainProcessor<'a>(&'a AutomatedGainShared);
+
+    impl PluginShared<'_> for AutomatedGainShared {}
+
+    impl Plugin for AutomatedGainPlugin {
+        type AudioProcessor<'a> = AutomatedGainProcessor<'a>;
+        type Shared<'a> = AutomatedGainShared;
+        type MainThread<'a> = AutomatedGainMain<'a>;
+
+        fn declare_extensions(
+            builder: &mut PluginExtensions<Self>,
+            _shared: Option<&AutomatedGainShared>,
+        ) {
+            builder.register::<PluginAudioPorts>().register::<PluginParams>();
+        }
+    }
+
+    impl DefaultPluginFactory for AutomatedGainPlugin {
+        fn get_descriptor() -> PluginDescriptor {
+            PluginDescriptor::new("org.mondrian.test.automated-gain", "Automated Gain Fixture")
+        }
+
+        fn new_shared(_host: HostSharedHandle<'_>) -> Result<AutomatedGainShared, PluginError> {
+            Ok(AutomatedGainShared(AtomicU32::new(1.0_f32.to_bits())))
+        }
+
+        fn new_main_thread<'a>(
+            _host: HostMainThreadHandle<'a>,
+            shared: &'a AutomatedGainShared,
+        ) -> Result<AutomatedGainMain<'a>, PluginError> {
+            Ok(AutomatedGainMain(shared))
+        }
+    }
+
+    impl<'a> PluginMainThread<'a, AutomatedGainShared> for AutomatedGainMain<'a> {}
+
+    impl PluginAudioPortsImpl for AutomatedGainMain<'_> {
+        fn count(&self, _is_input: bool) -> u32 {
+            1
+        }
+
+        fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+            if index == 0 {
+                writer.set(&AudioPortInfo {
+                    id: ClapId::new(0),
+                    name: b"main",
+                    channel_count: 2,
+                    flags: AudioPortFlags::IS_MAIN,
+                    port_type: Some(AudioPortType::STEREO),
+                    in_place_pair: None,
+                });
+            }
+        }
+    }
+
+    impl PluginMainThreadParams for AutomatedGainMain<'_> {
+        fn count(&self) -> u32 {
+            1
+        }
+
+        fn get_info(&self, index: u32, writer: &mut ParamInfoWriter) {
+            if index == 0 {
+                writer.set(&ParamInfo {
+                    id: ClapId::new(1),
+                    flags: ParamInfoFlags::IS_AUTOMATABLE,
+                    cookie: Default::default(),
+                    name: b"Gain",
+                    module: b"",
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: 1.0,
+                });
+            }
+        }
+
+        fn get_value(&self, id: ClapId) -> Option<f64> {
+            (id == ClapId::new(1)).then(|| f32::from_bits(self.0 .0.load(Ordering::Relaxed)) as f64)
+        }
+
+        fn value_to_text(
+            &self,
+            _id: ClapId,
+            _value: f64,
+            _writer: &mut ParamDisplayWriter,
+        ) -> std::fmt::Result {
+            Err(std::fmt::Error)
+        }
+
+        fn text_to_value(&self, _id: ClapId, _text: &CStr) -> Option<f64> {
+            None
+        }
+
+        fn flush(&self, _input: &clack_plugin::prelude::InputEvents, _output: &mut OutputEvents) {}
+    }
+
+    impl PluginAudioProcessorParams for AutomatedGainProcessor<'_> {
+        fn flush(
+            &mut self,
+            _input: &clack_plugin::prelude::InputEvents,
+            _output: &mut OutputEvents,
+        ) {
+        }
+    }
+
+    impl<'a>
+        clack_plugin::plugin::PluginAudioProcessor<'a, AutomatedGainShared, AutomatedGainMain<'a>>
+        for AutomatedGainProcessor<'a>
+    {
+        fn activate(
+            _host: HostAudioProcessorHandle<'a>,
+            _main: &AutomatedGainMain<'a>,
+            shared: &'a AutomatedGainShared,
+            _config: PluginConfig,
+        ) -> Result<Self, PluginError> {
+            Ok(Self(shared))
+        }
+
+        fn process(
+            &mut self,
+            _process: Process,
+            mut audio: Audio,
+            events: Events,
+        ) -> Result<ProcessStatus, PluginError> {
+            let mut gains = [f32::from_bits(self.0 .0.load(Ordering::Relaxed)); 4];
+            let mut gain = gains[0];
+            let mut next = events.input.iter().peekable();
+            for (frame, slot) in gains.iter_mut().enumerate() {
+                while next.peek().is_some_and(|event| event.header().time() as usize == frame) {
+                    let Some(event) = next.next() else { break };
+                    if let Some(CoreEventSpace::ParamValue(value)) = event.as_core_event()
+                        && value.param_id() == Some(ClapId::new(1))
+                    {
+                        gain = value.value() as f32;
+                    }
+                }
+                *slot = gain;
+            }
+            self.0 .0.store(gain.to_bits(), Ordering::Relaxed);
+            let mut pair = audio.port_pair(0).ok_or(PluginError::Message("missing main port"))?;
+            let mut channels =
+                pair.channels()?.into_f32().ok_or(PluginError::Message("missing f32"))?;
+            for channel in channels.iter_mut() {
+                match channel {
+                    ChannelPair::InputOutput(input, output) => {
+                        for ((source, destination), gain) in
+                            input.iter().zip(output.iter_mut()).zip(gains)
+                        {
+                            *destination = *source * gain;
+                        }
+                    }
+                    ChannelPair::InPlace(samples) => {
+                        for (sample, gain) in samples.iter_mut().zip(gains) {
+                            *sample *= gain;
+                        }
+                    }
+                    _ => return Err(PluginError::Message("unpaired channel")),
+                }
+            }
+            Ok(ProcessStatus::Continue)
+        }
+    }
 
     impl Plugin for GainPlugin {
         type AudioProcessor<'a> = GainProcessor;
@@ -690,6 +1016,7 @@ mod tests {
             library_path: helper.clone(),
             binary_sha256: [1; 32],
             execution_contract: contract(),
+            parameters: Vec::new(),
         };
         assert!(ClapAudioProcessorSpecResolver::new(
             helper.clone(),
@@ -740,6 +1067,8 @@ mod tests {
             plugin_id: "org.example.gain".to_owned(),
             binary_sha256: [7; 32],
             state: None,
+            parameters: Vec::new(),
+            parameter_ids: Vec::new(),
         })
         .expect("payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
@@ -784,7 +1113,7 @@ mod tests {
             parameter_ids: Vec::new(),
             render_contract,
         };
-        let mut worker = prepare_loaded(request, entry, c"org.mondrian.test.gain", None)
+        let mut worker = prepare_loaded(request, entry, c"org.mondrian.test.gain", None, &[], &[])
             .expect("prepare test CLAP plugin");
         worker.enter_state(12).expect("enter CLAP state");
         let mut samples = [0.25, -0.5, 1.0, 0.125];
@@ -861,8 +1190,34 @@ mod tests {
             plugin_id: "org.rust-audio.clack.gain".to_owned(),
             schema_version: 1,
         };
-        let parameters = BTreeMap::new();
         let state = 0.5_f32.to_le_bytes();
+        let instance = resolver
+            .create_instance(
+                "org.rust-audio.clack.gain",
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 512,
+                    processing_mode: AudioProcessingMode::Realtime,
+                    processor_session_scratch_budget_bytes: 1024 * 1024,
+                    public_output_lookahead_budget_frames: 4096,
+                    compensation_delay_scratch_budget_bytes: 1024 * 1024,
+                },
+                Some(state.to_vec()),
+            )
+            .expect("capture installed plugin parameters");
+        let parameters = instance
+            .parameters
+            .iter()
+            .map(|(id, parameter)| (id.clone(), parameter.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(
+            parameters[&mondrian_core::ParameterId::new("clap.param.1").expect("volume ID")]
+                .automation
+                .default_value,
+            0.5
+        );
         let request = AudioProcessorPrepareRequest::new(
             AudioProcessorOccurrence {
                 instance_id: AudioProcessorInstanceId::new(),
@@ -886,9 +1241,149 @@ mod tests {
         let payload: ClapPayload =
             serde_json::from_slice(&spec.preparation_payload).expect("CLAP worker payload");
         assert_eq!(payload.state, Some(state.to_vec()));
+        assert_eq!(payload.parameter_ids, vec![1]);
         assert_eq!(
             spec.plugin_execution_contract.algorithmic_latency_frames(),
             0
         );
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn reference_clap_receives_multiple_parameter_events() {
+        use super::super::SharedParameterEvent;
+        use mondrian_core::ParameterId;
+
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let render_contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let registration = probe_clap_plugin_registration(
+            &helper,
+            &plugin,
+            "org.rust-audio.clack.gain",
+            render_contract,
+            None,
+        )
+        .expect("probe Clack gain");
+        let parameter_ids = vec![ParameterId::new("clap.param.1").expect("stable parameter ID")];
+        let payload = serde_json::to_vec(&ClapPayload {
+            library_path: registration.library_path,
+            plugin_id: registration.plugin_id,
+            binary_sha256: registration.binary_sha256,
+            state: None,
+            parameters: registration.parameters,
+            parameter_ids: vec![1],
+        })
+        .expect("encode worker payload");
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            payload,
+            plugin_execution_contract: registration.execution_contract,
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: parameter_ids.clone(),
+            render_contract,
+        };
+        let mut worker = ClapAudioProcessorWorkerFactory.prepare(request).expect("prepare CLAP");
+        worker.enter_state(0).expect("enter CLAP state");
+        let mut samples = [1.0_f32; 8];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let events = [
+            SharedParameterEvent { lane: 0, sample_offset: 0, value: 0.25 },
+            SharedParameterEvent { lane: 0, sample_offset: 2, value: 0.5 },
+        ];
+        let block = IsolatedAudioProcessorWorkerBlock::new(
+            0,
+            4,
+            render_contract,
+            &mut samples,
+            &auxiliary,
+            &[],
+            &parameter_ids,
+            &events,
+        );
+        worker.process(block).expect("process exact CLAP parameter events");
+        // This Clack example multiplies the entire buffer once per event batch.
+        // Its result verifies delivery of both events, but is not a sample-accurate oracle.
+        assert_eq!(samples, [0.125; 8]);
+    }
+
+    #[test]
+    fn clap_abi_preserves_sample_accurate_parameter_offsets() {
+        use super::super::SharedParameterEvent;
+        use mondrian_core::ParameterId;
+
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/automated-gain",
+        )
+        .expect("static automated CLAP fixture");
+        let render_contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let parameter_ids = vec![ParameterId::new("clap.param.1").expect("parameter identity")];
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            payload: Vec::new(),
+            plugin_execution_contract: contract(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: parameter_ids.clone(),
+            render_contract,
+        };
+        let descriptor = super::super::ClapParameterDescriptor {
+            id: 1,
+            name: "Gain".to_owned(),
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 1.0,
+            current_value: 1.0,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        };
+        let mut worker = prepare_loaded(
+            request,
+            entry,
+            c"org.mondrian.test.automated-gain",
+            None,
+            &[descriptor],
+            &[1],
+        )
+        .expect("prepare automated fixture");
+        worker.enter_state(0).expect("enter fixture state");
+        let mut samples = [1.0_f32; 8];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let events = [
+            SharedParameterEvent { lane: 0, sample_offset: 0, value: 0.25 },
+            SharedParameterEvent { lane: 0, sample_offset: 2, value: 0.5 },
+        ];
+        let block = IsolatedAudioProcessorWorkerBlock::new(
+            0,
+            4,
+            render_contract,
+            &mut samples,
+            &auxiliary,
+            &[],
+            &parameter_ids,
+            &events,
+        );
+        worker.process(block).expect("process exact parameter offsets");
+        assert_eq!(samples, [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5]);
     }
 }

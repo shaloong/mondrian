@@ -68,8 +68,10 @@ library, checks descriptor identity, exactly one main Float32 input/output
 port with the requested mono/stereo port type and channel count, latency, and
 tail, restores supplied
 opaque state through CLAP's state extension before activation, and processes
-interleaved blocks through planar CLAP buffers. It rejects unsupported
-parameter lanes, auxiliary buses, and incompatible layouts.
+interleaved blocks through planar CLAP buffers. It accepts numeric CLAP
+parameter lanes with stable IDs and exact author-time automation; the worker
+rechecks probed metadata and emits sorted sample-accurate CLAP value events.
+It rejects auxiliary buses and incompatible layouts.
 Descriptor discovery executes one installed library in a separate deadline-bound
 child and validates its bounded response. The same child can probe a selected
 definition for exact Mono/Stereo port, latency, and tail facts after restoring
@@ -82,8 +84,12 @@ checks it again after descriptor discovery, after contract probing, and inside
 the processing child before native loading. A changed installed binary fails
 admission rather than silently changing the sound between Preview and Export.
 An installed reference-plugin test verifies the Preview adapter launches the
-real CLAP worker and renders a block. Automatic installed-path enumeration,
-project insertion UI, state capture, parameter automation, project-persistent
+real CLAP worker and renders a block. A local CLAP fixture verifies that parameter
+events retain their sample offsets at the ABI. The Clack Gain example receives
+multiple events but applies each gain to the whole buffer, so its output is
+checked against that implementation rather than used as a sample-accuracy oracle.
+Automatic installed-path enumeration,
+project insertion UI, state capture, parameter-control UI, project-persistent
 binary revision recovery, and a full Preview/Export signal-parity test remain required before
 CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.

@@ -170,7 +170,7 @@ tempfile         = "3"
 memmap2          = "0.9.11"
 clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
 clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params"] }
 
 # ---- 颜色管理 ----
 ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933c65dc4e8e4e22767174f0e22b07fe7af42e07", features = ["bundled"] }
