@@ -9,6 +9,9 @@ mod clap_discovery;
 mod clap_worker;
 mod protocol;
 mod supervisor;
+mod vst3_catalog;
+mod vst3_discovery;
+mod vst3_worker;
 mod worker;
 
 #[cfg(test)]
@@ -41,6 +44,17 @@ pub use clap_worker::{
     ClapAudioProcessorSpecResolver, ClapAudioProcessorWorkerFactory, ClapPluginRegistration,
     DiscoveredClapAudioProcessorSpecResolver, InstalledClapAudioProcessorSpecResolver,
 };
+pub use vst3_catalog::{
+    DiscoveredVst3AudioProcessorSpecResolver, InstalledVst3AudioProcessorSpecResolver,
+};
+pub use vst3_discovery::{
+    probe_vst3_plugin_registration, run_vst3_discovery_worker, scan_vst3_binary_descriptors,
+    Vst3PluginDescriptor, VST3_DISCOVERY_WORKER_ARGUMENT,
+};
+pub use vst3_worker::{
+    Vst3AudioProcessorSpecResolver, Vst3AudioProcessorWorkerFactory, Vst3ParameterDescriptor,
+    Vst3PluginRegistration, VST3_AUDIO_WORKER_ARGUMENT,
+};
 
 /// Hidden endpoint environment used only between a parent Adapter and its Worker.
 pub const ISOLATED_AUDIO_PROCESSOR_ENDPOINT_ENV: &str =
@@ -62,6 +76,7 @@ pub struct IsolatedAudioProcessorWorkerSpec {
     parameter_ids: Vec<ParameterId>,
     render_contract: AudioRenderContract,
     startup_timeout: Duration,
+    state_entry_timeout: Duration,
     operation_timeout: Duration,
 }
 
@@ -94,6 +109,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             parameter_ids,
             render_contract,
             startup_timeout: Duration::from_secs(5),
+            state_entry_timeout: Duration::from_secs(5),
             operation_timeout,
         };
         spec.validate()?;
@@ -127,12 +143,23 @@ impl IsolatedAudioProcessorWorkerSpec {
         Ok(self)
     }
 
+    /// Bound a discontinuity reset separately from one realtime audio block.
+    pub fn with_state_entry_timeout(
+        mut self,
+        timeout: Duration,
+    ) -> Result<Self, AudioProcessorHostError> {
+        self.state_entry_timeout = timeout;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), AudioProcessorHostError> {
         if self.helper_executable.as_os_str().is_empty()
             || self.preparation_payload.len() > MAX_CONTROL_FRAME_BYTES / 2
             || self.render_contract.sample_rate == 0
             || self.render_contract.max_block_frames == 0
             || self.startup_timeout.is_zero()
+            || self.state_entry_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.parameter_ids.len() > 4096
         {
@@ -170,6 +197,7 @@ impl fmt::Debug for IsolatedAudioProcessorWorkerSpec {
             .field("parameter_count", &self.parameter_ids.len())
             .field("render_contract", &self.render_contract)
             .field("startup_timeout", &self.startup_timeout)
+            .field("state_entry_timeout", &self.state_entry_timeout)
             .field("operation_timeout", &self.operation_timeout)
             .finish_non_exhaustive()
     }

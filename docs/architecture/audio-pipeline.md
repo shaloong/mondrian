@@ -1,5 +1,25 @@
 # Audio pipeline
 
+The VST3 adapter uses a selected-binary catalog, a deadline-bound metadata
+child, and a distinct supervised audio-worker mode. Its authoring schema keeps
+continuous parameter values normalized to `0..=1`; stepped parameters use
+integer indices `0..=step_count` and hold interpolation, then normalize at the
+ABI boundary. Discovery and worker both reject unsupported auxiliary/multiple
+main buses, mode changes, metadata drift, and latency/tail drift. Worker
+continuity entry releases the previous class and reloads the exact class from
+the saved opaque state, while
+sample-offset points enter the VST3 process queue. A reference Gain DLL built
+from the permissively licensed `vst3-rs` example passed an isolated stereo
+signal test with gain `0.5`, then a fresh continuity entry with gain `0.25`.
+That fixture does not implement meaningful VST3 state serialization, so
+state round-trip and App Preview/Export parity are still qualification gates.
+The current control frame limits serialized VST3 state to 128 KiB; larger state
+is rejected explicitly. Third-party host/license notices are in `LICENSES/`.
+VST3 worker startup is bounded to 15 seconds and continuity entry to 10
+seconds; the realtime block deadline stays at 100 milliseconds. Those bounds
+are separate because plugin construction and state restoration can be much
+slower than block processing.
+
 The isolated CLAP adapter has a child-side implementation in
 `mondrian-audio::processor_isolation::clap_worker`. It runs only through the
 application's hidden audio-worker entrypoint. The parent supplies an exact

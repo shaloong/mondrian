@@ -21,6 +21,7 @@ pub(super) struct SupervisedAudioWorker {
     _shared_file: NamedTempFile,
     layout: SharedBlockLayout,
     operation_timeout: Duration,
+    state_entry_timeout: Duration,
     active: bool,
 }
 
@@ -152,6 +153,7 @@ impl SupervisedAudioWorker {
             _shared_file: shared_file,
             layout,
             operation_timeout: spec.operation_timeout,
+            state_entry_timeout: spec.state_entry_timeout,
             active: true,
         })
     }
@@ -171,6 +173,15 @@ impl SupervisedAudioWorker {
     ) -> Result<(), AudioProcessorHostError> {
         if !self.active {
             return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        let timeout = if command.kind == super::protocol::CommandKind::EnterState {
+            self.state_entry_timeout
+        } else {
+            self.operation_timeout
+        };
+        if let Err(error) = set_stream_timeout(&self.control, timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
         }
         let result = (|| -> io::Result<WorkerResponse> {
             command.write_to(&mut self.control)?;

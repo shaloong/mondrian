@@ -1,9 +1,10 @@
 use super::*;
 use crate::{
     AudioKernelBackend, AudioParameterEvent, AudioProcessorAudioIo, AudioProcessorInputBus,
-    AudioProcessorMainAndInputBuses, AudioProcessorTail, AudioRenderRequest,
+    AudioProcessorInsertionPoint, AudioProcessorMainAndInputBuses, AudioProcessorOccurrence,
+    AudioProcessorOccurrenceOwner, AudioProcessorTail, AudioRenderRequest,
 };
-use mondrian_core::{AudioSampleRate, ParameterId};
+use mondrian_core::{AudioSampleRate, ParameterId, ProgramOutputId};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -234,6 +235,106 @@ fn installed_clap_reference_processes_through_isolated_worker() {
         )
         .expect("send automated volume through isolated worker");
     assert!(audio.main.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
+}
+
+#[test]
+#[ignore = "requires a built Mondrian executable and the VST3 SDK gain reference DLL"]
+fn installed_vst3_reference_processes_through_isolated_worker() {
+    let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_VST3_TEST_HELPER to the app executable");
+    let binary = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_VST3_TEST_PLUGIN to the VST3 gain DLL");
+    let descriptors =
+        scan_vst3_binary_descriptors(&helper, &binary).expect("scan VST3 reference classes");
+    assert_eq!(descriptors.len(), 1);
+    let registration = probe_vst3_plugin_registration(
+        &helper,
+        &binary,
+        &descriptors[0].class_id,
+        test_render_contract(),
+        None,
+    )
+    .expect("probe VST3 reference contract");
+    assert_eq!(registration.parameters.len(), 1);
+    let parameter = &registration.parameters[0];
+    assert!(!parameter.read_only);
+    let id = parameter.parameter_id().expect("VST3 stable parameter ID");
+    let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [binary])
+        .expect("discover VST3 reference catalog");
+    let instance = catalog
+        .create_instance(&descriptors[0].class_id, test_render_contract(), None)
+        .expect("capture VST3 authoring instance");
+    assert!(instance.parameters.contains_key(&id));
+    let spec = catalog
+        .resolve(AudioProcessorPrepareRequest::new(
+            AudioProcessorOccurrence {
+                instance_id: instance.id,
+                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+            &instance.definition,
+            &instance.parameters,
+            instance.opaque_state.as_ref().map(AsRef::as_ref),
+            test_render_contract(),
+        ))
+        .expect("resolve VST3 author instance");
+    let factory = IsolatedAudioProcessorFactory::prepare(spec)
+        .expect("prepare VST3 reference through child process");
+    let mut processor = factory.create().expect("create VST3 worker instance");
+    processor.enter_state(100).expect("enter VST3 state");
+    let source = vec![0.125, -0.25, 0.5, -0.75, 0.2, -0.4, 0.8, -1.0];
+    let mut audio = TestAudioIo { main: source.clone(), auxiliary: Vec::new() };
+    let ranges = [Range { start: 0, end: 1 }];
+    processor
+        .process(
+            test_context(100),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                100,
+                4,
+                std::slice::from_ref(&id),
+                &ranges,
+                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+            ),
+        )
+        .expect("process automated VST3 gain through child process");
+    for (actual, source) in audio.main.iter().zip(source) {
+        assert!((actual - source * 0.5).abs() < 1.0e-6);
+    }
+    processor.enter_state(100).expect("reset VST3 continuity");
+    let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: Vec::new() };
+    processor
+        .process(
+            test_context(100),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                100,
+                4,
+                std::slice::from_ref(&id),
+                &ranges,
+                &[AudioParameterEvent { sample_offset: 0, value: 0.25 }],
+            ),
+        )
+        .expect("process after VST3 state re-entry");
+    assert!(audio.main.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
+    processor.enter_state(100).expect("reset before invalid VST3 event");
+    let mut audio = TestAudioIo { main: vec![0.75; 8], auxiliary: Vec::new() };
+    assert!(processor
+        .process(
+            test_context(100),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                100,
+                4,
+                std::slice::from_ref(&id),
+                &ranges,
+                &[AudioParameterEvent { sample_offset: 0, value: 1.5 }],
+            ),
+        )
+        .is_err());
+    assert_eq!(audio.main, vec![0.75; 8]);
 }
 
 #[test]

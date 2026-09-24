@@ -171,6 +171,7 @@ memmap2          = "0.9.11"
 clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
 clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
 clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params"] }
+vst3-host = { git = "https://github.com/HelgeSverre/rust-vst3-host.git", rev = "49fc189177c72cf799d5034fcca81d8aacc3d7a6", default-features = false }
 
 # ---- 颜色管理 ----
 ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933c65dc4e8e4e22767174f0e22b07fe7af42e07", features = ["bundled"] }
@@ -185,6 +186,7 @@ zstd             = "0.11"
 
 [patch.crates-io]
 clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
+vst3 = { git = "https://github.com/coupler-rs/vst3-rs.git", rev = "b2a45f2d40e602eff5a224b41613735388868590" }
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

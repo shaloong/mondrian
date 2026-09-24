@@ -21,6 +21,7 @@ bytemuck.workspace = true
 uuid.workspace = true
 clack-host.workspace = true
 clack-extensions.workspace = true
+vst3-host.workspace = true
 
 [dev-dependencies]
 clack-plugin.workspace = true

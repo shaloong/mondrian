@@ -11,11 +11,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
+            mondrian_audio::VST3_DISCOVERY_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_audio::run_vst3_discovery_worker().map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
             mondrian_audio::ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT,
         ))
     {
         return mondrian_audio::run_isolated_audio_processor_worker(
             &mondrian_audio::ClapAudioProcessorWorkerFactory,
+        )
+        .map_err(Into::into);
+    }
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_audio::VST3_AUDIO_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_audio::run_isolated_audio_processor_worker(
+            &mondrian_audio::Vst3AudioProcessorWorkerFactory,
         )
         .map_err(Into::into);
     }

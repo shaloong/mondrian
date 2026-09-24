@@ -30,15 +30,21 @@ installer separately. Sources: [Steinberg SDK README](https://github.com/steinbe
 [CLAP repository](https://github.com/free-audio/clap), and
 [OpenFX license](https://github.com/AcademySoftwareFoundation/openfx/blob/main/LICENSE.md).
 
-VST3 currently has an authoring identity and an explicit optional binary
-SHA-256 revision field, but no discovery, rebind, or executable Adapter. An
-unbound definition records `null` and cannot authorize native execution. The first
-supported VST3 slice must discover and validate one selected installed effect
-in a bounded child, recheck its class, buses, parameter IDs, latency/tail,
-state, and exact binary revision in the existing supervised processing child,
-then prove saved-state and automation output through both Preview and Export
-against a reference plugin. No independent VST3 audio mixer or export path is
-admitted. Vendor editors and auxiliary buses require separate qualified slices.
+VST3 now has a bounded class-discovery/probe child and a separate supervised
+audio-worker entrypoint. Selected binaries are identified by their canonical
+path and SHA-256 revision; class IDs and parameter IDs are independent of scan
+order. The worker reloads the class, restores the authored state, selects the
+requested realtime or offline mode, and rechecks one active mono/stereo main
+input/output bus, parameter metadata, latency, and tail before processing. It
+delivers normalized VST3 parameter points with sample offsets and rejects
+events beyond the native host queue's 4096-point block bound. A continuity
+entry creates a fresh instance from authored state. A real VST3 SDK Gain DLL
+has passed isolated stereo processing, parameter change, and reset checks.
+The App's hidden child dispatch is present; insertion UI, persistent installed
+catalog restoration, and Preview/Export end-to-end qualification remain before
+the product advertises VST3 support. Vendor editors and auxiliary buses require
+separate qualified slices. Unbound definitions record `null` and cannot
+authorize native execution.
 
 OpenFX has no implemented ABI Adapter today. Its image-effect host needs
 property, parameter, clip/image, memory, progress, threading, and render suites
@@ -159,8 +165,10 @@ Installation and restoration do not
 advance the project author generation. Automatic installed-path enumeration,
 plugin management and relocation UI, state capture, expanded parameter-control UI,
 and broader vendor/plugin signal-parity coverage remain required before
-CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
-unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
+CLAP is advertised as a complete product feature. The VST3 audio backend can
+host an explicitly selected binary but is not yet wired into the product's
+installation and insertion flow. OpenFX binaries remain unhosted. The visual
+Effect registry/DSL does not host OpenFX.
 
 The ignored installed-reference acceptance tests use a built `mondrian`
 executable and the separately built MIT/Apache licensed Clack gain example
@@ -177,8 +185,9 @@ The initial supported subset is audio effects with explicitly negotiated
 Float32 buffers and channel layouts; instruments, MIDI, plugin UI, and
 unimplemented extensions remain unavailable with typed reasons.
 
-VST3 follows through the same Worker, using the VST 3.8 or newer MIT-licensed
-SDK. Its Adapter must honor component/controller separation, bus activation,
+VST3 follows through the same supervised Worker transport with its own child
+entrypoint and the pinned MIT-licensed `vst3-host` crate and MIT/Apache licensed
+`vst3-rs` bindings. Its Adapter must honor component/controller separation, bus activation,
 parameter timing, latency, tail, state, and offline/realtime process modes.
 Earlier SDK releases have different terms and are not an implicit substitute.
 The host must not ship third-party plugin binaries. Keep required SDK copyright
