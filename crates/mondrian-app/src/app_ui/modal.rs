@@ -54,16 +54,8 @@ impl ShellModal {
     }
 
     /// Build the pending-close confirmation modal.
-    pub fn pending_close(action: PendingCloseDialogAction) -> Self {
-        Self::PendingClose(Box::new(PendingCloseDialog::new(action)))
-    }
-
-    /// Build the pending-close confirmation in the selected UI language.
-    pub fn pending_close_with_locale(
-        action: PendingCloseDialogAction,
-        locale: AppUiLocale,
-    ) -> Self {
-        Self::PendingClose(Box::new(PendingCloseDialog::with_locale(action, locale)))
+    pub fn pending_close(action: PendingCloseDialogAction, locale: AppUiLocale) -> Self {
+        Self::PendingClose(Box::new(PendingCloseDialog::new(action, locale)))
     }
 
     /// Build the product preferences modal.
@@ -90,8 +82,8 @@ impl ShellModal {
     }
 
     /// Build the startup recovery inspection modal.
-    pub fn recovery(model: RecoveryConfirmationModel) -> Self {
-        Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model)))
+    pub fn recovery(model: RecoveryConfirmationModel, locale: AppUiLocale) -> Self {
+        Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model, locale)))
     }
 
     /// Build the active-sequence settings modal.

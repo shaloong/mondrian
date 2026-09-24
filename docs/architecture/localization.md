@@ -52,6 +52,13 @@ backend error text.
 The unsaved-project close/quit confirmation also projects action-specific body
 copy and save buttons from the machine-local locale. Its save, discard, cancel,
 Enter, and Escape actions keep the same typed dispatch independent of locale.
+Startup recovery rows and confirmation dialogs project the same immutable
+recovery candidate in the selected locale. Relative age, snapshot count, source
+and target paths, and target revision state are presentation only; confirmation
+passes the unchanged candidate to recovery admission. A newer target revision
+has its own warning copy. Locale changes reproject visible rows without changing
+candidate identity. These dialogs require an explicit locale at construction;
+the alpha UI does not retain duplicate default-language constructors.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

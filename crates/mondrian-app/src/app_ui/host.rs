@@ -76,7 +76,6 @@ use crate::app_ui::preferences_store::{
     AppUiPreferences,
 };
 use crate::app_ui::preview::{viewer_frame_content, WindowPreviewAdapter, WindowPreviewSnapshot};
-use crate::app_ui::recovery_dialog::recovery_age_label;
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -2372,22 +2371,10 @@ fn startup_recovery_projects_from_candidates(
 ) -> Vec<StartupRecoveryProject> {
     candidates
         .iter()
-        .map(|candidate| {
-            let snapshots = if candidate.total_snapshots > 1 {
-                format!("，共 {} 个恢复点", candidate.total_snapshots)
-            } else {
-                String::new()
-            };
-            StartupRecoveryProject {
-                candidate: candidate.clone(),
-                title: recent_project_title(&candidate.project_file),
-                detail: format!(
-                    "{}{} · {}",
-                    recovery_age_label(candidate.saved_at_unix_ms),
-                    snapshots,
-                    recent_project_subtitle(&candidate.project_file)
-                ),
-            }
+        .map(|candidate| StartupRecoveryProject {
+            candidate: candidate.clone(),
+            title: recent_project_title(&candidate.project_file),
+            location: candidate.project_file.display().to_string(),
         })
         .collect()
 }
@@ -4528,7 +4515,7 @@ mod tests {
         assert_eq!(rows[0].candidate.project_file, project_file);
         assert_eq!(rows[0].candidate.autosave_file, autosave_file);
         assert_eq!(rows[0].title, "recover");
-        assert!(rows[0].detail.contains("2 个恢复点"));
+        assert!(rows[0].location.contains("E:/projects"));
     }
 
     #[test]

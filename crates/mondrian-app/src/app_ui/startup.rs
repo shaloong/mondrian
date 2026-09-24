@@ -4,6 +4,7 @@
 //! launch-time presentation and emits shell actions; project lifecycle work
 //! stays in `AppUiHost` / `AppState`.
 
+use fluent_bundle::FluentArgs;
 #[cfg(test)]
 use mondrian_core::ProjectId;
 use mondrian_core::{Color, MondrianError, Result};
@@ -32,7 +33,9 @@ use crate::app_ui::icons::AppIcon;
 use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
-use crate::app_ui::recovery_dialog::RecoveryConfirmationModel;
+use crate::app_ui::recovery_dialog::{
+    recovery_age_label_at, unix_now_ms, RecoveryConfirmationModel,
+};
 use crate::app_ui::shell::project_file_filters;
 
 /// Startup window logical size used by the app UI product entrypoint.
@@ -83,8 +86,27 @@ pub struct StartupRecoveryProject {
     pub candidate: CrashRecoveryCandidate,
     /// Primary row label.
     pub title: String,
-    /// Secondary row label with age/snapshot metadata.
-    pub detail: String,
+    /// Project location, projected with age and count only at the UI boundary.
+    pub location: String,
+}
+
+fn recovery_row_detail_at(
+    project: &StartupRecoveryProject,
+    localizer: &Localizer,
+    now_ms: u64,
+) -> String {
+    let mut args = FluentArgs::new();
+    args.set(
+        "age",
+        recovery_age_label_at(localizer, project.candidate.saved_at_unix_ms, now_ms),
+    );
+    args.set("location", project.location.clone());
+    if project.candidate.total_snapshots > 1 {
+        args.set("count", project.candidate.total_snapshots.to_string());
+        localizer.format("recovery-row-multiple", Some(&args))
+    } else {
+        localizer.format("recovery-row-single", Some(&args))
+    }
 }
 
 /// Startup screen shown before a project is opened.
@@ -104,7 +126,7 @@ pub struct AppUiStartupScreen {
     close_rect: Rect,
     hover: Option<StartupHit>,
     pressed: Option<StartupHit>,
-    localizer: Option<Localizer>,
+    localizer: Localizer,
 }
 
 impl AppUiStartupScreen {
@@ -126,19 +148,18 @@ impl AppUiStartupScreen {
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
-            localizer: Localizer::new(AppUiLocale::ZhCn).ok(),
+            localizer: Localizer::new(AppUiLocale::ZhCn)
+                .expect("bundled UI catalogs must be valid"),
         }
     }
 
     /// Set the machine-local language used by startup chrome.
     pub fn set_locale(&mut self, locale: AppUiLocale) {
-        self.localizer = Localizer::new(locale).ok();
+        self.localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
     }
 
-    fn text(&self, id: &str, fallback: &str) -> String {
-        self.localizer
-            .as_ref()
-            .map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+    fn text(&self, id: &str) -> String {
+        self.localizer.text(id)
     }
 
     /// Replace startup autosave recovery rows.
@@ -171,10 +192,8 @@ impl AppUiStartupScreen {
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
                 self.modal = Some(ShellModal::new_project_with_locale(
-                    AppUiNewProjectDraft::for_locale(
-                        self.localizer.as_ref().map(Localizer::locale).unwrap_or(AppUiLocale::ZhCn),
-                    ),
-                    self.localizer.as_ref().map(Localizer::locale).unwrap_or(AppUiLocale::ZhCn),
+                    AppUiNewProjectDraft::for_locale(self.localizer.locale()),
+                    self.localizer.locale(),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
@@ -210,6 +229,7 @@ impl AppUiStartupScreen {
                     .map_err(|err| startup_shell_action_error(APP_SHELL_RECOVERY_DIALOG, err))?;
                 self.modal = Some(ShellModal::recovery(
                     RecoveryConfirmationModel::from_candidate(payload.candidate),
+                    self.localizer.locale(),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
@@ -511,7 +531,7 @@ impl Widget for AppUiStartupScreen {
         let content_y = self.right_rect.y + CONTENT_PAD_Y;
         let content_width = self.right_rect.width - CONTENT_PAD_X * 2.0;
         ctx.encoder.draw_text(
-            &self.text("startup-heading", "开始工作"),
+            &self.text("startup-heading"),
             typography.heading_h2.font_size,
             Point::new(content_x, content_y),
             colors.popover_foreground,
@@ -520,7 +540,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.new_project_rect,
-            &self.text("startup-new-project", "新建项目"),
+            &self.text("startup-new-project"),
             true,
             Some(AppIcon::PlusFilled),
             StartupHit::NewProject,
@@ -528,7 +548,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.open_project_rect,
-            &self.text("startup-open-project", "打开项目"),
+            &self.text("startup-open-project"),
             false,
             Some(AppIcon::FolderOpenFilled),
             StartupHit::OpenProject,
@@ -537,7 +557,7 @@ impl Widget for AppUiStartupScreen {
         let mut section_y = self.right_rect.y + CONTENT_PAD_Y + 72.0;
         if !self.recovery_projects.is_empty() {
             ctx.encoder.draw_text(
-                &self.text("startup-recoverable-projects", "可恢复项目"),
+                &self.text("startup-recoverable-projects"),
                 typography.large.font_size,
                 Point::new(content_x, section_y),
                 colors.popover_foreground,
@@ -560,8 +580,13 @@ impl Widget for AppUiStartupScreen {
                         rect.width - 28.0,
                         colors.card_foreground,
                     );
+                    let detail = recovery_row_detail_at(
+                        project,
+                        &self.localizer,
+                        unix_now_ms().unwrap_or(project.candidate.saved_at_unix_ms),
+                    );
                     ctx.encoder.draw_text_box(
-                        &project.detail,
+                        &detail,
                         typography.small.font_size,
                         Point::new(rect.x + 14.0, rect.y + 32.0),
                         rect.width - 28.0,
@@ -578,7 +603,7 @@ impl Widget for AppUiStartupScreen {
 
         let recent_y = section_y;
         ctx.encoder.draw_text(
-            &self.text("startup-recent-projects", "最近项目"),
+            &self.text("startup-recent-projects"),
             typography.large.font_size,
             Point::new(content_x, recent_y),
             colors.popover_foreground,
@@ -592,7 +617,7 @@ impl Widget for AppUiStartupScreen {
             );
             ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
             ctx.encoder.draw_text(
-                &self.text("startup-no-recent-projects", "暂无最近项目"),
+                &self.text("startup-no-recent-projects"),
                 typography.body.font_size,
                 Point::new(recent_rect.x + 14.0, recent_rect.y + 20.0),
                 colors.muted_foreground,
@@ -1239,7 +1264,7 @@ mod tests {
         screen.set_recovery_projects(vec![StartupRecoveryProject {
             candidate: candidate.clone(),
             title: "recover".to_owned(),
-            detail: "刚刚，共 2 个恢复点".to_owned(),
+            location: "E:/projects".to_owned(),
         }]);
         screen.layout(Rect::new(
             0.0,
@@ -1287,6 +1312,38 @@ mod tests {
             serde_json::from_value(payload).expect("confirmed recovery payload");
         assert_eq!(payload.candidate, candidate);
         assert!(!screen.has_modal());
+    }
+
+    #[test]
+    fn recovery_row_reprojects_language_without_changing_candidate_identity() {
+        let candidate = CrashRecoveryCandidate {
+            project_id: ProjectId::new(),
+            runtime_root: PathBuf::from("E:/runtime"),
+            project_file: PathBuf::from("E:/projects/recover.mdp"),
+            canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
+            autosave_file: PathBuf::from("E:/runtime/autosave/recover.mdp"),
+            author_generation: 5,
+            asset_library_revision: 2,
+            document_revision: 9,
+            archive_sha256: "a".repeat(64),
+            saved_at_unix_ms: 1_700_000_000_000,
+            total_snapshots: 2,
+        };
+        let row = StartupRecoveryProject {
+            candidate: candidate.clone(),
+            title: "recover".to_owned(),
+            location: "E:/projects".to_owned(),
+        };
+        let zh = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let observed_at = candidate.saved_at_unix_ms + 60_000;
+        let zh_detail =
+            recovery_row_detail_at(&row, &zh, observed_at).replace(['\u{2068}', '\u{2069}'], "");
+        let en_detail =
+            recovery_row_detail_at(&row, &en, observed_at).replace(['\u{2068}', '\u{2069}'], "");
+        assert!(zh_detail.contains("1 分钟前，共 2 个恢复点"));
+        assert!(en_detail.contains("One minute ago · 2 recovery points"));
+        assert_eq!(row.candidate, candidate);
     }
 
     #[test]

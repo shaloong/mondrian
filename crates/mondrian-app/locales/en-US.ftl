@@ -252,3 +252,39 @@ pending-close-save-close = Save and Close
 pending-close-save-quit = Save and Quit
 pending-close-discard = Don't Save
 pending-close-cancel = Cancel
+recovery-title = Confirm project recovery
+recovery-summary = This recovery point contains author generation { $generation } and document revision { $revision }. The manifest has { $count } verifiable recovery points.
+recovery-time = { $exact } ({ $relative })
+recovery-saved-at = Saved: { $time }
+recovery-source = Recovery source: { $path }
+recovery-target = Save destination: { $path }
+recovery-target-state = Destination status: { $state }
+recovery-target-missing = The destination file does not exist. The first save after recovery will create it at this path.
+recovery-target-same = Document revision { $revision } exists at the destination. The recovery point contains later unsaved edits.
+recovery-target-older = Earlier document revision { $revision } exists at the destination. The recovery point is revision { $snapshot }.
+recovery-target-newer = Destination revision { $revision } is newer than recovery revision { $snapshot }. Recovery will not immediately overwrite the destination.
+recovery-safety = Confirming verifies and opens this recovery point as an unsaved project. It does not immediately overwrite the destination. If the destination, manifest, or recovery file changed, recovery stops safely.
+recovery-confirm = Recover this version
+recovery-cancel = Cancel
+recovery-age-seconds =
+    { $count ->
+        [one] One second ago
+       *[other] { $count } seconds ago
+    }
+recovery-age-minutes =
+    { $count ->
+        [one] One minute ago
+       *[other] { $count } minutes ago
+    }
+recovery-age-hours =
+    { $count ->
+        [one] One hour ago
+       *[other] { $count } hours ago
+    }
+recovery-age-days =
+    { $count ->
+        [one] One day ago
+       *[other] { $count } days ago
+    }
+recovery-row-single = { $age } · { $location }
+recovery-row-multiple = { $age } · { $count } recovery points · { $location }

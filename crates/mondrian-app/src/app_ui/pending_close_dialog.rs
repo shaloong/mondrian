@@ -64,12 +64,7 @@ pub struct PendingCloseDialog {
 
 impl PendingCloseDialog {
     /// Build a pending-close confirmation dialog.
-    pub fn new(action: PendingCloseDialogAction) -> Self {
-        Self::with_locale(action, AppUiLocale::ZhCn)
-    }
-
-    /// Build a pending-close confirmation in the selected machine-local UI language.
-    pub fn with_locale(action: PendingCloseDialogAction, locale: AppUiLocale) -> Self {
+    pub fn new(action: PendingCloseDialogAction, locale: AppUiLocale) -> Self {
         let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         Self {
             id: WidgetId::new(),
@@ -220,12 +215,9 @@ mod tests {
 
     #[test]
     fn pending_close_dialog_localizes_both_actions_without_changing_dispatch() {
-        let close = PendingCloseDialog::with_locale(
-            PendingCloseDialogAction::CloseProject,
-            AppUiLocale::EnUs,
-        );
-        let quit =
-            PendingCloseDialog::with_locale(PendingCloseDialogAction::QuitApp, AppUiLocale::EnUs);
+        let close =
+            PendingCloseDialog::new(PendingCloseDialogAction::CloseProject, AppUiLocale::EnUs);
+        let quit = PendingCloseDialog::new(PendingCloseDialogAction::QuitApp, AppUiLocale::EnUs);
         assert!(close.body_label.text().contains("close the project"));
         assert!(quit.body_label.text().contains("quit Mondrian"));
         for dialog in [&close, &quit] {
@@ -242,10 +234,8 @@ mod tests {
                 Some(app_shell_pending_close_cancel_action())
             );
         }
-        let pseudo = PendingCloseDialog::with_locale(
-            PendingCloseDialogAction::CloseProject,
-            AppUiLocale::Pseudo,
-        );
+        let pseudo =
+            PendingCloseDialog::new(PendingCloseDialogAction::CloseProject, AppUiLocale::Pseudo);
         assert!(pseudo.title_label.text().starts_with('⟦'));
     }
 }
