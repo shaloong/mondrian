@@ -13,16 +13,17 @@ use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformD
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
+use crate::app::native_audio_plugin::{NativeAudioPluginFormat, NativeAudioPluginSelection};
 use crate::app_ui::localization::AppUiLocalePreference;
 use crate::app_ui::shortcuts::{is_known_shortcut_id, AppUiShortcutOverride};
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 const APP_UI_PREFERENCES_FILE: &str = "app_ui_preferences.json";
-const APP_UI_PREFERENCES_VERSION: u32 = 1;
+const APP_UI_PREFERENCES_VERSION: u32 = 2;
 /// Maximum number of recent projects kept by the app UI startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
 /// Bound the number of machine-local native libraries retried on startup.
-pub const MAX_CLAP_LIBRARIES: usize = 64;
+pub const MAX_NATIVE_AUDIO_PLUGINS: usize = 64;
 
 /// Versioned user preferences owned by the app UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +40,8 @@ pub struct AppUiPreferences {
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
     pub recent_projects: Vec<PathBuf>,
-    /// Explicitly selected CLAP binaries; project files store plugin IDs only.
-    #[serde(default)]
-    pub clap_libraries: Vec<PathBuf>,
+    /// Explicitly selected native audio binaries; project files store plugin identities only.
+    pub installed_audio_plugins: Vec<NativeAudioPluginSelection>,
     /// User overrides for app UI shell shortcut descriptors.
     #[serde(default)]
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
@@ -78,7 +78,7 @@ impl Default for AppUiPreferences {
             locale_preference: AppUiLocalePreference::System,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
-            clap_libraries: Vec::new(),
+            installed_audio_plugins: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
@@ -100,11 +100,12 @@ impl AppUiPreferences {
     }
 
     /// Remember one successfully scanned native library without adding duplicates.
-    pub fn record_clap_library(&mut self, library: PathBuf) {
-        self.clap_libraries.retain(|existing| existing != &library);
-        self.clap_libraries.push(library);
-        if self.clap_libraries.len() > MAX_CLAP_LIBRARIES {
-            self.clap_libraries.remove(0);
+    pub fn record_native_audio_plugin(&mut self, format: NativeAudioPluginFormat, path: PathBuf) {
+        self.installed_audio_plugins
+            .retain(|existing| existing.format != format || existing.path != path);
+        self.installed_audio_plugins.push(NativeAudioPluginSelection { format, path });
+        if self.installed_audio_plugins.len() > MAX_NATIVE_AUDIO_PLUGINS {
+            self.installed_audio_plugins.remove(0);
         }
     }
 
@@ -125,17 +126,17 @@ impl AppUiPreferences {
         }
         self.recent_projects = sanitized;
 
-        let mut libraries = Vec::new();
-        for path in self.clap_libraries {
-            if !path.is_absolute() || libraries.contains(&path) {
+        let mut plugins = Vec::new();
+        for selection in self.installed_audio_plugins {
+            if !selection.path.is_absolute() || plugins.contains(&selection) {
                 continue;
             }
-            libraries.push(path);
-            if libraries.len() == MAX_CLAP_LIBRARIES {
+            plugins.push(selection);
+            if plugins.len() == MAX_NATIVE_AUDIO_PLUGINS {
                 break;
             }
         }
-        self.clap_libraries = libraries;
+        self.installed_audio_plugins = plugins;
 
         let mut shortcut_overrides = Vec::new();
         for entry in self.shortcut_overrides {
@@ -249,7 +250,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -274,12 +275,12 @@ mod tests {
         let path = temp_preferences_path("round-trip-preferences");
         let project_path = temp_preferences_path("round-trip-project").with_extension("mdp");
         let preferences = AppUiPreferences {
-            version: 1,
+            version: AppUiPreferences::default().version,
             theme_preference: ThemePreference::Light,
             locale_preference: AppUiLocalePreference::EnUs,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
-            clap_libraries: Vec::new(),
+            installed_audio_plugins: Vec::new(),
             shortcut_overrides: vec![AppUiShortcutOverride {
                 id: "panel.inspector".to_owned(),
                 binding: None,
@@ -355,25 +356,33 @@ mod tests {
     }
 
     #[test]
-    fn clap_paths_are_bounded_deduplicated_and_missing_files_remain_recoverable() {
+    fn native_plugin_selections_are_bounded_deduplicated_and_missing_files_remain_recoverable() {
         let path = temp_preferences_path("clap-library-preferences");
         let missing = temp_preferences_path("missing-plugin").with_extension("clap");
         let mut preferences = AppUiPreferences::default();
-        preferences.record_clap_library(missing.clone());
-        preferences.record_clap_library(missing.clone());
-        assert_eq!(preferences.clap_libraries, vec![missing.clone()]);
+        preferences.record_native_audio_plugin(NativeAudioPluginFormat::Clap, missing.clone());
+        preferences.record_native_audio_plugin(NativeAudioPluginFormat::Clap, missing.clone());
+        let expected = NativeAudioPluginSelection {
+            format: NativeAudioPluginFormat::Clap,
+            path: missing.clone(),
+        };
+        assert_eq!(preferences.installed_audio_plugins, vec![expected.clone()]);
         persist_app_ui_preferences_to(&path, &preferences).expect("persist selections");
         assert_eq!(
-            load_app_ui_preferences_from(&path).clap_libraries,
-            vec![missing.clone()]
+            load_app_ui_preferences_from(&path).installed_audio_plugins,
+            vec![expected.clone()]
         );
-        for index in 0..=MAX_CLAP_LIBRARIES {
-            preferences.record_clap_library(
+        for index in 0..=MAX_NATIVE_AUDIO_PLUGINS {
+            preferences.record_native_audio_plugin(
+                NativeAudioPluginFormat::Clap,
                 std::env::temp_dir().join(format!("mondrian-clap-library-{index}.dll")),
             );
         }
-        assert_eq!(preferences.clap_libraries.len(), MAX_CLAP_LIBRARIES);
-        assert!(!preferences.clap_libraries.contains(&missing));
+        assert_eq!(
+            preferences.installed_audio_plugins.len(),
+            MAX_NATIVE_AUDIO_PLUGINS
+        );
+        assert!(!preferences.installed_audio_plugins.contains(&expected));
         fs::remove_file(path).ok();
     }
 
@@ -463,12 +472,12 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -535,7 +544,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -603,12 +612,12 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -635,12 +644,12 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: vec![
                     AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                     AppUiShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },

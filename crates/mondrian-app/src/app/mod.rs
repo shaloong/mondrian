@@ -6,8 +6,10 @@ use std::{fs, path::Path, path::PathBuf};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_audio::{
-    AudioProcessorResolver, BuiltInAudioProcessorResolver, InstalledClapAudioProcessorSpecResolver,
-    IsolatedAudioProcessorResolver,
+    AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorResolver,
+    BuiltInAudioProcessorResolver, InstalledClapAudioProcessorSpecResolver,
+    InstalledVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+    IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorkerSpec,
 };
 use mondrian_core::{
     automation::{
@@ -38,6 +40,7 @@ use mondrian_playback::{
     PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackRate, PlaybackSeekKind,
     PlaybackShuttleDirection, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
+use mondrian_timeline::audio::AudioProcessorDefinitionRef;
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, SequenceCollection, SequenceSettings,
@@ -111,7 +114,6 @@ pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
-mod clap_catalog_restore;
 mod clip_clipboard;
 mod clip_retime;
 mod dynamic_hdr_authoring;
@@ -142,6 +144,7 @@ pub mod endurance_reference_output;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_run_request;
 pub(crate) mod endurance_shutdown;
+mod native_audio_catalog_restore;
 pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(feature = "validation")]
 pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
@@ -170,6 +173,7 @@ pub(crate) mod headless_viewer_gpu;
 mod interchange;
 pub mod media_asset_mutation;
 mod media_import;
+pub mod native_audio_plugin;
 pub(crate) mod native_video_import;
 pub mod notifications;
 mod packaged_worker;
@@ -525,7 +529,8 @@ pub struct AppState {
     audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
     /// Session-installed CLAP definitions shared by Preview and Export.
     clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
-    clap_restore: Option<clap_catalog_restore::ClapCatalogRestore>,
+    native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
+    vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
     audio_idle_warmup_terminal_cursor: u64,
@@ -550,18 +555,56 @@ pub(crate) fn test_app_state_construction_count() -> u64 {
     APP_STATE_CONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
+struct NativeAudioProcessorSpecResolver {
+    clap: Arc<InstalledClapAudioProcessorSpecResolver>,
+    vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
+}
+
+impl IsolatedAudioProcessorSpecResolver for NativeAudioProcessorSpecResolver {
+    fn resolve(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> std::result::Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+        match request.definition() {
+            AudioProcessorDefinitionRef::Clap { .. } => self.clap.resolve(request),
+            AudioProcessorDefinitionRef::Vst3 { .. } => self.vst3.resolve(request),
+            AudioProcessorDefinitionRef::BuiltIn { .. } => {
+                Err(AudioProcessorHostError::InvalidContract(
+                    "built-in audio processors do not use the native plugin resolver".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
-        let catalog = std::env::current_exe()
-            .ok()
-            .and_then(|helper| InstalledClapAudioProcessorSpecResolver::new(helper).ok())
-            .map(Arc::new);
-        match catalog {
-            Some(catalog) => Self::with_clap_catalog(catalog),
+        let catalogs = std::env::current_exe().ok().and_then(|helper| {
+            let clap = InstalledClapAudioProcessorSpecResolver::new(helper.clone()).ok()?;
+            let vst3 = InstalledVst3AudioProcessorSpecResolver::new(helper).ok()?;
+            Some((Arc::new(clap), Arc::new(vst3)))
+        });
+        match catalogs {
+            Some((clap, vst3)) => Self::with_native_audio_catalogs(clap, vst3),
             None => Self::with_audio_processor_resolver(Arc::new(BuiltInAudioProcessorResolver)),
         }
     }
 
+    fn with_native_audio_catalogs(
+        clap: Arc<InstalledClapAudioProcessorSpecResolver>,
+        vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
+    ) -> Self {
+        let resolver: Arc<dyn AudioProcessorResolver> =
+            Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(
+                NativeAudioProcessorSpecResolver { clap: clap.clone(), vst3: vst3.clone() },
+            )));
+        let mut state = Self::with_audio_processor_resolver(resolver);
+        state.clap_catalog = Some(clap);
+        state.vst3_catalog = Some(vst3);
+        state
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_clap_catalog(catalog: Arc<InstalledClapAudioProcessorSpecResolver>) -> Self {
         let resolver: Arc<dyn AudioProcessorResolver> =
             Arc::new(IsolatedAudioProcessorResolver::new(catalog.clone()));
@@ -631,7 +674,8 @@ impl AppState {
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
             clap_catalog: None,
-            clap_restore: None,
+            native_audio_restore: None,
+            vst3_catalog: None,
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new_with_processor_resolver(
                 audio_processor_resolver,

@@ -127,6 +127,7 @@ pub const APP_SHELL_CONFIRM_RECOVERY_DIALOG: &str = "confirm_recovery_dialog";
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
 /// Request a native file picker for one CLAP binary.
 pub const APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG: &str = "install_clap_library_dialog";
+pub const APP_SHELL_INSTALL_VST3_BINARY_DIALOG: &str = "install_vst3_binary_dialog";
 /// App-shell request to navigate the Asset browser to one folder.
 pub const APP_SHELL_ASSET_BROWSER_OPEN_FOLDER: &str = "asset_browser_open_folder";
 
@@ -1376,6 +1377,15 @@ pub fn app_shell_install_clap_library_dialog_action() -> Action {
     Action::Custom {
         namespace: APP_SHELL_NAMESPACE.to_owned(),
         name: APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG.to_owned(),
+        payload: serde_json::Value::Null,
+    }
+}
+
+/// Open the native VST3 binary picker from an Audio Rack insertion menu.
+pub fn app_shell_install_vst3_binary_dialog_action() -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.to_owned(),
+        name: APP_SHELL_INSTALL_VST3_BINARY_DIALOG.to_owned(),
         payload: serde_json::Value::Null,
     }
 }

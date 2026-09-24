@@ -40,10 +40,11 @@ delivers normalized VST3 parameter points with sample offsets and rejects
 events beyond the native host queue's 4096-point block bound. A continuity
 entry creates a fresh instance from authored state. A real VST3 SDK Gain DLL
 has passed isolated stereo processing, parameter change, and reset checks.
-The App's hidden child dispatch is present; insertion UI, persistent installed
-catalog restoration, and Preview/Export end-to-end qualification remain before
-the product advertises VST3 support. Vendor editors and auxiliary buses require
-separate qualified slices. Unbound definitions record `null` and cannot
+The App's hidden child dispatch, insertion UI, and persistent installed catalog
+restoration are present; Preview/Export end-to-end qualification and meaningful
+state round-trip remain before the product advertises VST3 support. Vendor
+editors and auxiliary buses require separate qualified slices. Unbound
+definitions record `null` and cannot
 authorize native execution.
 
 OpenFX has no implemented ABI Adapter today. Its image-effect host needs
@@ -166,8 +167,8 @@ advance the project author generation. Automatic installed-path enumeration,
 plugin management and relocation UI, state capture, expanded parameter-control UI,
 and broader vendor/plugin signal-parity coverage remain required before
 CLAP is advertised as a complete product feature. The VST3 audio backend can
-host an explicitly selected binary but is not yet wired into the product's
-installation and insertion flow. OpenFX binaries remain unhosted. The visual
+host an explicitly selected binary through the product's installation and
+insertion flow. OpenFX binaries remain unhosted. The visual
 Effect registry/DSL does not host OpenFX.
 
 The ignored installed-reference acceptance tests use a built `mondrian`

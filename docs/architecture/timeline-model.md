@@ -1,5 +1,13 @@
 # Timeline Model
 
+Audio Rack `RebindNative` is one format-neutral author mutation for CLAP and
+VST3. The App probes the selected binary and compares parameter schemas first;
+Timeline then requires the same stable plugin identity, vendor where the format
+defines one, schema version, and a nonzero new binary fingerprint. It replaces
+only the definition binding, preserving automation, opaque state, and Undo/Redo.
+The generic Rack action is blocked at the App product boundary so a caller
+cannot bypass the format-specific probe.
+
 Clip blend-mode options pair each persisted `BlendMode` with its stable key in
 Core's canonical display order. The optional Clip override is a typed Clip
 field, not an intrinsic parameter-bag entry. A blend-mode action validates the

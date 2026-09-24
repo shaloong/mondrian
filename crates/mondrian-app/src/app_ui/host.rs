@@ -22,6 +22,7 @@ use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, ExecutionDomainDemand,
     ExternalExecutionResourceDemand, PreviewViewerGpuResourceOwner,
 };
+use crate::app::native_audio_plugin::{NativeAudioPluginFormat, NativeAudioPluginSelection};
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll,
@@ -1172,7 +1173,8 @@ impl AppUiHost {
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
-        let clap_catalog_changed = self.app_state.borrow_mut().poll_clap_catalog_restore();
+        let native_audio_catalog_changed =
+            self.app_state.borrow_mut().poll_native_audio_catalog_restore();
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1224,7 +1226,7 @@ impl AppUiHost {
         if preview_outcome.visible_change {
             self.preview_dirty.set(true);
         }
-        let full_model_changed = clap_catalog_changed
+        let full_model_changed = native_audio_catalog_changed
             || persistence_changed
             || project_close_changed
             || media_imports_changed
@@ -1710,9 +1712,18 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
-        let installed_clap_path = match ProductAction::decode_external(&action) {
+        let installed_plugin = match ProductAction::decode_external(&action) {
             Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
-                Some(payload.path)
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Clap,
+                    path: payload.path,
+                })
+            }
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Binary(payload)))) => {
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Vst3,
+                    path: payload.path,
+                })
             }
             _ => None,
         };
@@ -1722,15 +1733,16 @@ impl AppUiHost {
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
-            if let Some(path) = installed_clap_path {
-                let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
-                self.preferences.record_clap_library(canonical_path);
+            if let Some(selection) = installed_plugin {
+                let canonical_path =
+                    std::fs::canonicalize(&selection.path).unwrap_or(selection.path);
+                self.preferences.record_native_audio_plugin(selection.format, canonical_path);
                 if let Err(error) =
                     persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
                 {
-                    tracing::warn!(%error, "failed to save CLAP library selection");
+                    tracing::warn!(%error, "failed to save native audio plugin selection");
                     self.app_state.borrow_mut().set_status_hint(
-                        format!("CLAP 插件已安装，但无法保存重启恢复信息：{error}"),
+                        format!("音频插件已安装，但无法保存重启恢复信息：{error}"),
                         true,
                     );
                 }
@@ -2894,8 +2906,11 @@ mod tests {
             .expect("install library");
         let saved = load_app_ui_preferences_from(&preferences_path);
         assert_eq!(
-            saved.clap_libraries,
-            vec![library.canonicalize().expect("library path")]
+            saved.installed_audio_plugins,
+            vec![NativeAudioPluginSelection {
+                format: NativeAudioPluginFormat::Clap,
+                path: library.canonicalize().expect("library path")
+            }]
         );
         drop(first);
 
@@ -4508,12 +4523,12 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -4625,12 +4640,12 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5329,12 +5344,12 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5436,12 +5451,12 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
-                clap_libraries: Vec::new(),
+                installed_audio_plugins: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,

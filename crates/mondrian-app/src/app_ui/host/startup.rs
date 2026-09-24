@@ -539,7 +539,8 @@ impl AppUiHostStartupOwner {
 
         let mut app_state = self.app_state.take().expect("App installed");
         let preferences = self.preferences.take().expect("preferences installed");
-        app_state.schedule_clap_catalog_restore(preferences.clap_libraries.clone());
+        app_state
+            .schedule_native_audio_catalog_restore(preferences.installed_audio_plugins.clone());
         let preferences_path = self.preferences_path.take().expect("preferences path installed");
         let asset_thumbnails = self.thumbnail.take().expect("Thumbnail installed");
         let waveform_service = match self.waveform.take().expect("Waveform installed") {

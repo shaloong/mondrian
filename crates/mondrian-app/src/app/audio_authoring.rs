@@ -3,7 +3,9 @@
 //! UI Adapters submit the closed product action; Timeline Modules own Channel
 //! Strip/Rack mutation and validation; App owns transaction and execution refresh.
 
-use mondrian_audio::{AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor};
+use mondrian_audio::{
+    AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor, Vst3PluginDescriptor,
+};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::audio::{
     AudioComponentSource, AudioProcessorDefinitionRef, AudioProcessorInstance,
@@ -18,7 +20,8 @@ use mondrian_timeline::{
 };
 
 use super::product_action::{
-    AudioProcessorBuiltInPreset, AudioProcessorRebindClapPayload, AudioProductAction,
+    AudioProcessorBuiltInPreset, AudioProcessorRebindClapPayload, AudioProcessorRebindVst3Payload,
+    AudioProductAction,
 };
 use super::AppState;
 
@@ -32,9 +35,9 @@ impl AppState {
             AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
             AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
             AudioProductAction::EditProcessorRack(request) => {
-                if matches!(request.edit, AudioProcessorRackEdit::RebindClap { .. }) {
+                if matches!(request.edit, AudioProcessorRackEdit::RebindNative { .. }) {
                     return Err(clap_unavailable(
-                        "CLAP 重新绑定必须通过已安装插件探测入口完成",
+                        "原生插件重新绑定必须通过已安装插件探测入口完成",
                     ));
                 }
                 self.edit_audio_processor_rack(request)
@@ -105,6 +108,45 @@ impl AppState {
                 })
             }
             AudioProductAction::RebindClapProcessor(payload) => self.rebind_clap_processor(payload),
+            AudioProductAction::InstallVst3Binary(payload) => {
+                let catalog = self
+                    .vst3_catalog
+                    .as_ref()
+                    .ok_or_else(|| vst3_unavailable("native VST3 helper is unavailable"))?;
+                let descriptors = catalog
+                    .install_binary(payload.path)
+                    .map_err(|error| vst3_unavailable(error.to_string()))?;
+                self.set_status_hint(
+                    format!("已安装 {} 个 VST3 处理器", descriptors.len()),
+                    false,
+                );
+                if !descriptors.is_empty() && self.active_sequence().is_some() {
+                    self.reconcile_audio_after_committed_authoring_change("vst3_install_binary");
+                }
+                Ok(())
+            }
+            AudioProductAction::InsertVst3Processor(payload) => {
+                let layout = self
+                    .active_sequence()
+                    .ok_or_else(|| vst3_unavailable("当前没有活动序列"))?
+                    .settings
+                    .audio_channel_layout;
+                let catalog = self
+                    .vst3_catalog
+                    .as_ref()
+                    .ok_or_else(|| vst3_unavailable("native VST3 helper is unavailable"))?;
+                let processor = catalog
+                    .create_instance(&payload.class_id, self.plugin_render_contract(layout), None)
+                    .map_err(|error| vst3_unavailable(error.to_string()))?;
+                self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+                    address: payload.address,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor,
+                        placement: payload.placement,
+                    },
+                })
+            }
+            AudioProductAction::RebindVst3Processor(payload) => self.rebind_vst3_processor(payload),
             AudioProductAction::EditChannelStrip(request) => self.edit_audio_channel_strip(request),
             AudioProductAction::EditRouting(request) => self.edit_audio_routing(request),
         }
@@ -117,6 +159,82 @@ impl AppState {
             .as_ref()
             .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
         catalog.descriptors().map_err(|error| clap_unavailable(error.to_string()))
+    }
+
+    /// Session-visible VST3 effect classes for Inspector and Mixer insertion menus.
+    pub fn installed_vst3_processors(&self) -> Result<Vec<Vst3PluginDescriptor>> {
+        let catalog = self
+            .vst3_catalog
+            .as_ref()
+            .ok_or_else(|| vst3_unavailable("native VST3 helper is unavailable"))?;
+        catalog.descriptors().map_err(|error| vst3_unavailable(error.to_string()))
+    }
+
+    fn plugin_render_contract(
+        &self,
+        channel_layout: mondrian_core::AudioChannelLayout,
+    ) -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: self.audio_sample_rate,
+            channel_layout,
+            max_block_frames: super::audio_rendering::MAX_AUDIO_RENDER_BLOCK_FRAMES,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        }
+    }
+
+    fn rebind_vst3_processor(&mut self, payload: AudioProcessorRebindVst3Payload) -> Result<()> {
+        let sequence =
+            self.active_sequence().ok_or_else(|| vst3_unavailable("当前没有活动序列"))?;
+        let inspection = inspect_audio_processor_rack(sequence, &payload.address)
+            .map_err(|error| vst3_unavailable(error.to_string()))?;
+        if let Some(blocker) = inspection.edit_blocker() {
+            return Err(vst3_unavailable(blocker.to_string()));
+        }
+        let old = inspection
+            .rack()
+            .processors
+            .iter()
+            .find(|processor| processor.id == payload.processor_id)
+            .ok_or_else(|| vst3_unavailable("目标 VST3 处理器不存在"))?
+            .clone();
+        let AudioProcessorDefinitionRef::Vst3 { class_id, .. } = &old.definition else {
+            return Err(vst3_unavailable("只能重新绑定 VST3 处理器"));
+        };
+        let layout = sequence.settings.audio_channel_layout;
+        let catalog = self
+            .vst3_catalog
+            .as_ref()
+            .ok_or_else(|| vst3_unavailable("native VST3 helper is unavailable"))?;
+        let candidate = catalog
+            .create_instance(
+                class_id,
+                self.plugin_render_contract(layout),
+                old.opaque_state.as_ref().map(|state| state.iter().copied().collect()),
+            )
+            .map_err(|error| vst3_unavailable(error.to_string()))?;
+        if old.parameters.len() != candidate.parameters.len()
+            || old.parameters.iter().any(|(id, parameter)| {
+                candidate.parameters.get(id).is_none_or(|new| new.schema != parameter.schema)
+            })
+        {
+            return Err(vst3_unavailable(
+                "插件参数架构与项目中保存的架构不匹配；原自动化已保留",
+            ));
+        }
+        self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+            address: payload.address,
+            edit: AudioProcessorRackEdit::RebindNative {
+                processor_id: payload.processor_id,
+                expected_definition: old.definition,
+                new_definition: candidate.definition,
+            },
+        })
     }
 
     fn rebind_clap_processor(&mut self, payload: AudioProcessorRebindClapPayload) -> Result<()> {
@@ -171,7 +289,7 @@ impl AppState {
         }
         self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
             address: payload.address,
-            edit: AudioProcessorRackEdit::RebindClap {
+            edit: AudioProcessorRackEdit::RebindNative {
                 processor_id: payload.processor_id,
                 expected_definition: old.definition,
                 new_definition: candidate.definition,
@@ -384,13 +502,21 @@ fn clap_unavailable(reason: impl Into<String>) -> MondrianError {
     }
 }
 
+fn vst3_unavailable(reason: impl Into<String>) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "audio_vst3_plugin".to_owned(),
+        reason: reason.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::product_action::{
-        AudioInstallClapLibraryPayload, AudioProcessorBuiltInPreset,
+        AudioInstallClapLibraryPayload, AudioInstallVst3BinaryPayload, AudioProcessorBuiltInPreset,
         AudioProcessorInsertBuiltInPayload, AudioProcessorInsertClapPayload,
-        AudioProcessorRebindClapPayload, ProductAction,
+        AudioProcessorInsertVst3Payload, AudioProcessorRebindClapPayload,
+        AudioProcessorRebindVst3Payload, ProductAction,
     };
     use crate::app::ui_actions::{
         audio_automation_edit_action, audio_channel_strip_edit_action,
@@ -723,7 +849,7 @@ mod tests {
         let generation = state.project_author_generation();
         let action = audio_processor_rack_edit_action(request(
             address,
-            AudioProcessorRackEdit::RebindClap {
+            AudioProcessorRackEdit::RebindNative {
                 processor_id,
                 expected_definition,
                 new_definition: AudioProcessorDefinitionRef::Clap {
@@ -840,6 +966,82 @@ mod tests {
                 .definition,
             AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
         ));
+        assert!(state.undo_timeline().expect("undo insertion"));
+        assert!(
+            audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
+                .expect("Rack")
+                .processors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
+    fn selected_vst3_binary_inserts_canonical_processor_and_round_trips_undo() {
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("built app executable");
+        let binary = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("VST3 reference binary");
+        let clap = std::sync::Arc::new(
+            mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                .expect("CLAP catalog"),
+        );
+        let vst3 = std::sync::Arc::new(
+            mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper)
+                .expect("VST3 catalog"),
+        );
+        let mut state = AppState::with_native_audio_catalogs(clap, vst3);
+        let sequence = Sequence::new("VST3 insertion");
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::InstallVst3Binary(
+                    AudioInstallVst3BinaryPayload { path: binary },
+                ))
+                .into_external_action(),
+            )
+            .expect("install reference VST3 binary");
+        let classes = state.installed_vst3_processors().expect("VST3 catalog descriptors");
+        assert_eq!(classes.len(), 1);
+        assert_eq!(state.project_author_generation(), generation);
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::InsertVst3Processor(
+                    AudioProcessorInsertVst3Payload {
+                        address,
+                        class_id: classes[0].class_id.clone(),
+                        placement: AudioProcessorRackPlacement::End,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .expect("insert reference VST3 processor");
+        let rack = audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
+            .expect("Rack");
+        assert_eq!(rack.processors.len(), 1);
+        assert!(matches!(
+            &rack.processors[0].definition,
+            AudioProcessorDefinitionRef::Vst3 { class_id, binary_sha256: Some(hash), .. }
+                if class_id == &classes[0].class_id && *hash != [0; 32]
+        ));
+        assert_eq!(state.project_author_generation(), generation + 1);
+        let processor_id = rack.processors[0].id;
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::RebindVst3Processor(
+                    AudioProcessorRebindVst3Payload { address, processor_id },
+                ))
+                .into_external_action(),
+            )
+            .expect("rebind same VST3 revision");
+        assert_eq!(state.project_author_generation(), generation + 1);
         assert!(state.undo_timeline().expect("undo insertion"));
         assert!(
             audio_processor_rack(state.active_sequence().expect("Sequence"), &address)

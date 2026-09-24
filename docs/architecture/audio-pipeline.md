@@ -9,12 +9,18 @@ main buses, mode changes, metadata drift, and latency/tail drift. Worker
 continuity entry releases the previous class and reloads the exact class from
 the saved opaque state, while
 sample-offset points enter the VST3 process queue. A reference Gain DLL built
-from the permissively licensed `vst3-rs` example passed an isolated stereo
-signal test with gain `0.5`, then a fresh continuity entry with gain `0.25`.
+from the permissively licensed `vst3-rs` example passed isolated realtime and
+offline stereo signal tests with gain `0.5`, plus a fresh continuity entry with
+gain `0.25`.
 That fixture does not implement meaningful VST3 state serialization, so
 state round-trip and App Preview/Export parity are still qualification gates.
 The current control frame limits serialized VST3 state to 128 KiB; larger state
 is rejected explicitly. Third-party host/license notices are in `LICENSES/`.
+The App routes selected VST3 classes through the same resolver used for
+Preview, Export, and idle warmup; Inspector and Mixer use one shared Rack
+projection. Explicit format/path selections are machine-local UI preferences
+restored in one background catalog job, while `.mdp` retains only the VST3
+class, vendor, exact binary fingerprint, parameter curves, and opaque state.
 VST3 worker startup is bounded to 15 seconds and continuity entry to 10
 seconds; the realtime block deadline stays at 100 milliseconds. Those bounds
 are separate because plugin construction and state restoration can be much

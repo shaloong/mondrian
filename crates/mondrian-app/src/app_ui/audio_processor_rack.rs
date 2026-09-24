@@ -3,7 +3,7 @@
 //! Inspector and future Mixer surfaces consume this Module instead of
 //! traversing or interpreting the Sequence audio author model independently.
 
-use mondrian_audio::ClapPluginDescriptor;
+use mondrian_audio::{ClapPluginDescriptor, Vst3PluginDescriptor};
 use mondrian_core::automation::{ParameterSchema, PropertyValueType};
 use mondrian_core::{AudioProcessorInstanceId, ParameterId};
 use mondrian_editor_state::Action;
@@ -28,7 +28,8 @@ use super::audio_automation::{
 };
 use crate::app::product_action::{
     AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
-    AudioProcessorInsertClapPayload, AudioProcessorRebindClapPayload, AudioProductAction,
+    AudioProcessorInsertClapPayload, AudioProcessorInsertVst3Payload,
+    AudioProcessorRebindClapPayload, AudioProcessorRebindVst3Payload, AudioProductAction,
     ProductAction,
 };
 use crate::app::ui_actions::{
@@ -45,6 +46,13 @@ pub(crate) struct AudioProcessorInsertOptionModel {
 pub(crate) enum AudioProcessorInsertChoice {
     BuiltIn(AudioProcessorBuiltInPreset),
     Clap(String),
+    Vst3(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeAudioFormat {
+    Clap,
+    Vst3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +88,7 @@ pub(crate) struct AudioProcessorInstanceModel {
     pub(crate) processor_id: AudioProcessorInstanceId,
     pub(crate) label: String,
     pub(crate) bypassed: bool,
-    pub(crate) is_clap: bool,
+    pub(crate) native_format: Option<NativeAudioFormat>,
     pub(crate) parameters: Vec<AudioProcessorParameterModel>,
 }
 
@@ -204,6 +212,25 @@ pub(crate) fn append_clap_insert_options(
     }
 }
 
+pub(crate) fn append_vst3_insert_options(
+    racks: &mut [AudioProcessorRackModel],
+    descriptors: &[Vst3PluginDescriptor],
+) {
+    for rack in racks {
+        rack.insert_options.extend(descriptors.iter().map(|descriptor| {
+            let label =
+                descriptor.vendor.as_deref().filter(|vendor| !vendor.is_empty()).map_or_else(
+                    || descriptor.name.clone(),
+                    |vendor| format!("{vendor} · {}", descriptor.name),
+                );
+            AudioProcessorInsertOptionModel {
+                label,
+                choice: AudioProcessorInsertChoice::Vst3(descriptor.class_id.clone()),
+            }
+        }));
+    }
+}
+
 pub(crate) fn insert_option_action(
     rack: &AudioProcessorRackModel,
     choice: &AudioProcessorInsertChoice,
@@ -214,6 +241,14 @@ pub(crate) fn insert_option_action(
             AudioProductAction::InsertClapProcessor(AudioProcessorInsertClapPayload {
                 address: rack.address,
                 plugin_id: plugin_id.clone(),
+                placement: AudioProcessorRackPlacement::End,
+            }),
+        )
+        .into_external_action(),
+        AudioProcessorInsertChoice::Vst3(class_id) => ProductAction::Audio(
+            AudioProductAction::InsertVst3Processor(AudioProcessorInsertVst3Payload {
+                address: rack.address,
+                class_id: class_id.clone(),
                 placement: AudioProcessorRackPlacement::End,
             }),
         )
@@ -312,10 +347,11 @@ fn project_processor(
         processor_id: processor.id,
         label: processor_label(&processor.definition),
         bypassed: processor.bypassed,
-        is_clap: matches!(
-            processor.definition,
-            AudioProcessorDefinitionRef::Clap { .. }
-        ),
+        native_format: match processor.definition {
+            AudioProcessorDefinitionRef::Clap { .. } => Some(NativeAudioFormat::Clap),
+            AudioProcessorDefinitionRef::Vst3 { .. } => Some(NativeAudioFormat::Vst3),
+            AudioProcessorDefinitionRef::BuiltIn { .. } => None,
+        },
         parameters: processor
             .parameters
             .values()
@@ -432,19 +468,28 @@ pub(crate) fn remove_action(
     )
 }
 
-pub(crate) fn rebind_clap_action(
+pub(crate) fn rebind_native_action(
     rack: &AudioProcessorRackModel,
     processor: &AudioProcessorInstanceModel,
 ) -> Option<Action> {
-    (rack.is_editable && processor.is_clap).then(|| {
-        ProductAction::Audio(AudioProductAction::RebindClapProcessor(
-            AudioProcessorRebindClapPayload {
+    if !rack.is_editable {
+        return None;
+    }
+    let action = match processor.native_format? {
+        NativeAudioFormat::Clap => {
+            AudioProductAction::RebindClapProcessor(AudioProcessorRebindClapPayload {
                 address: rack.address,
                 processor_id: processor.processor_id,
-            },
-        ))
-        .into_external_action()
-    })
+            })
+        }
+        NativeAudioFormat::Vst3 => {
+            AudioProductAction::RebindVst3Processor(AudioProcessorRebindVst3Payload {
+                address: rack.address,
+                processor_id: processor.processor_id,
+            })
+        }
+    };
+    Some(ProductAction::Audio(action).into_external_action())
 }
 
 pub(crate) fn move_before_action(
@@ -702,6 +747,32 @@ mod tests {
     }
 
     #[test]
+    fn installed_vst3_option_preserves_class_identity_and_rack_address() {
+        let (sequence, _) = sequence_with_gain_scope();
+        let clip = &sequence.audio_tracks[0].clips[0];
+        let mut racks = clip_processing_scope_racks(&sequence, clip);
+        let class_id = "0123456789ABCDEF0123456789ABCDEF".to_owned();
+        append_vst3_insert_options(
+            &mut racks,
+            &[Vst3PluginDescriptor {
+                class_id: class_id.clone(),
+                name: "Gain".to_owned(),
+                vendor: Some("Example".to_owned()),
+                version: None,
+            }],
+        );
+        let rack = &racks[0];
+        assert_eq!(rack.insert_options[2].label, "Example · Gain");
+        let action = insert_option_action(rack, &rack.insert_options[2].choice);
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::InsertVst3Processor(
+                AudioProcessorInsertVst3Payload { address, class_id: actual, placement: AudioProcessorRackPlacement::End }
+            ))) if address == rack.address && actual == class_id
+        ));
+    }
+
+    #[test]
     fn clap_rack_projection_exposes_explicit_rebind_action() {
         let (mut sequence, _) = sequence_with_gain_scope();
         let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
@@ -723,8 +794,8 @@ mod tests {
             AudioProcessorRackAddress::ProcessingScope { scope_id },
         );
         let instance = &rack.processors[0];
-        assert!(instance.is_clap);
-        let action = rebind_clap_action(&rack, instance).expect("rebind action");
+        assert_eq!(instance.native_format, Some(NativeAudioFormat::Clap));
+        let action = rebind_native_action(&rack, instance).expect("rebind action");
         assert!(matches!(
             ProductAction::decode_external(&action).expect("decode"),
             Some(ProductAction::Audio(AudioProductAction::RebindClapProcessor(payload)))
@@ -735,7 +806,7 @@ mod tests {
             &sequence,
             AudioProcessorRackAddress::ProcessingScope { scope_id },
         );
-        assert!(rebind_clap_action(&locked, &locked.processors[0]).is_none());
+        assert!(rebind_native_action(&locked, &locked.processors[0]).is_none());
     }
 
     #[test]

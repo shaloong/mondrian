@@ -105,14 +105,14 @@ pub use crate::app::thumbnail_service::{
 };
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
-    app_shell_install_clap_library_dialog_action, app_shell_interpret_asset_dialog_action,
-    app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
-    app_shell_reveal_in_file_manager_action, app_shell_scopes_settings_changed_action,
-    assets_create_adjustment_layer_action, assets_create_folder_action,
-    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
-    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_rebind_audio_component_action,
+    app_shell_install_clap_library_dialog_action, app_shell_install_vst3_binary_dialog_action,
+    app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
+    app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
+    app_shell_scopes_settings_changed_action, assets_create_adjustment_layer_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
+    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
+    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
+    assets_open_folder_action, assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
@@ -195,11 +195,12 @@ use crate::app_ui::audio_mixer::{
     AudioMixerGainModel, AudioMixerPanelModel,
 };
 use crate::app_ui::audio_processor_rack::{
-    append_clap_insert_options, bypass_action as audio_processor_bypass_action,
-    clip_processing_scope_racks, insert_option_action as audio_processor_insert_option_action,
+    append_clap_insert_options, append_vst3_insert_options,
+    bypass_action as audio_processor_bypass_action, clip_processing_scope_racks,
+    insert_option_action as audio_processor_insert_option_action,
     move_before_action as audio_processor_move_before_action,
     move_to_end_action as audio_processor_move_to_end_action,
-    rebind_clap_action as audio_processor_rebind_clap_action,
+    rebind_native_action as audio_processor_rebind_native_action,
     remove_action as audio_processor_remove_action,
     set_static_parameter_action as audio_processor_set_static_parameter_action,
     AudioProcessorRackModel,
@@ -2612,6 +2613,9 @@ impl InspectorPanelModel {
                 let mut racks = clip_processing_scope_racks(sequence, clip);
                 if let Ok(descriptors) = state.installed_clap_processors() {
                     append_clap_insert_options(&mut racks, &descriptors);
+                }
+                if let Ok(descriptors) = state.installed_vst3_processors() {
+                    append_vst3_insert_options(&mut racks, &descriptors);
                 }
                 racks
             },

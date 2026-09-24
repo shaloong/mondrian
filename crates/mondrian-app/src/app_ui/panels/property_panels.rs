@@ -1439,6 +1439,10 @@ pub(super) fn with_audio_processor_rack_sections(
             "安装 CLAP 插件…",
             app_shell_install_clap_library_dialog_action(),
         ));
+        insert_items.push(MenuItem::new(
+            "安装 VST3 插件…",
+            app_shell_install_vst3_binary_dialog_action(),
+        ));
         let mut rack_section = PropertySection::new(title)
             .with_row(PropertyRow::new(
                 "作用域",
@@ -1533,8 +1537,8 @@ pub(super) fn with_audio_processor_rack_sections(
                         .with_gap(8.0),
                     ),
                 ));
-            if processor.is_clap {
-                let rebind = audio_processor_rebind_clap_action(rack, processor);
+            if processor.native_format.is_some() {
+                let rebind = audio_processor_rebind_native_action(rack, processor);
                 section = section.with_row(PropertyRow::new(
                     "插件绑定",
                     Box::new(

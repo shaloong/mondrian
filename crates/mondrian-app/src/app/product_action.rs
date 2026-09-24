@@ -213,6 +213,9 @@ pub const AUDIO_INSTALL_CLAP_LIBRARY: &str = "install_clap_library";
 /// External action name for inserting one installed CLAP processor.
 pub const AUDIO_INSERT_CLAP_PROCESSOR: &str = "insert_clap_processor";
 pub const AUDIO_REBIND_CLAP_PROCESSOR: &str = "rebind_clap_processor";
+pub const AUDIO_INSTALL_VST3_BINARY: &str = "install_vst3_binary";
+pub const AUDIO_INSERT_VST3_PROCESSOR: &str = "insert_vst3_processor";
+pub const AUDIO_REBIND_VST3_PROCESSOR: &str = "rebind_vst3_processor";
 /// External action name for one normative Channel Strip edit.
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 /// External action name for one atomic Bus/Route graph edit.
@@ -460,6 +463,12 @@ pub enum AudioProductAction {
     InsertClapProcessor(AudioProcessorInsertClapPayload),
     /// Re-probe an installed CLAP binary and explicitly update one authored instance.
     RebindClapProcessor(AudioProcessorRebindClapPayload),
+    /// Discover the effect classes in a selected VST3 binary.
+    InstallVst3Binary(AudioInstallVst3BinaryPayload),
+    /// Probe and insert an installed VST3 class in one author transaction.
+    InsertVst3Processor(AudioProcessorInsertVst3Payload),
+    /// Re-probe and explicitly rebind an authored VST3 instance.
+    RebindVst3Processor(AudioProcessorRebindVst3Payload),
     /// Apply one Track, Bus, or Program Output Channel Strip mutation.
     EditChannelStrip(AudioChannelStripEditRequest),
     /// Apply one Bus/Route graph mutation.
@@ -731,6 +740,21 @@ impl ProductAction {
                 }
                 AUDIO_REBIND_CLAP_PROCESSOR => {
                     Ok(Some(Self::Audio(AudioProductAction::RebindClapProcessor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSTALL_VST3_BINARY => {
+                    Ok(Some(Self::Audio(AudioProductAction::InstallVst3Binary(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSERT_VST3_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::InsertVst3Processor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_REBIND_VST3_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::RebindVst3Processor(
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
@@ -1262,6 +1286,21 @@ impl ProductAction {
                 AUDIO_REBIND_CLAP_PROCESSOR,
                 serde_json::json!(payload),
             ),
+            Self::Audio(AudioProductAction::InstallVst3Binary(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSTALL_VST3_BINARY,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::InsertVst3Processor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSERT_VST3_PROCESSOR,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::RebindVst3Processor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REBIND_VST3_PROCESSOR,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_CHANNEL_STRIP,
@@ -1731,6 +1770,36 @@ pub struct AudioProcessorInsertClapPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioProcessorRebindClapPayload {
+    /// Rack containing the processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Stable processor instance identity.
+    pub processor_id: AudioProcessorInstanceId,
+}
+
+/// Explicit VST3 binary selected by the user for session discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioInstallVst3BinaryPayload {
+    /// Absolute path selected by the native file dialog.
+    pub path: PathBuf,
+}
+
+/// Stable class identity and Rack placement for an installed VST3 effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInsertVst3Payload {
+    /// Rack receiving the new processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// VST3 class identity discovered from the selected binary.
+    pub class_id: String,
+    /// Stable position inside the Rack.
+    pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Existing VST3 processor selected for an explicit installed-revision rebind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorRebindVst3Payload {
     /// Rack containing the processor.
     pub address: mondrian_timeline::AudioProcessorRackAddress,
     /// Stable processor instance identity.
@@ -4186,7 +4255,7 @@ mod tests {
     }
 
     #[test]
-    fn external_codec_round_trips_clap_install_and_insertion_intents() {
+    fn external_codec_round_trips_native_plugin_install_and_insertion_intents() {
         let address = AudioProcessorRackAddress::ProcessingScope {
             scope_id: mondrian_core::AudioProcessingScopeId::new(),
         };
@@ -4203,6 +4272,22 @@ mod tests {
             )),
             ProductAction::Audio(AudioProductAction::RebindClapProcessor(
                 AudioProcessorRebindClapPayload {
+                    address,
+                    processor_id: AudioProcessorInstanceId::new(),
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::InstallVst3Binary(
+                AudioInstallVst3BinaryPayload { path: PathBuf::from("C:/plugins/gain.vst3") },
+            )),
+            ProductAction::Audio(AudioProductAction::InsertVst3Processor(
+                AudioProcessorInsertVst3Payload {
+                    address,
+                    class_id: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::RebindVst3Processor(
+                AudioProcessorRebindVst3Payload {
                     address,
                     processor_id: AudioProcessorInstanceId::new(),
                 },

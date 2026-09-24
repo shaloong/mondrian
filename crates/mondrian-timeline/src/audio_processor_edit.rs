@@ -92,8 +92,8 @@ pub enum AudioProcessorRackEdit {
         /// New authored bypass state.
         bypassed: bool,
     },
-    /// Bind an existing CLAP instance to a separately verified binary revision.
-    RebindClap {
+    /// Bind an existing native instance to a separately verified binary revision.
+    RebindNative {
         /// Exact processor to update without replacing its automation or state.
         processor_id: AudioProcessorInstanceId,
         /// Definition observed before the external plugin probe.
@@ -119,7 +119,7 @@ impl AudioProcessorRackEdit {
             Self::Remove { processor_id }
             | Self::Move { processor_id, .. }
             | Self::SetBypassed { processor_id, .. }
-            | Self::RebindClap { processor_id, .. }
+            | Self::RebindNative { processor_id, .. }
             | Self::SetParameterStaticValue { processor_id, .. } => *processor_id,
         }
     }
@@ -480,33 +480,48 @@ fn apply_to_rack(
             rack.processors[index].bypassed = *bypassed;
             Ok(true)
         }
-        AudioProcessorRackEdit::RebindClap {
+        AudioProcessorRackEdit::RebindNative {
             processor_id,
             expected_definition,
             new_definition,
         } => {
             let index = processor_index(rack, *processor_id)?;
             let processor = &mut rack.processors[index];
-            let (
-                AudioProcessorDefinitionRef::Clap {
-                    plugin_id: old_id,
-                    schema_version: old_version,
-                    ..
-                },
-                AudioProcessorDefinitionRef::Clap {
-                    plugin_id: new_id,
-                    schema_version: new_version,
-                    binary_sha256: Some(new_hash),
-                },
-            ) = (expected_definition, new_definition)
-            else {
-                return Err(AudioProcessorRackEditError::IncompatibleRebind);
+            let compatible = match (expected_definition, new_definition) {
+                (
+                    AudioProcessorDefinitionRef::Clap {
+                        plugin_id: old_id,
+                        schema_version: old_version,
+                        ..
+                    },
+                    AudioProcessorDefinitionRef::Clap {
+                        plugin_id: new_id,
+                        schema_version: new_version,
+                        binary_sha256: Some(new_hash),
+                    },
+                ) => old_id == new_id && old_version == new_version && *new_hash != [0; 32],
+                (
+                    AudioProcessorDefinitionRef::Vst3 {
+                        class_id: old_id,
+                        vendor: old_vendor,
+                        schema_version: old_version,
+                        ..
+                    },
+                    AudioProcessorDefinitionRef::Vst3 {
+                        class_id: new_id,
+                        vendor: new_vendor,
+                        schema_version: new_version,
+                        binary_sha256: Some(new_hash),
+                    },
+                ) => {
+                    old_id == new_id
+                        && old_vendor == new_vendor
+                        && old_version == new_version
+                        && *new_hash != [0; 32]
+                }
+                _ => false,
             };
-            if &processor.definition != expected_definition
-                || old_id != new_id
-                || old_version != new_version
-                || *new_hash == [0; 32]
-            {
+            if &processor.definition != expected_definition || !compatible {
                 return Err(AudioProcessorRackEditError::IncompatibleRebind);
             }
             if &processor.definition == new_definition {
@@ -845,7 +860,7 @@ mod tests {
         let rebind = |expected_definition, new_definition| {
             request(
                 address,
-                AudioProcessorRackEdit::RebindClap {
+                AudioProcessorRackEdit::RebindNative {
                     processor_id: id,
                     expected_definition,
                     new_definition,
@@ -884,6 +899,64 @@ mod tests {
             Err(AudioProcessorRackEditError::IncompatibleRebind)
         );
         assert_eq!(sequence, after);
+    }
+
+    #[test]
+    fn vst3_rebind_requires_same_class_and_vendor_and_keeps_author_state() {
+        let (mut sequence, track_id, _) = sequence_with_audio_clip();
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        processor.definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+            vendor: Some("Example".to_owned()),
+            schema_version: 1,
+            binary_sha256: None,
+        };
+        processor.opaque_state = Some(vec![1, 2, 3].into());
+        let id = insert(&mut sequence, address, processor.clone());
+        let expected = processor.definition.clone();
+        let rebound = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+            vendor: Some("Example".to_owned()),
+            schema_version: 1,
+            binary_sha256: Some([9; 32]),
+        };
+        let edit = |new_definition| {
+            request(
+                address,
+                AudioProcessorRackEdit::RebindNative {
+                    processor_id: id,
+                    expected_definition: expected.clone(),
+                    new_definition,
+                },
+            )
+        };
+        let before = sequence.clone();
+        assert_eq!(
+            apply_audio_processor_rack_edit(
+                &mut sequence,
+                &edit(AudioProcessorDefinitionRef::Vst3 {
+                    class_id: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+                    vendor: Some("Other".to_owned()),
+                    schema_version: 1,
+                    binary_sha256: Some([9; 32]),
+                })
+            ),
+            Err(AudioProcessorRackEditError::IncompatibleRebind)
+        );
+        assert_eq!(sequence, before);
+        assert!(
+            apply_audio_processor_rack_edit(&mut sequence, &edit(rebound.clone()))
+                .expect("rebind VST3")
+                .changed
+        );
+        let updated = &audio_processor_rack(&sequence, &address).expect("rack").processors[0];
+        assert_eq!(updated.definition, rebound);
+        assert_eq!(updated.parameters, processor.parameters);
+        assert_eq!(updated.opaque_state, processor.opaque_state);
     }
 
     #[test]

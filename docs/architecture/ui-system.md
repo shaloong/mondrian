@@ -930,7 +930,7 @@ the normal background tick. Widgets own no worker, decode Session, tracking
 cache, publication logic, or alternate shape-key writer.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
-For CLAP, it displays the captured plugin parameter name and omits parameters
+For native audio plugins, it displays the captured plugin parameter name and omits parameters
 marked hidden, while retaining every parameter in Timeline author state and
 native execution. Parameters without a plugin display name show their stable
 IDs; rebinding preserves the existing display snapshot, while new insertions
@@ -943,13 +943,15 @@ reconstruct admission. Numeric controls take hard/soft range, step, unit, value
 type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
 were the playhead value.
-The insertion dropdown projects built-ins and session-installed CLAP definitions
-through the same Rack address, then offers a native CLAP library picker. Dialog
-cancel is a no-op; a selected library is scanned in the audio isolation helper
-and atomically published to the App catalog. The UI does not load native code.
-The Host persists successfully selected paths in machine-local preferences and
-retries them on a background worker after startup. The UI refreshes the Rack
-menus as discoveries arrive and reports missing libraries in the status area.
+The insertion dropdown projects built-ins and session-installed CLAP/VST3
+definitions through the same Rack address, then offers format-specific native
+binary pickers. Dialog cancel is a no-op; a selected binary is scanned in its
+format's isolation helper and atomically published to the App catalog. The UI
+does not load native code. The Host persists selected format/path pairs in
+machine-local preferences and retries them on one background worker after
+startup. The UI refreshes Rack menus as discoveries arrive and reports missing
+binaries in the status area. Current VST3 selection accepts an individual
+binary file; selecting directory bundles remains format work.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact
@@ -2542,6 +2544,6 @@ receipts must all report closure; incomplete App closure returns an error from t
 Window entrypoint instead of accepting ordinary `Drop` as success. Validation may
 return the exact App owner to its caller for reuse and later consuming shutdown.
 The shared Inspector/Mixer Audio Processor Rack projection offers an explicit
-rebind control for CLAP instances. It submits a typed App action, which probes
+rebind control for CLAP and VST3 instances. It submits a typed App action, which probes
 and validates the installed binary before authoring one undoable Rack edit;
 failed or canceled attempts leave the Project unchanged.

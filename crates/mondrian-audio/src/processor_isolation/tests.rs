@@ -335,6 +335,59 @@ fn installed_vst3_reference_processes_through_isolated_worker() {
         )
         .is_err());
     assert_eq!(audio.main, vec![0.75; 8]);
+
+    let offline_render = AudioRenderContract {
+        processing_mode: AudioProcessingMode::Offline,
+        ..test_render_contract()
+    };
+    let offline_instance = catalog
+        .create_instance(&descriptors[0].class_id, offline_render, None)
+        .expect("capture offline VST3 instance");
+    let offline_spec = catalog
+        .resolve(AudioProcessorPrepareRequest::new(
+            AudioProcessorOccurrence {
+                instance_id: offline_instance.id,
+                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+            &offline_instance.definition,
+            &offline_instance.parameters,
+            offline_instance.opaque_state.as_ref().map(AsRef::as_ref),
+            offline_render,
+        ))
+        .expect("resolve offline VST3 instance");
+    let offline_factory =
+        IsolatedAudioProcessorFactory::prepare(offline_spec).expect("prepare offline VST3 worker");
+    let mut offline = offline_factory.create().expect("create offline VST3 instance");
+    offline.enter_state(100).expect("enter offline VST3 continuity");
+    let mut audio = TestAudioIo {
+        main: vec![0.5, -0.25, 1.0, -0.75, 0.4, -0.2, 0.8, -0.6],
+        auxiliary: Vec::new(),
+    };
+    let original = audio.main.clone();
+    let offline_context = AudioProcessorProcessContext::new(
+        AudioRenderRequest { start_sample: 100, frames: 4 },
+        AudioSampleRate::new(48_000).expect("sample rate"),
+        AudioChannelLayout::Stereo,
+        AudioProcessingMode::Offline,
+        AudioKernelBackend::ScalarReference,
+    );
+    offline
+        .process(
+            offline_context,
+            &mut audio,
+            AudioParameterEventBatch::new(
+                100,
+                4,
+                std::slice::from_ref(&id),
+                &ranges,
+                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+            ),
+        )
+        .expect("process offline VST3 gain");
+    for (actual, source) in audio.main.iter().zip(original) {
+        assert!((actual - source * 0.5).abs() < 1.0e-6);
+    }
 }
 
 #[test]

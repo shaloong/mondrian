@@ -4703,7 +4703,10 @@ fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
         .filter(|item| item.tree_depth == 0 && item.tree_expanded.is_some())
         .map(|item| item.title.as_str())
         .collect();
-    assert_eq!(root_categories, ["Color", "Transform", "Keying"]);
+    assert!(
+        root_categories.starts_with(&["Color", "Transform", "Keying"]),
+        "built-in roots must retain their order when plugin tests register extra roots: {root_categories:?}"
+    );
     let color = model
         .items
         .iter()
