@@ -182,6 +182,10 @@ pub enum AudioProcessorDefinitionRef {
     Clap {
         plugin_id: String,
         schema_version: u32,
+        /// Exact installed binary revision captured when the author inserted it.
+        /// Older project files deserialize as `None` and require explicit rebinding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binary_sha256: Option<[u8; 32]>,
     },
 }
 
@@ -356,6 +360,12 @@ impl AudioProcessorInstance {
     }
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
+        if matches!(
+            &self.definition,
+            AudioProcessorDefinitionRef::Clap { binary_sha256: Some(hash), .. } if *hash == [0; 32]
+        ) {
+            return Err(AudioAuthoringError::InvalidPluginBinaryRevision);
+        }
         for (parameter_id, parameter) in &self.parameters {
             if parameter_id != &parameter.schema.parameter_id
                 || parameter_id != &parameter.automation.parameter_id
@@ -876,7 +886,7 @@ impl AuthoringFootprint for AudioProcessorDefinitionRef {
                 collector.collect(class_id)?;
                 collector.collect(vendor)
             }
-            Self::Clap { plugin_id, schema_version: _ } => collector.collect(plugin_id),
+            Self::Clap { plugin_id, .. } => collector.collect(plugin_id),
         }
     }
 }
@@ -1815,6 +1825,9 @@ pub enum AudioAuthoringError {
     /// Default, keyframe, or Bezier control values violate the schema's hard range.
     #[error("audio processor parameter value violates its schema")]
     InvalidProcessorParameterValue,
+    /// A claimed native binary revision cannot be the all-zero sentinel.
+    #[error("audio processor plugin binary revision is invalid")]
+    InvalidPluginBinaryRevision,
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
@@ -1910,6 +1923,39 @@ pub enum AudioAuthoringError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clap_binary_revision_round_trips_and_legacy_definition_requires_rebinding() {
+        let pinned = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        let json = serde_json::to_value(&pinned).expect("serialize pinned definition");
+        assert_eq!(
+            serde_json::from_value::<AudioProcessorDefinitionRef>(json)
+                .expect("restore pinned definition"),
+            pinned
+        );
+        let legacy: AudioProcessorDefinitionRef = serde_json::from_value(serde_json::json!({
+            "Clap": { "plugin_id": "org.example.gain", "schema_version": 1 }
+        }))
+        .expect("load older definition");
+        assert!(matches!(
+            legacy,
+            AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
+        ));
+        let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        invalid.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([0; 32]),
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(AudioAuthoringError::InvalidPluginBinaryRevision)
+        ));
+    }
 
     #[test]
     fn audio_cow_containers_preserve_json_and_detach_only_on_mutation() {

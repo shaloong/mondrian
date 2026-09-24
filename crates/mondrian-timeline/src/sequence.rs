@@ -3710,6 +3710,7 @@ mod tests {
         clap.definition = AudioProcessorDefinitionRef::Clap {
             plugin_id: "com.example.clap.saturator".to_owned(),
             schema_version: 2,
+            binary_sha256: None,
         };
         sequence
             .audio_program

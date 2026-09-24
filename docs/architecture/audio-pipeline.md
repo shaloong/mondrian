@@ -43,15 +43,19 @@ when a restored definition becomes available.
 The selected binary is fingerprinted with bounded SHA-256 reads before and
 after descriptor discovery and contract probing, then verified again in the
 processing child before native loading. A replaced binary fails admission.
+Insertion captures the installed binary SHA-256 in the authored CLAP definition.
+The shared resolver requires that exact revision for both Preview and Export;
+older definitions without a revision remain readable but do not execute until
+the user explicitly rebinds them.
 
 The public Runtime builders for an audition compile request and for a frozen
 selected-range dependency closure accept an explicit processor resolver. Each
 builder passes it to every nested Sequence occurrence. The App binds one
-immutable resolver to Preview, idle audio warmup, and its Export queue. Export
+shared resolver to Preview, idle audio warmup, and its Export queue. Export
 uses that queue resolver for normal audio and each stem, including the initial
 aggregate resource admission pass. Default construction still uses built-ins
-and rejects unresolved external definitions. Installed-plugin selection and
-project-persistent binary revision recovery remain product work.
+and rejects unresolved external definitions. Explicit revision rebinding and
+missing-plugin management remain product work.
 
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different

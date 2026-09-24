@@ -49,7 +49,7 @@ impl AudioProcessorResolver for BuiltInAudioProcessorResolver {
                     "VST3 class {class_id} schema {schema_version}"
                 )))
             }
-            AudioProcessorDefinitionRef::Clap { plugin_id, schema_version } => {
+            AudioProcessorDefinitionRef::Clap { plugin_id, schema_version, .. } => {
                 Err(AudioProcessorHostError::Unavailable(format!(
                     "CLAP plugin {plugin_id} schema {schema_version}"
                 )))

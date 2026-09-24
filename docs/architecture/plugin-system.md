@@ -88,6 +88,11 @@ Discovery records a bounded SHA-256 fingerprint of each selected binary and
 checks it again after descriptor discovery, after contract probing, and inside
 the processing child before native loading. A changed installed binary fails
 admission rather than silently changing the sound between Preview and Export.
+Each newly inserted CLAP processor also persists the selected binary SHA-256
+inside its definition reference. Both Preview and Export compare that authored
+revision with the installed registration before preparing a worker. A legacy
+definition without a revision remains editable but needs explicit rebinding
+before native execution.
 An installed reference-plugin test verifies the Preview adapter launches the
 real CLAP worker and renders a block. A local CLAP fixture verifies that parameter
 events retain their sample offsets at the ABI. The Clack Gain example receives
@@ -101,8 +106,11 @@ a failed scan retains the previous catalog. A successful selection records its
 canonical path in bounded machine-local UI preferences, never in `.mdp`.
 At restart, the Host schedules those paths on a dedicated background worker;
 each library is re-scanned in its isolated child and publishes only after
-validation. Missing or changed libraries report a visible restore failure
-without changing project author state. Installation and restoration do not
+validation. Missing libraries report a visible restore failure. A changed
+binary may scan successfully but fails the Project instance's fingerprint
+binding during audio preparation; the App surfaces that preparation failure
+and clears stale audio. Neither case changes project author state.
+Installation and restoration do not
 advance the project author generation. Automatic installed-path enumeration,
 plugin management and relocation UI, state capture, parameter-control UI, project-persistent
 binary revision recovery, and a full Preview/Export signal-parity test remain required before

@@ -117,7 +117,9 @@ impl AppState {
                     ),
                     true,
                 );
-            } else if restore.succeeded > 0 {
+            } else if restore.succeeded > 0
+                && !self.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error)
+            {
                 self.set_status_hint(
                     format!("已恢复 {} 个 CLAP 插件库", restore.succeeded),
                     false,

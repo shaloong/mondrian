@@ -526,7 +526,6 @@ mod tests {
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
-        use mondrian_timeline::audio::{AudioProcessorDefinitionRef, AudioProcessorInstance};
 
         let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
             .map(std::path::PathBuf::from)
@@ -537,26 +536,31 @@ mod tests {
         let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
             .expect("discover reference plugin");
         let descriptor = installed.descriptors()[0].clone();
+        let instance = installed
+            .create_instance(
+                &descriptor.plugin_id,
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
+                    processing_mode: AudioProcessingMode::Realtime,
+                    processor_session_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                    public_output_lookahead_budget_frames:
+                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                    compensation_delay_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                },
+                Some(0.5_f32.to_le_bytes().to_vec()),
+            )
+            .expect("capture pinned CLAP instance");
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
         let root = std::env::temp_dir().join(format!(
             "mondrian-preview-clap-{}",
             mondrian_core::ProjectId::new()
         ));
         let mut sequence = Sequence::new("CLAP preview");
-        sequence.audio_program.outputs[0]
-            .strip
-            .pre_fader
-            .processors
-            .push(AudioProcessorInstance {
-                id: mondrian_core::AudioProcessorInstanceId::new(),
-                definition: AudioProcessorDefinitionRef::Clap {
-                    plugin_id: descriptor.plugin_id,
-                    schema_version: 1,
-                },
-                bypassed: false,
-                parameters: Default::default(),
-                opaque_state: Some(0.5_f32.to_le_bytes().into_iter().collect()),
-            });
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
         let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence,
             Vec::new(),

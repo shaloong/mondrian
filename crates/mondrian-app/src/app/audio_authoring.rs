@@ -671,8 +671,11 @@ mod tests {
         assert_eq!(rack.processors.len(), 1);
         assert!(matches!(
             &rack.processors[0].definition,
-            mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
-                if plugin_id == &plugins[0].plugin_id
+            mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                plugin_id,
+                binary_sha256: Some(hash),
+                ..
+            } if plugin_id == &plugins[0].plugin_id && *hash != [0; 32]
         ));
         assert_eq!(state.project_author_generation(), generation + 1);
         assert!(state.undo_timeline().expect("undo insertion"));

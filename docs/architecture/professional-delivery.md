@@ -17,6 +17,10 @@ from the independent artifact re-open/content verification required by
 commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+Frozen Export Snapshots retain any authored CLAP binary SHA-256. The audio
+resolver rejects an installed revision mismatch before worker admission;
+Export never silently uses a newer same-ID processor in place of authored sound.
+
 The job-scoped Audio Source Cache now returns schema-6 raw closure, including
 its independent native-startup worker and producer leases. Queue consumers do
 not reinterpret audio construction or introduce a separate startup scheduler.

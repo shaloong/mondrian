@@ -328,6 +328,7 @@ impl DiscoveredClapAudioProcessorSpecResolver {
             definition: AudioProcessorDefinitionRef::Clap {
                 plugin_id: plugin_id.to_owned(),
                 schema_version: 1,
+                binary_sha256: Some(*fingerprint),
             },
             bypassed: false,
             parameters,
@@ -398,7 +399,8 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         &self,
         request: AudioProcessorPrepareRequest<'_>,
     ) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
-        let AudioProcessorDefinitionRef::Clap { plugin_id, schema_version } = request.definition()
+        let AudioProcessorDefinitionRef::Clap { plugin_id, schema_version, binary_sha256 } =
+            request.definition()
         else {
             return Err(unavailable(
                 "only CLAP definitions are handled by this registry",
@@ -411,6 +413,19 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not registered")))?;
+        match binary_sha256 {
+            Some(expected) if *expected == plugin.binary_sha256 => {}
+            Some(_) => {
+                return Err(unavailable(format!(
+                    "CLAP plugin {plugin_id} binary revision differs from the authored instance"
+                )))
+            }
+            None => {
+                return Err(unavailable(format!(
+                    "CLAP plugin {plugin_id} has no authored binary revision; rebind it explicitly"
+                )))
+            }
+        }
         let mut parameter_ids = Vec::with_capacity(request.parameters().len());
         let mut clap_parameter_ids = Vec::with_capacity(request.parameters().len());
         for (parameter_id, parameter) in request.parameters() {
@@ -1144,6 +1159,65 @@ mod tests {
     }
 
     #[test]
+    fn authored_clap_binary_revision_is_required_and_matches_before_worker_admission() {
+        use crate::{
+            AudioProcessorInsertionPoint, AudioProcessorOccurrence, AudioProcessorOccurrenceOwner,
+        };
+        use mondrian_core::{AudioProcessorInstanceId, ProgramOutputId};
+
+        let helper = std::env::current_exe().expect("test executable path");
+        let resolver = ClapAudioProcessorSpecResolver::new(
+            helper.clone(),
+            [ClapPluginRegistration {
+                plugin_id: "org.example.gain".to_owned(),
+                library_path: helper,
+                binary_sha256: [7; 32],
+                execution_contract: contract(),
+                parameters: Vec::new(),
+            }],
+        )
+        .expect("reference registration");
+        let parameters = BTreeMap::new();
+        let render_contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 512,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let occurrence = AudioProcessorOccurrence {
+            instance_id: AudioProcessorInstanceId::new(),
+            owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+            insertion: AudioProcessorInsertionPoint::PreFader,
+        };
+        let resolve = |hash| {
+            let definition = AudioProcessorDefinitionRef::Clap {
+                plugin_id: "org.example.gain".to_owned(),
+                schema_version: 1,
+                binary_sha256: hash,
+            };
+            resolver.resolve(AudioProcessorPrepareRequest::new(
+                occurrence,
+                &definition,
+                &parameters,
+                None,
+                render_contract,
+            ))
+        };
+        assert!(matches!(
+            resolve(None),
+            Err(AudioProcessorHostError::Unavailable(message)) if message.contains("no authored binary revision")
+        ));
+        assert!(matches!(
+            resolve(Some([8; 32])),
+            Err(AudioProcessorHostError::Unavailable(message)) if message.contains("binary revision differs")
+        ));
+        assert!(resolve(Some([7; 32])).is_ok());
+    }
+
+    #[test]
     fn installed_catalog_preserves_empty_snapshot_after_failed_scan() {
         let helper = std::env::current_exe().expect("test executable path");
         let catalog =
@@ -1338,10 +1412,6 @@ mod tests {
             .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
         let resolver = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
             .expect("discover installed CLAP plugin");
-        let definition = AudioProcessorDefinitionRef::Clap {
-            plugin_id: "org.rust-audio.clack.gain".to_owned(),
-            schema_version: 1,
-        };
         let state = 0.5_f32.to_le_bytes();
         let instance = resolver
             .create_instance(
@@ -1358,6 +1428,7 @@ mod tests {
                 Some(state.to_vec()),
             )
             .expect("capture installed plugin parameters");
+        let definition = instance.definition.clone();
         let parameters = instance
             .parameters
             .iter()

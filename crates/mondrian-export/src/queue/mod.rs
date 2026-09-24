@@ -16518,6 +16518,7 @@ mod tests {
             definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
                 plugin_id: "test.mondrian.generator-capable".to_owned(),
                 schema_version: 1,
+                binary_sha256: None,
             },
             bypassed: false,
             parameters: Default::default(),
@@ -16605,6 +16606,7 @@ mod tests {
                 definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
                     plugin_id: "org.example.export-test".to_owned(),
                     schema_version: 1,
+                    binary_sha256: None,
                 },
                 bypassed: false,
                 parameters: Default::default(),

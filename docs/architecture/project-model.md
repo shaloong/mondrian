@@ -26,6 +26,10 @@ The File menu exposes a destination dialog, background copy progress, and
 cancel. The product still needs a linked-versus-embedded choice and a
 second-machine Preview/Export parity run. Installed third-party plugin binaries and fonts must not be bundled
 without a distributable license. Generated caches remain excluded.
+CLAP processor definitions in `project.json` retain the selected binary's
+SHA-256 revision, but never the installed machine path or the binary itself.
+Preview and Export reject a different revision until the author explicitly
+rebinds that processor; copying the project does not silently substitute sound.
 
 Persistent Timeline render-cache artifacts live in a versioned machine-local
 cache namespace. Project/Sequence authoring persists only enablement and format

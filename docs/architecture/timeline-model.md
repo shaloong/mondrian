@@ -1399,6 +1399,9 @@ milliseconds but marks it non-animatable and topology-affecting; audio plan
 preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
+CLAP processor definitions also store the selected binary's SHA-256 revision;
+the installed path remains machine-local. Legacy definitions without a revision
+stay readable for editing but fail native preparation until explicitly rebound.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,
 parameter_id }` as the stable property-instance address and `KeyframeId` as the

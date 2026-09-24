@@ -1231,6 +1231,7 @@ impl AppState {
                     "failed to clear stale audio after committed authoring change"
                 );
             }
+            self.set_status_hint(format!("音频处理无法准备：{error}"), true);
         }
     }
 

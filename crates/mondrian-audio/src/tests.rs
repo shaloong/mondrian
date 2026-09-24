@@ -492,6 +492,7 @@ fn sequence_with_parallel_hosted_delay() -> Sequence {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.delay".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -679,6 +680,7 @@ fn typed_sidechain_retains_detector_only_track_and_supplies_auxiliary_pcm() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.sidechain_copy".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1539,6 +1541,7 @@ fn selected_bus_processor_prevents_unprepared_silence_substitution() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.generator-capable".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1578,6 +1581,7 @@ fn pre_fader_tap_does_not_retain_an_unreachable_post_fader_processor() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.unreachable-generator".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1612,6 +1616,7 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     authored_processor.definition = mondrian_timeline::AudioProcessorDefinitionRef::Clap {
         plugin_id: "com.example.effect".to_owned(),
         schema_version: 1,
+        binary_sha256: None,
     };
     authored_processor.opaque_state = Some(vec![1, 2, 3].into());
     sequence
@@ -2060,6 +2065,7 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.delay".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
