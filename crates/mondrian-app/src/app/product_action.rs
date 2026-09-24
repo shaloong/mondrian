@@ -206,6 +206,10 @@ pub const AUDIO_NAMESPACE: &str = "ui.audio";
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
 pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
+/// External action name for registering one selected CLAP library in this session.
+pub const AUDIO_INSTALL_CLAP_LIBRARY: &str = "install_clap_library";
+/// External action name for inserting one installed CLAP processor.
+pub const AUDIO_INSERT_CLAP_PROCESSOR: &str = "insert_clap_processor";
 /// External action name for one normative Channel Strip edit.
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 /// External action name for one atomic Bus/Route graph edit.
@@ -445,6 +449,10 @@ pub enum AudioProductAction {
     EditProcessorRack(AudioProcessorRackEditRequest),
     /// Resolve and insert one canonical product-visible built-in Processor.
     InsertBuiltInProcessor(AudioProcessorInsertBuiltInPayload),
+    /// Discover a selected library in an isolated helper and publish its definitions.
+    InstallClapLibrary(AudioInstallClapLibraryPayload),
+    /// Probe and insert an installed native processor in one author transaction.
+    InsertClapProcessor(AudioProcessorInsertClapPayload),
     /// Apply one Track, Bus, or Program Output Channel Strip mutation.
     EditChannelStrip(AudioChannelStripEditRequest),
     /// Apply one Bus/Route graph mutation.
@@ -704,6 +712,16 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
+                AUDIO_INSTALL_CLAP_LIBRARY => {
+                    Ok(Some(Self::Audio(AudioProductAction::InstallClapLibrary(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSERT_CLAP_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::InsertClapProcessor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
                 AUDIO_EDIT_CHANNEL_STRIP => Ok(Some(Self::Audio(
                     AudioProductAction::EditChannelStrip(decode_payload(namespace, name, payload)?),
                 ))),
@@ -1214,6 +1232,16 @@ impl ProductAction {
                 AUDIO_INSERT_BUILT_IN_PROCESSOR,
                 serde_json::json!(payload),
             ),
+            Self::Audio(AudioProductAction::InstallClapLibrary(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSTALL_CLAP_LIBRARY,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::InsertClapProcessor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSERT_CLAP_PROCESSOR,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_CHANNEL_STRIP,
@@ -1650,6 +1678,26 @@ pub struct AudioProcessorInsertBuiltInPayload {
     pub address: mondrian_timeline::AudioProcessorRackAddress,
     /// Product-visible canonical built-in.
     pub preset: AudioProcessorBuiltInPreset,
+    /// Stable position inside the Rack.
+    pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Explicit native library selected by the user for session discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioInstallClapLibraryPayload {
+    /// Absolute path selected by the native file dialog.
+    pub path: PathBuf,
+}
+
+/// Stable plugin ID and Rack placement for an installed CLAP definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInsertClapPayload {
+    /// Rack receiving the new processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// CLAP identity discovered from the selected binary.
+    pub plugin_id: String,
     /// Stable position inside the Rack.
     pub placement: mondrian_timeline::AudioProcessorRackPlacement,
 }
@@ -4086,6 +4134,31 @@ mod tests {
             .expect("recognized product action");
 
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_clap_install_and_insertion_intents() {
+        let address = AudioProcessorRackAddress::ProcessingScope {
+            scope_id: mondrian_core::AudioProcessingScopeId::new(),
+        };
+        for expected in [
+            ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                AudioInstallClapLibraryPayload { path: PathBuf::from("C:/plugins/gain.clap") },
+            )),
+            ProductAction::Audio(AudioProductAction::InsertClapProcessor(
+                AudioProcessorInsertClapPayload {
+                    address,
+                    plugin_id: "org.example.gain".to_owned(),
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )),
+        ] {
+            assert_eq!(
+                ProductAction::decode_external(&expected.clone().into_external_action())
+                    .expect("valid external payload"),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

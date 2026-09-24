@@ -3,6 +3,7 @@
 //! Inspector and future Mixer surfaces consume this Module instead of
 //! traversing or interpreting the Sequence audio author model independently.
 
+use mondrian_audio::ClapPluginDescriptor;
 use mondrian_core::automation::{ParameterSchema, PropertyValueType};
 use mondrian_core::{AudioProcessorInstanceId, ParameterId};
 use mondrian_editor_state::Action;
@@ -25,15 +26,24 @@ use super::audio_automation::{
     processing_scope_automation_viewport, project_audio_automation, sequence_automation_viewport,
     AudioAutomationCurveModel, AudioAutomationViewport,
 };
-use crate::app::product_action::{AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload};
+use crate::app::product_action::{
+    AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
+    AudioProcessorInsertClapPayload, AudioProductAction, ProductAction,
+};
 use crate::app::ui_actions::{
     audio_processor_insert_built_in_action, audio_processor_rack_edit_action,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AudioProcessorInsertOptionModel {
-    pub(crate) label: &'static str,
-    pub(crate) preset: AudioProcessorBuiltInPreset,
+    pub(crate) label: String,
+    pub(crate) choice: AudioProcessorInsertChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AudioProcessorInsertChoice {
+    BuiltIn(AudioProcessorBuiltInPreset),
+    Clap(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,14 +170,52 @@ pub(crate) fn project_audio_processor_rack(
         },
         insert_options: vec![
             AudioProcessorInsertOptionModel {
-                label: "增益",
-                preset: AudioProcessorBuiltInPreset::Gain,
+                label: "增益".to_owned(),
+                choice: AudioProcessorInsertChoice::BuiltIn(AudioProcessorBuiltInPreset::Gain),
             },
             AudioProcessorInsertOptionModel {
-                label: "前瞻限制器（Sample Peak）",
-                preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
+                label: "前瞻限制器（Sample Peak）".to_owned(),
+                choice: AudioProcessorInsertChoice::BuiltIn(
+                    AudioProcessorBuiltInPreset::LookaheadLimiter,
+                ),
             },
         ],
+    }
+}
+
+pub(crate) fn append_clap_insert_options(
+    racks: &mut [AudioProcessorRackModel],
+    descriptors: &[ClapPluginDescriptor],
+) {
+    for rack in racks {
+        rack.insert_options.extend(descriptors.iter().map(|descriptor| {
+            let label =
+                descriptor.vendor.as_deref().filter(|vendor| !vendor.is_empty()).map_or_else(
+                    || descriptor.name.clone(),
+                    |vendor| format!("{vendor} · {}", descriptor.name),
+                );
+            AudioProcessorInsertOptionModel {
+                label,
+                choice: AudioProcessorInsertChoice::Clap(descriptor.plugin_id.clone()),
+            }
+        }));
+    }
+}
+
+pub(crate) fn insert_option_action(
+    rack: &AudioProcessorRackModel,
+    choice: &AudioProcessorInsertChoice,
+) -> Action {
+    match choice {
+        AudioProcessorInsertChoice::BuiltIn(preset) => insert_action(rack, *preset),
+        AudioProcessorInsertChoice::Clap(plugin_id) => ProductAction::Audio(
+            AudioProductAction::InsertClapProcessor(AudioProcessorInsertClapPayload {
+                address: rack.address,
+                plugin_id: plugin_id.clone(),
+                placement: AudioProcessorRackPlacement::End,
+            }),
+        )
+        .into_external_action(),
     }
 }
 
@@ -594,6 +642,35 @@ mod tests {
                     ..
                 })
             ))
+        ));
+    }
+
+    #[test]
+    fn installed_clap_option_preserves_plugin_identity_and_rack_address() {
+        let (sequence, _) = sequence_with_gain_scope();
+        let clip = &sequence.audio_tracks[0].clips[0];
+        let mut racks = clip_processing_scope_racks(&sequence, clip);
+        append_clap_insert_options(
+            &mut racks,
+            &[ClapPluginDescriptor {
+                plugin_id: "org.example.gain".to_owned(),
+                name: "Gain".to_owned(),
+                vendor: Some("Example".to_owned()),
+                version: None,
+            }],
+        );
+        let rack = &racks[0];
+        assert_eq!(rack.insert_options[2].label, "Example · Gain");
+        let action = insert_option_action(rack, &rack.insert_options[2].choice);
+        assert!(matches!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::InsertClapProcessor(
+                AudioProcessorInsertClapPayload {
+                    address,
+                    plugin_id,
+                    placement: AudioProcessorRackPlacement::End,
+                }
+            ))) if address == rack.address && plugin_id == "org.example.gain"
         ));
     }
 }

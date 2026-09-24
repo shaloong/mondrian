@@ -124,6 +124,8 @@ pub const APP_SHELL_RECOVERY_DIALOG: &str = "recovery_dialog";
 pub const APP_SHELL_CONFIRM_RECOVERY_DIALOG: &str = "confirm_recovery_dialog";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// Request a native file picker for one CLAP binary.
+pub const APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG: &str = "install_clap_library_dialog";
 /// App-shell request to navigate the Asset browser to one folder.
 pub const APP_SHELL_ASSET_BROWSER_OPEN_FOLDER: &str = "asset_browser_open_folder";
 
@@ -1361,6 +1363,15 @@ pub fn app_shell_confirm_recovery_dialog_action() -> Action {
 /// Build an app-shell request for importing media files.
 pub fn app_shell_import_media_dialog_action() -> Action {
     app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload { folder_id: None })
+}
+
+/// Open the native CLAP library picker from an Audio Rack insertion menu.
+pub fn app_shell_install_clap_library_dialog_action() -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.to_owned(),
+        name: APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG.to_owned(),
+        payload: serde_json::Value::Null,
+    }
 }
 
 /// Build an app-shell request for importing media files into a target folder.

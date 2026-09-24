@@ -1387,16 +1387,21 @@ pub(super) fn with_audio_processor_rack_sections(
         } else {
             format!("{} {}", rack.title, rack_index + 1)
         };
-        let insert_items = rack
+        let mut insert_items: Vec<MenuItem> = rack
             .insert_options
             .iter()
             .map(|option| {
                 MenuItem::new(
-                    option.label,
-                    audio_processor_insert_action(rack, option.preset),
+                    option.label.clone(),
+                    audio_processor_insert_option_action(rack, &option.choice),
                 )
             })
             .collect();
+        insert_items.push(MenuItem::separator());
+        insert_items.push(MenuItem::new(
+            "安装 CLAP 插件…",
+            app_shell_install_clap_library_dialog_action(),
+        ));
         let mut rack_section = PropertySection::new(title)
             .with_row(PropertyRow::new(
                 "作用域",

@@ -12,7 +12,7 @@ use mondrian_core::{AudioChannelLayout, AudioSourceComponentId, ExecutionCancell
 use mondrian_media::{AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
 
-const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
+pub(super) const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
     state: Mutex<TimelineAudioRenderState>,

@@ -39,7 +39,7 @@ pub use clap_discovery::{
 };
 pub use clap_worker::{
     ClapAudioProcessorSpecResolver, ClapAudioProcessorWorkerFactory, ClapPluginRegistration,
-    DiscoveredClapAudioProcessorSpecResolver,
+    DiscoveredClapAudioProcessorSpecResolver, InstalledClapAudioProcessorSpecResolver,
 };
 
 /// Hidden endpoint environment used only between a parent Adapter and its Worker.

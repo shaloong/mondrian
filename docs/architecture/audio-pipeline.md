@@ -27,8 +27,15 @@ metadata after successful exit. Plugin code is loaded only in the child.
 The probe restores the same author state, validates a Mono/Stereo main port,
 and measures latency/tail for the requested rate and block extent. The
 subsequent audio worker rechecks those facts. Explicit library selection is
-available through the resolver, which the application can bind to Preview and
-Export. The insertion picker and installed-library management are not yet wired.
+available through the App's native file picker and session catalog. Inspector
+and Mixer offer installed definitions; insertion probes the processor in the
+child before the existing Rack author transaction.
+An `InstalledClapAudioProcessorSpecResolver` supplies an App-shareable,
+mutable backend catalog. Library scans happen before the write lock and commit
+all descriptors from one selected path together; failed scans and cross-path
+plugin ID collisions preserve the previous snapshot. Preview/Export preparation
+copies one snapshot and retains the existing binary-revision checks. Selected
+paths still need machine-local persistence and restart recovery.
 The selected binary is fingerprinted with bounded SHA-256 reads before and
 after descriptor discovery and contract probing, then verified again in the
 processing child before native loading. A replaced binary fails admission.

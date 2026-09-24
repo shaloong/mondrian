@@ -78,7 +78,12 @@ definition for exact Mono/Stereo port, latency, and tail facts after restoring
 its author state. `DiscoveredClapAudioProcessorSpecResolver` binds explicitly
 selected libraries to those probes during preparation; the processing child
 checks the facts again before admission. The App's Preview, idle warmup, and
-Export queue now share one injected resolver; the default remains built-in only.
+Export queue share one injected resolver backed by the same session catalog.
+The mutable `InstalledClapAudioProcessorSpecResolver` scans outside its lock,
+publishes every descriptor from one selected library atomically, and rejects
+duplicate plugin IDs from another path without altering the old snapshot.
+Reselecting the same path replaces its definitions, while a preparation keeps
+one immutable snapshot and re-probes the selected binary.
 Discovery records a bounded SHA-256 fingerprint of each selected binary and
 checks it again after descriptor discovery, after contract probing, and inside
 the processing child before native loading. A changed installed binary fails
@@ -88,8 +93,13 @@ real CLAP worker and renders a block. A local CLAP fixture verifies that paramet
 events retain their sample offsets at the ABI. The Clack Gain example receives
 multiple events but applies each gain to the whole buffer, so its output is
 checked against that implementation rather than used as a sample-accuracy oracle.
-Automatic installed-path enumeration,
-project insertion UI, state capture, parameter-control UI, project-persistent
+The Inspector and Mixer insertion menus expose session-installed definitions
+and a native picker for an explicitly selected CLAP binary. The App probes a
+selected definition in the isolated helper before submitting one Timeline Rack
+insert transaction. Canceling the picker changes neither catalog nor project;
+a failed scan retains the previous catalog. Installation is session-local and
+does not advance the project author generation. Automatic installed-path enumeration,
+selected-path persistence and restart recovery, state capture, parameter-control UI, project-persistent
 binary revision recovery, and a full Preview/Export signal-parity test remain required before
 CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.

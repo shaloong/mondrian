@@ -32,7 +32,9 @@ use crate::app::AppState;
 use super::audio_automation::{
     project_audio_automation, sequence_automation_viewport, AudioAutomationCurveModel,
 };
-use super::audio_processor_rack::{project_audio_processor_rack, AudioProcessorRackModel};
+use super::audio_processor_rack::{
+    append_clap_insert_options, project_audio_processor_rack, AudioProcessorRackModel,
+};
 
 /// Complete immutable Mixer panel projection.
 #[derive(Debug, Clone)]
@@ -175,6 +177,11 @@ impl AudioMixerPanelModel {
                 meter.as_ref(),
             )
         }));
+        if let Ok(descriptors) = state.installed_clap_processors() {
+            for channel in &mut channels {
+                append_clap_insert_options(&mut channel.processor_racks, &descriptors);
+            }
+        }
         Self {
             channels,
             next_bus_name: Some(next_bus_name(sequence)),

@@ -3,6 +3,7 @@
 //! UI Adapters submit the closed product action; Timeline Modules own Channel
 //! Strip/Rack mutation and validation; App owns transaction and execution refresh.
 
+use mondrian_audio::{AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::audio::{
     AudioComponentSource, AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
@@ -46,9 +47,65 @@ impl AppState {
                     },
                 })
             }
+            AudioProductAction::InstallClapLibrary(payload) => {
+                let catalog = self
+                    .clap_catalog
+                    .as_ref()
+                    .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
+                let descriptors = catalog
+                    .install_library(payload.path)
+                    .map_err(|error| clap_unavailable(error.to_string()))?;
+                self.set_status_hint(
+                    format!("已安装 {} 个 CLAP 处理器", descriptors.len()),
+                    false,
+                );
+                Ok(())
+            }
+            AudioProductAction::InsertClapProcessor(payload) => {
+                let channel_layout = self
+                    .active_sequence()
+                    .ok_or_else(|| clap_unavailable("当前没有活动序列"))?
+                    .settings
+                    .audio_channel_layout;
+                let catalog = self
+                    .clap_catalog
+                    .as_ref()
+                    .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
+                let processor = catalog
+                    .create_instance(
+                        &payload.plugin_id,
+                        AudioRenderContract {
+                            sample_rate: self.audio_sample_rate,
+                            channel_layout,
+                            max_block_frames: super::audio_rendering::MAX_AUDIO_RENDER_BLOCK_FRAMES,
+                            processing_mode: AudioProcessingMode::Realtime,
+                            processor_session_scratch_budget_bytes: AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                            public_output_lookahead_budget_frames: AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                            compensation_delay_scratch_budget_bytes: AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                        },
+                        None,
+                    )
+                    .map_err(|error| clap_unavailable(error.to_string()))?;
+                self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+                    address: payload.address,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor,
+                        placement: payload.placement,
+                    },
+                })
+            }
             AudioProductAction::EditChannelStrip(request) => self.edit_audio_channel_strip(request),
             AudioProductAction::EditRouting(request) => self.edit_audio_routing(request),
         }
+    }
+
+    /// Session-visible CLAP definitions for Inspector and Mixer insertion menus.
+    pub fn installed_clap_processors(&self) -> Result<Vec<ClapPluginDescriptor>> {
+        let catalog = self
+            .clap_catalog
+            .as_ref()
+            .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
+        catalog.descriptors().map_err(|error| clap_unavailable(error.to_string()))
     }
 
     fn edit_audio_automation(&mut self, request: AudioAutomationEditRequest) -> Result<()> {
@@ -249,11 +306,19 @@ impl AppState {
     }
 }
 
+fn clap_unavailable(reason: impl Into<String>) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "audio_clap_plugin".to_owned(),
+        reason: reason.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::product_action::{
-        AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
+        AudioInstallClapLibraryPayload, AudioProcessorBuiltInPreset,
+        AudioProcessorInsertBuiltInPayload, AudioProcessorInsertClapPayload, ProductAction,
     };
     use crate::app::ui_actions::{
         audio_automation_edit_action, audio_channel_strip_edit_action,
@@ -517,6 +582,103 @@ mod tests {
         ));
         assert_eq!(processor.parameters.len(), 3);
         assert_eq!(state.project_author_generation(), generation + 1);
+    }
+
+    #[test]
+    fn failed_clap_install_and_missing_definition_leave_author_state_untouched() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("CLAP admission");
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-clap-{}.dll",
+            mondrian_core::ProjectId::new()
+        ));
+        let install = ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+            AudioInstallClapLibraryPayload { path: missing_path },
+        ));
+        assert!(state.dispatch_action(install.into_external_action()).is_err());
+        let insert = ProductAction::Audio(AudioProductAction::InsertClapProcessor(
+            AudioProcessorInsertClapPayload {
+                address,
+                plugin_id: "invalid.plugin".to_owned(),
+                placement: AudioProcessorRackPlacement::End,
+            },
+        ));
+        assert!(state.dispatch_action(insert.into_external_action()).is_err());
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(state.installed_clap_processors().expect("catalog").is_empty());
+        assert!(
+            audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
+                .expect("Rack")
+                .processors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_CLAP_TEST_HELPER and MONDRIAN_CLAP_TEST_PLUGIN"]
+    fn selected_clap_library_inserts_canonical_processor_and_round_trips_undo() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("built app executable");
+        let library = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("Clack reference library");
+        let catalog = std::sync::Arc::new(
+            mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper).expect("catalog"),
+        );
+        let mut state = AppState::with_clap_catalog(catalog);
+        let sequence = Sequence::new("CLAP insertion");
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                    AudioInstallClapLibraryPayload { path: library },
+                ))
+                .into_external_action(),
+            )
+            .expect("install reference library");
+        let plugins = state.installed_clap_processors().expect("catalog descriptors");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(state.project_author_generation(), generation);
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::InsertClapProcessor(
+                    AudioProcessorInsertClapPayload {
+                        address,
+                        plugin_id: plugins[0].plugin_id.clone(),
+                        placement: AudioProcessorRackPlacement::End,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .expect("insert reference processor");
+        let rack = audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
+            .expect("Rack");
+        assert_eq!(rack.processors.len(), 1);
+        assert!(matches!(
+            &rack.processors[0].definition,
+            mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
+                if plugin_id == &plugins[0].plugin_id
+        ));
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert!(state.undo_timeline().expect("undo insertion"));
+        assert!(
+            audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
+                .expect("Rack")
+                .processors
+                .is_empty()
+        );
     }
 
     #[test]

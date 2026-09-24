@@ -921,6 +921,10 @@ reconstruct admission. Numeric controls take hard/soft range, step, unit, value
 type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
 were the playhead value.
+The insertion dropdown projects built-ins and session-installed CLAP definitions
+through the same Rack address, then offers a native CLAP library picker. Dialog
+cancel is a no-op; a selected library is scanned in the audio isolation helper
+and atomically published to the App catalog. The UI does not load native code.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact

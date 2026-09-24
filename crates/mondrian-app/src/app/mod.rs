@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 use std::{fs, path::Path, path::PathBuf};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
-use mondrian_audio::{AudioProcessorResolver, BuiltInAudioProcessorResolver};
+use mondrian_audio::{
+    AudioProcessorResolver, BuiltInAudioProcessorResolver, InstalledClapAudioProcessorSpecResolver,
+    IsolatedAudioProcessorResolver,
+};
 use mondrian_core::{
     automation::{
         interpolation_mode_from_keyframe, AnimationParameterAddress, InterpolationType, Keyframe,
@@ -517,8 +520,10 @@ pub struct AppState {
     audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger,
     /// Open-Session audition intent and observations from the exact prepared Runtime.
     audio_monitoring: audio_monitoring::AudioMonitoringState,
-    /// Immutable processor interpretation shared with Export and idle warmup.
+    /// Shared processor interpretation for Preview, Export, and idle warmup.
     audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
+    /// Session-installed CLAP definitions shared by Preview and Export.
+    clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
     audio_idle_warmup_terminal_cursor: u64,
@@ -545,7 +550,22 @@ pub(crate) fn test_app_state_construction_count() -> u64 {
 
 impl AppState {
     pub fn new() -> Self {
-        Self::with_audio_processor_resolver(Arc::new(BuiltInAudioProcessorResolver))
+        let catalog = std::env::current_exe()
+            .ok()
+            .and_then(|helper| InstalledClapAudioProcessorSpecResolver::new(helper).ok())
+            .map(Arc::new);
+        match catalog {
+            Some(catalog) => Self::with_clap_catalog(catalog),
+            None => Self::with_audio_processor_resolver(Arc::new(BuiltInAudioProcessorResolver)),
+        }
+    }
+
+    fn with_clap_catalog(catalog: Arc<InstalledClapAudioProcessorSpecResolver>) -> Self {
+        let resolver: Arc<dyn AudioProcessorResolver> =
+            Arc::new(IsolatedAudioProcessorResolver::new(catalog.clone()));
+        let mut state = Self::with_audio_processor_resolver(resolver);
+        state.clap_catalog = Some(catalog);
+        state
     }
 
     /// Create an editor whose Preview and Export share one processor resolver.
@@ -608,6 +628,7 @@ impl AppState {
             audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger::default(),
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
+            clap_catalog: None,
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new_with_processor_resolver(
                 audio_processor_resolver,

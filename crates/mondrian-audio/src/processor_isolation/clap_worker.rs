@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 pub(super) struct ClapHost;
 
@@ -123,9 +123,119 @@ pub struct ClapAudioProcessorSpecResolver {
 
 /// CLAP resolver that discovers selected installed libraries and probes each
 /// occurrence's exact render contract before worker admission.
+#[derive(Clone)]
 pub struct DiscoveredClapAudioProcessorSpecResolver {
     helper_executable: PathBuf,
     plugins: BTreeMap<String, (ClapPluginDescriptor, PathBuf, [u8; 32])>,
+}
+
+/// Mutable installed-plugin catalog shared by Preview and Export resolvers.
+///
+/// Native discovery runs outside the catalog lock. Each installation publishes
+/// every descriptor from one library together or leaves the previous snapshot
+/// intact. Existing prepared sessions retain their binary fingerprint.
+pub struct InstalledClapAudioProcessorSpecResolver {
+    catalog: RwLock<DiscoveredClapAudioProcessorSpecResolver>,
+}
+
+impl InstalledClapAudioProcessorSpecResolver {
+    /// Start one empty catalog bound to the packaged helper executable.
+    pub fn new(helper_executable: PathBuf) -> Result<Self, AudioProcessorHostError> {
+        Ok(Self {
+            catalog: RwLock::new(DiscoveredClapAudioProcessorSpecResolver::discover(
+                helper_executable,
+                [],
+            )?),
+        })
+    }
+
+    /// Discover and atomically publish one explicitly selected native library.
+    ///
+    /// Selecting the same path again replaces all definitions from that path,
+    /// so a changed binary has to pass fresh discovery before being used.
+    pub fn install_library(
+        &self,
+        library_path: PathBuf,
+    ) -> Result<Vec<ClapPluginDescriptor>, AudioProcessorHostError> {
+        let selected_path = std::fs::canonicalize(&library_path)
+            .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+        let selected_fingerprint = fingerprint_clap_binary(&selected_path)?;
+        let helper_executable = self
+            .catalog
+            .read()
+            .map_err(|_| unavailable("CLAP catalog lock is poisoned"))?
+            .helper_executable
+            .clone();
+        let discovered = DiscoveredClapAudioProcessorSpecResolver::discover(
+            helper_executable,
+            [selected_path.clone()],
+        )?;
+        if fingerprint_clap_binary(&selected_path)? != selected_fingerprint {
+            return Err(unavailable("CLAP binary changed during installation"));
+        }
+        let mut catalog =
+            self.catalog.write().map_err(|_| unavailable("CLAP catalog lock is poisoned"))?;
+        for plugin_id in discovered.plugins.keys() {
+            if catalog
+                .plugins
+                .get(plugin_id)
+                .is_some_and(|(_, path, _)| path != &selected_path)
+            {
+                return Err(invalid(format!(
+                    "CLAP plugin ID {plugin_id} is already supplied by another library"
+                )));
+            }
+        }
+        catalog.plugins.retain(|_, (_, path, _)| path != &selected_path);
+        let descriptors = discovered
+            .plugins
+            .values()
+            .map(|(descriptor, _, _)| descriptor.clone())
+            .collect();
+        catalog.plugins.extend(discovered.plugins);
+        Ok(descriptors)
+    }
+
+    /// Current installed descriptors for an insertion picker.
+    pub fn descriptors(&self) -> Result<Vec<ClapPluginDescriptor>, AudioProcessorHostError> {
+        Ok(self
+            .catalog
+            .read()
+            .map_err(|_| unavailable("CLAP catalog lock is poisoned"))?
+            .plugins
+            .values()
+            .map(|(descriptor, _, _)| descriptor.clone())
+            .collect())
+    }
+
+    /// Capture an author instance from one currently selected definition.
+    pub fn create_instance(
+        &self,
+        plugin_id: &str,
+        render_contract: crate::AudioRenderContract,
+        state: Option<Vec<u8>>,
+    ) -> Result<AudioProcessorInstance, AudioProcessorHostError> {
+        let snapshot = self
+            .catalog
+            .read()
+            .map_err(|_| unavailable("CLAP catalog lock is poisoned"))?
+            .clone();
+        snapshot.create_instance(plugin_id, render_contract, state)
+    }
+}
+
+impl IsolatedAudioProcessorSpecResolver for InstalledClapAudioProcessorSpecResolver {
+    fn resolve(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+        let snapshot = self
+            .catalog
+            .read()
+            .map_err(|_| unavailable("CLAP catalog lock is poisoned"))?
+            .clone();
+        snapshot.resolve(request)
+    }
 }
 
 impl DiscoveredClapAudioProcessorSpecResolver {
@@ -1031,6 +1141,48 @@ mod tests {
             }],
         )
         .is_err());
+    }
+
+    #[test]
+    fn installed_catalog_preserves_empty_snapshot_after_failed_scan() {
+        let helper = std::env::current_exe().expect("test executable path");
+        let catalog =
+            InstalledClapAudioProcessorSpecResolver::new(helper).expect("empty installed catalog");
+        let temp = tempfile::tempdir().expect("temporary plugin directory");
+        let invalid = temp.path().join("invalid.clap");
+        std::fs::write(&invalid, b"not a native plugin").expect("write invalid plugin");
+        assert!(catalog.install_library(invalid).is_err());
+        assert!(catalog.descriptors().expect("catalog remains readable").is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn installed_catalog_atomically_reselects_and_rejects_duplicate_plugin_ids() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let reference = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let temp = tempfile::tempdir().expect("temporary plugin directory");
+        let copy = temp.path().join("gain-copy.dll");
+        std::fs::copy(&reference, &copy).expect("copy reference plugin");
+        let catalog =
+            InstalledClapAudioProcessorSpecResolver::new(helper).expect("empty installed catalog");
+        assert_eq!(
+            catalog.install_library(copy.clone()).expect("first installation").len(),
+            1
+        );
+        assert_eq!(
+            catalog.install_library(copy).expect("same-path reselection").len(),
+            1
+        );
+        let before = catalog.descriptors().expect("installed descriptors");
+        assert!(catalog.install_library(reference).is_err());
+        assert_eq!(
+            catalog.descriptors().expect("unchanged descriptors"),
+            before
+        );
     }
 
     #[test]

@@ -23,6 +23,9 @@ use mondrian_ui_widgets::{
 };
 use std::path::Path;
 
+use crate::app::product_action::{
+    AudioInstallClapLibraryPayload, AudioProductAction, ProductAction,
+};
 use crate::app::ui_actions::{
     app_shell_export_portable_package_action,
     app_shell_preferences_display_management_changed_action, assets_import_files_action,
@@ -42,9 +45,10 @@ use crate::app::ui_actions::{
     APP_SHELL_CONFIRM_PROJECT_SETTINGS, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
     APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
+    APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG,
+    APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
     APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE, APP_SHELL_PREFERENCES_TAB_CHANGED,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED,
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
@@ -128,6 +132,11 @@ pub fn media_import_filters() -> Vec<FileFilter> {
         ),
         FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+/// Native binary extensions accepted by the CLAP discovery worker.
+pub fn clap_library_filters() -> Vec<FileFilter> {
+    vec![FileFilter::new("CLAP 插件", vec!["clap", "dll"])]
 }
 
 /// File dialog filter for monitor calibration profiles.
@@ -588,6 +597,22 @@ pub fn try_resolve_app_shell_action(
                 } else {
                     Action::ImportMedia(paths)
                 }
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG =>
+        {
+            let selected = platform
+                .open_file_dialog("安装 CLAP 插件", &clap_library_filters())
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+                .and_then(|paths| paths.into_iter().next());
+            Ok(selected.map(|path| {
+                ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                    AudioInstallClapLibraryPayload { path },
+                ))
+                .into_external_action()
             }))
         }
         Action::Custom { namespace, name, payload }
@@ -2434,7 +2459,8 @@ mod tests {
         app_shell_confirm_new_project_dialog_action, app_shell_confirm_project_settings_action,
         app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
         app_shell_export_portable_package_dialog_action, app_shell_import_media_dialog_action,
-        app_shell_import_media_dialog_action_with_target, app_shell_interpret_asset_dialog_action,
+        app_shell_import_media_dialog_action_with_target,
+        app_shell_install_clap_library_dialog_action, app_shell_interpret_asset_dialog_action,
         app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
         app_shell_open_recent_project_action, app_shell_preferences_action,
@@ -4599,6 +4625,26 @@ mod tests {
             resolve_app_shell_action(app_shell_import_media_dialog_action(), &platform, None);
 
         assert_eq!(action, Some(Action::ImportMedia(paths)));
+    }
+
+    #[test]
+    fn clap_install_picker_cancels_cleanly_and_uses_first_selected_library() {
+        let request = app_shell_install_clap_library_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/gain.clap");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone(), PathBuf::from("E:/plugins/other.clap")]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected library");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(
+                AudioProductAction::InstallClapLibrary(AudioInstallClapLibraryPayload { path })
+            ))
+        );
     }
 
     #[test]
