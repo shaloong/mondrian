@@ -9,7 +9,8 @@ use crate::{
         EffectGraphBuildError, EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
     },
     graph::{EffectGraphBuilderState, EffectGraphValue},
-    CustomEffectRenderProcessor, EffectPluginContract, EffectRenderOp,
+    CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor, EffectPluginContract,
+    EffectRenderOp,
 };
 use mondrian_core::{
     automation::{PropertyBag, PropertyDescriptor},
@@ -232,6 +233,23 @@ impl EffectPluginDefinitionBuilder {
         processor: CustomEffectRenderProcessor,
     ) -> Self {
         self.definition = self.definition.with_custom_render_backend(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            processor,
+        );
+        self
+    }
+
+    /// Bind a Float32 custom renderer with explicit cache behavior.
+    pub fn with_custom_float_render_backend(
+        mut self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        processor: CustomEffectFloatRenderProcessor,
+    ) -> Self {
+        self.definition = self.definition.with_custom_float_render_backend(
             params_builder,
             cache_key_builder,
             cache_policy,

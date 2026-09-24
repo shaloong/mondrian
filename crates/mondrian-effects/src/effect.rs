@@ -1,6 +1,6 @@
 //! 效果节点抽象
 
-use crate::execution::CustomEffectRenderProcessor;
+use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::{Lut3D, LutPreparationCache};
 use crate::mask::MaskComponent;
@@ -736,9 +736,17 @@ impl std::fmt::Debug for EffectRenderOp {
 #[derive(Clone)]
 pub struct CustomEffectProcessorBinding {
     revision: u64,
-    processor: CustomEffectRenderProcessor,
+    processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
 }
+
+#[derive(Clone)]
+enum CustomEffectProcessor {
+    Rgba8(CustomEffectRenderProcessor),
+    Float32(CustomEffectFloatRenderProcessor),
+}
+
+static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct CustomEffectRuntimeOwner {
@@ -749,10 +757,17 @@ struct CustomEffectRuntimeOwner {
 
 impl CustomEffectProcessorBinding {
     pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
-        static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
         Self {
-            revision: NEXT_REVISION.fetch_add(1, Ordering::AcqRel),
-            processor,
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Rgba8(processor),
+            runtime_owner: None,
+        }
+    }
+
+    pub(crate) fn new_f32(processor: CustomEffectFloatRenderProcessor) -> Self {
+        Self {
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
         }
     }
@@ -762,8 +777,25 @@ impl CustomEffectProcessorBinding {
         self.revision
     }
 
-    pub(crate) fn processor(&self) -> &CustomEffectRenderProcessor {
-        &self.processor
+    pub(crate) fn rgba8_processor(&self) -> Option<&CustomEffectRenderProcessor> {
+        match &self.processor {
+            CustomEffectProcessor::Rgba8(processor) => Some(processor),
+            CustomEffectProcessor::Float32(_) => None,
+        }
+    }
+
+    pub(crate) fn float32_processor(&self) -> Option<&CustomEffectFloatRenderProcessor> {
+        match &self.processor {
+            CustomEffectProcessor::Rgba8(_) => None,
+            CustomEffectProcessor::Float32(processor) => Some(processor),
+        }
+    }
+
+    pub(crate) fn execution_modes(&self) -> crate::EffectExecutionModes {
+        match self.processor {
+            CustomEffectProcessor::Rgba8(_) => crate::EffectExecutionModes::CPU_U8,
+            CustomEffectProcessor::Float32(_) => crate::EffectExecutionModes::CPU_F32,
+        }
     }
 
     pub(crate) fn with_runtime_owner(
@@ -774,7 +806,7 @@ impl CustomEffectProcessorBinding {
     ) -> Self {
         Self {
             revision: self.revision,
-            processor: Arc::clone(&self.processor),
+            processor: self.processor.clone(),
             runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
                 effect_key: effect_key.to_owned(),
                 definition_registry_revision,
@@ -1187,25 +1219,51 @@ impl EffectDefinition {
     }
 
     pub fn with_custom_render_backend(
-        mut self,
+        self,
         params_builder: EffectRenderParamsBuilder,
         cache_key_builder: Option<EffectCacheKeyBuilder>,
         cache_policy: EffectCachePolicy,
         processor: CustomEffectRenderProcessor,
     ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding::new(processor),
+        )
+    }
+
+    /// Bind a Float32 processor to the same compiled graph used by preview and export.
+    pub fn with_custom_float_render_backend(
+        self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        processor: CustomEffectFloatRenderProcessor,
+    ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding::new_f32(processor),
+        )
+    }
+
+    fn with_custom_processor_binding(
+        mut self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        processor: CustomEffectProcessorBinding,
+    ) -> Self {
         let effect_key = self.key.clone();
-        let processor = CustomEffectProcessorBinding::new(processor);
-        let params_builder_for_graph = Arc::clone(&params_builder);
-        let effect_key_for_graph = effect_key.clone();
-        let cache_key_builder_for_graph = cache_key_builder.clone();
         self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(Arc::new(
             move |effect, context, graph| {
-                if let Some(params) = params_builder_for_graph(effect, context)? {
-                    let cache_key = cache_key_builder_for_graph
-                        .as_ref()
-                        .and_then(|builder| builder(effect, context));
+                if let Some(params) = params_builder(effect, context)? {
+                    let cache_key =
+                        cache_key_builder.as_ref().and_then(|builder| builder(effect, context));
                     graph.append_unary(EffectRenderOp::Custom {
-                        key: effect_key_for_graph.clone(),
+                        key: effect_key.clone(),
                         params,
                         cache_key,
                         cache_policy,
@@ -3194,6 +3252,48 @@ mod tests {
             execution_modes: crate::EffectExecutionModes::CPU_U8,
             ..test_plugin_execution_contract()
         }
+    }
+
+    #[test]
+    fn authored_float_custom_backend_executes_through_compiled_graph() {
+        let plugin_type = EffectType::Plugin("plugin.test.float.custom_backend".to_owned());
+        register_effect_definition(
+            EffectDefinition::new(
+                plugin_type.key(),
+                "Float Custom",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..test_plugin_execution_contract()
+            })
+            .with_custom_float_render_backend(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({ "gain": 0.25 })))),
+                None,
+                EffectCachePolicy::Deterministic,
+                Arc::new(|pixels, _, _, params, _| {
+                    pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
+                    Ok(())
+                }),
+            ),
+        )
+        .expect("register float custom effect");
+        let effect = EffectNode::with_defaults(plugin_type);
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile float custom effect");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(
+            crate::apply_compiled_effect_graph_rgba_f32(
+                &[[2.0, -0.25, 0.5, 1.0]],
+                1,
+                1,
+                &compiled,
+                0,
+            )
+            .expect("execute float custom effect"),
+            vec![[2.25, -0.25, 0.5, 1.0]]
+        );
     }
 
     #[test]

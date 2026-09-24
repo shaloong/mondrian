@@ -54,9 +54,9 @@ pub use execution::{
     apply_compiled_effect_graph_rgba_f32_with_domain_processor,
     compiled_effect_graph_has_resolvable_rgba_f32_domain,
     compiled_effect_graph_has_rgba_f32_execution_shape, compiled_effect_graph_supports_rgba_f32,
-    compiled_effect_graph_supports_rgba_f32_with_domain_processor, CustomEffectRenderProcessor,
-    EffectDomainProcessorCacheKey, EffectExecutionError, EffectFloatExecutionError,
-    EffectFloatUnsupportedReason,
+    compiled_effect_graph_supports_rgba_f32_with_domain_processor,
+    CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor, EffectDomainProcessorCacheKey,
+    EffectExecutionError, EffectFloatExecutionError, EffectFloatUnsupportedReason,
 };
 pub use execution_contract::{
     EffectDeterminism, EffectExecutionAdmissionError, EffectExecutionContract,

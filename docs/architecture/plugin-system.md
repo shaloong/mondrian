@@ -57,6 +57,10 @@ contracts. Admission must preserve the same compiled visual graph semantics
 for Viewer and Export, run native plugin code outside the editor process, and
 compare real reference-plugin pixels over time, color, alpha, and failure cases.
 An effect definition alone does not qualify OpenFX support.
+The visual processor seam now admits an explicitly bound CPU Float32 callback
+and charges one full-frame scratch image for transactional execution. This is
+an internal prerequisite for the host; it does not load or execute OpenFX
+binaries by itself.
 
 ## Effect Plugins
 

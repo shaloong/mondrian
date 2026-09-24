@@ -221,8 +221,9 @@ stateless or ordered-session state; exact past/future temporal input; ROI
 propagation; resource lifetime; and the maximum linear-chain or general-DAG
 topology the definition may emit. Modes are not inferred as a Cartesian
 product: admitting CPU-U8 and GPU-F32 does not admit CPU-F32 or GPU-U8. An
-encoded RGBA8 Custom processor therefore admits only CPU-U8, while the current
-production linear built-ins admit CPU-F32. These facts are definition
+encoded RGBA8 Custom processor admits only CPU-U8; a Float32 Custom processor
+admits only CPU-F32. The current production linear built-ins admit CPU-F32.
+These facts are definition
 semantics, not renderer guesses. Spatial contracts call the same finite-support
 calculation as the production kernel. In particular, the three-pass
 fractional-box Gaussian may require a halo larger than `ceil(author_radius)`
@@ -1002,13 +1003,17 @@ legal RGB transitions through
 `apply_compiled_effect_graph_rgba_f32_with_domain_processor(...)`; transition
 failures and domain blockers are fail-closed and never authorize RGBA8
 execution. The encoded executor returns `EffectExecutionError` for any domain
-plan because it has no typed OCIO runtime. Custom/plugin processors remain
-unsupported until their ABI declares a float implementation. CPU float support
-does not imply GPU execution support.
+plan because it has no typed OCIO runtime. Custom/plugin processors bind an
+explicit RGBA8 or Float32 callback to the compiled graph. The graph derives
+exact admission from that binding; it never converts a Float32 frame through
+RGBA8 to invoke an encoded processor. Float32 callbacks preserve extended and
+negative RGB, stage one full-frame scratch image, and report processor failure
+without publishing mutated pixels. CPU float support does not imply GPU
+execution support.
 
-The encoded custom-processor fallback is also fail-closed. Missing processors,
-processor errors and processor panics return `EffectExecutionError`; staged
-pixels are discarded. `timeline_composite` wraps encoded, float and unresolved
+Both custom-processor paths are fail-closed. Missing processors, processor
+errors and processor panics return typed execution errors; staged pixels are
+discarded. `timeline_composite` wraps encoded, float and unresolved
 domain failures in `TimelineCompositeError`, and production preview/export
 propagate that error instead of substituting black or unchanged pixels.
 

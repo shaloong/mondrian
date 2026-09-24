@@ -194,7 +194,10 @@ process-wide compiled graph; every non-identity compiled graph belongs to its
 Prepared Program, one frame-local uncached reference evaluation, or the
 consumer's bounded Effect Execution Session. Effect preparation
 failure is retained as a Clip-local blocker, so an unavailable effect later in
-the timeline does not disable an unrelated Preview region. Transition
+the timeline does not disable an unrelated Preview region. Preview classifies
+a missing bound Float32 custom processor as blocked; a processor error, panic,
+or invalid output length is an execution failure. Neither case publishes the
+staged frame. Transition
 definition identity, Property Bag, and opaque parameters are also captured once
 behind one shared immutable snapshot; repeated interval queries copy only its
 `Arc`, while exact progress and endpoint samples remain frame-local.

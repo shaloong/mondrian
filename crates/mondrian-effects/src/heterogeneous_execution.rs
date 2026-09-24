@@ -11,7 +11,8 @@
 
 use crate::{
     adjustment::{
-        apply_render_op_f32_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
+        apply_custom_render_op_f32, apply_render_op_f32_controlled, render_op_f32_scratch_frames,
+        EffectRasterRegion,
     },
     execution::{
         apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled,
@@ -2146,6 +2147,9 @@ pub enum PreparedHeterogeneousEffectWorkError {
     /// Graph-value planning failed before any pixel execution.
     #[error(transparent)]
     Planning(#[from] EffectGraphExecutionPlanError),
+    /// A bound custom Float32 processor failed without publishing staged pixels.
+    #[error(transparent)]
+    CustomProcessor(#[from] crate::EffectExecutionError),
     /// The selected graph route is valid but outside the executable vertical slice.
     #[error(
         "effect heterogeneous route is not the supported CPU-F32 DAG to GPU-F32 DAG-suffix shape: {reason}"
@@ -2908,14 +2912,27 @@ fn execute_cpu_dag_prefix(
             EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 let mut output = take_single_cpu_input(&mut inputs, dispatch.node)?;
-                if !apply_render_op_f32_controlled(
-                    &mut output,
-                    extent.width(),
-                    extent.height(),
-                    &op,
-                    frame_seed,
-                    checkpoint,
-                )? {
+                let supported = if matches!(op, crate::EffectRenderOp::Custom { .. }) {
+                    apply_custom_render_op_f32(
+                        &mut output,
+                        extent.width(),
+                        extent.height(),
+                        &op,
+                        frame_seed,
+                    )?;
+                    checkpoint()?;
+                    true
+                } else {
+                    apply_render_op_f32_controlled(
+                        &mut output,
+                        extent.width(),
+                        extent.height(),
+                        &op,
+                        frame_seed,
+                        checkpoint,
+                    )?
+                };
+                if !supported {
                     return Err(
                         PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
                             node: dispatch.node,
@@ -3962,9 +3979,12 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
             | crate::EffectRenderOp::Crop { .. }
-            | crate::EffectRenderOp::Lut3D { .. } => Ok(render_op_f32_scratch_frames(op)),
+            | crate::EffectRenderOp::Lut3D { .. }
+            | crate::EffectRenderOp::Custom { processor: Some(_), .. } => {
+                Ok(render_op_f32_scratch_frames(op))
+            }
             crate::EffectRenderOp::TemporalFrameBlend { .. }
-            | crate::EffectRenderOp::Custom { .. } => {
+            | crate::EffectRenderOp::Custom { processor: None, .. } => {
                 Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
             }
         },

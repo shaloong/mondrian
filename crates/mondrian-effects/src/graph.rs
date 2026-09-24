@@ -1536,17 +1536,22 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             resource_lifetime: EffectResourceLifetime::PreparedProgram,
             ..cpu_float
         },
-        EffectRenderOp::Custom { cache_policy, .. } => EffectImplementationRequirements {
-            execution_modes: EffectExecutionModes::CPU_U8,
-            determinism: match cache_policy {
-                EffectCachePolicy::Deterministic => EffectDeterminism::Deterministic,
-                EffectCachePolicy::FrameDependent => EffectDeterminism::FrameSeeded,
-                EffectCachePolicy::Uncacheable => EffectDeterminism::Nondeterministic,
-            },
-            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
-            roi_from_effect_input: EffectRoiPropagation::UnknownRequiresFullFrame,
-            resource_lifetime: EffectResourceLifetime::Frame,
-        },
+        EffectRenderOp::Custom { cache_policy, processor, .. } => {
+            EffectImplementationRequirements {
+                execution_modes: processor.as_ref().map_or(
+                    EffectExecutionModes::CPU_U8,
+                    crate::CustomEffectProcessorBinding::execution_modes,
+                ),
+                determinism: match cache_policy {
+                    EffectCachePolicy::Deterministic => EffectDeterminism::Deterministic,
+                    EffectCachePolicy::FrameDependent => EffectDeterminism::FrameSeeded,
+                    EffectCachePolicy::Uncacheable => EffectDeterminism::Nondeterministic,
+                },
+                temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+                roi_from_effect_input: EffectRoiPropagation::UnknownRequiresFullFrame,
+                resource_lifetime: EffectResourceLifetime::Frame,
+            }
+        }
     }
 }
 
