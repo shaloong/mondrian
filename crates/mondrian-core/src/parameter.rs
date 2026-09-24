@@ -200,11 +200,17 @@ impl ExactAutomationCurve {
         keyframe: ExactAutomationKeyframe,
     ) -> Result<(), AutomationError> {
         validate_keyframe(&keyframe)?;
-        match self.keyframes.binary_search_by_key(&keyframe.time, |candidate| candidate.time) {
-            Ok(index) => self.keyframes[index] = keyframe,
-            Err(index) => self.keyframes.insert(index, keyframe),
+        let mut candidate = self.clone();
+        match candidate
+            .keyframes
+            .binary_search_by_key(&keyframe.time, |existing| existing.time)
+        {
+            Ok(index) => candidate.keyframes[index] = keyframe,
+            Err(index) => candidate.keyframes.insert(index, keyframe),
         }
-        self.validate()
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Validate ordering, values, and monotonic Bezier time handles.
@@ -479,6 +485,44 @@ fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_keyframe_insertions_leave_the_curve_unchanged() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("mondrian.test.atomic_curve"), 0.0)
+                .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        let second =
+            ExactAutomationKeyframe::linear(TimelineTime::new(1, 1).expect("one second"), 1.0);
+        curve.set_keyframe(first.clone()).expect("first key");
+        curve.set_keyframe(second).expect("second key");
+        let original = curve.clone();
+
+        let mut invalid_handle = first.clone();
+        invalid_handle.interpolation_to_next = AutomationSegmentInterpolation::Bezier;
+        invalid_handle.out_handle = Some(ExactBezierHandle {
+            time_offset: TimelineTime::new(2, 1).expect("two seconds"),
+            value_offset: 0.5,
+        });
+        assert_eq!(
+            curve.set_keyframe(invalid_handle),
+            Err(AutomationError::InvalidBezierTimeHandle)
+        );
+        assert_eq!(curve, original);
+
+        let mut duplicate_identity =
+            ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("two seconds"), 2.0);
+        duplicate_identity.id = first.id;
+        assert_eq!(
+            curve.set_keyframe(duplicate_identity),
+            Err(AutomationError::DuplicateKeyframeIdentity)
+        );
+        assert_eq!(curve, original);
+        assert_eq!(
+            curve.evaluate(TimelineTime::new(1, 2).expect("half second")),
+            Ok(0.5)
+        );
+    }
 
     #[test]
     fn parameter_ids_are_stable_namespaced_values() {

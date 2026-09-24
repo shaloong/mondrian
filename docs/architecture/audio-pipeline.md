@@ -383,6 +383,9 @@ last key is removed, while Processor parameters retain their intrinsic empty
 curve because that curve also owns the unkeyed definition value. Channel Strip,
 Routing, and Rack Modules retain only their static/topology operations, so no
 second keyed write path can drift from this contract.
+The underlying `ExactAutomationCurve::set_keyframe` also validates a detached
+candidate before replacing the curve. Invalid handle spans or duplicate stable
+IDs therefore cannot leave even an in-memory curve in an invalid state.
 
 ### Processors and plugins
 

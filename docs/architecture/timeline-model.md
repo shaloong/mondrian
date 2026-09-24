@@ -1423,6 +1423,9 @@ whose evaluator reuses the same Hold/Linear/Bezier mathematics as direct curve
 evaluation. Execution Modules may lower those segments onto their Evaluation
 Grid and advance span cursors; they may not copy the interpolation formulas or
 reinterpret the persisted author curve.
+Direct key upserts validate a detached curve before publication as well. A
+rejected key with an invalid Bezier time span or duplicate `KeyframeId` leaves
+the prior curve and its evaluation unchanged.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
 defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local
