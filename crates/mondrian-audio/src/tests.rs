@@ -2821,15 +2821,17 @@ fn nested_public_output_hides_child_lookahead_without_double_compensation() {
         fail_first_state_entry: false,
         ..Default::default()
     };
-    let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
-        &root,
-        &[child],
-        &RampResolver,
-        &resolver,
-        contract,
-        None,
-    )
-    .expect("recursive lookahead runtime");
+    let mut runtime =
+        AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+            &root,
+            &[child],
+            &RampResolver,
+            &resolver,
+            contract,
+            AudioCompileRequest::program(root.audio_program.outputs[0].id),
+            AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024),
+        )
+        .expect("recursive lookahead runtime");
     assert_eq!(runtime.public_output_lookahead_frames(), 0);
     assert!(runtime.requires_state_entry());
     runtime

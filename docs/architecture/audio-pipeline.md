@@ -23,6 +23,13 @@ subsequent audio worker rechecks those facts. Explicit library selection is
 available through the resolver; the application has not yet wired discovery
 into the insertion picker or its Preview/Export runtime paths.
 
+The public Runtime builders for an audition compile request and for a frozen
+selected-range dependency closure now accept an explicit processor resolver.
+Each builder passes that resolver to every nested Sequence occurrence. The
+default builders still use built-ins and reject unresolved external definitions;
+the application and export adapters must supply the same isolated resolver once
+plugin selection and snapshot binding are implemented.
+
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different
 schedulers and downstream consumers, but they cannot reinterpret placement,

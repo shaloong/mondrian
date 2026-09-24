@@ -390,6 +390,28 @@ impl AudioProgramRuntime {
         request: AudioCompileRequest,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_with_compile_request_processor_resolver_and_resource_grant(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            request,
+            resource_grant,
+        )
+    }
+
+    /// Build a semantic root request using one explicit processor resolver
+    /// throughout the complete nested Program closure.
+    pub fn build_with_compile_request_processor_resolver_and_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        request: AudioCompileRequest,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -403,7 +425,7 @@ impl AudioProgramRuntime {
             root,
             sequences,
             resolver,
-            default_processor_resolver(),
+            processor_resolver,
             contract,
             Some(request),
             None,
@@ -524,6 +546,33 @@ impl AudioProgramRuntime {
         prepared_closure: &AudioDependencyClosure,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            output_id,
+            range,
+            prepared_closure,
+            resource_grant,
+        )
+    }
+
+    /// Build a frozen selected-range closure with an explicit processor
+    /// resolver shared by the root and all nested public outputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+        range: TimelineTimeRange,
+        prepared_closure: &AudioDependencyClosure,
+        resource_grant: AudioRuntimeResourceGrant,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -538,7 +587,7 @@ impl AudioProgramRuntime {
             root,
             sequences,
             resolver,
-            default_processor_resolver(),
+            processor_resolver,
             contract,
             output_id.map(AudioCompileRequest::program),
             Some(window),
