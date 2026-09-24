@@ -911,13 +911,20 @@ mod tests {
     use mondrian_assets::AssetMediaProbeCandidate;
     use mondrian_core::automation::PropertyMutation;
     use mondrian_core::{
-        AudioCodec, AudioSourceComponentId, AudioStreamInfo, ChannelLayout, GradeDefinition,
-        GradeGraph, GradeGraphNode, GradeGraphNodeId, GradeVersion, MediaFileFingerprint,
-        MediaInfo, ProjectColorEnvironment, ProjectSettings, TimelineTime,
+        AudioCodec, AudioSourceComponentId, AudioStreamInfo, ChannelLayout, Color, ColorSpace,
+        GradeDefinition, GradeGraph, GradeGraphNode, GradeGraphNodeId, GradeVersion,
+        MediaFileFingerprint, MediaInfo, ProjectColorEnvironment, ProjectSettings, TimelineTime,
     };
     use mondrian_editor_state::{Action, AuthoringSession};
     use mondrian_effects::{
-        build_effect_render_graph, EffectGraphNodeKind, EffectNodeExt, EffectRenderOp, EffectType,
+        build_effect_render_graph, compile_reference_render_graph, EffectGraphNodeKind,
+        EffectNodeExt, EffectRenderOp, EffectType,
+    };
+    use mondrian_renderer::{
+        color::{ProgramOutputModule, ProgramOutputRole},
+        composite_timeline_elements_color_frame, TimelineCompositeElement,
+        TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
+        TimelineSolidColorLayer,
     };
     use mondrian_timeline::{Clip, Sequence, SequenceCollection};
     use std::time::Duration;
@@ -982,6 +989,65 @@ mod tests {
                 _ => None,
             })
             .expect("prepared LUT operation")
+    }
+
+    fn render_document_lut_preview_and_export(document: &ProjectDocument) -> (Vec<u8>, Vec<u8>) {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("default color config");
+        let sequence = &document.sequences.sequences[0];
+        let clip = &sequence.video_tracks[0].clips[0];
+        let graph = build_effect_render_graph(
+            &clip.effects,
+            TimelineTime::ZERO,
+            sequence.settings.color.working_color_space,
+        )
+        .expect("prepare authored LUT");
+        let compiled = compile_reference_render_graph(graph).expect("compile LUT execution");
+        let mut settings = sequence.settings.clone();
+        settings.color.program_output.color_space = ColorSpace::Srgb;
+        let color_context = settings
+            .root_program_color_context(&document.color_environment)
+            .expect("color context");
+        let layer = TimelineSolidColorLayer {
+            color: Color::from_rgba8(64, 128, 192, 255),
+            opacity: 1.0,
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: compiled,
+            frame_seed: 0,
+        };
+        let mut preview_scratch = TimelineCompositeScratch::default();
+        let preview = crate::app::preview_cpu_execution::composite_resolved_preview(
+            2,
+            2,
+            &[crate::app::preview_viewer_plan::ResolvedPreviewElement::SolidColor(layer.clone())],
+            &color_context,
+            &mut preview_scratch,
+        )
+        .expect("render Viewer LUT frame")
+        .rgba;
+        let mut export_scratch = TimelineCompositeScratch::default();
+        let working = composite_timeline_elements_color_frame(
+            2,
+            2,
+            &[TimelineCompositeElement::SolidColor(layer)],
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(
+                color_context.engine(),
+                color_context.working_color_space(),
+            ),
+            &mut export_scratch,
+        )
+        .expect("render Export LUT frame");
+        let boundary = ProgramOutputModule::boundary(ProgramOutputRole::Export, &color_context)
+            .expect("Export output boundary");
+        let export = ProgramOutputModule::execute_cpu_rgba8(
+            &working,
+            &boundary,
+            export_scratch.color_execution_mut(),
+        )
+        .expect("encode Export LUT frame")
+        .rgba;
+        (preview, export)
     }
 
     fn document_with_lut(
@@ -1078,6 +1144,17 @@ mod tests {
         fs::write(&lut, RED_INVERT_CUBE_2).expect("LUT fixture");
         let document = document_with_lut(&library, lut.clone(), true);
         let expected = sample_document_lut(&document);
+        let (original_preview, original_export) = render_document_lut_preview_and_export(&document);
+        assert_eq!(original_preview, original_export);
+        let mut without_lut = document.clone();
+        without_lut.sequences.sequences[0].video_tracks[0].clips[0].effects.clear();
+        let (identity_preview, identity_export) =
+            render_document_lut_preview_and_export(&without_lut);
+        assert_eq!(identity_preview, identity_export);
+        assert_ne!(
+            original_preview, identity_preview,
+            "LUT must change rendered pixels"
+        );
         assert!(
             (expected[0] - 0.75).abs() < 1.0e-6,
             "LUT must change red: {expected:?}"
@@ -1109,6 +1186,10 @@ mod tests {
         let rebound = imported.portable_project_dependency_inventory().expect("rebound inventory");
         let imported_document = imported.authoring.as_ref().expect("Session").document();
         let actual = sample_document_lut(imported_document);
+        let (moved_preview, moved_export) =
+            render_document_lut_preview_and_export(imported_document);
+        assert_eq!(moved_preview, moved_export);
+        assert_eq!(moved_preview, original_preview);
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1.0e-6);
         }
@@ -1127,6 +1208,27 @@ mod tests {
             moved.with_file_name("moved-imported-1.mdp")
         );
         assert!(!moved.with_file_name("moved-imported-1.mdp").exists());
+        drop(imported);
+
+        let mut omitted_lut = manifest.clone();
+        omitted_lut.files.clear();
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&omitted_lut).expect("encode omitted LUT"),
+        )
+        .expect("omit LUT binding");
+        verify_portable_project_package(&moved).expect("byte-valid missing LUT binding");
+        let mut rejected_missing_lut = AppState::new();
+        let error = rejected_missing_lut
+            .open_portable_project_package(moved.clone())
+            .expect_err("an unbound authored LUT must block import");
+        assert!(error.to_string().contains("absent from portable manifest"));
+        assert!(!rejected_missing_lut.has_open_project());
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("encode restored manifest"),
+        )
+        .expect("restore manifest");
 
         let mut unsafe_manifest = manifest.clone();
         unsafe_manifest.files[0].bundled_path = PathBuf::from("files").join("..").join("escape");

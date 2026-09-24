@@ -70,10 +70,13 @@ to one verified bundled source and no remote Asset may remain. A manifest that
 omits a Library file row is rejected even when its remaining hashes are valid;
 the previous Session is restored after a failed import.
 The moved-package regression uses a valid nonidentity `.cube` and compares its
-prepared LUT sample before packaging and after removing the original source;
-this checks executable resource rebinding, not merely path presence. A separate
-Preview/Export pixel-parity qualification remains necessary before claiming
-cross-machine rendering parity.
+prepared LUT sample before packaging and after removing the original source.
+It also executes the Viewer CPU composite and Export composite/output boundary
+for the same solid-color frame, requiring byte-identical pixels both between
+paths and before/after relocation. A byte-valid manifest that omits the LUT
+binding is rejected before Session installation. This qualifies the in-process
+CPU rendering paths; encoded-file, GPU, and other-machine parity still require
+separate qualification.
 The import is unsaved and its first Save has create-only intent for a sibling
 `.mdp`; it never rewrites the portable package. Choosing `project.mdp` inside a
 `.mdpkg` directory in the ordinary Open dialog routes through this package
