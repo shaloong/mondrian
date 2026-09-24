@@ -1399,12 +1399,15 @@ milliseconds but marks it non-animatable and topology-affecting; audio plan
 preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
-CLAP processor definitions also store the selected binary's SHA-256 revision;
-an explicit rebind Rack edit compares the old definition before replacing only
-that revision. It rejects a different plugin ID, schema version, zero revision,
-or stale instance and commits only after complete Audio Program validation.
-the installed path remains machine-local. Legacy definitions without a revision
-stay readable for editing but fail native preparation until explicitly rebound.
+CLAP and VST3 processor definitions may store the selected binary's SHA-256
+revision; an all-zero revision is invalid. An explicit CLAP rebind Rack edit
+compares the old definition before replacing only that revision. It rejects a
+different plugin ID, schema version, or stale instance and commits only after
+complete Audio Program validation. The installed path remains machine-local.
+Legacy definitions without a revision stay readable for editing but fail native
+preparation until explicitly rebound. VST3 discovery, rebind, and native
+preparation remain unimplemented; the persisted revision is only the necessary
+authoring identity contract for a future adapter.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,
 parameter_id }` as the stable property-instance address and `KeyframeId` as the

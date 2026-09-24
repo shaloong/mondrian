@@ -177,6 +177,10 @@ pub enum AudioProcessorDefinitionRef {
         class_id: String,
         vendor: Option<String>,
         schema_version: u32,
+        /// Exact installed binary revision captured when the author inserted it.
+        /// Older project files deserialize as `None` and require explicit rebinding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binary_sha256: Option<[u8; 32]>,
     },
     /// A CLAP audio-effect definition.
     Clap {
@@ -362,7 +366,9 @@ impl AudioProcessorInstance {
     fn validate(&self) -> Result<(), AudioAuthoringError> {
         if matches!(
             &self.definition,
-            AudioProcessorDefinitionRef::Clap { binary_sha256: Some(hash), .. } if *hash == [0; 32]
+            AudioProcessorDefinitionRef::Vst3 { binary_sha256: Some(hash), .. }
+                | AudioProcessorDefinitionRef::Clap { binary_sha256: Some(hash), .. }
+                if *hash == [0; 32]
         ) {
             return Err(AudioAuthoringError::InvalidPluginBinaryRevision);
         }
@@ -882,7 +888,7 @@ impl AuthoringFootprint for AudioProcessorDefinitionRef {
     ) -> Result<(), AuthoringFootprintError> {
         match self {
             Self::BuiltIn { definition_id, schema_version: _ } => collector.collect(definition_id),
-            Self::Vst3 { class_id, vendor, schema_version: _ } => {
+            Self::Vst3 { class_id, vendor, .. } => {
                 collector.collect(class_id)?;
                 collector.collect(vendor)
             }
@@ -1958,12 +1964,52 @@ mod tests {
     }
 
     #[test]
+    fn vst3_binary_revision_round_trips_and_legacy_definition_requires_rebinding() {
+        let pinned = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: Some("Test Vendor".to_owned()),
+            schema_version: 7,
+            binary_sha256: Some([9; 32]),
+        };
+        let json = serde_json::to_value(&pinned).expect("serialize pinned VST3 definition");
+        assert_eq!(
+            serde_json::from_value::<AudioProcessorDefinitionRef>(json)
+                .expect("restore pinned VST3 definition"),
+            pinned
+        );
+        let legacy: AudioProcessorDefinitionRef = serde_json::from_value(serde_json::json!({
+            "Vst3": {
+                "class_id": "00112233445566778899aabbccddeeff",
+                "vendor": "Test Vendor",
+                "schema_version": 7
+            }
+        }))
+        .expect("load older VST3 definition");
+        assert!(matches!(
+            legacy,
+            AudioProcessorDefinitionRef::Vst3 { binary_sha256: None, .. }
+        ));
+        let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        invalid.definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: None,
+            schema_version: 1,
+            binary_sha256: Some([0; 32]),
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(AudioAuthoringError::InvalidPluginBinaryRevision)
+        ));
+    }
+
+    #[test]
     fn audio_cow_containers_preserve_json_and_detach_only_on_mutation() {
         let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
         processor.definition = AudioProcessorDefinitionRef::Vst3 {
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
             vendor: Some("Test Vendor".to_owned()),
             schema_version: 7,
+            binary_sha256: Some([9; 32]),
         };
         processor.opaque_state = Some(AuthoringList::from(vec![1, 2, 3, 4]));
         let parameter_allocation = processor.parameters.allocation_id();
