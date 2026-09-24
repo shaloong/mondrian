@@ -23,9 +23,16 @@ rebinding to byte-identical files. The imported Session is unsaved; its first
 ordinary `.mdp` save targets a new sibling and never rewrites the package.
 
 The File menu exposes a destination dialog, background copy progress, and
-cancel. The product still needs a linked-versus-embedded choice and a
-second-machine Preview/Export parity run. Installed third-party plugin binaries and fonts must not be bundled
-without a distributable license. Generated caches remain excluded.
+cancel. Ordinary `.mdp` Save/Save As keeps external file references; explicit
+`.mdpkg` export always embeds admitted local dependencies. A linked option
+inside the package command would duplicate ordinary save and make a
+supposedly portable artifact depend on its source machine, so the two file
+actions provide the choice directly. The relocated-package test removes the
+original LUT and proves identical Viewer and Export pixels after reopening;
+the media-asset test proves path/probe rebinding but does not yet prove a real
+second-machine media Preview/Export run. That release qualification remains.
+Installed third-party plugin binaries and fonts must not be bundled without a
+distributable license. Generated caches remain excluded.
 CLAP processor definitions in `project.json` retain the selected binary's
 SHA-256 revision, but never the installed machine path or the binary itself.
 Preview and Export reject a different revision until the author explicitly
