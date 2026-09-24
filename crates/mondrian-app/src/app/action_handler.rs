@@ -1524,6 +1524,11 @@ impl AppState {
                 "clip_set_solid_color",
                 "Solid Color Clip already has the requested source color",
             ),
+            ClipProductAction::SetBlendMode(payload) => require_action_executed(
+                self.set_clip_blend_mode_by_id(payload.clip_id, payload.blend_mode)?,
+                "clip_set_blend_mode",
+                "Video Clip already has the requested blend mode",
+            ),
             ClipProductAction::SetRate(payload) => require_action_executed(
                 self.set_clip_rate_from_action(
                     payload.clip_id,
@@ -2011,19 +2016,20 @@ mod tests {
         assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action,
-        audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_enabled_action,
-        clip_set_solid_color_action, clip_write_parameter_values_action, export_cancel_action,
-        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
-        project_create_with_settings_action, project_recover_from_autosave_action,
-        project_update_color_environment_action, project_update_new_sequence_defaults_action,
-        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-        sequence_return_to_parent_action, sequence_set_active_default_action,
-        sequence_switch_active_action, sequence_update_settings_action,
-        timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_drop_file_action, timeline_insert_asset_action,
-        timeline_link_selected_clips_action, timeline_move_clip_action,
-        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
+        audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_blend_mode_action,
+        clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
+        export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
+        export_enqueue_action, project_create_with_settings_action,
+        project_recover_from_autosave_action, project_update_color_environment_action,
+        project_update_new_sequence_defaults_action, sequence_delete_action,
+        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
+        sequence_set_active_default_action, sequence_switch_active_action,
+        sequence_update_settings_action, timeline_clear_in_out_points_action,
+        timeline_create_basic_title_action, timeline_drop_asset_action, timeline_drop_file_action,
+        timeline_insert_asset_action, timeline_link_selected_clips_action,
+        timeline_move_clip_action, timeline_open_nested_sequence_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+        timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
         timeline_unlink_selected_clips_action, track_add_action, track_move_action,
@@ -2038,15 +2044,15 @@ mod tests {
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
         ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-        ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineDropFilePayload,
-        TimelineExportRequest, TimelineInOutPointKind, TimelineInsertAssetPayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
-        TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
-        TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        ClipParameterValueWrite, ClipSetBlendModePayload, ClipSetEnabledPayload,
+        ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineDropAssetPayload,
+        TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
+        TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+        TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
+        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
         TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
         VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
@@ -2060,7 +2066,7 @@ mod tests {
         AssetId, AudioComponentEditId, AudioSourceComponentId, ClipLinkGroupId, EffectId,
         FramePosition, MaskId, TrackId,
     };
-    use mondrian_core::{Color, ColorSpace, NormalizedCurve, NormalizedCurvePoint};
+    use mondrian_core::{BlendMode, Color, ColorSpace, NormalizedCurve, NormalizedCurvePoint};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
     use mondrian_effects::EffectType;
     use mondrian_media::info::{AudioCodec, ChannelLayout};
@@ -6740,6 +6746,76 @@ mod tests {
     }
 
     #[test]
+    fn clip_blend_override_is_atomic_reversible_and_rejects_noop() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let set_multiply = clip_set_blend_mode_action(ClipSetBlendModePayload {
+            clip_id,
+            blend_mode: Some(BlendMode::Multiply),
+        });
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: Some(BlendMode::Multiply),
+                })
+            ))
+        );
+        state.dispatch_action(set_multiply.clone()).expect("set Multiply");
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            Some(BlendMode::Multiply)
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: Some(BlendMode::Multiply),
+                })
+            ))
+        );
+        assert_action_not_executed(
+            state.dispatch_action(set_multiply).expect_err("same mode is a no-op"),
+            "clip_set_blend_mode",
+        );
+        assert!(state.undo_timeline().expect("undo blend mode"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            None
+        );
+        assert!(state.redo_timeline().expect("redo blend mode"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            Some(BlendMode::Multiply)
+        );
+        state
+            .dispatch_action(clip_set_blend_mode_action(ClipSetBlendModePayload {
+                clip_id,
+                blend_mode: None,
+            }))
+            .expect("inherit Track mode");
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            None
+        );
+        let author_generation = state.project_author_generation();
+        let stale_clip_id = ClipId::new();
+        let stale_action = ClipSetBlendModePayload {
+            clip_id: stale_clip_id,
+            blend_mode: Some(BlendMode::Screen),
+        };
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(stale_action)
+            ))
+        );
+        assert!(matches!(
+            state.dispatch_action(clip_set_blend_mode_action(stale_action)),
+            Err(MondrianError::ClipNotFound { .. })
+        ));
+        assert_eq!(state.project_author_generation(), author_generation);
+    }
+
+    #[test]
     fn dispatch_clip_parameter_action_sets_transform_atomically() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
@@ -6959,6 +7035,10 @@ mod tests {
 
         for action in [
             clip_set_enabled_action(ClipSetEnabledPayload { clip_id, enabled: false }),
+            clip_set_blend_mode_action(ClipSetBlendModePayload {
+                clip_id,
+                blend_mode: Some(BlendMode::Screen),
+            }),
             clip_parameter_action(
                 clip_id,
                 opacity_property.clone(),

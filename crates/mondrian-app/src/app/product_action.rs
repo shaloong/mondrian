@@ -14,8 +14,8 @@ use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioProcessorInstanceId, AudioSourceComponentId, ClipId, EffectId, FramePosition,
-    GeneratedAssetKind, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioProcessorInstanceId, AudioSourceComponentId, BlendMode, ClipId, EffectId,
+    FramePosition, GeneratedAssetKind, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, GalleryColorStatistics, GalleryStillId, GalleryStillRaster, GradeDefinitionId,
@@ -101,6 +101,8 @@ pub const CLIP_NAMESPACE: &str = "ui.clip";
 pub const CLIP_SET_ENABLED: &str = "set_enabled";
 /// External action name for changing one Solid Color Clip's source color.
 pub const CLIP_SET_SOLID_COLOR: &str = "set_solid_color";
+/// External action name for choosing one video Clip's compositing mode.
+pub const CLIP_SET_BLEND_MODE: &str = "set_blend_mode";
 /// External action name for changing one Clip or linked group to an exact signed rate.
 pub const CLIP_SET_RATE: &str = "set_rate";
 /// External action name for holding one video Clip at an exact Sequence frame.
@@ -420,6 +422,8 @@ pub enum ClipProductAction {
     SetEnabled(ClipSetEnabledPayload),
     /// Change the generated source color of one Solid Color Clip.
     SetSolidColor(ClipSetSolidColorPayload),
+    /// Set or clear one video Clip's override of the owning Track blend mode.
+    SetBlendMode(ClipSetBlendModePayload),
     /// Set an exact nonzero forward or reverse source-time rate.
     SetRate(ClipSetRatePayload),
     /// Hold a video Clip at the picture selected on the Sequence grid.
@@ -799,6 +803,9 @@ impl ProductAction {
                     decode_payload(namespace, name, payload)?,
                 )))),
                 CLIP_SET_SOLID_COLOR => Ok(Some(Self::Clip(ClipProductAction::SetSolidColor(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                CLIP_SET_BLEND_MODE => Ok(Some(Self::Clip(ClipProductAction::SetBlendMode(
                     decode_payload(namespace, name, payload)?,
                 )))),
                 CLIP_SET_RATE => Ok(Some(Self::Clip(ClipProductAction::SetRate(
@@ -1276,6 +1283,11 @@ impl ProductAction {
             Self::Clip(ClipProductAction::SetSolidColor(payload)) => (
                 CLIP_NAMESPACE,
                 CLIP_SET_SOLID_COLOR,
+                serde_json::json!(payload),
+            ),
+            Self::Clip(ClipProductAction::SetBlendMode(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_SET_BLEND_MODE,
                 serde_json::json!(payload),
             ),
             Self::Clip(ClipProductAction::SetRate(payload)) => {
@@ -2401,6 +2413,16 @@ pub struct ClipSetSolidColorPayload {
     pub color: Color,
 }
 
+/// Set an explicit video Clip blend mode, or inherit its Track mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipSetBlendModePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// `None` follows the owning Track's current mode.
+    pub blend_mode: Option<BlendMode>,
+}
+
 /// Change one Clip and, optionally, its complete link group to an exact signed rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2745,6 +2767,10 @@ impl<'a> ProductActionAvailability<'a> {
             ClipProductAction::SetSolidColor(payload) => self
                 .state
                 .clip_solid_color_write_would_change(payload.clip_id, payload.color)
+                .unwrap_or(false),
+            ClipProductAction::SetBlendMode(payload) => self
+                .state
+                .clip_blend_mode_write_would_change(payload.clip_id, payload.blend_mode)
                 .unwrap_or(false),
             ClipProductAction::SetRate(payload) => {
                 if payload.rate.numerator() == 0 {

@@ -1,8 +1,12 @@
 # Timeline Model
 
-Clip blend-mode enum schemas project options in Core's canonical display
-order. Ordering and UI-only separator rows never alter persisted `BlendMode`
-values, authoring identity, or composite semantics.
+Clip blend-mode options pair each persisted `BlendMode` with its stable key in
+Core's canonical display order. The optional Clip override is a typed Clip
+field, not an intrinsic parameter-bag entry. A blend-mode action validates the
+selected video Clip and its Track lock, rejects no-ops, then changes the field
+through one Authoring Session transaction with Undo/Redo. `None` inherits the
+Track mode. UI-only ordering and separator rows never alter persisted values,
+authoring identity, or composite semantics.
 
 Core numeric automation persists exact key times, incoming/outgoing handles,
 and temporal constraint flags. `AutoBezier` recomputes tangent handles from

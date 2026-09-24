@@ -133,7 +133,7 @@ fn grade_authoring_is_atomic_undoable_and_lock_aware() {
     let generation_before = state.project_author_generation();
     let revision_before = state.active_sequence().expect("Sequence").revision;
     let history_before = state.authoring_history().expect("History").diagnostics().undo_entries;
-    let create_model = InspectorPanelModel::from_app_state(&state);
+    let create_model = InspectorPanelModel::from_app_state(&state, None);
     let create_action = create_model
         .grade
         .create_clip_grade_action
@@ -287,7 +287,7 @@ fn grade_authoring_is_atomic_undoable_and_lock_aware() {
         })),
     )
     .expect("assign Timeline Grade");
-    let hierarchy = InspectorPanelModel::from_app_state(&state).grade;
+    let hierarchy = InspectorPanelModel::from_app_state(&state, None).grade;
     assert_eq!(hierarchy.clip_definition_id, Some(definition_id));
     assert_eq!(hierarchy.clip_grade.as_deref(), Some("Hero Look"));
     assert_eq!(hierarchy.group.as_deref(), Some("Scene"));
@@ -357,7 +357,10 @@ fn grade_authoring_is_atomic_undoable_and_lock_aware() {
         ))
     );
     assert!(
-        !InspectorPanelModel::from_app_state(&state).grade.add_node_actions.is_empty(),
+        !InspectorPanelModel::from_app_state(&state, None)
+            .grade
+            .add_node_actions
+            .is_empty(),
         "Track lock cannot freeze Sequence-level Shared Definition editing"
     );
 

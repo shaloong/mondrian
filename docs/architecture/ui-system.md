@@ -1,10 +1,13 @@
 # UI System
 
 Inspector enum dropdowns consume definition-owned stable option keys. The
-Dropdown widget supports non-action separator rows; Clip blend modes use the
-Core display order (inherit/base, darken, lighten, contrast, difference, and
-component groups) and place separators only in their UI projection. The
-persisted enum value and parameter schema do not contain presentation rows.
+Dropdown widget supports non-action separator rows. Video Clip blend modes
+project Core's typed option order into a localized Inspector dropdown, with
+UI-only boundaries between inherit/base, darken, lighten, contrast,
+difference, and component groups. The checked item is the Clip's explicit
+override or Track inheritance; it has no edit action. Choosing another item
+dispatches one typed Clip action, and a locked Track disables the control.
+Neither persisted values nor parameter schemas contain presentation rows.
 `Dropdown::set_model` updates labels and options while preserving widget
 interaction identity.
 

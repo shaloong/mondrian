@@ -242,7 +242,7 @@ fn inspector_model_projects_asset_components_and_physical_binding_separately() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
 
     assert_eq!(model.audio_components.len(), 1);
     let component = &model.audio_components[0];
@@ -316,7 +316,7 @@ fn inspector_model_uses_child_sequence_layout_for_nested_output_mapping() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
     let mapping = &model.audio_components[0].channel_mapping;
     assert_eq!(
         mapping.observed_source_layout,
@@ -356,7 +356,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
     state.seek(4).expect("seek");
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
     let source_timing = model.source_timing.expect("source-timing model");
     assert_eq!(
         source_timing.mode,
@@ -372,7 +372,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
     state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
         .set_constant_source_time_map(tt(6, time_base), TimeScale::new(0, 1).expect("exact hold"))
         .expect("set hold");
-    let held_model = InspectorPanelModel::from_app_state(&state);
+    let held_model = InspectorPanelModel::from_app_state(&state, None);
     let held_timing = held_model.source_timing.expect("held source-timing model");
     assert_eq!(held_timing.mode, InspectorSourceTimingMode::Hold);
     assert!(held_timing.can_set_rate);
@@ -384,7 +384,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
     state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
         .set_constant_source_time_map(tt(12, time_base), TimeScale::NEGATIVE_ONE)
         .expect("set reverse map fixture");
-    let reverse_model = InspectorPanelModel::from_app_state(&state);
+    let reverse_model = InspectorPanelModel::from_app_state(&state, None);
     let reverse_timing = reverse_model.source_timing.expect("reverse source-timing model");
     assert_eq!(
         reverse_timing.mode,
@@ -423,7 +423,7 @@ fn inspector_model_does_not_offer_retime_for_known_still_images() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
 
     assert_eq!(model.source_timing, None);
     drop(state);
@@ -500,7 +500,7 @@ fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
 
     assert_eq!(
         model.clip_properties.len(),
@@ -564,6 +564,63 @@ fn dock_tabs_project_locale_without_changing_panel_identity() {
     assert_eq!(
         assets.tab_kinds(),
         vec![PanelKind::Assets, PanelKind::Effects]
+    );
+}
+
+#[test]
+fn inspector_blend_menu_keeps_typed_order_groups_and_locale() {
+    let english =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("English catalog");
+    let chinese =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("Chinese catalog");
+    let english_model = inspector_blend_mode_model(None, Some(&english));
+    let chinese_model = inspector_blend_mode_model(None, Some(&chinese));
+    assert_eq!(english_model.row_label, "Blend Mode");
+    assert_eq!(english_model.selected_label, "Inherit Track");
+    assert_eq!(chinese_model.row_label, "混合模式");
+    assert_eq!(chinese_model.selected_label, "继承轨道");
+    assert_eq!(english_model.options.len(), chinese_model.options.len());
+    assert_eq!(
+        english_model.options.iter().map(|option| option.mode).collect::<Vec<_>>(),
+        chinese_model.options.iter().map(|option| option.mode).collect::<Vec<_>>()
+    );
+    let clip_id = ClipId::new();
+    let dropdown = inspector_blend_mode_dropdown(&english_model, clip_id, true);
+    assert_eq!(dropdown.label(), "Inherit Track");
+    assert_eq!(
+        dropdown.items().iter().filter(|item| item.is_separator()).count(),
+        6
+    );
+    let inherit = dropdown
+        .items()
+        .iter()
+        .find(|item| item.label == "Inherit Track")
+        .expect("inherit row");
+    assert!(inherit.checked);
+    assert!(!inherit.enabled);
+    let multiply = dropdown
+        .items()
+        .iter()
+        .find(|item| item.label == "Multiply")
+        .expect("Multiply row");
+    let mondrian_ui_widgets::menu::MenuItemCommand::Action(action) = &multiply.command else {
+        panic!("Multiply must dispatch a typed product action");
+    };
+    let decoded = crate::app::product_action::ProductAction::decode_external(action)
+        .expect("decode blend action")
+        .expect("product action");
+    assert!(matches!(
+        decoded,
+        crate::app::product_action::ProductAction::Clip(
+            crate::app::product_action::ClipProductAction::SetBlendMode(payload)
+        ) if payload.clip_id == clip_id && payload.blend_mode == Some(BlendMode::Multiply)
+    ));
+    assert!(!inspector_blend_mode_dropdown(&english_model, clip_id, false).is_enabled());
+    let state = demo_app_state();
+    let inspector = InspectorPanelModel::from_app_state(&state, Some(&english));
+    assert!(
+        inspector.blend_mode.is_some(),
+        "selected video Clip exposes Blend Mode"
     );
 }
 
@@ -6492,6 +6549,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         is_editable: false,
         edit_disabled_reason: Some("所选剪辑所在轨道已锁定".to_owned()),
         enabled: true,
+        blend_mode: None,
         opacity: 100.0,
         tint: Color::from_rgba8(64, 128, 192, 255),
         shows_tint: true,
@@ -6578,7 +6636,7 @@ fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
     state.test_set_sequence(Some(sequence));
     state.select_clip_by_id(clip_id).expect("select Clip");
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, None);
     assert_eq!(
         model.selected_clip.map(|selection| selection.track_id),
         Some(track_id)
@@ -6881,6 +6939,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         is_editable: true,
         edit_disabled_reason: None,
         enabled: true,
+        blend_mode: None,
         opacity: 100.0,
         tint: Color::from_rgba8(64, 128, 192, 255),
         shows_tint: true,

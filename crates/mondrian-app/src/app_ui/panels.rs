@@ -23,8 +23,9 @@ use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::mask_data::{MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings};
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
-    EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, BlendMode, ClipId, ClipLinkGroupId,
+    ColorSpace, EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId,
+    VideoTransitionId,
 };
 use mondrian_core::{
     AudioChannelLayout, Color, DynamicHdrMetadataFamily, FramePosition, FrameRounding,
@@ -399,7 +400,7 @@ impl AppUiPanelModels {
             viewer,
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
-            inspector: InspectorPanelModel::from_app_state(state),
+            inspector: InspectorPanelModel::from_app_state(state, localizer),
             mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
@@ -430,7 +431,7 @@ impl AppUiPanelModels {
                     .with_app_edit_availability(state)
                 })
                 .unwrap_or_else(demo_timeline_model),
-            inspector: InspectorPanelModel::from_app_state(state),
+            inspector: InspectorPanelModel::from_app_state(state, None),
             mixer: AudioMixerPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
@@ -2114,6 +2115,8 @@ pub struct InspectorPanelModel {
     pub edit_disabled_reason: Option<String>,
     /// Whether the selected clip is enabled.
     pub enabled: bool,
+    /// Video Clip blend-mode override and localized menu presentation.
+    pub blend_mode: Option<InspectorBlendModeModel>,
     /// Opacity shown in UI percent units.
     pub opacity: f32,
     /// Solid/tint color shown by the color trigger.
@@ -2162,6 +2165,30 @@ pub struct InspectorPanelModel {
     pub grade: InspectorGradeHierarchyModel,
     /// Masks currently attached to the selected video Clip.
     pub masks: Vec<InspectorMaskModel>,
+}
+
+/// One localized Clip blend-mode control; authoring uses typed modes only.
+#[derive(Debug, Clone)]
+pub struct InspectorBlendModeModel {
+    /// Selected override, or `None` when inheriting the Track mode.
+    pub selected: Option<BlendMode>,
+    /// Localized property row label.
+    pub row_label: String,
+    /// Localized trigger text for the selected mode.
+    pub selected_label: String,
+    /// Canonical semantic ordering with group boundaries.
+    pub options: Vec<InspectorBlendModeOption>,
+}
+
+/// One typed blend-mode choice in Inspector display order.
+#[derive(Debug, Clone)]
+pub struct InspectorBlendModeOption {
+    /// Typed Clip override; `None` inherits the owning Track mode.
+    pub mode: Option<BlendMode>,
+    /// Localized display label.
+    pub label: String,
+    /// Whether this option begins a new visual group.
+    pub separator_before: bool,
 }
 
 /// One placement-local audio Component Edit shown by the Inspector.
@@ -2440,8 +2467,45 @@ fn inspector_grade_hierarchy_model(
     }
 }
 
+fn inspector_blend_mode_model(
+    selected: Option<BlendMode>,
+    localizer: Option<&Localizer>,
+) -> InspectorBlendModeModel {
+    let options = mondrian_core::display_labels::blend_mode_options()
+        .iter()
+        .map(|option| InspectorBlendModeOption {
+            mode: option.mode,
+            label: localizer.map_or_else(
+                || option.label.to_owned(),
+                |localizer| {
+                    localizer.text(&format!("blend-mode-{}", option.value.to_ascii_lowercase()))
+                },
+            ),
+            separator_before: matches!(
+                option.value,
+                "Normal" | "Darken" | "Lighten" | "Overlay" | "Difference" | "Hue"
+            ),
+        })
+        .collect::<Vec<_>>();
+    let selected_label = options
+        .iter()
+        .find(|option| option.mode == selected)
+        .expect("every BlendMode must have an Inspector option")
+        .label
+        .clone();
+    InspectorBlendModeModel {
+        selected,
+        row_label: localizer.map_or_else(
+            || "混合模式".to_owned(),
+            |localizer| localizer.text("inspector-blend-mode"),
+        ),
+        selected_label,
+        options,
+    }
+}
+
 impl InspectorPanelModel {
-    pub fn from_app_state(state: &AppState) -> Self {
+    pub fn from_app_state(state: &AppState, localizer: Option<&Localizer>) -> Self {
         let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
@@ -2494,6 +2558,9 @@ impl InspectorPanelModel {
             is_editable,
             edit_disabled_reason: (!is_editable).then(|| "所选剪辑所在轨道已锁定".to_owned()),
             enabled: !clip.is_disabled,
+            blend_mode: resolved_selection
+                .is_video_track
+                .then(|| inspector_blend_mode_model(clip.blend_mode, localizer)),
             opacity,
             tint: clip
                 .content
@@ -2625,6 +2692,7 @@ impl InspectorPanelModel {
             is_editable: false,
             edit_disabled_reason: None,
             enabled: false,
+            blend_mode: None,
             opacity: 100.0,
             tint: Color::from_rgba8(128, 128, 128, 255),
             shows_tint: false,
@@ -2662,6 +2730,7 @@ impl InspectorPanelModel {
             is_editable: false,
             edit_disabled_reason: None,
             enabled: true,
+            blend_mode: None,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
             shows_tint: true,

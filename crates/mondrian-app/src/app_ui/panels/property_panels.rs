@@ -427,6 +427,16 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 },
             ),
         ));
+    if let (Some(selection), Some(blend_mode)) = (selected_clip, model.blend_mode.as_ref()) {
+        style_section = style_section.with_row(PropertyRow::new(
+            &blend_mode.row_label,
+            Box::new(inspector_blend_mode_dropdown(
+                blend_mode,
+                selection.clip_id,
+                can_edit,
+            )),
+        ));
+    }
     if model.shows_tint {
         let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
         tint.picker_mut().set_area_mode(model.tint_area_mode);
@@ -1371,6 +1381,33 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         PropertySection::new("动画")
             .with_row(PropertyRow::new("曲线", Box::new(curve)).with_height(118.0)),
     )
+}
+
+pub(super) fn inspector_blend_mode_dropdown(
+    model: &InspectorBlendModeModel,
+    clip_id: ClipId,
+    can_edit: bool,
+) -> Dropdown {
+    let mut items = Vec::with_capacity(model.options.len() + 6);
+    for option in &model.options {
+        if option.separator_before {
+            items.push(MenuItem::separator());
+        }
+        let action = (option.mode != model.selected).then(|| {
+            crate::app::ui_actions::clip_set_blend_mode_action(
+                crate::app::ui_actions::ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: option.mode,
+                },
+            )
+        });
+        items.push(
+            MenuItem::new(option.label.clone(), action).checked(option.mode == model.selected),
+        );
+    }
+    Dropdown::new(model.selected_label.clone(), items)
+        .with_max_visible_items(14)
+        .enabled(can_edit)
 }
 
 pub(super) fn with_audio_processor_rack_sections(
@@ -2547,24 +2584,10 @@ pub(super) fn inspector_property_value_widget(
             }
         }
         PropertyValue::Enum(value) => {
-            let is_blend_mode = path == mondrian_timeline::Clip::BLEND_MODE_PATH;
-            let mut items = Vec::with_capacity(property.schema.enum_options.len() + 6);
+            let mut items = Vec::with_capacity(property.schema.enum_options.len());
             for option in &property.schema.enum_options {
-                if is_blend_mode
-                    && matches!(
-                        option.key.as_str(),
-                        "Normal" | "Darken" | "Lighten" | "Overlay" | "Difference" | "Hue"
-                    )
-                {
-                    items.push(MenuItem::separator());
-                }
-                let label = if is_blend_mode {
-                    mondrian_core::display_labels::blend_mode_display_label(&option.key)
-                } else {
-                    option.key.clone()
-                };
                 items.push(MenuItem::new(
-                    label,
+                    option.key.clone(),
                     inspector_property_action(
                         selection,
                         target.clone(),
@@ -2573,12 +2596,7 @@ pub(super) fn inspector_property_value_widget(
                     ),
                 ));
             }
-            let label = if is_blend_mode {
-                mondrian_core::display_labels::blend_mode_display_label(value)
-            } else {
-                value.clone()
-            };
-            Box::new(Dropdown::new(label, items).enabled(can_edit))
+            Box::new(Dropdown::new(value.clone(), items).enabled(can_edit))
         }
         PropertyValue::Resource(reference) => {
             let text = match reference {
