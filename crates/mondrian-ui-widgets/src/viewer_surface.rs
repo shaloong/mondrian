@@ -887,7 +887,7 @@ impl Widget for ViewerSurface {
                     EventResult::Ignored
                 }
             }
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
                     self.open_dropdown = Some(dropdown);
                     self.hovered_dropdown_index = Some(index);
@@ -906,6 +906,19 @@ impl Widget for ViewerSurface {
                 }
                 self.focus_from_pointer(ctx);
                 let canvas = self.canvas_rect();
+                if modifiers.alt
+                    && self.on_power_window_edit.is_some()
+                    && let Some(shape) = self
+                        .power_window_editor
+                        .as_mut()
+                        .and_then(|editor| editor.insert_bezier_point(canvas, *position))
+                {
+                    if let Some(mapper) = self.on_power_window_edit.as_ref() {
+                        (ctx.dispatch)(mapper(shape));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(editor) = self.power_window_editor.as_mut()
                     && editor.pointer_down(canvas, *position)
                 {
@@ -2117,6 +2130,50 @@ mod tests {
             Some(PointerCaptureRequest::Release(viewer.id()))
         );
         assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+    }
+
+    #[test]
+    fn alt_click_on_bezier_segment_commits_one_insert_without_pointer_capture() {
+        let point = |x| ViewerPowerWindowBezierPoint {
+            position: [x, 0.5],
+            control_in: [0.0, 0.0],
+            control_out: [0.0, 0.0],
+        };
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_power_window(ViewerPowerWindow {
+                shape: ViewerPowerWindowShape::Bezier {
+                    points: vec![point(0.2), point(0.8)],
+                    closed: false,
+                },
+                editable: true,
+            })
+            .on_power_window_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let insertion = Point::new(
+            canvas.x + canvas.width * 0.5,
+            canvas.y + canvas.height * 0.5,
+        );
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: insertion,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers { alt: true, ..Modifiers::none() },
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+        assert_eq!(ctx.requests.pointer_capture, None);
     }
 
     #[test]

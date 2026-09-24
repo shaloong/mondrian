@@ -1069,6 +1069,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         }),
                 ),
             ));
+        if mask.shape_label == "路径" && model.selected_mask_id == Some(mask_id) {
+            section = section.with_row(PropertyRow::new(
+                "Viewer",
+                Box::new(Label::new("Alt+单击曲线：插入控制点").muted()),
+            ));
+        }
         let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
             matches!(
                 status.phase,

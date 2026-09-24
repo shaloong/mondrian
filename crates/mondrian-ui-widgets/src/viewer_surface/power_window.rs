@@ -4,6 +4,7 @@
 //! only an in-gesture preview; a completed drag emits one complete shape value
 //! and the App authoring transaction remains the sole authority.
 
+use mondrian_core::mask_data::MAX_MASK_PATH_POINTS;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::PaintContext;
 
@@ -92,6 +93,43 @@ impl PowerWindowEditor {
 
     pub(crate) fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// Split the nearest visible cubic without changing the rendered outline.
+    /// Called by the Viewer for Alt+click; one completed shape is committed.
+    pub(crate) fn insert_bezier_point(
+        &mut self,
+        canvas: Rect,
+        point: Point,
+    ) -> Option<ViewerPowerWindowShape> {
+        if !self.authored.editable
+            || self.drag.is_some()
+            || !canvas.contains(point)
+            || canvas.width <= 0.0
+            || canvas.height <= 0.0
+        {
+            return None;
+        }
+        let ViewerPowerWindowShape::Bezier { points, closed } = &self.preview else {
+            return None;
+        };
+        if points.len() < 2 || points.len() >= MAX_MASK_PATH_POINTS {
+            return None;
+        }
+        if points.iter().any(|anchor| {
+            distance_squared(canvas_point(canvas, anchor.position), point)
+                <= HIT_RADIUS * HIT_RADIUS
+        }) {
+            return None;
+        }
+        let (segment, t) = nearest_bezier_segment(points, *closed, canvas, point)?;
+        let mut shape = self.preview.clone();
+        let ViewerPowerWindowShape::Bezier { points, .. } = &mut shape else {
+            return None;
+        };
+        split_bezier_segment(points, segment, t);
+        self.preview = shape.clone();
+        Some(shape)
     }
 
     pub(crate) fn pointer_down(&mut self, canvas: Rect, point: Point) -> bool {
@@ -388,6 +426,88 @@ fn bezier_polyline(points: &[ViewerPowerWindowBezierPoint], closed: bool) -> Vec
     output
 }
 
+fn nearest_bezier_segment(
+    points: &[ViewerPowerWindowBezierPoint],
+    closed: bool,
+    canvas: Rect,
+    pointer: Point,
+) -> Option<(usize, f32)> {
+    let segment_count = if closed {
+        points.len()
+    } else {
+        points.len().saturating_sub(1)
+    };
+    let mut nearest = None::<(usize, f32, f32)>;
+    for segment in 0..segment_count {
+        let next = (segment + 1) % points.len();
+        let mut previous = canvas_point(canvas, points[segment].position);
+        for step in 1..=CURVE_STEPS {
+            let current = canvas_point(
+                canvas,
+                cubic(
+                    points[segment],
+                    points[next],
+                    step as f32 / CURVE_STEPS as f32,
+                ),
+            );
+            let delta_x = current.x - previous.x;
+            let delta_y = current.y - previous.y;
+            let length_squared = delta_x * delta_x + delta_y * delta_y;
+            let fraction = if length_squared > f32::EPSILON {
+                (((pointer.x - previous.x) * delta_x + (pointer.y - previous.y) * delta_y)
+                    / length_squared)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let projected = Point::new(
+                previous.x + fraction * delta_x,
+                previous.y + fraction * delta_y,
+            );
+            let distance = distance_squared(pointer, projected);
+            if nearest.is_none_or(|(_, _, best)| distance < best) {
+                let t = ((step - 1) as f32 + fraction) / CURVE_STEPS as f32;
+                nearest = Some((segment, t, distance));
+            }
+            previous = current;
+        }
+    }
+    nearest.and_then(|(segment, t, distance)| {
+        (distance <= HIT_RADIUS * HIT_RADIUS && (0.001..=0.999).contains(&t))
+            .then_some((segment, t))
+    })
+}
+
+fn split_bezier_segment(points: &mut Vec<ViewerPowerWindowBezierPoint>, segment: usize, t: f32) {
+    let next = (segment + 1) % points.len();
+    let start = points[segment];
+    let end = points[next];
+    let p0 = start.position;
+    let p1 = add(start.position, start.control_out);
+    let p2 = add(end.position, end.control_in);
+    let p3 = end.position;
+    let q0 = lerp(p0, p1, t);
+    let q1 = lerp(p1, p2, t);
+    let q2 = lerp(p2, p3, t);
+    let r0 = lerp(q0, q1, t);
+    let r1 = lerp(q1, q2, t);
+    let position = lerp(r0, r1, t);
+    points[segment].control_out = sub(q0, p0);
+    points[next].control_in = sub(q2, p3);
+    points.insert(
+        segment + 1,
+        ViewerPowerWindowBezierPoint {
+            position,
+            control_in: sub(r0, position),
+            control_out: sub(r1, position),
+        },
+    );
+}
+
+fn lerp(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
 fn cubic(a: ViewerPowerWindowBezierPoint, b: ViewerPowerWindowBezierPoint, t: f32) -> [f32; 2] {
     let inverse = 1.0 - t;
     let p0 = a.position;
@@ -529,6 +649,108 @@ mod tests {
             (actual[1] - expected[1]).abs() < 1.0e-6,
             "y: {actual:?} != {expected:?}"
         );
+    }
+
+    #[test]
+    fn splitting_a_cubic_adds_one_control_point_without_changing_its_outline() {
+        let start = ViewerPowerWindowBezierPoint {
+            position: [0.15, 0.25],
+            control_in: [0.0, 0.0],
+            control_out: [0.25, -0.1],
+        };
+        let end = ViewerPowerWindowBezierPoint {
+            position: [0.85, 0.75],
+            control_in: [-0.2, 0.15],
+            control_out: [0.0, 0.0],
+        };
+        let mut points = vec![start, end];
+        let split = 0.37;
+        split_bezier_segment(&mut points, 0, split);
+        assert_eq!(points.len(), 3);
+        for index in 0..=100 {
+            let original_t = index as f32 / 100.0;
+            let actual = if original_t <= split {
+                cubic(points[0], points[1], original_t / split)
+            } else {
+                cubic(points[1], points[2], (original_t - split) / (1.0 - split))
+            };
+            let expected = cubic(start, end, original_t);
+            assert!((actual[0] - expected[0]).abs() < 1.0e-5);
+            assert!((actual[1] - expected[1]).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn splitting_the_closing_cubic_keeps_the_closed_outline_continuous() {
+        let mut points = vec![
+            ViewerPowerWindowBezierPoint {
+                position: [0.2, 0.2],
+                control_in: [-0.05, 0.04],
+                control_out: [0.0, 0.0],
+            },
+            ViewerPowerWindowBezierPoint {
+                position: [0.8, 0.2],
+                control_in: [0.0, 0.0],
+                control_out: [0.0, 0.0],
+            },
+            ViewerPowerWindowBezierPoint {
+                position: [0.6, 0.8],
+                control_in: [0.0, 0.0],
+                control_out: [-0.08, -0.03],
+            },
+        ];
+        let closing_start = points[2];
+        let closing_end = points[0];
+        let original = cubic(closing_start, closing_end, 0.41);
+        split_bezier_segment(&mut points, 2, 0.41);
+        assert_eq!(points.len(), 4);
+        assert_point_close(points[3].position, original);
+        for index in 0..=100 {
+            let t = index as f32 / 100.0;
+            let before = if t <= 0.41 {
+                cubic(points[2], points[3], t / 0.41)
+            } else {
+                cubic(points[3], points[0], (t - 0.41) / 0.59)
+            };
+            let expected = cubic(closing_start, closing_end, t);
+            assert!((before[0] - expected[0]).abs() < 1.0e-5);
+            assert!((before[1] - expected[1]).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn insertion_requires_editability_and_a_visible_path_segment() {
+        let shape = ViewerPowerWindowShape::Bezier {
+            points: vec![
+                ViewerPowerWindowBezierPoint {
+                    position: [0.2, 0.5],
+                    control_in: [0.0, 0.0],
+                    control_out: [0.2, 0.0],
+                },
+                ViewerPowerWindowBezierPoint {
+                    position: [0.8, 0.5],
+                    control_in: [-0.2, 0.0],
+                    control_out: [0.0, 0.0],
+                },
+            ],
+            closed: false,
+        };
+        let canvas = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mut editor =
+            PowerWindowEditor::new(ViewerPowerWindow { shape: shape.clone(), editable: true });
+        assert!(editor.insert_bezier_point(canvas, Point::new(100.0, 20.0)).is_none());
+        assert!(editor.insert_bezier_point(canvas, Point::new(40.0, 50.0)).is_none());
+        assert_eq!(editor.preview, shape);
+        let Some(ViewerPowerWindowShape::Bezier { points, .. }) =
+            editor.insert_bezier_point(canvas, Point::new(100.0, 50.0))
+        else {
+            panic!("inserted Bezier point");
+        };
+        assert_eq!(points.len(), 3);
+        assert_point_close(points[1].position, [0.5, 0.5]);
+
+        let mut locked = PowerWindowEditor::new(ViewerPowerWindow { shape, editable: false });
+        assert!(locked.insert_bezier_point(canvas, Point::new(100.0, 50.0)).is_none());
     }
 
     #[test]

@@ -1198,6 +1198,13 @@ disabled or non-current Clips, and Mask editing cannot publish a partial Clip
 transform. Viewer zoom and sample aspect ratio only affect screen mapping, not
 the persisted parameter values.
 
+Selected Power Windows expose rectangle, ellipse, and Bezier control handles in
+the same Viewer. Alt+click on a visible Bezier segment inserts one anchor by
+splitting the cubic at the picked parameter: the existing outline is unchanged
+until the user moves that point. The gesture emits one complete Mask shape
+action with no intermediate author mutation or pointer capture. A miss, locked
+Mask, existing anchor hit, or path at the point limit inserts nothing.
+
 ## Viewer Preview Scheduling
 
 The Color workspace owns a real `Scopes` panel rather than aliasing the Effects
