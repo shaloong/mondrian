@@ -1677,7 +1677,7 @@ fn assets_panel_card_drop_moves_asset_selection_into_folder_card() {
 
 #[test]
 fn assets_panel_context_menu_uses_shell_and_asset_actions() {
-    let items = asset_grid_context_menu_items(None);
+    let items = asset_grid_context_menu_items(None, None);
 
     assert_eq!(items.len(), 3);
     assert_shell_action(items[0].action(), APP_SHELL_IMPORT_MEDIA_DIALOG);
@@ -1697,7 +1697,7 @@ fn assets_panel_context_menu_uses_shell_and_asset_actions() {
 
 #[test]
 fn assets_panel_context_menu_creates_folders_inside_current_folder() {
-    let items = asset_grid_context_menu_items(Some("rushes"));
+    let items = asset_grid_context_menu_items(Some("rushes"), None);
 
     let Action::Custom { namespace, name, payload } =
         items[0].action().expect("import dialog action")
@@ -1851,7 +1851,7 @@ fn assets_panel_file_card_context_menu_dispatches_interpret_first() {
     std::fs::write(&path, b"fixture").expect("write media");
     let asset = test_video_asset(path.clone());
     let asset_id = asset.id;
-    let item = asset_grid_item_from_asset(asset, None, false, None);
+    let item = asset_grid_item_from_asset(asset, None, false, None, None);
     let model = AssetGridModel::new("Assets", vec![item]);
     let mut grid = asset_grid(&model);
     grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -1983,7 +1983,7 @@ fn assets_panel_offline_file_card_context_menu_includes_relink() {
         engine: mondrian_core::ColorEngine::mondrian_standard(),
         working_color_space: WorkingColorSpace::LinearP3D65,
     };
-    let item = asset_grid_item_from_asset(asset, None, false, Some(&input_pipeline));
+    let item = asset_grid_item_from_asset(asset, None, false, Some(&input_pipeline), None);
 
     assert_eq!(badge_labels(&item), ["视频", "离线"]);
     assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
@@ -2036,7 +2036,7 @@ fn assets_panel_online_video_card_context_menu_toggles_proxy_mode() {
     std::fs::write(&media_path, b"not decoded in this view-model test").expect("write media");
     let asset = test_video_asset(media_path.clone());
     let asset_id = asset.id;
-    let item = asset_grid_item_from_asset(asset.clone(), None, false, None);
+    let item = asset_grid_item_from_asset(asset.clone(), None, false, None, None);
 
     assert_eq!(badge_labels(&item), ["视频"]);
     assert_eq!(item.context_menu_items.len(), 5);
@@ -2056,7 +2056,7 @@ fn assets_panel_online_video_card_context_menu_toggles_proxy_mode() {
     assert_eq!(payload.asset_id, asset_id);
     assert!(payload.enabled);
 
-    let proxied = asset_grid_item_from_asset(asset, None, true, None);
+    let proxied = asset_grid_item_from_asset(asset, None, true, None, None);
     assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
     assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
     assert_eq!(proxied.context_menu_items[2].label, "关闭代理模式");
@@ -4294,6 +4294,116 @@ fn asset_panel_model_shows_top_level_folders_before_root_assets() {
 }
 
 #[test]
+fn asset_browser_locale_changes_copy_without_changing_folder_or_asset_actions() {
+    let root = unique_temp_dir("asset-panel-localization");
+    let library = AssetLibrary::open(root.clone()).expect("open asset library");
+    let folder_id = library.create_folder("Rushes", None).expect("create folder");
+    let asset_id = library.create_solid_color_asset(Some("Slate")).expect("create solid color");
+    library
+        .move_asset_to_folder(asset_id, Some(&folder_id))
+        .expect("move into folder");
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let chinese =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("Chinese catalog");
+    let english_root = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        None,
+        None,
+        None,
+        None,
+        Some(&english),
+    );
+    let chinese_root = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        None,
+        None,
+        None,
+        None,
+        Some(&chinese),
+    );
+    assert_eq!(english_root.subtitle, "Project library");
+    assert_eq!(
+        english_root.empty_state_copy[0],
+        "Drop media here to start editing"
+    );
+    assert_eq!(chinese_root.empty_state_copy[2], "没有匹配的素材");
+    assert_eq!(
+        english_root.filter_placeholder.as_deref(),
+        Some("Search assets")
+    );
+    assert_eq!(english_root.items[0].title, "Rushes");
+    assert_eq!(badge_labels(&english_root.items[0]), ["1 item"]);
+    assert!(badge_labels(&chinese_root.items[0])[0].contains('1'));
+    assert!(badge_labels(&chinese_root.items[0])[0].ends_with(" 项"));
+    assert_eq!(
+        english_root.items[0].activate_action,
+        chinese_root.items[0].activate_action
+    );
+    assert_eq!(
+        english_root.items[0].drag_payload,
+        chinese_root.items[0].drag_payload
+    );
+    assert_eq!(
+        english_root.items[0].context_menu_items[0].label,
+        "Delete folder"
+    );
+    assert_eq!(
+        chinese_root.items[0].context_menu_items[0].label,
+        "删除文件夹"
+    );
+    assert_eq!(
+        english_root.items[0].context_menu_items[0].action(),
+        chinese_root.items[0].context_menu_items[0].action()
+    );
+    assert_eq!(english_root.context_menu_items[0].label, "Import media...");
+    assert_eq!(chinese_root.context_menu_items[0].label, "导入媒体...");
+    assert_eq!(
+        english_root.context_menu_items[0].action(),
+        chinese_root.context_menu_items[0].action()
+    );
+
+    let english_folder = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        Some(&folder_id),
+        None,
+        None,
+        None,
+        Some(&english),
+    );
+    let chinese_folder = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        Some(&folder_id),
+        None,
+        None,
+        None,
+        Some(&chinese),
+    );
+    assert_eq!(english_folder.subtitle, "Project library / Rushes");
+    assert_eq!(english_folder.items[0].title, "All assets");
+    assert_eq!(
+        english_folder.items[0].activate_action,
+        chinese_folder.items[0].activate_action
+    );
+    assert_eq!(english_folder.items[1].title, "Slate");
+    assert_eq!(badge_labels(&english_folder.items[1]), ["Solid color"]);
+    assert_eq!(badge_labels(&chinese_folder.items[1]), ["图片"]);
+    assert_eq!(
+        english_folder.items[1].drag_payload,
+        chinese_folder.items[1].drag_payload
+    );
+    assert_eq!(
+        english_folder.items[1].activate_action,
+        chinese_folder.items[1].activate_action
+    );
+
+    drop(library);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn asset_panel_model_can_show_one_folder_with_parent_navigation() {
     let root = unique_temp_dir("asset-panel-folder-view");
     let library = AssetLibrary::open(root.clone()).expect("open asset library");
@@ -4423,7 +4533,7 @@ fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
     let localizer =
         crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
             .expect("English catalog");
-    let model = PanelListModel::from_app_effect_registry_localized(&state, &localizer);
+    let model = PanelListModel::from_app_effect_registry_with_localizer(&state, Some(&localizer));
     assert_eq!(model.title, "Effects");
     assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
     let root_categories: Vec<&str> = model

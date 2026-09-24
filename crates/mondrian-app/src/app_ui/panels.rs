@@ -363,18 +363,36 @@ impl AppUiPanelModels {
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
+        Self::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            state,
+            asset_folder_id,
+            thumbnails,
+            preview,
+            None,
+        )
+    }
+
+    /// Build panel labels for one UI locale snapshot without changing author data.
+    pub(crate) fn from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+        state: &AppState,
+        asset_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        preview: Option<&dyn ViewerPreviewSource>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
-            assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
+            assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
                 state.asset_library(),
                 asset_folder_id,
                 thumbnails,
                 Some(state.proxy_mode_assets()),
                 Some(&input_pipeline),
+                localizer,
             ),
-            effects: PanelListModel::from_app_effect_registry(state),
+            effects: PanelListModel::from_app_effect_registry_with_localizer(state, localizer),
             viewer,
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
@@ -473,6 +491,9 @@ pub struct AssetGridModel {
     pub filter_placeholder: Option<String>,
     pub accepts_file_drop: bool,
     pub current_folder_id: Option<String>,
+    selection_delete_label: String,
+    context_menu_items: Vec<MenuItem>,
+    empty_state_copy: [String; 4],
 }
 
 impl AssetGridModel {
@@ -484,6 +505,14 @@ impl AssetGridModel {
             filter_placeholder: None,
             accepts_file_drop: false,
             current_folder_id: None,
+            selection_delete_label: "Delete selected".to_owned(),
+            context_menu_items: Vec::new(),
+            empty_state_copy: [
+                "拖入媒体开始编辑".to_owned(),
+                "支持视频、音频、图片与序列".to_owned(),
+                "没有匹配的素材".to_owned(),
+                "换个关键词或清空搜索条件".to_owned(),
+            ],
         }
     }
 
@@ -531,62 +560,105 @@ impl AssetGridModel {
         proxy_mode_assets: Option<&BTreeSet<AssetId>>,
         input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
     ) -> Self {
+        Self::from_asset_library_in_folder_with_thumbnails_and_locale(
+            library,
+            current_folder_id,
+            thumbnails,
+            proxy_mode_assets,
+            input_pipeline,
+            None,
+        )
+    }
+
+    fn from_asset_library_in_folder_with_thumbnails_and_locale(
+        library: Option<&AssetLibrary>,
+        current_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        proxy_mode_assets: Option<&BTreeSet<AssetId>>,
+        input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let colors = current_theme().colors.clone();
+        let title = asset_text(localizer, "panel-assets", "Assets");
+        let library_label = asset_text(localizer, "asset-library", "项目素材库");
+        let search = asset_text(localizer, "asset-search", "搜索素材");
+        let selection_delete_label =
+            asset_text(localizer, "asset-delete-selected", "Delete selected");
+        let empty_state_copy = [
+            asset_text(localizer, "asset-empty-title", "拖入媒体开始编辑"),
+            asset_text(
+                localizer,
+                "asset-empty-description",
+                "支持视频、音频、图片与序列",
+            ),
+            asset_text(localizer, "asset-no-results-title", "没有匹配的素材"),
+            asset_text(
+                localizer,
+                "asset-no-results-description",
+                "换个关键词或清空搜索条件",
+            ),
+        ];
         let Some(library) = library else {
             return AssetGridModel::new(
-                "Assets",
+                title,
                 vec![asset_empty_item(
                     "asset-library-disconnected",
-                    "没有项目素材库",
-                    "打开或创建项目后浏览素材",
+                    asset_text(localizer, "asset-library-disconnected", "没有项目素材库"),
+                    "",
                     colors.muted_foreground,
                     AppIcon::Folder,
                 )],
             )
-            .with_subtitle("项目素材库")
-            .with_filter_placeholder("搜索素材");
+            .with_subtitle(library_label)
+            .with_filter_placeholder(search)
+            .with_selection_delete_label(selection_delete_label)
+            .with_empty_state_copy(empty_state_copy);
         };
 
         let folders = match library.list_folders() {
             Ok(folders) => folders,
             Err(err) => {
                 return AssetGridModel::new(
-                    "Assets",
+                    title,
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "素材库不可用",
+                        asset_text(localizer, "asset-library-unavailable", "素材库不可用"),
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("项目素材库")
-                .with_filter_placeholder("搜索素材");
+                .with_subtitle(library_label)
+                .with_filter_placeholder(search)
+                .with_selection_delete_label(selection_delete_label)
+                .with_empty_state_copy(empty_state_copy);
             }
         };
         let assets = match library.list_assets() {
             Ok(assets) => assets,
             Err(err) => {
                 return AssetGridModel::new(
-                    "Assets",
+                    title,
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "素材库不可用",
+                        asset_text(localizer, "asset-library-unavailable", "素材库不可用"),
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("项目素材库")
-                .with_filter_placeholder("搜索素材");
+                .with_subtitle(library_label)
+                .with_filter_placeholder(search)
+                .with_selection_delete_label(selection_delete_label)
+                .with_empty_state_copy(empty_state_copy);
             }
         };
 
         let current_folder =
             current_folder_id.and_then(|id| folders.iter().find(|folder| folder.id == id));
         let subtitle = current_folder
-            .map(|folder| format!("项目素材库 / {}", folder.name))
-            .unwrap_or_else(|| "项目素材库".to_owned());
+            .map(|folder| format!("{library_label} / {}", folder.name))
+            .unwrap_or_else(|| library_label.clone());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
         let items = asset_grid_items_from_library_records(
             &folders,
@@ -595,26 +667,54 @@ impl AssetGridModel {
             thumbnails,
             proxy_mode_assets,
             input_pipeline,
+            localizer,
         );
+        let context_menu_items =
+            asset_grid_context_menu_items(current_folder_id.as_deref(), localizer);
         if items.is_empty() {
-            return AssetGridModel::new("Assets", Vec::new())
+            return AssetGridModel::new(title, Vec::new())
                 .with_subtitle(subtitle)
-                .with_filter_placeholder("搜索素材")
+                .with_filter_placeholder(search)
                 .accepts_file_drop(true)
-                .with_current_folder_id(current_folder_id);
+                .with_current_folder_id(current_folder_id)
+                .with_selection_delete_label(selection_delete_label)
+                .with_context_menu_items(context_menu_items)
+                .with_empty_state_copy(empty_state_copy);
         }
 
-        AssetGridModel::new("Assets", items)
+        AssetGridModel::new(title, items)
             .with_subtitle(subtitle)
-            .with_filter_placeholder("搜索素材")
+            .with_filter_placeholder(search)
             .accepts_file_drop(true)
             .with_current_folder_id(current_folder_id)
+            .with_selection_delete_label(selection_delete_label)
+            .with_context_menu_items(context_menu_items)
+            .with_empty_state_copy(empty_state_copy)
     }
 
     pub fn with_current_folder_id(mut self, folder_id: Option<String>) -> Self {
         self.current_folder_id = folder_id;
         self
     }
+
+    fn with_selection_delete_label(mut self, label: String) -> Self {
+        self.selection_delete_label = label;
+        self
+    }
+
+    fn with_context_menu_items(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
+        self
+    }
+
+    fn with_empty_state_copy(mut self, copy: [String; 4]) -> Self {
+        self.empty_state_copy = copy;
+        self
+    }
+}
+
+fn asset_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
 }
 
 impl PanelListModel {
@@ -644,14 +744,6 @@ impl PanelListModel {
     /// withheld in those states.
     pub fn from_app_effect_registry(state: &AppState) -> Self {
         Self::from_app_effect_registry_with_localizer(state, None)
-    }
-
-    /// Project effect labels from the current UI locale without changing effect identities.
-    pub(crate) fn from_app_effect_registry_localized(
-        state: &AppState,
-        localizer: &Localizer,
-    ) -> Self {
-        Self::from_app_effect_registry_with_localizer(state, Some(localizer))
     }
 
     fn from_app_effect_registry_with_localizer(
@@ -3769,13 +3861,14 @@ fn asset_grid_item_from_asset(
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode: bool,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> AssetGridItem {
-    let badge = asset_kind_badge(&asset.kind);
+    let badge = asset_kind_badge(&asset.kind, localizer);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
     let context_menu_items =
-        asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline);
+        asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline, localizer);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
     let duration_label = asset
@@ -3792,9 +3885,15 @@ fn asset_grid_item_from_asset(
         .with_context_menu(context_menu_items)
         .renamable(true);
     if offline {
-        item = item.with_badge_tone("离线", AssetGridBadgeTone::Warning);
+        item = item.with_badge_tone(
+            asset_text(localizer, "asset-offline", "离线"),
+            AssetGridBadgeTone::Warning,
+        );
     } else if proxied {
-        item = item.with_badge_tone("代理", AssetGridBadgeTone::Success);
+        item = item.with_badge_tone(
+            asset_text(localizer, "asset-proxy", "代理"),
+            AssetGridBadgeTone::Success,
+        );
     }
     if let Some(state) = thumbnail_state {
         item = match state {
@@ -3811,13 +3910,14 @@ fn asset_grid_asset_context_menu_items(
     asset: &AssetRecord,
     proxy_mode: bool,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if let Some(file_path) = asset.file_path() {
         let media_probe = asset.media_probe();
         items.push(asset_menu_item(
             MenuItem::new(
-                "解释素材...",
+                asset_text(localizer, "asset-interpret", "解释素材..."),
                 app_shell_interpret_asset_dialog_action(AppShellInterpretAssetDialogPayload {
                     asset_id: asset.id,
                     asset_name: asset.name.clone(),
@@ -3841,7 +3941,7 @@ fn asset_grid_asset_context_menu_items(
         ));
         items.push(asset_menu_item(
             MenuItem::new(
-                "在文件管理器中显示",
+                asset_text(localizer, "asset-reveal", "在文件管理器中显示"),
                 app_shell_reveal_in_file_manager_action(AppShellRevealInFileManagerPayload {
                     path: file_path.to_path_buf(),
                 }),
@@ -3851,7 +3951,7 @@ fn asset_grid_asset_context_menu_items(
         if asset_is_offline(asset) {
             items.push(asset_menu_item(
                 MenuItem::new(
-                    "重新链接媒体...",
+                    asset_text(localizer, "asset-relink", "重新链接媒体..."),
                     app_shell_relink_asset_dialog_action(AppShellRelinkAssetDialogPayload {
                         asset_id: asset.id,
                     }),
@@ -3860,9 +3960,15 @@ fn asset_grid_asset_context_menu_items(
             ));
         } else if matches!(asset.kind, AssetKind::Video) {
             let (label, enabled) = if proxy_mode {
-                ("关闭代理模式", false)
+                (
+                    asset_text(localizer, "asset-disable-proxy", "关闭代理模式"),
+                    false,
+                )
             } else {
-                ("启用代理模式", true)
+                (
+                    asset_text(localizer, "asset-enable-proxy", "启用代理模式"),
+                    true,
+                )
             };
             items.push(asset_menu_item(
                 MenuItem::new(
@@ -3879,7 +3985,7 @@ fn asset_grid_asset_context_menu_items(
     }
     items.push(asset_menu_item(
         MenuItem::new(
-            "删除素材",
+            asset_text(localizer, "asset-delete", "删除素材"),
             assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
         ),
         AppIcon::Trash,
@@ -3898,16 +4004,17 @@ fn asset_grid_items_from_library_records(
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode_assets: Option<&BTreeSet<AssetId>>,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> Vec<AssetGridItem> {
     let mut items =
         Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
     let parent_id = current_folder.map(|folder| folder.id.as_str());
     if let Some(folder) = current_folder {
-        items.push(asset_grid_parent_item(folder.parent_id.clone()));
+        items.push(asset_grid_parent_item(folder.parent_id.clone(), localizer));
     }
     for folder in folders.iter().filter(|folder| folder.parent_id.as_deref() == parent_id) {
         let item_count = asset_folder_direct_item_count(folders, &assets, folder);
-        items.push(asset_grid_item_from_folder(folder, item_count));
+        items.push(asset_grid_item_from_folder(folder, item_count, localizer));
     }
     items.extend(
         assets
@@ -3915,7 +4022,7 @@ fn asset_grid_items_from_library_records(
             .filter(|asset| asset.folder_id.as_deref() == parent_id)
             .map(|asset| {
                 let proxy_mode = proxy_mode_assets.is_some_and(|ids| ids.contains(&asset.id));
-                asset_grid_item_from_asset(asset, thumbnails, proxy_mode, input_pipeline)
+                asset_grid_item_from_asset(asset, thumbnails, proxy_mode, input_pipeline, localizer)
             }),
     );
     items
@@ -3938,11 +4045,20 @@ fn asset_folder_direct_item_count(
     child_folders + child_assets
 }
 
-fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
+fn asset_grid_parent_item(
+    parent_id: Option<String>,
+    localizer: Option<&Localizer>,
+) -> AssetGridItem {
     let (title, badge) = if parent_id.is_some() {
-        ("返回", "上级")
+        (
+            asset_text(localizer, "asset-back", "返回"),
+            asset_text(localizer, "asset-parent", "上级"),
+        )
     } else {
-        ("全部素材", "全部")
+        (
+            asset_text(localizer, "asset-all", "全部素材"),
+            asset_text(localizer, "asset-all-badge", "全部"),
+        )
     };
     with_asset_icon(
         AssetGridItem::new("asset-folder-up", title, current_theme().colors.secondary)
@@ -3954,8 +4070,18 @@ fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
     )
 }
 
-fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> AssetGridItem {
-    let badge = format!("{item_count} 项");
+fn asset_grid_item_from_folder(
+    folder: &FolderRecord,
+    item_count: usize,
+    localizer: Option<&Localizer>,
+) -> AssetGridItem {
+    let badge = if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", item_count as i64);
+        localizer.format("asset-item-count", Some(&args))
+    } else {
+        format!("{item_count} 项")
+    };
     let folder_id = folder.id.clone();
     with_asset_icon(
         AssetGridItem::new(
@@ -3970,7 +4096,7 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
         }))
         .with_context_menu(vec![asset_menu_item(
             MenuItem::new(
-                "删除文件夹",
+                asset_text(localizer, "asset-delete-folder", "删除文件夹"),
                 assets_delete_folder_action(AssetsDeleteFolderPayload { folder_id }),
             ),
             AppIcon::Trash,
@@ -4018,14 +4144,15 @@ fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
     trigger
 }
 
-fn asset_kind_badge(kind: &AssetKind) -> &'static str {
-    match kind {
-        AssetKind::Video => "视频",
-        AssetKind::StillImage => "静帧",
-        AssetKind::Audio => "音频",
-        AssetKind::AdjustmentLayer => "序列",
-        AssetKind::SolidColor => "图片",
-    }
+fn asset_kind_badge(kind: &AssetKind, localizer: Option<&Localizer>) -> String {
+    let (id, fallback) = match kind {
+        AssetKind::Video => ("asset-kind-video", "视频"),
+        AssetKind::StillImage => ("asset-kind-still", "静帧"),
+        AssetKind::Audio => ("asset-kind-audio", "音频"),
+        AssetKind::AdjustmentLayer => ("asset-kind-adjustment", "序列"),
+        AssetKind::SolidColor => ("asset-kind-solid", "图片"),
+    };
+    asset_text(localizer, id, fallback)
 }
 
 fn asset_duration_label(duration: std::time::Duration) -> String {
@@ -4461,12 +4588,19 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     let mut grid = AssetGrid::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone())
         .with_embedded_panel_chrome()
+        .with_empty_state_copy(
+            &model.empty_state_copy[0],
+            &model.empty_state_copy[1],
+            &model.empty_state_copy[2],
+            &model.empty_state_copy[3],
+        )
         .on_rename(asset_grid_rename_action);
     if let Some(placeholder) = &model.filter_placeholder {
         grid = grid.with_filter(placeholder.clone());
     }
     if model.accepts_file_drop {
         let drop_folder_id = model.current_folder_id.clone();
+        let selection_delete_label = model.selection_delete_label.clone();
         grid = grid
             .on_drop(move |payload, _position| match payload {
                 DragPayload::File(paths) if !paths.is_empty() => {
@@ -4525,10 +4659,14 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                     _ => AssetGridDropOutcome::Unhandled,
                 }
             })
-            .with_context_menu(asset_grid_context_menu_items(
-                model.current_folder_id.as_deref(),
-            ))
-            .with_selection_context_menu(asset_grid_selection_context_menu_items);
+            .with_context_menu(if model.context_menu_items.is_empty() {
+                asset_grid_context_menu_items(model.current_folder_id.as_deref(), None)
+            } else {
+                model.context_menu_items.clone()
+            })
+            .with_selection_context_menu(move |indices, items| {
+                asset_grid_selection_context_menu_items(indices, items, &selection_delete_label)
+            });
     }
     grid
 }
@@ -4564,6 +4702,7 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
 fn asset_grid_selection_context_menu_items(
     _indices: &[usize],
     items: &[&AssetGridItem],
+    delete_label: &str,
 ) -> Vec<MenuItem> {
     let mut asset_ids = Vec::new();
     let mut folder_ids = Vec::new();
@@ -4579,7 +4718,7 @@ fn asset_grid_selection_context_menu_items(
     }
     vec![asset_menu_item(
         MenuItem::new(
-            "Delete selected",
+            delete_label,
             assets_delete_selection_action(AssetsDeleteSelectionPayload { asset_ids, folder_ids }),
         ),
         AppIcon::Trash,
@@ -4606,11 +4745,14 @@ fn move_asset_selection_action(
     }))
 }
 
-fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuItem> {
+fn asset_grid_context_menu_items(
+    current_folder_id: Option<&str>,
+    localizer: Option<&Localizer>,
+) -> Vec<MenuItem> {
     vec![
         asset_menu_item(
             MenuItem::new(
-                "导入媒体...",
+                asset_text(localizer, "asset-import", "导入媒体..."),
                 app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
                     folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -4620,11 +4762,11 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         MenuItem::separator(),
         asset_menu_item(
             MenuItem::submenu(
-                "新建",
+                asset_text(localizer, "asset-new", "新建"),
                 vec![
                     asset_menu_item(
                         MenuItem::new(
-                            "调整图层",
+                            asset_text(localizer, "asset-new-adjustment", "调整图层"),
                             assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
                                 folder_id: current_folder_id.map(str::to_owned),
                             }),
@@ -4633,7 +4775,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
                     ),
                     asset_menu_item(
                         MenuItem::new(
-                            "纯色",
+                            asset_text(localizer, "asset-new-solid", "纯色"),
                             assets_create_solid_color_action(AssetsCreateAssetPayload {
                                 folder_id: current_folder_id.map(str::to_owned),
                             }),
@@ -4642,7 +4784,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
                     ),
                     asset_menu_item(
                         MenuItem::new(
-                            "文件夹",
+                            asset_text(localizer, "asset-new-folder", "文件夹"),
                             assets_create_folder_action(AssetsCreateFolderPayload {
                                 parent_folder_id: current_folder_id.map(str::to_owned),
                             }),

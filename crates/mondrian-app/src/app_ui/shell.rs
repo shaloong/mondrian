@@ -955,9 +955,16 @@ impl AppUiAppRoot {
         waveform_source: Option<AudioWaveformSource>,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
-        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-            state, None, thumbnails, preview,
-        );
+        let locale = preferences.locale_preference.resolve(sys_locale::get_locale().as_deref());
+        let localizer = Localizer::new(locale).ok();
+        let mut models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                state,
+                None,
+                thumbnails,
+                preview,
+                localizer.as_ref(),
+            );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
         apply_video_scopes_preferences(&mut models, state, preferences);
@@ -979,12 +986,6 @@ impl AppUiAppRoot {
             preferences.locale_preference,
             sys_locale::get_locale().as_deref(),
         );
-        if let Ok(localizer) = Localizer::new(preferences_model.locale) {
-            models.effects =
-                crate::app_ui::panels::PanelListModel::from_app_effect_registry_localized(
-                    state, &localizer,
-                );
-        }
         let mut menu_bar =
             MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         menu_bar.set_locale(preferences_model.locale);
@@ -1351,28 +1352,25 @@ impl AppUiAppRoot {
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
         self.project_sequence_color_contracts = project_sequence_color_contracts(state);
-        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-            state,
-            self.asset_folder_id.as_deref(),
-            thumbnails,
-            preview,
-        );
-        models.timeline.waveform_display = preferences.waveform_display;
-        models.timeline.waveform_source = waveform_source;
-        apply_video_scopes_preferences(&mut models, state, preferences);
-        apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
-        apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         let locale = if preferences.locale_preference == self.preferences_model.locale_preference {
             self.preferences_model.locale
         } else {
             preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
         };
-        if let Ok(localizer) = Localizer::new(locale) {
-            models.effects =
-                crate::app_ui::panels::PanelListModel::from_app_effect_registry_localized(
-                    state, &localizer,
-                );
-        }
+        let localizer = Localizer::new(locale).ok();
+        let mut models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                state,
+                self.asset_folder_id.as_deref(),
+                thumbnails,
+                preview,
+                localizer.as_ref(),
+            );
+        models.timeline.waveform_display = preferences.waveform_display;
+        models.timeline.waveform_source = waveform_source;
+        apply_video_scopes_preferences(&mut models, state, preferences);
+        apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
+        apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
@@ -4182,6 +4180,7 @@ mod tests {
             root.models.effects.filter_placeholder.as_deref(),
             Some("Search effects")
         );
+        assert_eq!(root.models.assets.subtitle, "Project library");
 
         root.refresh_from_app_state(&state);
 
@@ -4194,6 +4193,10 @@ mod tests {
             crate::app_ui::localization::AppUiLocale::EnUs
         );
         assert!(root.models.effects.items.iter().any(|item| item.title == "Color"));
+        assert_eq!(
+            root.models.assets.filter_placeholder.as_deref(),
+            Some("Search assets")
+        );
 
         let chinese = AppUiPreferences {
             locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
@@ -4205,6 +4208,7 @@ mod tests {
             Some("搜索效果")
         );
         assert!(root.models.effects.items.iter().any(|item| item.title == "颜色"));
+        assert_eq!(root.models.assets.subtitle, "项目素材库");
     }
 
     #[test]

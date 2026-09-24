@@ -35,6 +35,13 @@ The Effect Browser builds a locale-specific label projection from the registered
 effect definitions. Its category tree IDs remain canonical across locale
 switches, so expansion state and add-to-clip actions retain their identities;
 the browser does not persist translated names in authoring data.
+The Asset Browser likewise projects translated card badges, folder navigation,
+and context menu labels from a single library snapshot. File and folder names
+remain user-authored text; their stable IDs and menu actions do not vary by
+locale. The model carries prepared menu rows for the current locale, including
+the dynamic selection-delete label.
+The generic `AssetGrid` widget accepts formatted empty-library and no-results
+copy from the App so it never has to resolve the product locale itself.
 
 `File → Export → Package Project` opens a `.mdpkg` destination dialog. The
 App takes an author snapshot, then performs dependency preflight, file copying,

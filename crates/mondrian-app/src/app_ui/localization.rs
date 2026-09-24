@@ -216,6 +216,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asset_browser_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "panel-assets",
+            "asset-library",
+            "asset-search",
+            "asset-empty-title",
+            "asset-empty-description",
+            "asset-no-results-title",
+            "asset-no-results-description",
+            "asset-library-disconnected",
+            "asset-library-unavailable",
+            "asset-delete-selected",
+            "asset-back",
+            "asset-parent",
+            "asset-all",
+            "asset-all-badge",
+            "asset-item-count",
+            "asset-kind-video",
+            "asset-kind-still",
+            "asset-kind-audio",
+            "asset-kind-adjustment",
+            "asset-kind-solid",
+            "asset-offline",
+            "asset-proxy",
+            "asset-interpret",
+            "asset-reveal",
+            "asset-relink",
+            "asset-disable-proxy",
+            "asset-enable-proxy",
+            "asset-delete",
+            "asset-delete-folder",
+            "asset-import",
+            "asset-new",
+            "asset-new-adjustment",
+            "asset-new-solid",
+            "asset-new-folder",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn every_builtin_effect_and_category_has_chinese_and_english_copy() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");

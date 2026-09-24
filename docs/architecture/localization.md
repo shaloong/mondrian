@@ -8,7 +8,7 @@ locale. The preference is stored in `app_ui_preferences.json`; switching it
 reprojects the dialog model without changing Project authoring state. System
 resolution supports English language tags and otherwise falls back to Chinese.
 The initial catalogs cover the language selector, notification copy, the
-complete application menu bar, and the Effect Browser's built-in effect names,
+complete application menu bar, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
 categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
 changes update retained dropdown widgets, including nested rows, without
 discarding their open submenu or focus state, and remeasure trigger hit regions.
@@ -18,6 +18,10 @@ only displayed labels, then restore the retained panel state by stable IDs.
 Categories use a semantic order independent of translated spelling; effects
 within each category sort by their displayed name. Third-party effect names
 fall back to their declared display name until plugin catalogs are supported.
+Asset Browser construction formats labels while reading the library snapshot;
+the folder name, Asset ID, folder ID, drag payload, and action payload stay
+canonical. Context menus are captured in the same locale snapshot so a
+language switch rebuilds their labels together with cards and breadcrumbs.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

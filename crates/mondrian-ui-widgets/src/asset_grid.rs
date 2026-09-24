@@ -317,6 +317,10 @@ pub struct AssetGrid {
     items: Vec<AssetGridItem>,
     filter_input: Option<Box<TextInput>>,
     filter_query: String,
+    empty_state_title: String,
+    empty_state_description: String,
+    no_results_title: String,
+    no_results_description: String,
     visible_indices: Vec<usize>,
     bounds: Rect,
     viewport: Rect,
@@ -372,6 +376,10 @@ impl AssetGrid {
             items,
             filter_input: None,
             filter_query: String::new(),
+            empty_state_title: "拖入媒体开始编辑".to_owned(),
+            empty_state_description: "支持视频、音频、图片与序列".to_owned(),
+            no_results_title: "没有匹配的素材".to_owned(),
+            no_results_description: "换个关键词或清空搜索条件".to_owned(),
             visible_indices,
             bounds: Rect::ZERO,
             viewport: Rect::ZERO,
@@ -438,6 +446,21 @@ impl AssetGrid {
         }
         self.filter_input = Some(Box::new(input));
         self.header.has_filter = true;
+        self
+    }
+
+    /// Supply host-formatted copy for the empty library and empty search result.
+    pub fn with_empty_state_copy(
+        mut self,
+        empty_title: impl Into<String>,
+        empty_description: impl Into<String>,
+        no_results_title: impl Into<String>,
+        no_results_description: impl Into<String>,
+    ) -> Self {
+        self.empty_state_title = empty_title.into();
+        self.empty_state_description = empty_description.into();
+        self.no_results_title = no_results_title.into();
+        self.no_results_description = no_results_description.into();
         self
     }
 
@@ -1256,9 +1279,9 @@ impl AssetGrid {
     fn paint_empty_state(&self, ctx: &mut PaintContext) {
         let colors = &ctx.theme.colors;
         let (title, description) = if self.items.is_empty() {
-            ("拖入媒体开始编辑", "支持视频、音频、图片与序列")
+            (&self.empty_state_title, &self.empty_state_description)
         } else {
-            ("没有匹配的素材", "换个关键词或清空搜索条件")
+            (&self.no_results_title, &self.no_results_description)
         };
         let top = self.viewport.y + (self.viewport.height * 0.30).max(24.0);
         let title_size = ctx.theme.typography.small.font_size;
