@@ -1581,10 +1581,38 @@ pub(super) fn audio_processor_parameter_decimals(step: Option<f64>) -> usize {
 
 pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) -> Box<dyn Widget> {
     let action_model = model.clone();
+    let interpolation_menus = model
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let keyframe = key.keyframe.as_ref()?;
+            Some(
+                [
+                    ("保持", InterpolationType::Hold),
+                    ("线性", InterpolationType::Linear),
+                    ("贝塞尔", InterpolationType::Bezier),
+                    ("自动贝塞尔", InterpolationType::AutoBezier),
+                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
+                ]
+                .into_iter()
+                .filter_map(|(label, interpolation)| {
+                    audio_automation_interpolation_action(model, index, interpolation).map(
+                        |action| {
+                            MenuItem::new(label, action)
+                                .checked(audio_keyframe_interpolation(keyframe) == interpolation)
+                        },
+                    )
+                })
+                .collect(),
+            )
+        })
+        .collect();
     Box::new(
         CurveEditor::with_points(model.points())
             .with_point_policies(model.point_policies())
             .with_display_points(model.display_points.clone())
+            .with_point_context_menus(interpolation_menus)
             .enabled(model.is_editable)
             .on_edit(move |edit| audio_automation_curve_edit_action(&action_model, edit)),
     )

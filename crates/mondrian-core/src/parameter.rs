@@ -1,7 +1,8 @@
 //! Stable parameter identity and exact-time numeric automation curves.
 
 use crate::{
-    AuthoringList, KeyframeId, TimeScale, TimelineTime, TimelineTimeError, TimelineTimeRange,
+    AuthoringList, InterpolationType, KeyframeId, TimeScale, TimelineTime, TimelineTimeError,
+    TimelineTimeRange,
 };
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::{collections::HashSet, fmt};
@@ -111,6 +112,19 @@ pub enum AutomationSegmentInterpolation {
     Bezier,
 }
 
+/// Persistent constraint on both Bezier tangents of one numeric keyframe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactAutomationTangentMode {
+    /// Preserve explicitly authored handles, including legacy curves.
+    #[default]
+    Manual,
+    /// Recompute monotone tangents when neighboring keys move or change.
+    Auto,
+    /// Keep incoming and outgoing tangents collinear while allowing overshoot.
+    Continuous,
+}
+
 /// One numeric automation keyframe in its curve owner's time domain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExactAutomationKeyframe {
@@ -126,6 +140,9 @@ pub struct ExactAutomationKeyframe {
     pub in_handle: Option<ExactBezierHandle>,
     /// Outgoing Bezier handle used by this segment.
     pub out_handle: Option<ExactBezierHandle>,
+    /// Sticky tangent constraint; absent in older project files means manual.
+    #[serde(default)]
+    pub tangent_mode: ExactAutomationTangentMode,
 }
 
 impl crate::AuthoringFootprint for ExactAutomationKeyframe {
@@ -140,6 +157,7 @@ impl crate::AuthoringFootprint for ExactAutomationKeyframe {
             interpolation_to_next: _,
             in_handle: _,
             out_handle: _,
+            tangent_mode: _,
         } = self;
         Ok(())
     }
@@ -155,6 +173,7 @@ impl ExactAutomationKeyframe {
             interpolation_to_next: AutomationSegmentInterpolation::Linear,
             in_handle: None,
             out_handle: None,
+            tangent_mode: ExactAutomationTangentMode::Manual,
         }
     }
 }
@@ -208,9 +227,105 @@ impl ExactAutomationCurve {
             Ok(index) => candidate.keyframes[index] = keyframe,
             Err(index) => candidate.keyframes.insert(index, keyframe),
         }
+        candidate.normalize_constrained_tangents()?;
         candidate.validate()?;
         *self = candidate;
         Ok(())
+    }
+
+    /// Change one key's outgoing interpolation and its optional two-sided tangent constraint.
+    ///
+    /// Auto and continuous modes also enable Bezier interpolation on the
+    /// incoming segment. The edit is validated before publication.
+    pub fn set_keyframe_interpolation(
+        &mut self,
+        keyframe_id: KeyframeId,
+        interpolation: InterpolationType,
+    ) -> Result<(), AutomationError> {
+        let mut candidate = self.clone();
+        let index = candidate
+            .keyframes
+            .iter()
+            .position(|keyframe| keyframe.id == keyframe_id)
+            .ok_or(AutomationError::UnknownKeyframe)?;
+        let (segment, mode) = match interpolation {
+            InterpolationType::Hold => (
+                AutomationSegmentInterpolation::Hold,
+                ExactAutomationTangentMode::Manual,
+            ),
+            InterpolationType::Linear => (
+                AutomationSegmentInterpolation::Linear,
+                ExactAutomationTangentMode::Manual,
+            ),
+            InterpolationType::AutoBezier => (
+                AutomationSegmentInterpolation::Bezier,
+                ExactAutomationTangentMode::Auto,
+            ),
+            InterpolationType::ContinuousBezier => (
+                AutomationSegmentInterpolation::Bezier,
+                ExactAutomationTangentMode::Continuous,
+            ),
+            InterpolationType::Bezier => (
+                AutomationSegmentInterpolation::Bezier,
+                ExactAutomationTangentMode::Manual,
+            ),
+            InterpolationType::EaseIn | InterpolationType::EaseOut => {
+                return Err(AutomationError::UnsupportedInterpolationPreset);
+            }
+        };
+        candidate.keyframes[index].interpolation_to_next = segment;
+        candidate.keyframes[index].tangent_mode = mode;
+        if mode != ExactAutomationTangentMode::Manual && index > 0 {
+            candidate.keyframes[index - 1].interpolation_to_next =
+                AutomationSegmentInterpolation::Bezier;
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Remove a key and refresh the constraints of its surviving neighbors.
+    pub fn remove_keyframe(&mut self, keyframe_id: KeyframeId) -> Result<(), AutomationError> {
+        let mut candidate = self.clone();
+        let before = candidate.keyframes.len();
+        candidate.keyframes.retain(|keyframe| keyframe.id != keyframe_id);
+        if candidate.keyframes.len() == before {
+            return Err(AutomationError::UnknownKeyframe);
+        }
+        candidate.normalize_constrained_tangents()?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn normalize_constrained_tangents(&mut self) -> Result<(), AutomationError> {
+        for index in 0..self.keyframes.len() {
+            if self.keyframes[index].tangent_mode == ExactAutomationTangentMode::Manual {
+                continue;
+            }
+            let (incoming, outgoing) = self.constrained_handles(index)?;
+            self.keyframes[index].in_handle = incoming;
+            self.keyframes[index].out_handle = outgoing;
+        }
+        Ok(())
+    }
+
+    fn constrained_handles(
+        &self,
+        index: usize,
+    ) -> Result<(Option<ExactBezierHandle>, Option<ExactBezierHandle>), AutomationError> {
+        let current = &self.keyframes[index];
+        let previous = index.checked_sub(1).map(|position| &self.keyframes[position]);
+        let next = self.keyframes.get(index + 1);
+        let slope = constrained_slope(current.tangent_mode, previous, current, next)?;
+        let incoming = previous
+            .map(|keyframe| tangent_handle(keyframe.time, current.time, slope, true))
+            .transpose()?;
+        let outgoing = next
+            .map(|keyframe| tangent_handle(current.time, keyframe.time, slope, false))
+            .transpose()?;
+        Ok((incoming, outgoing))
     }
 
     /// Validate ordering, values, and monotonic Bezier time handles.
@@ -230,6 +345,20 @@ impl ExactAutomationCurve {
         }
         for pair in self.keyframes.windows(2) {
             validate_segment(&pair[0], &pair[1])?;
+        }
+        for (index, keyframe) in self.keyframes.iter().enumerate() {
+            if keyframe.tangent_mode == ExactAutomationTangentMode::Manual {
+                continue;
+            }
+            if index + 1 < self.keyframes.len()
+                && keyframe.interpolation_to_next != AutomationSegmentInterpolation::Bezier
+            {
+                return Err(AutomationError::InvalidConstrainedTangent);
+            }
+            let (incoming, outgoing) = self.constrained_handles(index)?;
+            if keyframe.in_handle != incoming || keyframe.out_handle != outgoing {
+                return Err(AutomationError::InvalidConstrainedTangent);
+            }
         }
         Ok(())
     }
@@ -300,6 +429,7 @@ impl ExactAutomationCurve {
                 keyframe.time = keyframe.time.checked_add(delta)?;
             }
         }
+        candidate.normalize_constrained_tangents()?;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -326,6 +456,7 @@ impl ExactAutomationCurve {
                 keyframe.time = keyframe.time.checked_sub(range.duration)?;
             }
         }
+        candidate.normalize_constrained_tangents()?;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -381,6 +512,15 @@ pub enum AutomationError {
     /// One curve cannot address two keys through the same stable identity.
     #[error("automation keyframe identities must be unique within one curve")]
     DuplicateKeyframeIdentity,
+    /// Addressed keyframe is absent from this curve.
+    #[error("automation keyframe identity is absent")]
+    UnknownKeyframe,
+    /// This preset has no defined exact numeric automation interpretation.
+    #[error("interpolation preset is unsupported by exact numeric automation")]
+    UnsupportedInterpolationPreset,
+    /// Stored handles disagree with their persistent auto/continuous constraint.
+    #[error("automation constrained Bezier handles do not match neighboring keys")]
+    InvalidConstrainedTangent,
     /// Bezier time handles must stay within their segment and remain monotonic.
     #[error("automation Bezier time handles are outside their segment")]
     InvalidBezierTimeHandle,
@@ -397,6 +537,66 @@ fn validate_keyframe(keyframe: &ExactAutomationKeyframe) -> Result<(), Automatio
         return Err(AutomationError::NonFiniteValue);
     }
     Ok(())
+}
+
+fn constrained_slope(
+    mode: ExactAutomationTangentMode,
+    previous: Option<&ExactAutomationKeyframe>,
+    current: &ExactAutomationKeyframe,
+    next: Option<&ExactAutomationKeyframe>,
+) -> Result<f64, AutomationError> {
+    let incoming = previous
+        .map(|keyframe| {
+            let span = current.time.checked_sub(keyframe.time)?.to_f64();
+            Ok::<_, AutomationError>(((current.value - keyframe.value) / span, span))
+        })
+        .transpose()?;
+    let outgoing = next
+        .map(|keyframe| {
+            let span = keyframe.time.checked_sub(current.time)?.to_f64();
+            Ok::<_, AutomationError>(((keyframe.value - current.value) / span, span))
+        })
+        .transpose()?;
+    let slope = match (incoming, outgoing) {
+        (Some((left, left_span)), Some((right, right_span))) => match mode {
+            ExactAutomationTangentMode::Auto => {
+                if left == 0.0 || right == 0.0 || left.signum() != right.signum() {
+                    0.0
+                } else {
+                    let left_weight = 2.0 * right_span + left_span;
+                    let right_weight = right_span + 2.0 * left_span;
+                    (left_weight + right_weight) / (left_weight / left + right_weight / right)
+                }
+            }
+            ExactAutomationTangentMode::Continuous => {
+                (left * right_span + right * left_span) / (left_span + right_span)
+            }
+            ExactAutomationTangentMode::Manual => 0.0,
+        },
+        (Some((slope, _)), None) | (None, Some((slope, _))) => slope,
+        (None, None) => 0.0,
+    };
+    slope.is_finite().then_some(slope).ok_or(AutomationError::NonFiniteValue)
+}
+
+fn tangent_handle(
+    left: TimelineTime,
+    right: TimelineTime,
+    slope: f64,
+    incoming: bool,
+) -> Result<ExactBezierHandle, AutomationError> {
+    let duration = right.checked_sub(left)?;
+    let fraction = if incoming {
+        TimeScale::new(-1, 3)?
+    } else {
+        TimeScale::new(1, 3)?
+    };
+    let time_offset = duration.checked_scale(fraction)?;
+    let value_offset = slope * time_offset.to_f64();
+    if !value_offset.is_finite() {
+        return Err(AutomationError::NonFiniteValue);
+    }
+    Ok(ExactBezierHandle { time_offset, value_offset })
 }
 
 fn validate_segment(
@@ -485,6 +685,117 @@ fn cubic(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_tangent_flattens_an_extremum_and_recomputes_after_neighbor_move() {
+        let mut curve = ExactAutomationCurve::new(ParameterId::new_static("test.audio.auto"), 0.0)
+            .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 1.0);
+        let last = ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("time"), 0.0);
+        curve.set_keyframe(first).expect("first");
+        curve.set_keyframe(middle.clone()).expect("middle");
+        curve.set_keyframe(last.clone()).expect("last");
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::AutoBezier)
+            .expect("auto");
+        assert_eq!(
+            curve.keyframes[1].tangent_mode,
+            ExactAutomationTangentMode::Auto
+        );
+        assert_eq!(curve.keyframes[1].in_handle.expect("in").value_offset, 0.0);
+        assert_eq!(
+            curve.keyframes[1].out_handle.expect("out").value_offset,
+            0.0
+        );
+        for index in 0..=20 {
+            let time = TimelineTime::new(index, 10).expect("sample time");
+            assert!(curve.evaluate(time).expect("evaluate") <= 1.0 + 1.0e-9);
+        }
+
+        let mut moved = last;
+        moved.value = 2.0;
+        curve.set_keyframe(moved).expect("move neighbor");
+        let middle = &curve.keyframes[1];
+        let incoming = middle.in_handle.expect("in after move");
+        let outgoing = middle.out_handle.expect("out after move");
+        assert!(incoming.value_offset < 0.0);
+        assert!(outgoing.value_offset > 0.0);
+        assert!((incoming.value_offset + outgoing.value_offset).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn continuous_tangent_stays_collinear_and_legacy_keys_remain_manual() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.continuous"), 0.0)
+                .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 2.0);
+        let last = ExactAutomationKeyframe::linear(TimelineTime::new(3, 1).expect("time"), 3.0);
+        for keyframe in [first, middle.clone(), last] {
+            curve.set_keyframe(keyframe).expect("keyframe");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::ContinuousBezier)
+            .expect("continuous");
+        let selected = &curve.keyframes[1];
+        let incoming = selected.in_handle.expect("incoming");
+        let outgoing = selected.out_handle.expect("outgoing");
+        let incoming_slope = incoming.value_offset / incoming.time_offset.to_f64();
+        let outgoing_slope = outgoing.value_offset / outgoing.time_offset.to_f64();
+        assert!((incoming_slope - outgoing_slope).abs() < 1.0e-10);
+
+        let mut legacy = serde_json::to_value(selected).expect("serialize keyframe");
+        legacy.as_object_mut().expect("object").remove("tangent_mode");
+        let restored: ExactAutomationKeyframe =
+            serde_json::from_value(legacy).expect("deserialize legacy keyframe");
+        assert_eq!(restored.tangent_mode, ExactAutomationTangentMode::Manual);
+    }
+
+    #[test]
+    fn missing_key_interpolation_edit_is_atomic() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.missing"), 0.0)
+                .expect("curve");
+        let keyframe = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        curve.set_keyframe(keyframe).expect("keyframe");
+        let before = curve.clone();
+        assert_eq!(
+            curve.set_keyframe_interpolation(KeyframeId::new(), InterpolationType::AutoBezier),
+            Err(AutomationError::UnknownKeyframe)
+        );
+        assert_eq!(curve, before);
+    }
+
+    #[test]
+    fn forged_constrained_handles_are_rejected_on_project_validation() {
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static("test.audio.forged"), 0.0)
+                .expect("curve");
+        let first = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        let middle = ExactAutomationKeyframe::linear(TimelineTime::ONE, 1.0);
+        let last = ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("time"), 0.0);
+        for keyframe in [first, middle.clone(), last] {
+            curve.set_keyframe(keyframe).expect("keyframe");
+        }
+        curve
+            .set_keyframe_interpolation(middle.id, InterpolationType::AutoBezier)
+            .expect("auto");
+        let encoded = serde_json::to_string(&curve).expect("serialize");
+        let mut loaded: ExactAutomationCurve = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(loaded.validate(), Ok(()));
+        loaded.keyframes[1].out_handle.as_mut().expect("out").value_offset = 0.5;
+        assert_eq!(
+            loaded.validate(),
+            Err(AutomationError::InvalidConstrainedTangent)
+        );
+        loaded.keyframes[1].out_handle = curve.keyframes[1].out_handle;
+        loaded.keyframes[1].interpolation_to_next = AutomationSegmentInterpolation::Linear;
+        assert_eq!(
+            loaded.validate(),
+            Err(AutomationError::InvalidConstrainedTangent)
+        );
+    }
 
     #[test]
     fn rejected_keyframe_insertions_leave_the_curve_unchanged() {

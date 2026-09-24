@@ -17,9 +17,9 @@ use crate::audio_processor_edit::{
 use crate::sequence::Sequence;
 use mondrian_core::{
     AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRouteId,
-    AuthoringTimeDomain, ClipId, ExactAutomationCurve, ExactAutomationKeyframe, KeyframeId,
-    MixBusId, ParameterId, ParameterInterpolation, ParameterNumericRange, ProgramOutputId,
-    PropertyValueType, TrackId,
+    AuthoringTimeDomain, ClipId, ExactAutomationCurve, ExactAutomationKeyframe, InterpolationType,
+    KeyframeId, MixBusId, ParameterId, ParameterInterpolation, ParameterNumericRange,
+    ProgramOutputId, PropertyValueType, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,13 @@ pub enum AudioAutomationEdit {
     RemoveKeyframe {
         /// Keyframe to remove.
         keyframe_id: KeyframeId,
+    },
+    /// Change the outgoing segment and the selected key's tangent constraint.
+    SetInterpolation {
+        /// Stable keyframe to edit.
+        keyframe_id: KeyframeId,
+        /// One of the supported hold, linear, or Bezier modes.
+        interpolation: InterpolationType,
     },
     /// Remove every keyframe and retain one explicit unkeyed value.
     Clear {
@@ -246,6 +253,9 @@ pub enum AudioAutomationEditError {
     /// A distinct keyframe already owns the requested exact time.
     #[error("Audio automation already has another keyframe at the requested owner time")]
     KeyframeTimeCollision,
+    /// The addressed parameter schema disallows this interpolation family.
+    #[error("Audio parameter does not allow the requested interpolation")]
+    InterpolationNotAllowed,
     /// Curve construction or exact interpolation validation failed.
     #[error("Audio automation is invalid: {reason}")]
     InvalidAutomation {
@@ -437,6 +447,16 @@ pub fn apply_audio_automation_edit(
     let inspection = inspect_audio_automation(sequence, &request.target)?;
     if let Some(blocker) = inspection.edit_blocker().cloned() {
         return Err(blocker.into());
+    }
+    if let AudioAutomationEdit::SetInterpolation { interpolation, .. } = &request.edit {
+        let family = match interpolation {
+            InterpolationType::Hold => ParameterInterpolation::Hold,
+            InterpolationType::Linear => ParameterInterpolation::Linear,
+            _ => ParameterInterpolation::Bezier,
+        };
+        if !inspection.allowed_interpolations().contains(&family) {
+            return Err(AudioAutomationEditError::InterpolationNotAllowed);
+        }
     }
     let mut candidate = sequence.clone();
     let changed = apply_to_candidate(&mut candidate, &request.target, &request.edit)?;
@@ -769,11 +789,22 @@ fn edit_curve(
             curve.set_keyframe(keyframe.clone()).map_err(invalid_automation)?;
         }
         AudioAutomationEdit::RemoveKeyframe { keyframe_id } => {
-            let count = curve.keyframes.len();
-            curve.keyframes.retain(|candidate| candidate.id != *keyframe_id);
-            if curve.keyframes.len() == count {
-                return Err(AudioAutomationEditError::UnknownKeyframe(*keyframe_id));
-            }
+            curve.remove_keyframe(*keyframe_id).map_err(|error| match error {
+                mondrian_core::AutomationError::UnknownKeyframe => {
+                    AudioAutomationEditError::UnknownKeyframe(*keyframe_id)
+                }
+                other => invalid_automation(other),
+            })?;
+        }
+        AudioAutomationEdit::SetInterpolation { keyframe_id, interpolation } => {
+            curve
+                .set_keyframe_interpolation(*keyframe_id, *interpolation)
+                .map_err(|error| match error {
+                    mondrian_core::AutomationError::UnknownKeyframe => {
+                        AudioAutomationEditError::UnknownKeyframe(*keyframe_id)
+                    }
+                    other => invalid_automation(other),
+                })?;
         }
         AudioAutomationEdit::Clear { default_value } => {
             curve.default_value = *default_value;
@@ -1003,6 +1034,76 @@ mod tests {
         let inspection = inspect_audio_automation(&sequence, &target).expect("inspection");
         assert!(inspection.curve().is_none());
         assert_eq!(inspection.default_value(), 0.0);
+    }
+
+    #[test]
+    fn interpolation_edit_is_atomic_and_survives_neighbor_motion() {
+        let mut sequence = Sequence::new("Audio tangent modes");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        let keys = [
+            ExactAutomationKeyframe::linear(TimelineTime::ZERO, -12.0),
+            ExactAutomationKeyframe::linear(TimelineTime::ONE, -6.0),
+            ExactAutomationKeyframe::linear(TimelineTime::new(2, 1).expect("time"), 0.0),
+        ];
+        for keyframe in keys.iter().cloned() {
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target: target.clone(),
+                    edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+                },
+            )
+            .expect("insert keyframe");
+        }
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::SetInterpolation {
+                    keyframe_id: keys[1].id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        )
+        .expect("set auto");
+        let mut moved = keys[2].clone();
+        moved.value = -4.0;
+        apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe: moved },
+            },
+        )
+        .expect("move neighbor");
+        let curve = inspect_audio_automation(&sequence, &target)
+            .expect("inspection")
+            .curve()
+            .expect("curve");
+        assert_eq!(
+            curve.keyframes[1].tangent_mode,
+            mondrian_core::ExactAutomationTangentMode::Auto
+        );
+        assert!(curve.keyframes[1].out_handle.expect("out tangent").value_offset > 0.0);
+        let before = sequence.clone();
+        let unknown_id = KeyframeId::new();
+        assert_eq!(
+            apply_audio_automation_edit(
+                &mut sequence,
+                &AudioAutomationEditRequest {
+                    target,
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: unknown_id,
+                        interpolation: InterpolationType::ContinuousBezier,
+                    },
+                },
+            ),
+            Err(AudioAutomationEditError::UnknownKeyframe(unknown_id))
+        );
+        assert_eq!(sequence, before);
     }
 
     #[test]

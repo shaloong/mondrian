@@ -936,6 +936,11 @@ interpolation and handles before changing time/value. Static controls are
 disabled while keys are authoritative, but the exact evaluated curve remains
 visible and editable.
 
+Keyed audio point context menus expose Hold, Linear, manual Bezier, Auto Bezier,
+and Continuous Bezier only when the target schema admits that interpolation
+family. Menu actions carry stable key identity into one audio authoring
+transaction; the widget never computes or owns tangent values.
+
 `app_ui::audio_mixer` projects audio Tracks in Timeline order, followed by
 authored Buses and Program Outputs, each with input trim, an honest static-or-
 automated fader state, persistent Track mute, transient Track solo, the latest

@@ -373,11 +373,12 @@ soft ranges, allowed interpolation modes, edit admission, and its explicit
 `AuthoringTimeDomain` (`Sequence`, `AudioComponentEdit`, or
 `AudioProcessingScope`) from one immutable Sequence snapshot.
 
-`AudioAutomationEditRequest` performs stable-ID key upsert, key removal, or
-explicit clear-to-default. It admits Track and shared-Scope locks before
+`AudioAutomationEditRequest` performs stable-ID key upsert, key removal,
+interpolation-mode change, or explicit clear-to-default. It admits Track and shared-Scope locks before
 copy-on-write detachment, mutates a complete candidate, validates the complete
 Audio Program, and publishes atomically. Moving a key preserves its ID,
-interpolation, and Bezier handles; collisions at the same exact owner time fail
+interpolation, and manual Bezier handles; constrained handles are recalculated.
+Collisions at the same exact owner time fail
 closed. Optional semantic curves canonicalize to their static value after the
 last key is removed, while Processor parameters retain their intrinsic empty
 curve because that curve also owns the unkeyed definition value. Channel Strip,
@@ -386,6 +387,12 @@ second keyed write path can drift from this contract.
 The underlying `ExactAutomationCurve::set_keyframe` also validates a detached
 candidate before replacing the curve. Invalid handle spans or duplicate stable
 IDs therefore cannot leave even an in-memory curve in an invalid state.
+Exact numeric keys persist a manual, auto, or continuous tangent constraint;
+older projects default to manual. Auto uses monotone neighboring slopes and
+flattens local extrema, while continuous keeps both sides at one slope. Key
+insertions, moves, removals, and exact-time edits recompute constrained handles
+before validation. The UI exposes the modes on keyed audio curve points, and
+the same curve is evaluated by realtime playback and offline export.
 
 ### Processors and plugins
 

@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use mondrian_core::{
     AuthoringTimeDomain, AutomationSegmentInterpolation, ExactAutomationKeyframe,
-    ParameterInterpolation, PropertyValueType, TimeScale, TimelineTime, TimelineTimeRange,
+    ExactAutomationTangentMode, InterpolationType, ParameterInterpolation, PropertyValueType,
+    TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
@@ -50,6 +51,7 @@ pub(crate) struct AudioAutomationCurveModel {
     pub(crate) step: Option<f64>,
     pub(crate) value_type: PropertyValueType,
     pub(crate) insert_interpolation: AutomationSegmentInterpolation,
+    pub(crate) allowed_interpolations: Vec<ParameterInterpolation>,
     pub(crate) is_editable: bool,
     pub(crate) edit_disabled_reason: Option<String>,
 }
@@ -249,9 +251,48 @@ pub(crate) fn project_audio_automation(
         step: contract.step,
         value_type: contract.value_type,
         insert_interpolation,
+        allowed_interpolations: allowed.to_vec(),
         is_editable: inspection.is_editable(),
         edit_disabled_reason: inspection.edit_blocker().map(ToString::to_string),
     })
+}
+
+/// Lower a keyframe context-menu choice through the same stable target address.
+pub(crate) fn audio_automation_interpolation_action(
+    model: &AudioAutomationCurveModel,
+    index: usize,
+    interpolation: InterpolationType,
+) -> Option<Action> {
+    if !model.is_editable {
+        return None;
+    }
+    let family = match interpolation {
+        InterpolationType::Hold => ParameterInterpolation::Hold,
+        InterpolationType::Linear => ParameterInterpolation::Linear,
+        _ => ParameterInterpolation::Bezier,
+    };
+    if !model.allowed_interpolations.contains(&family) {
+        return None;
+    }
+    let keyframe_id = model.keys.get(index)?.keyframe.as_ref()?.id;
+    Some(audio_automation_edit_action(AudioAutomationEditRequest {
+        target: model.target.clone(),
+        edit: AudioAutomationEdit::SetInterpolation { keyframe_id, interpolation },
+    }))
+}
+
+pub(crate) fn audio_keyframe_interpolation(
+    keyframe: &ExactAutomationKeyframe,
+) -> InterpolationType {
+    match keyframe.tangent_mode {
+        ExactAutomationTangentMode::Auto => InterpolationType::AutoBezier,
+        ExactAutomationTangentMode::Continuous => InterpolationType::ContinuousBezier,
+        ExactAutomationTangentMode::Manual => match keyframe.interpolation_to_next {
+            AutomationSegmentInterpolation::Hold => InterpolationType::Hold,
+            AutomationSegmentInterpolation::Linear => InterpolationType::Linear,
+            AutomationSegmentInterpolation::Bezier => InterpolationType::Bezier,
+        },
+    }
 }
 
 /// Lower one committed CurveEditor gesture into one stable-ID author action.
@@ -360,6 +401,61 @@ mod tests {
                 && keyframe.time == TimelineTime::new(3, 4).unwrap()
                 && keyframe.interpolation_to_next == AutomationSegmentInterpolation::Linear
         ));
+    }
+
+    #[test]
+    fn interpolation_choice_uses_stable_key_and_schema_gate() {
+        let mut sequence = Sequence::new("Audio interpolation menu");
+        let track_id = sequence.audio_tracks[0].id;
+        let target = AudioAutomationTarget::ChannelFader {
+            owner: AudioChannelStripOwner::Track { track_id },
+        };
+        let keyframe = ExactAutomationKeyframe::linear(TimelineTime::new(1, 2).unwrap(), -6.0);
+        let keyframe_id = keyframe.id;
+        mondrian_timeline::apply_audio_automation_edit(
+            &mut sequence,
+            &AudioAutomationEditRequest {
+                target: target.clone(),
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            },
+        )
+        .unwrap();
+        let viewport = AudioAutomationViewport {
+            domain: AuthoringTimeDomain::Sequence(sequence.id),
+            range: TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+        };
+        let mut model = project_audio_automation(&sequence, target, viewport).unwrap();
+        let index = model.keys.iter().position(|key| key.keyframe.is_some()).unwrap();
+        let action = audio_automation_interpolation_action(
+            &model,
+            index,
+            InterpolationType::ContinuousBezier,
+        )
+        .unwrap();
+        assert!(matches!(
+            ProductAction::decode_external(&action).unwrap(),
+            Some(ProductAction::Audio(AudioProductAction::EditAutomation(
+                AudioAutomationEditRequest {
+                    edit: AudioAutomationEdit::SetInterpolation {
+                        keyframe_id: id,
+                        interpolation: InterpolationType::ContinuousBezier,
+                    },
+                    ..
+                }
+            ))) if id == keyframe_id
+        ));
+        model
+            .allowed_interpolations
+            .retain(|mode| *mode != ParameterInterpolation::Bezier);
+        assert!(audio_automation_interpolation_action(
+            &model,
+            index,
+            InterpolationType::AutoBezier,
+        )
+        .is_none());
+        assert!(
+            audio_automation_interpolation_action(&model, 0, InterpolationType::Linear,).is_none()
+        );
     }
 
     #[test]

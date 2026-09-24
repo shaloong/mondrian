@@ -169,7 +169,8 @@ use crate::app::{
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::audio_automation::{
-    audio_automation_curve_edit_action, component_automation_viewport, project_audio_automation,
+    audio_automation_curve_edit_action, audio_automation_interpolation_action,
+    audio_keyframe_interpolation, component_automation_viewport, project_audio_automation,
     AudioAutomationCurveModel,
 };
 use crate::app_ui::audio_component_mapping::{

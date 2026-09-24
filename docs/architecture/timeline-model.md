@@ -1426,6 +1426,12 @@ reinterpret the persisted author curve.
 Direct key upserts validate a detached curve before publication as well. A
 rejected key with an invalid Bezier time span or duplicate `KeyframeId` leaves
 the prior curve and its evaluation unchanged.
+Exact audio automation also stores a per-key tangent constraint independent of
+the execution segment kind. The stable-ID `SetInterpolation` author edit maps
+hold, linear, manual Bezier, auto Bezier, and continuous Bezier to canonical
+exact handles. Neighbor changes regenerate constrained handles on a detached
+curve; absent legacy mode data means manual. Stale IDs and schema-disallowed
+interpolation families reject before Sequence publication.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
 defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local
