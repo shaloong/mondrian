@@ -1170,7 +1170,10 @@ impl AppUiAppRoot {
 
     /// Show the pending-close confirmation modal.
     pub fn show_pending_close_dialog(&mut self, action: PendingCloseDialogAction) {
-        self.modal = Some(ShellModal::pending_close(action));
+        self.modal = Some(ShellModal::pending_close_with_locale(
+            action,
+            self.preferences_model.locale,
+        ));
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
         }

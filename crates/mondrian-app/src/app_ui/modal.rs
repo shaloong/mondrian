@@ -58,6 +58,14 @@ impl ShellModal {
         Self::PendingClose(Box::new(PendingCloseDialog::new(action)))
     }
 
+    /// Build the pending-close confirmation in the selected UI language.
+    pub fn pending_close_with_locale(
+        action: PendingCloseDialogAction,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::PendingClose(Box::new(PendingCloseDialog::with_locale(action, locale)))
+    }
+
     /// Build the product preferences modal.
     pub fn preferences(model: AppUiPreferencesModel) -> Self {
         Self::Preferences(Box::new(PreferencesDialog::with_model(model)))

@@ -9,6 +9,7 @@ use crate::app::ui_actions::{
     app_shell_pending_close_cancel_action, app_shell_pending_close_discard_action,
     app_shell_pending_close_save_continue_action,
 };
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 const CARD_MIN_WIDTH: f32 = 360.0;
 const CARD_WIDTH: f32 = 500.0;
@@ -32,10 +33,17 @@ pub enum PendingCloseDialogAction {
 }
 
 impl PendingCloseDialogAction {
-    fn action_text(self) -> &'static str {
+    fn body_message_id(self) -> &'static str {
         match self {
-            Self::CloseProject => "关闭项目",
-            Self::QuitApp => "退出应用",
+            Self::CloseProject => "pending-close-body-close",
+            Self::QuitApp => "pending-close-body-quit",
+        }
+    }
+
+    fn save_message_id(self) -> &'static str {
+        match self {
+            Self::CloseProject => "pending-close-save-close",
+            Self::QuitApp => "pending-close-save-quit",
         }
     }
 }
@@ -57,6 +65,12 @@ pub struct PendingCloseDialog {
 impl PendingCloseDialog {
     /// Build a pending-close confirmation dialog.
     pub fn new(action: PendingCloseDialogAction) -> Self {
+        Self::with_locale(action, AppUiLocale::ZhCn)
+    }
+
+    /// Build a pending-close confirmation in the selected machine-local UI language.
+    pub fn with_locale(action: PendingCloseDialogAction, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         Self {
             id: WidgetId::new(),
             action,
@@ -67,20 +81,21 @@ impl PendingCloseDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
-            title_label: Label::new("关闭前保存项目")
+            title_label: Label::new(localizer.text("pending-close-title"))
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
-            body_label: Label::new(body_text(action))
+            body_label: Label::new(localizer.text(action.body_message_id()))
                 .muted()
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            save_button: Button::new("保存并继续")
+            save_button: Button::new(localizer.text(action.save_message_id()))
                 .on_click(app_shell_pending_close_save_continue_action()),
-            discard_button: Button::new("不保存")
+            discard_button: Button::new(localizer.text("pending-close-discard"))
                 .on_click(app_shell_pending_close_discard_action()),
-            cancel_button: Button::new("取消").on_click(app_shell_pending_close_cancel_action()),
+            cancel_button: Button::new(localizer.text("pending-close-cancel"))
+                .on_click(app_shell_pending_close_cancel_action()),
         }
     }
 
@@ -88,10 +103,6 @@ impl PendingCloseDialog {
     pub fn action(&self) -> PendingCloseDialogAction {
         self.action
     }
-}
-
-fn body_text(action: PendingCloseDialogAction) -> String {
-    format!("正在{}。是否先保存当前项目？", action.action_text())
 }
 
 impl Widget for PendingCloseDialog {
@@ -208,8 +219,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pending_close_dialog_body_names_action() {
-        assert!(body_text(PendingCloseDialogAction::CloseProject).contains("关闭项目"));
-        assert!(body_text(PendingCloseDialogAction::QuitApp).contains("退出应用"));
+    fn pending_close_dialog_localizes_both_actions_without_changing_dispatch() {
+        let close = PendingCloseDialog::with_locale(
+            PendingCloseDialogAction::CloseProject,
+            AppUiLocale::EnUs,
+        );
+        let quit =
+            PendingCloseDialog::with_locale(PendingCloseDialogAction::QuitApp, AppUiLocale::EnUs);
+        assert!(close.body_label.text().contains("close the project"));
+        assert!(quit.body_label.text().contains("quit Mondrian"));
+        for dialog in [&close, &quit] {
+            assert_eq!(
+                dialog.save_button.on_click,
+                Some(app_shell_pending_close_save_continue_action())
+            );
+            assert_eq!(
+                dialog.discard_button.on_click,
+                Some(app_shell_pending_close_discard_action())
+            );
+            assert_eq!(
+                dialog.cancel_button.on_click,
+                Some(app_shell_pending_close_cancel_action())
+            );
+        }
+        let pseudo = PendingCloseDialog::with_locale(
+            PendingCloseDialogAction::CloseProject,
+            AppUiLocale::Pseudo,
+        );
+        assert!(pseudo.title_label.text().starts_with('⟦'));
     }
 }

@@ -49,6 +49,9 @@ standard notation. The active draft is unchanged when labels are projected;
 validation retains the modal and shows a localized empty-name error. Other
 sequence validation diagnostics still need typed localization instead of raw
 backend error text.
+The unsaved-project close/quit confirmation also projects action-specific body
+copy and save buttons from the machine-local locale. Its save, discard, cancel,
+Enter, and Escape actions keep the same typed dispatch independent of locale.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

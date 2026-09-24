@@ -216,6 +216,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_close_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "pending-close-title",
+            "pending-close-body-close",
+            "pending-close-body-quit",
+            "pending-close-save-close",
+            "pending-close-save-quit",
+            "pending-close-discard",
+            "pending-close-cancel",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn sequence_settings_messages_exist_in_both_catalogs() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
