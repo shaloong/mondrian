@@ -1,6 +1,9 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
-use super::clap_discovery::{fingerprint_clap_binary, list_parameters, validate_parameters};
+use super::clap_discovery::{
+    fingerprint_clap_binary, list_parameters, probe_clap_plugin_registration_with_state,
+    validate_parameters,
+};
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -295,12 +298,13 @@ impl DiscoveredClapAudioProcessorSpecResolver {
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
-        let registration = probe_clap_plugin_registration(
+        let (registration, captured_state) = probe_clap_plugin_registration_with_state(
             &self.helper_executable,
             library_path,
             plugin_id,
             render_contract,
             state.as_deref(),
+            state.is_none(),
         )?;
         if registration.binary_sha256 != *fingerprint {
             return Err(unavailable(
@@ -332,7 +336,7 @@ impl DiscoveredClapAudioProcessorSpecResolver {
             },
             bypassed: false,
             parameters,
-            opaque_state: state.map(|bytes| bytes.into_iter().collect()),
+            opaque_state: state.or(captured_state).map(Into::into),
         })
     }
 }
@@ -854,6 +858,7 @@ mod tests {
         ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
         PluginMainThreadParams, PluginParams,
     };
+    use clack_extensions::state::PluginStateImpl;
     use clack_plugin::events::spaces::CoreEventSpace;
     use clack_plugin::prelude::{
         Audio, ChannelPair, ClapId, DefaultPluginFactory, Events, HostAudioProcessorHandle,
@@ -861,7 +866,9 @@ mod tests {
         PluginDescriptor, PluginError, PluginExtensions, PluginMainThread, PluginShared, Process,
         ProcessStatus, SinglePluginEntry,
     };
+    use clack_plugin::stream::{InputStream, OutputStream};
     use mondrian_core::AudioChannelLayout;
+    use std::io::{Read as _, Write as _};
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::{AtomicUsize, Ordering as TestOrdering};
 
@@ -887,7 +894,10 @@ mod tests {
             builder: &mut PluginExtensions<Self>,
             _shared: Option<&AutomatedGainShared>,
         ) {
-            builder.register::<PluginAudioPorts>().register::<PluginParams>();
+            builder
+                .register::<PluginAudioPorts>()
+                .register::<PluginParams>()
+                .register::<PluginState>();
         }
     }
 
@@ -909,6 +919,20 @@ mod tests {
     }
 
     impl<'a> PluginMainThread<'a, AutomatedGainShared> for AutomatedGainMain<'a> {}
+
+    impl PluginStateImpl for AutomatedGainMain<'_> {
+        fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
+            output.write_all(&self.0 .0.load(Ordering::Relaxed).to_le_bytes())?;
+            Ok(())
+        }
+
+        fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
+            let mut bytes = [0; 4];
+            input.read_exact(&mut bytes)?;
+            self.0 .0.store(u32::from_le_bytes(bytes), Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     impl PluginAudioPortsImpl for AutomatedGainMain<'_> {
         fn count(&self, _is_input: bool) -> u32 {
@@ -1316,6 +1340,41 @@ mod tests {
             ClapAudioProcessorWorkerFactory.prepare(request),
             Err(AudioProcessorHostError::Unavailable(message)) if message.contains("changed")
         ));
+    }
+
+    #[test]
+    fn probe_captures_factory_state_and_restores_supplied_state() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/automated-gain-state",
+        )
+        .expect("static stateful CLAP entry");
+        let default_probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.automated-gain",
+            48_000,
+            AudioChannelLayout::Stereo,
+            512,
+            None,
+            true,
+        )
+        .expect("capture factory state");
+        assert_eq!(
+            default_probe.captured_state,
+            Some(1.0_f32.to_le_bytes().to_vec())
+        );
+
+        let authored = 0.25_f32.to_le_bytes();
+        let restored_probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.automated-gain",
+            48_000,
+            AudioChannelLayout::Stereo,
+            512,
+            Some(&authored),
+            true,
+        )
+        .expect("restore authored state");
+        assert_eq!(restored_probe.captured_state, None);
     }
 
     #[test]

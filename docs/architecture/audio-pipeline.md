@@ -16,14 +16,19 @@ out-of-range or fractional stepped values. It stops and deactivates the native
 instance when the worker closes; a restart request fails the current instance.
 Selected-plugin instance creation captures the current values after restoring
 the same opaque state, so a first-block parameter event does not reset a saved
-setting to the plugin factory default.
-Plugin state capture and auxiliary buses remain pending format work;
+setting to the plugin factory default. When no state is supplied, insertion
+also saves the plugin's factory state in the discovery child, bounded to 64 KiB,
+and persists those bytes on the author instance. A plugin without the CLAP
+state extension remains parameter-only; a failed or oversized save rejects the
+insertion. Auxiliary buses and subsequent plugin UI state edits remain pending
+format work;
 unsupported requests return typed errors, not silent bypasses.
 
 CLAP descriptor discovery and execution-contract probing use a separate hidden child mode. The editor
 process writes a bounded request into a private temporary directory, starts
-the child with a five-second deadline, and reads at most 256 KiB of validated
-metadata after successful exit. Plugin code is loaded only in the child.
+the child with a five-second deadline, and reads at most 512 KiB of validated
+metadata and optional captured state after successful exit. Plugin code is
+loaded only in the child.
 The probe restores the same author state, validates a Mono/Stereo main port,
 and measures latency/tail for the requested rate and block extent. The
 subsequent audio worker rechecks those facts. Explicit library selection is

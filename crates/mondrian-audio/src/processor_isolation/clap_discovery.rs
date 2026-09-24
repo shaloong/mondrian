@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -37,7 +37,8 @@ const REQUEST_ENV: &str = "MONDRIAN_INTERNAL_CLAP_DISCOVERY_REQUEST";
 const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_CLAP_DISCOVERY_RESPONSE";
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
+const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
 const MAX_PARAMETERS: u32 = 1024;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
@@ -166,6 +167,7 @@ enum DiscoveryOperation {
         channel_layout: AudioChannelLayout,
         max_block_frames: usize,
         state: Option<Vec<u8>>,
+        capture_default_state: bool,
     },
 }
 
@@ -177,11 +179,12 @@ struct DiscoveryResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ProbeResult {
+pub(super) struct ProbeResult {
     plugin_id: String,
     latency_frames: u32,
     tail: ProbeTail,
     parameters: Vec<ClapParameterDescriptor>,
+    pub(super) captured_state: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -221,6 +224,25 @@ pub fn probe_clap_plugin_registration(
     render_contract: AudioRenderContract,
     state: Option<&[u8]>,
 ) -> Result<ClapPluginRegistration, AudioProcessorHostError> {
+    probe_clap_plugin_registration_with_state(
+        helper_executable,
+        library_path,
+        plugin_id,
+        render_contract,
+        state,
+        false,
+    )
+    .map(|(registration, _)| registration)
+}
+
+pub(super) fn probe_clap_plugin_registration_with_state(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render_contract: AudioRenderContract,
+    state: Option<&[u8]>,
+    capture_default_state: bool,
+) -> Result<(ClapPluginRegistration, Option<Vec<u8>>), AudioProcessorHostError> {
     if plugin_id.is_empty() || plugin_id.len() > 256 || plugin_id.contains('\0') {
         return Err(invalid("CLAP probe plugin ID is invalid"));
     }
@@ -236,6 +258,7 @@ pub fn probe_clap_plugin_registration(
             channel_layout: render_contract.channel_layout,
             max_block_frames: render_contract.max_block_frames,
             state: state.map(ToOwned::to_owned),
+            capture_default_state,
         },
     )?;
     if fingerprint_clap_binary(&library_path)? != fingerprint {
@@ -251,6 +274,13 @@ pub fn probe_clap_plugin_registration(
         return Err(invalid("CLAP probe response changed plugin identity"));
     }
     validate_parameters(&probe.parameters)?;
+    if probe
+        .captured_state
+        .as_ref()
+        .is_some_and(|state| state.len() > MAX_CAPTURED_STATE_BYTES || !capture_default_state)
+    {
+        return Err(invalid("CLAP probe returned invalid captured state"));
+    }
     let tail = match probe.tail {
         ProbeTail::None => AudioProcessorTail::None,
         ProbeTail::Finite(frames) => AudioProcessorTail::Finite(frames as usize),
@@ -264,13 +294,16 @@ pub fn probe_clap_plugin_registration(
         true,
         0,
     )?;
-    Ok(ClapPluginRegistration {
-        plugin_id: plugin_id.to_owned(),
-        library_path,
-        binary_sha256: fingerprint,
-        execution_contract,
-        parameters: probe.parameters,
-    })
+    Ok((
+        ClapPluginRegistration {
+            plugin_id: plugin_id.to_owned(),
+            library_path,
+            binary_sha256: fingerprint,
+            execution_contract,
+            parameters: probe.parameters,
+        },
+        probe.captured_state,
+    ))
 }
 
 fn request_discovery(
@@ -374,6 +407,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             channel_layout,
             max_block_frames,
             state,
+            capture_default_state,
         } => DiscoveryResponse {
             descriptors: Vec::new(),
             probe: Some(probe_loaded(
@@ -383,6 +417,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
                 channel_layout,
                 max_block_frames,
                 state.as_deref(),
+                capture_default_state,
             )?),
         },
     };
@@ -425,13 +460,14 @@ fn list_loaded(entry: &PluginEntry) -> Result<Vec<ClapPluginDescriptor>, AudioPr
     Ok(descriptors)
 }
 
-fn probe_loaded(
+pub(super) fn probe_loaded(
     entry: &PluginEntry,
     plugin_id: &str,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
     max_block_frames: usize,
     state: Option<&[u8]>,
+    capture_default_state: bool,
 ) -> Result<ProbeResult, AudioProcessorHostError> {
     let expected_type = match channel_layout {
         AudioChannelLayout::Mono => AudioPortType::MONO,
@@ -489,6 +525,21 @@ fn probe_loaded(
     }
     let handle = instance.plugin_handle();
     let parameters = list_parameters(&handle)?;
+    let captured_state = if capture_default_state && state.is_none() {
+        if let Some(extension) = handle.get_extension::<PluginState>() {
+            let mut writer = BoundedStateWriter::default();
+            let saved = extension.save(&handle, &mut writer);
+            if writer.exceeded {
+                return Err(invalid("CLAP state exceeds the capture limit"));
+            }
+            saved.map_err(|error| unavailable(format!("CLAP state capture failed: {error}")))?;
+            Some(writer.bytes)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let ports = handle
         .get_extension::<PluginAudioPorts>()
         .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
@@ -543,7 +594,34 @@ fn probe_loaded(
         latency_frames,
         tail,
         parameters,
+        captured_state,
     })
+}
+
+#[derive(Default)]
+struct BoundedStateWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl Write for BoundedStateWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self
+            .bytes
+            .len()
+            .checked_add(buf.len())
+            .is_none_or(|len| len > MAX_CAPTURED_STATE_BYTES)
+        {
+            self.exceeded = true;
+            return Err(io::Error::other("CLAP state exceeds the capture limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(super) fn list_parameters(
@@ -730,6 +808,7 @@ mod tests {
                 AudioChannelLayout::Stereo,
                 512,
                 None,
+                false,
             ),
             Err(AudioProcessorHostError::InvalidContract(_))
         ));
@@ -801,6 +880,16 @@ mod tests {
     }
 
     #[test]
+    fn captured_state_writer_enforces_limit_across_multiple_writes() {
+        let mut writer = BoundedStateWriter::default();
+        writer.write_all(&vec![7; MAX_CAPTURED_STATE_BYTES - 1]).expect("initial state");
+        writer.write_all(&[8]).expect("exact limit");
+        assert!(writer.write_all(&[9]).is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.bytes.len(), MAX_CAPTURED_STATE_BYTES);
+    }
+
+    #[test]
     fn binary_fingerprint_changes_with_file_and_rejects_oversized_file() {
         let temp = tempfile::tempdir().expect("temporary plugin directory");
         let library = temp.path().join("gain.clap");
@@ -843,6 +932,36 @@ mod tests {
             descriptor.plugin_id == "org.rust-audio.clack.gain"
                 && descriptor.name == "Clack Gain Example"
         }));
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn installed_clap_reference_default_state_is_captured_in_child() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let render_contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 512,
+            processing_mode: crate::AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let (_, state) = probe_clap_plugin_registration_with_state(
+            &helper,
+            &plugin,
+            "org.rust-audio.clack.gain",
+            render_contract,
+            None,
+            true,
+        )
+        .expect("capture gain factory state");
+        assert_eq!(state, Some(1.0_f32.to_le_bytes().to_vec()));
     }
 
     #[test]
