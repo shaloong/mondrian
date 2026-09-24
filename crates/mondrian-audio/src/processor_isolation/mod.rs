@@ -34,11 +34,12 @@ use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
 
 pub use clap_discovery::{
-    run_clap_discovery_worker, scan_clap_library_descriptors, ClapPluginDescriptor,
-    CLAP_DISCOVERY_WORKER_ARGUMENT,
+    probe_clap_plugin_registration, run_clap_discovery_worker, scan_clap_library_descriptors,
+    ClapPluginDescriptor, CLAP_DISCOVERY_WORKER_ARGUMENT,
 };
 pub use clap_worker::{
     ClapAudioProcessorSpecResolver, ClapAudioProcessorWorkerFactory, ClapPluginRegistration,
+    DiscoveredClapAudioProcessorSpecResolver,
 };
 
 /// Hidden endpoint environment used only between a parent Adapter and its Worker.

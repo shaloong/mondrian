@@ -1,6 +1,7 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
 use super::{
+    probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
     IsolatedAudioProcessorWorkerBlock, IsolatedAudioProcessorWorkerFactory,
     IsolatedAudioProcessorWorkerPrepareRequest, IsolatedAudioProcessorWorkerSpec,
@@ -9,7 +10,9 @@ use crate::{
     AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
     AudioProcessorPrepareRequest,
 };
-use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::audio_ports::{
+    AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
+};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
@@ -18,6 +21,7 @@ use clack_host::prelude::{
     InputEvents, OutputEvents, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry,
     PluginInstance, SharedHandler,
 };
+use mondrian_core::AudioChannelLayout;
 use mondrian_timeline::audio::AudioProcessorDefinitionRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,12 +30,44 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-struct ClapHost;
+pub(super) struct ClapHost;
 
 #[derive(Clone)]
-struct ClapHostShared {
+pub(super) struct ClapHostShared {
     restart_requested: Arc<AtomicBool>,
     callback_requested: Arc<AtomicBool>,
+}
+
+impl ClapHostShared {
+    pub(super) fn new() -> Self {
+        Self {
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            callback_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(super) fn service_callbacks(
+        &self,
+        instance: &mut PluginInstance<ClapHost>,
+    ) -> Result<(), AudioProcessorHostError> {
+        for _ in 0..16 {
+            if !self.callback_requested.swap(false, Ordering::AcqRel) {
+                return if self.restart_requested.load(Ordering::Acquire) {
+                    Err(invalid("CLAP plugin requested a host restart"))
+                } else {
+                    Ok(())
+                };
+            }
+            instance.call_on_main_thread_callback();
+        }
+        Err(invalid(
+            "CLAP plugin requested unbounded main-thread callbacks",
+        ))
+    }
+
+    pub(super) fn restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Acquire)
+    }
 }
 
 impl SharedHandler<'_> for ClapHostShared {
@@ -73,6 +109,74 @@ pub struct ClapPluginRegistration {
 pub struct ClapAudioProcessorSpecResolver {
     helper_executable: PathBuf,
     plugins: BTreeMap<String, ClapPluginRegistration>,
+}
+
+/// CLAP resolver that discovers selected installed libraries and probes each
+/// occurrence's exact render contract before worker admission.
+pub struct DiscoveredClapAudioProcessorSpecResolver {
+    helper_executable: PathBuf,
+    plugins: BTreeMap<String, (ClapPluginDescriptor, PathBuf)>,
+}
+
+impl DiscoveredClapAudioProcessorSpecResolver {
+    /// Discover explicitly selected installed libraries in isolated children.
+    /// Duplicate plugin IDs require the caller to choose one installed binary.
+    pub fn discover(
+        helper_executable: PathBuf,
+        libraries: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, AudioProcessorHostError> {
+        if !helper_executable.is_absolute() {
+            return Err(invalid("CLAP helper executable must be absolute"));
+        }
+        let mut plugins = BTreeMap::new();
+        for library in libraries {
+            let descriptors = scan_clap_library_descriptors(&helper_executable, &library)?;
+            let path = std::fs::canonicalize(&library)
+                .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+            for descriptor in descriptors {
+                if plugins
+                    .insert(descriptor.plugin_id.clone(), (descriptor, path.clone()))
+                    .is_some()
+                {
+                    return Err(invalid(
+                        "duplicate installed CLAP plugin ID requires selection",
+                    ));
+                }
+            }
+        }
+        Ok(Self { helper_executable, plugins })
+    }
+
+    /// Stable plugin descriptors available for an insertion picker.
+    pub fn descriptors(&self) -> Vec<&ClapPluginDescriptor> {
+        self.plugins.values().map(|(descriptor, _)| descriptor).collect()
+    }
+}
+
+impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecResolver {
+    fn resolve(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+        let AudioProcessorDefinitionRef::Clap { plugin_id, .. } = request.definition() else {
+            return Err(unavailable(
+                "only CLAP definitions are handled by this resolver",
+            ));
+        };
+        let (_, library_path) = self
+            .plugins
+            .get(plugin_id)
+            .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
+        let registration = probe_clap_plugin_registration(
+            &self.helper_executable,
+            library_path,
+            plugin_id,
+            request.render_contract(),
+            request.opaque_state(),
+        )?;
+        ClapAudioProcessorSpecResolver::new(self.helper_executable.clone(), [registration])?
+            .resolve(request)
+    }
 }
 
 impl ClapAudioProcessorSpecResolver {
@@ -187,11 +291,16 @@ fn prepare_loaded(
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    if !factory
+    if factory
         .plugin_descriptors()
-        .any(|descriptor| descriptor.id() == Some(plugin_id))
+        .filter(|descriptor| descriptor.id() == Some(plugin_id))
+        .take(2)
+        .count()
+        != 1
     {
-        return Err(unavailable("CLAP plugin ID is absent from the library"));
+        return Err(unavailable(
+            "CLAP plugin ID is missing or duplicated in the library",
+        ));
     }
     let info = HostInfo::new(
         "Mondrian",
@@ -200,21 +309,11 @@ fn prepare_loaded(
         env!("CARGO_PKG_VERSION"),
     )
     .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
-    let shared = ClapHostShared {
-        restart_requested: Arc::new(AtomicBool::new(false)),
-        callback_requested: Arc::new(AtomicBool::new(false)),
-    };
+    let shared = ClapHostShared::new();
     let mut instance =
         PluginInstance::<ClapHost>::new(|_| shared.clone(), |_| (), &entry, plugin_id, &info)
             .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
-    if shared.callback_requested.swap(false, Ordering::AcqRel) {
-        instance.call_on_main_thread_callback();
-    }
-    if shared.restart_requested.load(Ordering::Acquire) {
-        return Err(invalid(
-            "CLAP plugin requested restart during initialization",
-        ));
-    }
+    shared.service_callbacks(&mut instance)?;
     if let Some(state) = state {
         let handle = instance.plugin_handle();
         let extension = handle
@@ -226,6 +325,11 @@ fn prepare_loaded(
             .map_err(|error| unavailable(format!("CLAP state restore failed: {error}")))?;
     }
 
+    let expected_port_type = match request.render_contract().channel_layout {
+        AudioChannelLayout::Mono => AudioPortType::MONO,
+        AudioChannelLayout::Stereo => AudioPortType::STEREO,
+        _ => return Err(invalid("CLAP channel layout is not yet supported")),
+    };
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
     let ports = handle
@@ -243,6 +347,7 @@ fn prepare_loaded(
             .ok_or_else(|| invalid("CLAP main audio port metadata is unavailable"))?;
         if !port.flags.contains(AudioPortFlags::IS_MAIN)
             || usize::try_from(port.channel_count).ok() != Some(channel_count)
+            || port.port_type != Some(expected_port_type)
         {
             return Err(invalid(
                 "CLAP main audio port layout differs from the render contract",
@@ -351,7 +456,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
                 "CLAP block violates prepared continuity or extent".to_owned(),
             ));
         }
-        if self.shared.restart_requested.load(Ordering::Acquire) {
+        if self.shared.restart_requested() {
             return Err(AudioProcessorHostError::Process(
                 "CLAP plugin requested a host restart; prepare a new instance".to_owned(),
             ));
@@ -398,14 +503,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             .map_err(|error| {
                 AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
             })?;
-        if self.shared.callback_requested.swap(false, Ordering::AcqRel) {
-            self.instance.call_on_main_thread_callback();
-        }
-        if self.shared.restart_requested.load(Ordering::Acquire) {
-            return Err(AudioProcessorHostError::Process(
-                "CLAP plugin requested a host restart during processing".to_owned(),
-            ));
-        }
+        self.shared
+            .service_callbacks(&mut self.instance)
+            .map_err(|error| AudioProcessorHostError::Process(error.to_string()))?;
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
             for (channel, sample) in samples.iter_mut().enumerate() {
                 let value = self.output[channel][frame];
@@ -662,6 +762,76 @@ mod tests {
         assert_eq!(
             DEACTIVATIONS.load(TestOrdering::SeqCst),
             deactivations_before + 1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn discovered_resolver_lists_installed_reference_plugin() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let resolver = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover installed CLAP plugin");
+        assert_eq!(resolver.descriptors().len(), 1);
+        assert_eq!(
+            resolver.descriptors()[0].plugin_id,
+            "org.rust-audio.clack.gain"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn discovered_resolver_probes_and_restores_author_state() {
+        use crate::{
+            AudioProcessingMode, AudioProcessorInsertionPoint, AudioProcessorOccurrence,
+            AudioProcessorOccurrenceOwner,
+        };
+        use mondrian_core::{AudioProcessorInstanceId, ProgramOutputId};
+
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let resolver = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover installed CLAP plugin");
+        let definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.rust-audio.clack.gain".to_owned(),
+            schema_version: 1,
+        };
+        let parameters = BTreeMap::new();
+        let state = 0.5_f32.to_le_bytes();
+        let request = AudioProcessorPrepareRequest::new(
+            AudioProcessorOccurrence {
+                instance_id: AudioProcessorInstanceId::new(),
+                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+            &definition,
+            &parameters,
+            Some(&state),
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 512,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes: 1024 * 1024,
+                public_output_lookahead_budget_frames: 4096,
+                compensation_delay_scratch_budget_bytes: 1024 * 1024,
+            },
+        );
+        let spec = resolver.resolve(request).expect("probe installed processor contract");
+        let payload: ClapPayload =
+            serde_json::from_slice(&spec.preparation_payload).expect("CLAP worker payload");
+        assert_eq!(payload.state, Some(state.to_vec()));
+        assert_eq!(
+            spec.plugin_execution_contract.algorithmic_latency_frames(),
+            0
         );
     }
 }

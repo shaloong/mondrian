@@ -1,9 +1,23 @@
 //! Bounded out-of-process discovery of installed CLAP descriptors.
 
-use crate::AudioProcessorHostError;
-use clack_host::prelude::PluginEntry;
+use super::clap_worker::{ClapHost, ClapHostShared};
+use super::ClapPluginRegistration;
+use crate::{
+    AudioProcessorExecutionContract, AudioProcessorHostError, AudioProcessorTail,
+    AudioRenderContract,
+};
+use clack_extensions::audio_ports::{
+    AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
+};
+use clack_extensions::latency::PluginLatency;
+use clack_extensions::state::PluginState;
+use clack_extensions::tail::{PluginTail, TailLength};
+use clack_host::prelude::{
+    HostInfo, PluginAudioConfiguration, PluginAudioProcessor, PluginEntry, PluginInstance,
+};
+use mondrian_core::AudioChannelLayout;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,7 +30,8 @@ pub const CLAP_DISCOVERY_WORKER_ARGUMENT: &str = "--internal-clap-discovery-v1";
 const REQUEST_ENV: &str = "MONDRIAN_INTERNAL_CLAP_DISCOVERY_REQUEST";
 const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_CLAP_DISCOVERY_RESPONSE";
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
-const MAX_DISCOVERY_BYTES: u64 = 256 * 1024;
+const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
 
 /// One discovered CLAP identity for display and persistent definition matching.
@@ -36,12 +51,41 @@ pub struct ClapPluginDescriptor {
 #[serde(deny_unknown_fields)]
 struct DiscoveryRequest {
     library_path: PathBuf,
+    operation: DiscoveryOperation,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DiscoveryOperation {
+    List,
+    Probe {
+        plugin_id: String,
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+        max_block_frames: usize,
+        state: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscoveryResponse {
     descriptors: Vec<ClapPluginDescriptor>,
+    probe: Option<ProbeResult>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProbeResult {
+    plugin_id: String,
+    latency_frames: u32,
+    tail: ProbeTail,
+}
+
+#[derive(Serialize, Deserialize)]
+enum ProbeTail {
+    None,
+    Finite(u32),
+    Infinite,
 }
 
 /// Discover descriptors without loading the native module in the editor process.
@@ -52,6 +96,76 @@ pub fn scan_clap_library_descriptors(
     helper_executable: &Path,
     library_path: &Path,
 ) -> Result<Vec<ClapPluginDescriptor>, AudioProcessorHostError> {
+    let (_, response) =
+        request_discovery(helper_executable, library_path, DiscoveryOperation::List)?;
+    if response.probe.is_some() {
+        return Err(invalid(
+            "CLAP descriptor response unexpectedly contains a probe",
+        ));
+    }
+    validate_descriptors(&response.descriptors)?;
+    Ok(response.descriptors)
+}
+
+/// Probe one selected plugin's exact main-port, latency, and tail contract.
+///
+/// Native code executes only in the deadline-bound child. The subsequent
+/// processor worker independently repeats these checks before audio admission.
+pub fn probe_clap_plugin_registration(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render_contract: AudioRenderContract,
+    state: Option<&[u8]>,
+) -> Result<ClapPluginRegistration, AudioProcessorHostError> {
+    if plugin_id.is_empty() || plugin_id.len() > 256 || plugin_id.contains('\0') {
+        return Err(invalid("CLAP probe plugin ID is invalid"));
+    }
+    let (library_path, response) = request_discovery(
+        helper_executable,
+        library_path,
+        DiscoveryOperation::Probe {
+            plugin_id: plugin_id.to_owned(),
+            sample_rate: render_contract.sample_rate,
+            channel_layout: render_contract.channel_layout,
+            max_block_frames: render_contract.max_block_frames,
+            state: state.map(ToOwned::to_owned),
+        },
+    )?;
+    if !response.descriptors.is_empty() {
+        return Err(invalid(
+            "CLAP probe response unexpectedly contains descriptors",
+        ));
+    }
+    let probe = response.probe.ok_or_else(|| invalid("CLAP probe response is missing"))?;
+    if probe.plugin_id != plugin_id {
+        return Err(invalid("CLAP probe response changed plugin identity"));
+    }
+    let tail = match probe.tail {
+        ProbeTail::None => AudioProcessorTail::None,
+        ProbeTail::Finite(frames) => AudioProcessorTail::Finite(frames as usize),
+        ProbeTail::Infinite => AudioProcessorTail::Infinite,
+    };
+    let execution_contract = AudioProcessorExecutionContract::new(
+        probe.latency_frames as usize,
+        tail,
+        true,
+        true,
+        true,
+        0,
+    )?;
+    Ok(ClapPluginRegistration {
+        plugin_id: plugin_id.to_owned(),
+        library_path,
+        execution_contract,
+    })
+}
+
+fn request_discovery(
+    helper_executable: &Path,
+    library_path: &Path,
+    operation: DiscoveryOperation,
+) -> Result<(PathBuf, DiscoveryResponse), AudioProcessorHostError> {
     if !helper_executable.is_absolute() || !library_path.is_absolute() {
         return Err(invalid(
             "CLAP discovery requires absolute helper and library paths",
@@ -66,8 +180,12 @@ pub fn scan_clap_library_descriptors(
         .map_err(|error| unavailable(format!("CLAP discovery staging failed: {error}")))?;
     let request_path = temp.path().join("request.json");
     let response_path = temp.path().join("response.json");
-    let request = serde_json::to_vec(&DiscoveryRequest { library_path })
-        .map_err(|error| invalid(format!("CLAP discovery request failed: {error}")))?;
+    let request =
+        serde_json::to_vec(&DiscoveryRequest { library_path: library_path.clone(), operation })
+            .map_err(|error| invalid(format!("CLAP discovery request failed: {error}")))?;
+    if request.len() as u64 > MAX_REQUEST_BYTES {
+        return Err(invalid("CLAP discovery request exceeds the metadata limit"));
+    }
     fs::write(&request_path, request)
         .map_err(|error| unavailable(format!("CLAP discovery request write failed: {error}")))?;
     let mut child = Command::new(helper_executable)
@@ -105,11 +223,10 @@ pub fn scan_clap_library_descriptors(
             }
         }
     }
-    let response = read_bounded(&response_path, "response")?;
+    let response = read_bounded(&response_path, "response", MAX_RESPONSE_BYTES)?;
     let response: DiscoveryResponse = serde_json::from_slice(&response)
         .map_err(|error| invalid(format!("CLAP discovery response is invalid: {error}")))?;
-    validate_descriptors(&response.descriptors)?;
-    Ok(response.descriptors)
+    Ok((library_path, response))
 }
 
 /// Execute the hidden discovery mode before any UI, GPU, or media initialization.
@@ -127,7 +244,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
     let response_path = std::env::var_os(RESPONSE_ENV)
         .map(PathBuf::from)
         .ok_or_else(|| invalid("CLAP discovery response path is missing"))?;
-    let request = read_bounded(&request_path, "request")?;
+    let request = read_bounded(&request_path, "request", MAX_REQUEST_BYTES)?;
     let request: DiscoveryRequest = serde_json::from_slice(&request)
         .map_err(|error| invalid(format!("CLAP discovery request is invalid: {error}")))?;
     if !request.library_path.is_absolute() {
@@ -135,10 +252,31 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
     }
     let entry = unsafe { PluginEntry::load(request.library_path.as_os_str()) }
         .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
-    let descriptors = list_loaded(&entry)?;
-    let response = serde_json::to_vec(&DiscoveryResponse { descriptors })
+    let response = match request.operation {
+        DiscoveryOperation::List => {
+            DiscoveryResponse { descriptors: list_loaded(&entry)?, probe: None }
+        }
+        DiscoveryOperation::Probe {
+            plugin_id,
+            sample_rate,
+            channel_layout,
+            max_block_frames,
+            state,
+        } => DiscoveryResponse {
+            descriptors: Vec::new(),
+            probe: Some(probe_loaded(
+                &entry,
+                &plugin_id,
+                sample_rate,
+                channel_layout,
+                max_block_frames,
+                state.as_deref(),
+            )?),
+        },
+    };
+    let response = serde_json::to_vec(&response)
         .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;
-    if response.len() as u64 > MAX_DISCOVERY_BYTES {
+    if response.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP discovery response exceeds the metadata limit",
         ));
@@ -175,6 +313,125 @@ fn list_loaded(entry: &PluginEntry) -> Result<Vec<ClapPluginDescriptor>, AudioPr
     Ok(descriptors)
 }
 
+fn probe_loaded(
+    entry: &PluginEntry,
+    plugin_id: &str,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+    max_block_frames: usize,
+    state: Option<&[u8]>,
+) -> Result<ProbeResult, AudioProcessorHostError> {
+    let expected_type = match channel_layout {
+        AudioChannelLayout::Mono => AudioPortType::MONO,
+        AudioChannelLayout::Stereo => AudioPortType::STEREO,
+        _ => return Err(invalid("CLAP probe channel layout is unsupported")),
+    };
+    let max_frames = u32::try_from(max_block_frames)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .ok_or_else(|| invalid("CLAP probe block extent is invalid"))?;
+    if sample_rate == 0 {
+        return Err(invalid("CLAP probe sample rate is invalid"));
+    }
+    let plugin_c_id =
+        CString::new(plugin_id).map_err(|_| invalid("CLAP probe plugin ID contains a NUL byte"))?;
+    let factory = entry
+        .get_plugin_factory()
+        .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
+    if factory
+        .plugin_descriptors()
+        .filter(|descriptor| descriptor.id() == Some(plugin_c_id.as_c_str()))
+        .take(2)
+        .count()
+        != 1
+    {
+        return Err(unavailable("CLAP probe plugin ID is missing or duplicated"));
+    }
+    let info = HostInfo::new(
+        "Mondrian",
+        "Mondrian",
+        "https://github.com/shaloong/mondrian",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
+    let shared = ClapHostShared::new();
+    let mut instance = PluginInstance::<ClapHost>::new(
+        |_| shared.clone(),
+        |_| (),
+        entry,
+        plugin_c_id.as_c_str(),
+        &info,
+    )
+    .map_err(|error| unavailable(format!("CLAP probe instance failed: {error}")))?;
+    shared.service_callbacks(&mut instance)?;
+    if let Some(state) = state {
+        let handle = instance.plugin_handle();
+        let extension = handle
+            .get_extension::<PluginState>()
+            .ok_or_else(|| unavailable("CLAP plugin does not support state restoration"))?;
+        let mut reader = state;
+        extension
+            .load(&handle, &mut reader)
+            .map_err(|error| unavailable(format!("CLAP probe state restore failed: {error}")))?;
+        shared.service_callbacks(&mut instance)?;
+    }
+    let handle = instance.plugin_handle();
+    let ports = handle
+        .get_extension::<PluginAudioPorts>()
+        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
+    for is_input in [true, false] {
+        if ports.count(&handle, is_input) != 1 {
+            return Err(invalid(
+                "CLAP plugin must expose one main input and output port",
+            ));
+        }
+        let mut buffer = AudioPortInfoBuffer::new();
+        let port = ports
+            .get(&handle, 0, is_input, &mut buffer)
+            .ok_or_else(|| invalid("CLAP main port metadata is unavailable"))?;
+        if !port.flags.contains(AudioPortFlags::IS_MAIN)
+            || port.port_type != Some(expected_type)
+            || usize::try_from(port.channel_count).ok() != Some(channel_layout.channel_count())
+        {
+            return Err(invalid("CLAP main port differs from the requested layout"));
+        }
+    }
+    let latency_frames = handle
+        .get_extension::<PluginLatency>()
+        .map(|extension| extension.get(&handle))
+        .unwrap_or(0);
+    let configuration = PluginAudioConfiguration {
+        sample_rate: f64::from(sample_rate),
+        min_frames_count: 1,
+        max_frames_count: max_frames,
+    };
+    let mut processor: PluginAudioProcessor<ClapHost> = instance
+        .activate(|_, _| (), configuration)
+        .map_err(|error| unavailable(format!("CLAP probe activation failed: {error}")))?
+        .into();
+    let tail = processor
+        .plugin_handle()
+        .get_extension::<PluginTail>()
+        .map(|extension| extension.get(&processor.plugin_handle()))
+        .unwrap_or(TailLength::Finite(0));
+    processor.ensure_processing_stopped();
+    drop(processor);
+    instance
+        .try_deactivate()
+        .map_err(|error| unavailable(format!("CLAP probe deactivation failed: {error}")))?;
+    shared.service_callbacks(&mut instance)?;
+    let tail = match tail {
+        TailLength::Finite(0) => ProbeTail::None,
+        TailLength::Finite(frames) => ProbeTail::Finite(frames),
+        TailLength::Infinite => ProbeTail::Infinite,
+    };
+    Ok(ProbeResult {
+        plugin_id: plugin_id.to_owned(),
+        latency_frames,
+        tail,
+    })
+}
+
 fn validate_descriptors(
     descriptors: &[ClapPluginDescriptor],
 ) -> Result<(), AudioProcessorHostError> {
@@ -197,14 +454,14 @@ fn validate_descriptors(
     Ok(())
 }
 
-fn read_bounded(path: &Path, name: &str) -> Result<Vec<u8>, AudioProcessorHostError> {
+fn read_bounded(path: &Path, name: &str, maximum: u64) -> Result<Vec<u8>, AudioProcessorHostError> {
     let file = fs::File::open(path)
         .map_err(|error| unavailable(format!("CLAP discovery {name} open failed: {error}")))?;
     let mut bytes = Vec::new();
-    file.take(MAX_DISCOVERY_BYTES + 1)
+    file.take(maximum + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| unavailable(format!("CLAP discovery {name} read failed: {error}")))?;
-    if bytes.len() as u64 > MAX_DISCOVERY_BYTES {
+    if bytes.len() as u64 > maximum {
         return Err(invalid(format!(
             "CLAP discovery {name} exceeds the metadata limit"
         )));
@@ -273,6 +530,24 @@ mod tests {
     }
 
     #[test]
+    fn probe_rejects_plugin_without_explicit_main_audio_ports() {
+        let entry =
+            PluginEntry::load_from_clack::<SinglePluginEntry<DiscoveryFixture>>(c"/test/discovery")
+                .expect("static discovery entry");
+        assert!(matches!(
+            probe_loaded(
+                &entry,
+                "org.mondrian.discovery-fixture",
+                48_000,
+                AudioChannelLayout::Stereo,
+                512,
+                None,
+            ),
+            Err(AudioProcessorHostError::InvalidContract(_))
+        ));
+    }
+
+    #[test]
     fn rejects_duplicate_or_oversized_discovery_metadata() {
         let descriptor = ClapPluginDescriptor {
             plugin_id: "org.example.gain".to_owned(),
@@ -292,10 +567,10 @@ mod tests {
     fn bounded_reader_rejects_oversized_worker_response() {
         let temp = tempfile::tempdir().expect("temporary discovery directory");
         let response_path = temp.path().join("response.json");
-        fs::write(&response_path, vec![b'x'; MAX_DISCOVERY_BYTES as usize + 1])
+        fs::write(&response_path, vec![b'x'; MAX_RESPONSE_BYTES as usize + 1])
             .expect("write oversized response");
         assert!(matches!(
-            read_bounded(&response_path, "response"),
+            read_bounded(&response_path, "response", MAX_RESPONSE_BYTES),
             Err(AudioProcessorHostError::InvalidContract(_))
         ));
     }
@@ -324,5 +599,43 @@ mod tests {
             descriptor.plugin_id == "org.rust-audio.clack.gain"
                 && descriptor.name == "Clack Gain Example"
         }));
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn installed_clap_reference_contract_is_probed_in_child() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to mondrian executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to Clack gain DLL");
+        let render_contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 512,
+            processing_mode: crate::AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let registration = probe_clap_plugin_registration(
+            &helper,
+            &plugin,
+            "org.rust-audio.clack.gain",
+            render_contract,
+            Some(&0.5_f32.to_le_bytes()),
+        )
+        .expect("probe installed gain plugin");
+        assert_eq!(registration.plugin_id, "org.rust-audio.clack.gain");
+        assert_eq!(
+            registration.execution_contract.algorithmic_latency_frames(),
+            0
+        );
+        assert_eq!(
+            registration.execution_contract.tail(),
+            AudioProcessorTail::None
+        );
+        assert!(registration.execution_contract.requires_state_entry());
     }
 }

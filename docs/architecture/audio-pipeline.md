@@ -13,12 +13,15 @@ plugin state capture, parameter automation, and auxiliary buses remain
 pending format work; unsupported requests return typed errors, not
 silent bypasses.
 
-CLAP descriptor discovery uses a separate hidden child mode. The editor
+CLAP descriptor discovery and execution-contract probing use a separate hidden child mode. The editor
 process writes a bounded request into a private temporary directory, starts
 the child with a five-second deadline, and reads at most 256 KiB of validated
-descriptor metadata after successful exit. Plugin code is loaded only in the
-child. Discovery does not yet establish a render contract or make a plugin
-available for insertion.
+metadata after successful exit. Plugin code is loaded only in the child.
+The probe restores the same author state, validates a Mono/Stereo main port,
+and measures latency/tail for the requested rate and block extent. The
+subsequent audio worker rechecks those facts. Explicit library selection is
+available through the resolver; the application has not yet wired discovery
+into the insertion picker or its Preview/Export runtime paths.
 
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different
