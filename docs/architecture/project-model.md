@@ -29,8 +29,10 @@ inside the package command would duplicate ordinary save and make a
 supposedly portable artifact depend on its source machine, so the two file
 actions provide the choice directly. The relocated-package test removes the
 original LUT and proves identical Viewer and Export pixels after reopening;
-the media-asset test proves path/probe rebinding but does not yet prove a real
-second-machine media Preview/Export run. That release qualification remains.
+the real-media relocated-package test deletes the source video, proves bundled
+Preview decode pixel parity, and admits an Export snapshot bound to the bundled
+file with its exact video stream and fingerprint. A full encoded Export run on a
+second machine remains release qualification.
 Installed third-party plugin binaries and fonts must not be bundled without a
 distributable license. Generated caches remain excluded.
 CLAP processor definitions in `project.json` retain the selected binary's

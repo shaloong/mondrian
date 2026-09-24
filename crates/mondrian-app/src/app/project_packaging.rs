@@ -920,6 +920,12 @@ mod tests {
         build_effect_render_graph, compile_reference_render_graph, EffectGraphNodeKind,
         EffectNodeExt, EffectRenderOp, EffectType,
     };
+    use mondrian_export::preset::TimelineExportRange;
+    use mondrian_media::{
+        clear_thread_local_preview_decode_session, decode_preview_frame_cancellable,
+        DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+        PreviewDecodeRequest, PreviewSourceColorContract,
+    };
     use mondrian_renderer::{
         color::{ProgramOutputModule, ProgramOutputRole},
         composite_timeline_elements_color_frame, TimelineCompositeElement,
@@ -1486,5 +1492,139 @@ mod tests {
             "{error:#}"
         );
         assert!(!rejected.has_open_project());
+    }
+
+    #[test]
+    fn moved_package_decodes_real_video_and_admits_export_from_bundled_media() {
+        const VIDEO: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().expect("root");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let media = root.path().join("source.mp4");
+        fs::write(&media, VIDEO).expect("video fixture");
+        let source = fs::canonicalize(&media).expect("canonical video");
+        let info = mondrian_media::probe_media_info(&source).expect("probe real video");
+        let video = info.primary_video().expect("video stream");
+        let request_color = PreviewSourceColorContract::new(
+            video.executable_color_space().expect("admitted source color"),
+            DecodedVideoRangeContract::Automatic { probed_range: video.color_range },
+        );
+        let stream_index = video.index;
+        let fingerprint = MediaFileFingerprint::capture(&source);
+        let candidate = AssetMediaProbeCandidate::new(source.clone(), fingerprint, info)
+            .expect("probe candidate");
+        let asset_id = library.commit_media_probe(candidate, None).expect("commit video");
+        let stored_source = library
+            .get_asset(asset_id)
+            .expect("lookup video")
+            .expect("video Asset")
+            .file_path()
+            .expect("file source")
+            .to_path_buf();
+        let original = decode_preview_frame_cancellable(
+            PreviewDecodeRequest::new(
+                &source,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                request_color,
+            )
+            .with_video_stream_index(stream_index)
+            .with_fingerprint(fingerprint),
+            || false,
+        )
+        .expect("decode source video");
+        let PreviewDecodeOutcome::Frame(original) = original else {
+            panic!("real video must yield a CPU RGBA preview frame");
+        };
+        clear_thread_local_preview_decode_session();
+
+        let mut sequence = Sequence::new("portable video");
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(
+                    asset_id,
+                    TimelineTime::ZERO,
+                    TimelineTime::new(1, 1).expect("time"),
+                )
+                .expect("video clip"),
+            )
+            .expect("place video");
+        let settings = sequence.settings.clone();
+        let document = ProjectDocument::new(
+            "portable video",
+            SequenceCollection::new(sequence),
+            ProjectColorEnvironment::default(),
+            settings,
+            ProjectSettings::default(),
+        );
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("portable.mdpkg");
+        export_snapshot_package(session.snapshot().expect("snapshot"), &package).expect("export");
+        fs::remove_file(&source).expect("remove source video");
+        let moved = root.path().join("moved.mdpkg");
+        fs::rename(&package, &moved).expect("move package");
+        let manifest = verify_portable_project_package(&moved).expect("package");
+        let bundled = manifest
+            .files
+            .iter()
+            .find(|file| file.source_paths.contains(&stored_source))
+            .map(|file| {
+                mondrian_assets::canonical_native_path(&moved.join(&file.bundled_path))
+                    .expect("bundled video")
+            })
+            .expect("video binding");
+
+        let mut imported = AppState::new();
+        imported.open_portable_project_package(moved).expect("open moved package");
+        let asset = imported
+            .authoring
+            .as_ref()
+            .expect("Session")
+            .asset_library()
+            .get_asset(asset_id)
+            .expect("lookup")
+            .expect("Asset");
+        assert_eq!(asset.file_path(), Some(bundled.as_path()));
+        let rebound_fingerprint = asset.source_fingerprint().expect("rebound fingerprint");
+        let decoded = decode_preview_frame_cancellable(
+            PreviewDecodeRequest::new(
+                &bundled,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                request_color,
+            )
+            .with_video_stream_index(stream_index)
+            .with_fingerprint(rebound_fingerprint),
+            || false,
+        )
+        .expect("decode bundled video");
+        let PreviewDecodeOutcome::Frame(decoded) = decoded else {
+            panic!("bundled video must yield a CPU RGBA preview frame");
+        };
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (original.width, original.height)
+        );
+        assert_eq!(decoded.rgba(), original.rgba());
+        clear_thread_local_preview_decode_session();
+
+        let sequence = imported.active_sequence().expect("sequence").clone();
+        let export = super::super::exporting::capture_timeline_export_snapshot(
+            &imported,
+            sequence.clone(),
+            vec![sequence],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .expect("admit export from bundled video");
+        let dependency = export.media.get(&asset_id).expect("video export dependency");
+        assert_eq!(dependency.path, bundled);
+        assert_eq!(dependency.video_stream_index, Some(stream_index));
+        assert_eq!(dependency.source_fingerprint, rebound_fingerprint);
     }
 }
