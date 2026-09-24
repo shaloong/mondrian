@@ -3863,6 +3863,70 @@ fn app_state_models_surface_viewer_color_rejection() {
     assert!(empty.contains("检测：MissingMetadata / None / warnings 1"));
     assert!(empty.contains("问题：missing-cicp 1"));
     assert!(empty.contains("missing_cicp"));
+
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let localized =
+        AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            &state,
+            None,
+            None,
+            Some(&RejectedPreview),
+            Some(&english),
+        );
+    assert_eq!(localized.viewer.status, "Color interpretation rejected");
+    assert_eq!(localized.viewer.fit_label, "Fit");
+    let detail = localized.viewer.empty_message.as_deref().expect("localized detail");
+    assert!(detail.contains("Asset:"));
+    assert!(detail.contains("missing-color-tags.mov"));
+    assert!(detail.contains("Detection:"));
+    assert!(detail.contains("Issues:"));
+}
+
+#[test]
+fn viewer_localized_status_and_frame_count_cover_playback_and_failure_states() {
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    assert_eq!(
+        viewer_status(false, true, false, None, Some(&english)).0,
+        "Preparing preview"
+    );
+    assert_eq!(
+        viewer_status(
+            false,
+            false,
+            false,
+            Some(PreviewUnavailabilityDisposition::Blocked),
+            Some(&english)
+        )
+        .0,
+        "Preview blocked"
+    );
+    assert_eq!(
+        viewer_status(
+            false,
+            false,
+            false,
+            Some(PreviewUnavailabilityDisposition::Failed),
+            Some(&english)
+        )
+        .0,
+        "Preview failed"
+    );
+    assert_eq!(
+        viewer_status(true, false, false, None, Some(&english)).0,
+        "Playing"
+    );
+    assert_eq!(
+        viewer_status(false, false, false, None, Some(&english)).0,
+        "Ready"
+    );
+    assert_eq!(viewer_frame_count(1, Some(&english)), "1 frame");
+    let two_frames = viewer_frame_count(2, Some(&english));
+    assert!(two_frames.contains('2'));
+    assert!(two_frames.ends_with(" frames"));
 }
 
 #[test]

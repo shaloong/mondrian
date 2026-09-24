@@ -380,7 +380,8 @@ impl AppUiPanelModels {
         preview: Option<&dyn ViewerPreviewSource>,
         localizer: Option<&Localizer>,
     ) -> Self {
-        let viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        let viewer =
+            ViewerPanelModel::from_app_state_with_preview_and_locale(state, preview, localizer);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
@@ -886,6 +887,7 @@ pub struct ViewerPanelModel {
     pub position_label: String,
     pub duration_label: String,
     pub zoom_label: String,
+    pub fit_label: String,
     pub zoom_scale: Option<f32>,
     pub preview_quality_label: String,
     pub preview_resolution_scale: f32,
@@ -966,7 +968,12 @@ impl ViewerPanelModel {
     /// Transport actions must not synchronously re-enter Preview production,
     /// but they also must not erase the last usable output or its typed
     /// lifecycle while a later Preview turn proves the replacement.
-    pub(crate) fn retain_presentation_from(&mut self, current: &Self, state: &AppState) {
+    pub(crate) fn retain_presentation_from(
+        &mut self,
+        current: &Self,
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) {
         self.frame_content = current.frame_content.clone();
         self.canvas_background = current.canvas_background;
         self.transparent_canvas = current.transparent_canvas;
@@ -983,13 +990,18 @@ impl ViewerPanelModel {
             self.preview_waiting,
             color_rejected,
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+            localizer,
         );
         self.status = status;
         self.status_tone = status_tone;
     }
 
     /// Keep a usable fallback visible while a transport intent awaits exact proof.
-    pub(crate) fn mark_presentation_pending_after_transport_intent(&mut self, state: &AppState) {
+    pub(crate) fn mark_presentation_pending_after_transport_intent(
+        &mut self,
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) {
         if self.frame_content.is_none() && !self.transparent_canvas {
             return;
         }
@@ -999,6 +1011,7 @@ impl ViewerPanelModel {
             true,
             false,
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+            localizer,
         );
         self.status = status;
         self.status_tone = status_tone;
@@ -1031,8 +1044,16 @@ impl ViewerPanelModel {
         state: &AppState,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
+        Self::from_app_state_with_preview_and_locale(state, preview, None)
+    }
+
+    pub(crate) fn from_app_state_with_preview_and_locale(
+        state: &AppState,
+        preview: Option<&dyn ViewerPreviewSource>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let Some(sequence) = state.active_sequence() else {
-            return Self::empty();
+            return Self::empty_with_locale(localizer);
         };
         let resolution = sequence.settings.resolution;
         let current_frame = state.current_frame();
@@ -1053,7 +1074,7 @@ impl ViewerPanelModel {
             time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Ceil)
                 .map_err(Into::into)
         }) else {
-            return Self::empty();
+            return Self::empty_with_locale(localizer);
         };
         let duration_frame = duration_frame.frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
@@ -1126,6 +1147,7 @@ impl ViewerPanelModel {
             preview_waiting,
             color_rejected,
             unavailability_disposition,
+            localizer,
         );
 
         Self {
@@ -1137,8 +1159,9 @@ impl ViewerPanelModel {
                 resolution.width, resolution.height, fps
             ),
             position_label,
-            duration_label: format!("{duration_frame} 帧"),
-            zoom_label: "适合".into(),
+            duration_label: viewer_frame_count(duration_frame, localizer),
+            zoom_label: viewer_text(localizer, "viewer-fit", "适合"),
+            fit_label: viewer_text(localizer, "viewer-fit", "适合"),
             zoom_scale: None,
             preview_quality_label,
             preview_resolution_scale,
@@ -1159,9 +1182,9 @@ impl ViewerPanelModel {
             empty_message: if let Some(rejection) =
                 color_rejection.as_ref().filter(|_| color_rejected)
             {
-                Some(viewer_color_rejection_empty_message(rejection))
+                Some(viewer_color_rejection_empty_message(rejection, localizer))
             } else if matches!(preview_state.as_ref(), Some(ViewerPreviewState::Loading)) {
-                Some("预览准备中".into())
+                Some(viewer_text(localizer, "viewer-loading", "预览准备中"))
             } else {
                 preview_unavailability
                     .as_ref()
@@ -1181,14 +1204,19 @@ impl ViewerPanelModel {
 
     /// Empty viewer shown before a sequence is open.
     pub fn empty() -> Self {
+        Self::empty_with_locale(None)
+    }
+
+    fn empty_with_locale(localizer: Option<&Localizer>) -> Self {
         Self {
-            title: "预览".into(),
-            status: "没有序列".into(),
+            title: viewer_text(localizer, "panel-viewer", "预览"),
+            status: viewer_text(localizer, "viewer-no-sequence", "没有序列"),
             status_tone: ViewerStatusTone::Neutral,
-            resolution_label: "无信号".into(),
+            resolution_label: viewer_text(localizer, "viewer-no-signal", "无信号"),
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
-            zoom_label: "适合".into(),
+            zoom_label: viewer_text(localizer, "viewer-fit", "适合"),
+            fit_label: viewer_text(localizer, "viewer-fit", "适合"),
             zoom_scale: None,
             preview_quality_label: "1/1".into(),
             preview_resolution_scale: 1.0,
@@ -1202,7 +1230,11 @@ impl ViewerPanelModel {
             comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas: false,
-            empty_message: Some("未载入序列".into()),
+            empty_message: Some(viewer_text(
+                localizer,
+                "viewer-no-sequence-loaded",
+                "未载入序列",
+            )),
             preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
@@ -1372,19 +1404,20 @@ fn viewer_status(
     preview_waiting: bool,
     color_rejected: bool,
     unavailability: Option<PreviewUnavailabilityDisposition>,
+    localizer: Option<&Localizer>,
 ) -> (String, ViewerStatusTone) {
-    let status = if preview_waiting {
-        "预览准备中"
+    let (id, fallback) = if preview_waiting {
+        ("viewer-loading", "预览准备中")
     } else if color_rejected {
-        "色彩解释被拒绝"
+        ("viewer-color-rejected", "色彩解释被拒绝")
     } else if unavailability == Some(PreviewUnavailabilityDisposition::Blocked) {
-        "预览被阻止"
+        ("viewer-blocked", "预览被阻止")
     } else if unavailability == Some(PreviewUnavailabilityDisposition::Failed) {
-        "预览失败"
+        ("viewer-failed", "预览失败")
     } else if playing {
-        "播放中"
+        ("viewer-playing", "播放中")
     } else {
-        "就绪"
+        ("viewer-ready", "就绪")
     };
     let tone = if preview_waiting
         || color_rejected
@@ -1401,26 +1434,55 @@ fn viewer_status(
     } else {
         ViewerStatusTone::Neutral
     };
-    (status.to_owned(), tone)
+    (viewer_text(localizer, id, fallback), tone)
 }
 
-fn viewer_color_rejection_empty_message(rejection: &ViewerPreviewColorRejectionModel) -> String {
+fn viewer_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+}
+
+fn viewer_frame_count(count: i64, localizer: Option<&Localizer>) -> String {
+    if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", count);
+        localizer.format("viewer-frame-count", Some(&args))
+    } else {
+        format!("{count} 帧")
+    }
+}
+
+fn viewer_color_rejection_empty_message(
+    rejection: &ViewerPreviewColorRejectionModel,
+    localizer: Option<&Localizer>,
+) -> String {
     let summary = &rejection.diagnostic_issue_summary;
     let issue_tags = color_issue_summary_tags(summary);
-    let issue_line = if issue_tags.is_empty() {
-        "问题：none".to_owned()
+    let issues = if issue_tags.is_empty() {
+        "none".to_owned()
     } else {
-        format!("问题：{}", issue_tags.join(" / "))
+        issue_tags.join(" / ")
     };
+    if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("asset", rejection.path.display().to_string());
+        args.set("policy", format!("{:?}", rejection.missing_metadata_policy));
+        args.set("source", format!("{:?}", rejection.source));
+        args.set("method", format!("{:?}", summary.method));
+        args.set("confidence", format!("{:?}", summary.confidence));
+        args.set("warnings", summary.warning_count as i64);
+        args.set("issues", issues);
+        args.set("detail", rejection.diagnostic_summary.clone());
+        return localizer.format("viewer-color-rejection-detail", Some(&args));
+    }
     format!(
-        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n检测：{:?} / {:?} / warnings {}\n{}\n{}",
+        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n检测：{:?} / {:?} / warnings {}\n问题：{}\n{}",
         rejection.path.display(),
         rejection.missing_metadata_policy,
         rejection.source,
         summary.method,
         summary.confidence,
         summary.warning_count,
-        issue_line,
+        issues,
         rejection.diagnostic_summary
     )
 }
@@ -3334,6 +3396,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_position_label(model.position_label.clone())
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
+        .with_fit_label(model.fit_label.clone())
         .with_zoom_scale(model.zoom_scale)
         .with_sample_aspect_ratio(model.sample_aspect_ratio)
         .with_preview_quality_label(model.preview_quality_label.clone())

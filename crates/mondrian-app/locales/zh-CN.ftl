@@ -73,6 +73,24 @@ asset-new-adjustment = 调整图层
 asset-new-solid = 纯色
 asset-new-folder = 文件夹
 panel-viewer = 预览
+viewer-no-sequence = 没有序列
+viewer-no-signal = 无信号
+viewer-fit = 适合
+viewer-no-sequence-loaded = 未载入序列
+viewer-frame-count = { $count } 帧
+viewer-loading = 预览准备中
+viewer-color-rejected = 色彩解释被拒绝
+viewer-blocked = 预览被阻止
+viewer-failed = 预览失败
+viewer-playing = 播放中
+viewer-ready = 就绪
+viewer-color-rejection-detail =
+    色彩解释被拒绝
+    素材：{ $asset }
+    策略：{ $policy } / { $source }
+    检测：{ $method } / { $confidence } / warnings { $warnings }
+    问题：{ $issues }
+    { $detail }
 panel-scopes = 示波器
 panel-timeline = 时间线
 panel-inspector = 检查器

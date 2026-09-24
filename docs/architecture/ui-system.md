@@ -42,6 +42,9 @@ locale. The model carries prepared menu rows for the current locale, including
 the dynamic selection-delete label.
 The generic `AssetGrid` widget accepts formatted empty-library and no-results
 copy from the App so it never has to resolve the product locale itself.
+The generic Viewer receives a localized Fit option label from the App. Frame
+refresh and pending transport status use the window's retained locale snapshot;
+Viewer gesture actions still carry stable mask and transform parameter IDs.
 
 `File → Export → Package Project` opens a `.mdpkg` destination dialog. The
 App takes an author snapshot, then performs dependency preflight, file copying,

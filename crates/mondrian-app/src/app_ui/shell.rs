@@ -816,9 +816,9 @@ impl ViewerZoomMode {
         }
     }
 
-    fn label(self) -> String {
+    fn label(self, fit_label: &str) -> String {
         match self {
-            Self::Fit => "适合".to_owned(),
+            Self::Fit => fit_label.to_owned(),
             Self::Fixed(percent) => format!("{percent}%"),
         }
     }
@@ -888,7 +888,7 @@ fn project_sequence_color_contracts(state: &AppState) -> Vec<(WorkingColorSpace,
 }
 
 fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoomMode) {
-    model.zoom_label = mode.label();
+    model.zoom_label = mode.label(&model.fit_label);
     model.zoom_scale = mode.scale();
 }
 
@@ -902,6 +902,7 @@ pub struct AppUiAppRoot {
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
+    localizer: Option<Localizer>,
     audio_output_device_catalog: AudioOutputDeviceCatalogState,
     workspace_preset: WorkspacePreset,
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
@@ -1059,6 +1060,7 @@ impl AppUiAppRoot {
             custom_workspace_layout.as_ref(),
         );
         let audio_output_device_catalog = preferences_model.audio_output_device_catalog.clone();
+        let localizer = Localizer::new(preferences_model.locale).ok();
         let mut root = Self {
             id: WidgetId::new(),
             title_bar,
@@ -1079,6 +1081,7 @@ impl AppUiAppRoot {
             models,
             asset_folder_id: None,
             preferences_model,
+            localizer,
             audio_output_device_catalog,
             workspace_preset,
             custom_workspace_layout,
@@ -1270,9 +1273,13 @@ impl AppUiAppRoot {
         self.status_bar.set_model(status_bar_model(state));
         self.status_bar.sync_history(&state.status_log);
         self.sync_notifications(state, self.preferences_model.locale);
-        let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
+            state,
+            preview,
+            self.localizer.as_ref(),
+        );
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
-            viewer.retain_presentation_from(&self.models.viewer, state);
+            viewer.retain_presentation_from(&self.models.viewer, state, self.localizer.as_ref());
         }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
@@ -1292,7 +1299,9 @@ impl AppUiAppRoot {
     /// Refresh a user transport intent without claiming the retained output is exact.
     pub fn refresh_transport_intent_from_app_state(&mut self, state: &AppState) {
         self.refresh_playback_frame_from_app_state(state, None);
-        self.models.viewer.mark_presentation_pending_after_transport_intent(state);
+        self.models
+            .viewer
+            .mark_presentation_pending_after_transport_intent(state, self.localizer.as_ref());
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
     }
 
@@ -1371,6 +1380,7 @@ impl AppUiAppRoot {
         apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+        self.localizer = localizer;
         self.set_models(models);
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
@@ -4181,6 +4191,11 @@ mod tests {
             Some("Search effects")
         );
         assert_eq!(root.models.assets.subtitle, "Project library");
+        assert_eq!(root.models.viewer.title, "Viewer");
+        assert_eq!(root.models.viewer.status, "No sequence");
+        assert_eq!(root.models.viewer.fit_label, "Fit");
+        root.refresh_playback_frame_from_app_state(&state, None);
+        assert_eq!(root.models.viewer.status, "No sequence");
 
         root.refresh_from_app_state(&state);
 
@@ -4209,6 +4224,9 @@ mod tests {
         );
         assert!(root.models.effects.items.iter().any(|item| item.title == "颜色"));
         assert_eq!(root.models.assets.subtitle, "项目素材库");
+        assert_eq!(root.models.viewer.title, "预览");
+        assert_eq!(root.models.viewer.status, "没有序列");
+        assert_eq!(root.models.viewer.fit_label, "适合");
     }
 
     #[test]

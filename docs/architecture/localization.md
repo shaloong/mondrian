@@ -22,6 +22,13 @@ Asset Browser construction formats labels while reading the library snapshot;
 the folder name, Asset ID, folder ID, drag payload, and action payload stay
 canonical. Context menus are captured in the same locale snapshot so a
 language switch rebuilds their labels together with cards and breadcrumbs.
+Viewer chrome is projected from the same locale snapshot, including status,
+frame count, Fit zoom, empty state, and color rejection diagnostics. The window
+retains its `Localizer` for playback-frame updates so realtime status refreshes
+do not parse catalogs on every frame. Timecode and diagnostic codes retain
+their stable representations. Free-form Preview failure details currently remain
+raw diagnostic evidence and need typed message codes before full English UI
+coverage can be claimed.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

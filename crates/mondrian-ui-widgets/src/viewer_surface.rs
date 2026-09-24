@@ -330,6 +330,7 @@ pub struct ViewerSurface {
     position_label: String,
     duration_label: String,
     zoom_label: String,
+    fit_label: String,
     zoom_scale: Option<f32>,
     preview_quality_label: String,
     source_width: u32,
@@ -378,6 +379,7 @@ impl ViewerSurface {
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
             zoom_label: "适合".into(),
+            fit_label: "适合".into(),
             zoom_scale: None,
             preview_quality_label: "1/1".into(),
             source_width: source_width.max(1),
@@ -447,6 +449,12 @@ impl ViewerSurface {
     /// Set the displayed canvas zoom mode label.
     pub fn with_zoom_label(mut self, label: impl Into<String>) -> Self {
         self.zoom_label = label.into();
+        self
+    }
+
+    /// Set the localized label for the fit-to-view zoom option.
+    pub fn with_fit_label(mut self, label: impl Into<String>) -> Self {
+        self.fit_label = label.into();
         self
     }
 
@@ -1541,7 +1549,11 @@ impl ViewerSurface {
                 ViewerDropdown::Zoom => {
                     let option = VIEWER_ZOOM_OPTIONS[index];
                     (
-                        option.label,
+                        if index == 0 {
+                            self.fit_label.as_str()
+                        } else {
+                            option.label
+                        },
                         viewer_zoom_option_selected(option, self.zoom_scale),
                     )
                 }
@@ -2457,7 +2469,9 @@ mod tests {
 
     #[test]
     fn viewer_dropdown_label_starts_after_reserved_check_lane() {
-        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_label("适合");
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_zoom_label("100%")
+            .with_fit_label("Fit");
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         viewer.open_dropdown = Some(ViewerDropdown::Zoom);
         let theme = ThemePreset::Dark.build();
@@ -2476,7 +2490,7 @@ mod tests {
         let index = encoder
             .texts
             .iter()
-            .position(|text| text == VIEWER_ZOOM_OPTIONS[0].label)
+            .position(|text| text == "Fit")
             .expect("zoom option label should be painted");
         assert!(encoder.text_positions[index].x >= expected_x);
     }

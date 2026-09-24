@@ -76,6 +76,27 @@ asset-new-adjustment = Adjustment layer
 asset-new-solid = Solid color
 asset-new-folder = Folder
 panel-viewer = Viewer
+viewer-no-sequence = No sequence
+viewer-no-signal = No signal
+viewer-fit = Fit
+viewer-no-sequence-loaded = No sequence loaded
+viewer-frame-count = { $count ->
+    [one] 1 frame
+   *[other] { $count } frames
+}
+viewer-loading = Preparing preview
+viewer-color-rejected = Color interpretation rejected
+viewer-blocked = Preview blocked
+viewer-failed = Preview failed
+viewer-playing = Playing
+viewer-ready = Ready
+viewer-color-rejection-detail =
+    Color interpretation rejected
+    Asset: { $asset }
+    Policy: { $policy } / { $source }
+    Detection: { $method } / { $confidence } / warnings { $warnings }
+    Issues: { $issues }
+    { $detail }
 panel-scopes = Scopes
 panel-timeline = Timeline
 panel-inspector = Inspector
