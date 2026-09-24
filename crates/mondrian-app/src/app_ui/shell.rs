@@ -61,6 +61,8 @@ use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{AppState, StatusLogEntry};
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
+#[cfg(test)]
+use crate::app_ui::localization::AppUiLocale;
 use crate::app_ui::localization::Localizer;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
@@ -111,38 +113,53 @@ struct PanelScrollState {
 }
 
 /// File dialog filters for project file commands.
-pub fn project_file_filters() -> Vec<FileFilter> {
+pub fn project_file_filters(localizer: &Localizer) -> Vec<FileFilter> {
     vec![FileFilter::new(
-        "Mondrian 项目",
+        localizer.text("file-filter-project"),
         vec![PROJECT_FILE_EXTENSION],
     )]
 }
 
 /// File dialog filter for the portable package directory destination.
-pub fn portable_package_filters() -> Vec<FileFilter> {
-    vec![FileFilter::new("Mondrian 便携项目包", vec!["mdpkg"])]
+pub fn portable_package_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-package"),
+        vec!["mdpkg"],
+    )]
 }
 
 /// File dialog filters for media import commands.
-pub fn media_import_filters() -> Vec<FileFilter> {
+pub fn media_import_filters(localizer: &Localizer) -> Vec<FileFilter> {
     vec![
-        FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new(
-            "图片 / Camera RAW",
+            localizer.text("file-filter-video"),
+            vec!["mp4", "mov", "mkv", "webm", "avi"],
+        ),
+        FileFilter::new(
+            localizer.text("file-filter-image"),
             vec!["dng", "dpx", "exr", "png", "jpg", "jpeg", "tif", "tiff"],
         ),
-        FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
+        FileFilter::new(
+            localizer.text("file-filter-audio"),
+            vec!["mp3", "wav", "aac", "flac", "m4a"],
+        ),
     ]
 }
 
 /// Native binary extensions accepted by the CLAP discovery worker.
-pub fn clap_library_filters() -> Vec<FileFilter> {
-    vec![FileFilter::new("CLAP 插件", vec!["clap", "dll"])]
+pub fn clap_library_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-clap"),
+        vec!["clap", "dll"],
+    )]
 }
 
 /// File dialog filter for monitor calibration profiles.
-pub fn display_icc_profile_filters() -> Vec<FileFilter> {
-    vec![FileFilter::new("ICC 显示配置文件", vec!["icc", "icm"])]
+pub fn display_icc_profile_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-icc"),
+        vec!["icc", "icm"],
+    )]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,15 +504,18 @@ fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
 }
 
 /// File dialog filter for timeline export output commands.
-pub fn export_output_filters(extension: &str) -> Vec<FileFilter> {
+pub fn export_output_filters(extension: &str, localizer: &Localizer) -> Vec<FileFilter> {
     let extension = normalized_export_extension(extension);
     if extension.is_empty() {
         vec![FileFilter::new(
-            "媒体",
+            localizer.text("file-filter-media"),
             vec!["mp4", "mov", "mkv", "gif", "mxf", "webm"],
         )]
     } else {
-        vec![FileFilter::new("导出", vec![extension])]
+        vec![FileFilter::new(
+            localizer.text("file-filter-export"),
+            vec![extension],
+        )]
     }
 }
 
@@ -503,17 +523,14 @@ fn normalized_export_extension(extension: &str) -> String {
     extension.trim().trim_start_matches('.').trim().to_ascii_lowercase()
 }
 
-/// Resolve an app-shell action into a concrete editor action.
-///
-/// Native file dialogs stay behind [`PlatformService`]. Widgets and menus emit
-/// stable app-shell requests, while the window entrypoint injects platform
-/// capabilities and dispatches only concrete editor actions.
-pub fn resolve_app_shell_action(
+#[cfg(test)]
+fn resolve_app_shell_action(
     action: Action,
     platform: &dyn PlatformService,
     current_project_path: Option<&Path>,
 ) -> Option<Action> {
-    match try_resolve_app_shell_action(action, platform, current_project_path) {
+    let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    match try_resolve_app_shell_action(action, platform, current_project_path, &localizer) {
         Ok(action) => action,
         Err(err) => {
             tracing::warn!("app-shell action failed: {err}");
@@ -522,11 +539,13 @@ pub fn resolve_app_shell_action(
     }
 }
 
-/// Resolve an app-shell action and report protocol errors.
+/// Resolve a shell request into a concrete editor action using the active formatter.
+/// Native file dialogs stay behind [`PlatformService`].
 pub fn try_resolve_app_shell_action(
     action: Action,
     platform: &dyn PlatformService,
     current_project_path: Option<&Path>,
+    localizer: &Localizer,
 ) -> Result<Option<Action>> {
     match action {
         Action::Custom { namespace, name, .. }
@@ -534,9 +553,12 @@ pub fn try_resolve_app_shell_action(
         {
             let path = platform
                 .save_file_dialog(
-                    "创建 Mondrian 项目",
-                    &format!("未命名.{PROJECT_FILE_EXTENSION}"),
-                    &project_file_filters(),
+                    &localizer.text("file-dialog-create-project"),
+                    &format!(
+                        "{}.{PROJECT_FILE_EXTENSION}",
+                        localizer.text("file-default-untitled")
+                    ),
+                    &project_file_filters(localizer),
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection();
@@ -552,7 +574,10 @@ pub fn try_resolve_app_shell_action(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
             let Some(paths) = platform
-                .open_file_dialog("打开 Mondrian 项目", &project_file_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-open-project"),
+                    &project_file_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -583,7 +608,10 @@ pub fn try_resolve_app_shell_action(
                 serde_json::from_value(payload).map_err(|err| app_shell_action_error(&name, err))?
             };
             let Some(paths) = platform
-                .open_file_dialog("导入媒体", &media_import_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-import-media"),
+                    &media_import_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -605,7 +633,10 @@ pub fn try_resolve_app_shell_action(
                 && name == APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG =>
         {
             let selected = platform
-                .open_file_dialog("安装 CLAP 插件", &clap_library_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-install-clap"),
+                    &clap_library_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
                 .and_then(|paths| paths.into_iter().next());
@@ -632,7 +663,10 @@ pub fn try_resolve_app_shell_action(
             let payload: AppShellRelinkAssetDialogPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
             let Some(paths) = platform
-                .open_file_dialog("重新链接媒体", &media_import_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-relink-media"),
+                    &media_import_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -652,9 +686,18 @@ pub fn try_resolve_app_shell_action(
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("未命名.{PROJECT_FILE_EXTENSION}"));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}.{PROJECT_FILE_EXTENSION}",
+                        localizer.text("file-default-untitled")
+                    )
+                });
             Ok(platform
-                .save_file_dialog("另存 Mondrian 项目", &default_name, &project_file_filters())
+                .save_file_dialog(
+                    &localizer.text("file-dialog-save-as-project"),
+                    &default_name,
+                    &project_file_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
                 .map(Action::SaveProjectAs))
@@ -667,13 +710,14 @@ pub fn try_resolve_app_shell_action(
                 .and_then(Path::file_stem)
                 .and_then(|stem| stem.to_str())
                 .filter(|stem| !stem.is_empty())
-                .unwrap_or("未命名项目");
+                .map(str::to_owned)
+                .unwrap_or_else(|| localizer.text("file-default-untitled-project"));
             let default_name = format!("{stem}.mdpkg");
             Ok(platform
                 .save_file_dialog(
-                    "打包 Mondrian 项目",
+                    &localizer.text("file-dialog-package-project"),
                     &default_name,
-                    &portable_package_filters(),
+                    &portable_package_filters(localizer),
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
@@ -689,9 +733,9 @@ pub fn try_resolve_app_shell_action(
                 normalized_export_default_file_name(&payload.default_file_name, &extension);
             Ok(platform
                 .save_file_dialog(
-                    "选择导出输出",
+                    &localizer.text("file-dialog-export-output"),
                     &default_name,
-                    &export_output_filters(&extension),
+                    &export_output_filters(&extension, localizer),
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
@@ -707,9 +751,9 @@ pub fn try_resolve_app_shell_action(
         {
             let Some(paths) = platform
                 .open_file_dialog(
-                    "导入 ANC / 广播字幕",
+                    &localizer.text("file-dialog-import-ancillary"),
                     &[FileFilter::new(
-                        "ANC JSON / SCC V1.0 / 原始 CDP",
+                        localizer.text("file-filter-ancillary"),
                         vec!["json", "mdanc", "scc", "cdp"],
                     )],
                 )
@@ -729,8 +773,11 @@ pub fn try_resolve_app_shell_action(
         {
             let Some(paths) = platform
                 .open_file_dialog(
-                    "导入监管 PSE 配置",
-                    &[FileFilter::new("Regulatory PSE JSON", vec!["json"])],
+                    &localizer.text("file-dialog-import-pse"),
+                    &[FileFilter::new(
+                        localizer.text("file-filter-pse"),
+                        vec!["json"],
+                    )],
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
@@ -902,7 +949,7 @@ pub struct AppUiAppRoot {
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
-    localizer: Option<Localizer>,
+    localizer: Localizer,
     audio_output_device_catalog: AudioOutputDeviceCatalogState,
     workspace_preset: WorkspacePreset,
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
@@ -957,14 +1004,14 @@ impl AppUiAppRoot {
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
         let locale = preferences.locale_preference.resolve(sys_locale::get_locale().as_deref());
-        let localizer = Localizer::new(locale).ok();
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         let mut models =
             AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
                 state,
                 None,
                 thumbnails,
                 preview,
-                localizer.as_ref(),
+                Some(&localizer),
             );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
@@ -1060,7 +1107,8 @@ impl AppUiAppRoot {
             custom_workspace_layout.as_ref(),
         );
         let audio_output_device_catalog = preferences_model.audio_output_device_catalog.clone();
-        let localizer = Localizer::new(preferences_model.locale).ok();
+        let localizer =
+            Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid");
         let mut root = Self {
             id: WidgetId::new(),
             title_bar,
@@ -1279,10 +1327,10 @@ impl AppUiAppRoot {
         let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
             state,
             preview,
-            self.localizer.as_ref(),
+            Some(&self.localizer),
         );
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
-            viewer.retain_presentation_from(&self.models.viewer, state, self.localizer.as_ref());
+            viewer.retain_presentation_from(&self.models.viewer, state, Some(&self.localizer));
         }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
@@ -1304,7 +1352,7 @@ impl AppUiAppRoot {
         self.refresh_playback_frame_from_app_state(state, None);
         self.models
             .viewer
-            .mark_presentation_pending_after_transport_intent(state, self.localizer.as_ref());
+            .mark_presentation_pending_after_transport_intent(state, Some(&self.localizer));
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
     }
 
@@ -1369,14 +1417,14 @@ impl AppUiAppRoot {
         } else {
             preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
         };
-        let localizer = Localizer::new(locale).ok();
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         let mut models =
             AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
                 state,
                 self.asset_folder_id.as_deref(),
                 thumbnails,
                 preview,
-                localizer.as_ref(),
+                Some(&localizer),
             );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
@@ -1741,9 +1789,9 @@ impl AppUiAppRoot {
                 }
                 let Some(path) = platform
                     .save_file_dialog(
-                        "创建 Mondrian 项目",
+                        &self.localizer.text("file-dialog-create-project"),
                         &default_project_file_name(&draft.display_name()),
-                        &project_file_filters(),
+                        &project_file_filters(&self.localizer),
                     )
                     .map_err(|error| native_shell_error(&name, error))?
                     .into_selection()
@@ -1825,7 +1873,10 @@ impl AppUiAppRoot {
                     && name == APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE =>
             {
                 let Some(path) = platform
-                    .open_file_dialog("选择显示器 ICC 配置文件", &display_icc_profile_filters())
+                    .open_file_dialog(
+                        &self.localizer.text("file-dialog-select-icc"),
+                        &display_icc_profile_filters(&self.localizer),
+                    )
                     .map_err(|error| native_shell_error(&name, error))?
                     .into_selection()
                     .and_then(|paths| paths.into_iter().next())
@@ -1995,7 +2046,12 @@ impl AppUiAppRoot {
                 self.modal = None;
                 Ok(None)
             }
-            action => try_resolve_app_shell_action(action, platform, current_project_path),
+            action => try_resolve_app_shell_action(
+                action,
+                platform,
+                current_project_path,
+                &self.localizer,
+            ),
         }
     }
 
@@ -2605,6 +2661,8 @@ mod tests {
         open_paths: Option<Vec<PathBuf>>,
         save_path: Option<PathBuf>,
         revealed_paths: Mutex<Vec<PathBuf>>,
+        dialog_titles: Mutex<Vec<String>>,
+        dialog_default_names: Mutex<Vec<String>>,
     }
 
     impl PlatformService for FakePlatform {
@@ -2618,9 +2676,10 @@ mod tests {
 
         fn open_file_dialog(
             &self,
-            _title: &str,
+            title: &str,
             _filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
             Ok(match self.open_paths.clone() {
                 Some(paths) => FileDialogOutcome::Selected(paths),
                 None => FileDialogOutcome::Cancelled,
@@ -2629,10 +2688,15 @@ mod tests {
 
         fn save_file_dialog(
             &self,
-            _title: &str,
-            _default_name: &str,
+            title: &str,
+            default_name: &str,
             _filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            self.dialog_default_names
+                .lock()
+                .expect("dialog default names lock")
+                .push(default_name.to_owned());
             Ok(match self.save_path.clone() {
                 Some(path) => FileDialogOutcome::Selected(path),
                 None => FileDialogOutcome::Cancelled,
@@ -3234,7 +3298,8 @@ mod tests {
 
     #[test]
     fn media_import_filters_cover_video_and_audio_extensions() {
-        let filters = media_import_filters();
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = media_import_filters(&localizer);
 
         assert!(filters.iter().any(
             |filter| filter.name == "视频" && filter.extensions.iter().any(|ext| ext == "mp4")
@@ -3245,8 +3310,44 @@ mod tests {
     }
 
     #[test]
+    fn native_file_dialogs_use_selected_locale_without_changing_cancel_semantics() {
+        let platform = FakePlatform::default();
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let opened = try_resolve_app_shell_action(
+            app_shell_open_project_dialog_action(),
+            &platform,
+            None,
+            &english,
+        )
+        .expect("English open-project dialog");
+        let packaged = try_resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_export_portable_package_dialog_action(),
+            &platform,
+            None,
+            &english,
+        )
+        .expect("English package dialog");
+        assert_eq!(opened, None);
+        assert_eq!(packaged, None);
+        assert_eq!(
+            platform.dialog_titles.lock().expect("dialog titles lock").as_slice(),
+            &["Open Mondrian project", "Package Mondrian project"]
+        );
+        assert_eq!(
+            platform
+                .dialog_default_names
+                .lock()
+                .expect("dialog default names lock")
+                .as_slice(),
+            &["Untitled Project.mdpkg"]
+        );
+        assert_eq!(project_file_filters(&english)[0].name, "Mondrian project");
+    }
+
+    #[test]
     fn project_file_filters_cover_mondrian_project_extension() {
-        let filters = project_file_filters();
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = project_file_filters(&localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "Mondrian 项目");
@@ -3258,14 +3359,16 @@ mod tests {
 
     #[test]
     fn portable_package_dialog_uses_distinct_directory_extension() {
-        let filters = portable_package_filters();
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = portable_package_filters(&localizer);
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].extensions, vec!["mdpkg"]);
     }
 
     #[test]
     fn export_output_filters_normalize_requested_extension() {
-        let filters = export_output_filters(".MP4 ");
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = export_output_filters(".MP4 ", &localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "导出");
@@ -3274,7 +3377,8 @@ mod tests {
 
     #[test]
     fn export_output_filters_fall_back_for_empty_extension() {
-        let filters = export_output_filters(" . ");
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = export_output_filters(" . ", &localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "媒体");
@@ -4255,6 +4359,16 @@ mod tests {
             ..AppUiPreferences::default()
         };
         let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        let platform = FakePlatform::default();
+        assert_eq!(
+            root.try_handle_shell_action(app_shell_open_project_dialog_action(), &platform, None)
+                .expect("English project dialog"),
+            None
+        );
+        assert_eq!(
+            platform.dialog_titles.lock().expect("dialog titles lock").as_slice(),
+            &["Open Mondrian project"]
+        );
         assert_eq!(
             root.preferences_model.locale,
             crate::app_ui::localization::AppUiLocale::EnUs
@@ -4844,6 +4958,7 @@ mod tests {
             }),
             &platform,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect("resolve reveal action");
 
@@ -4996,6 +5111,7 @@ mod tests {
             app_shell_open_project_dialog_action(),
             &mondrian_platform::NoopPlatformService,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect_err("unavailable native dialog must remain an actionable failure");
 
@@ -5023,6 +5139,7 @@ mod tests {
             },
             &platform,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect_err("unknown app-shell command should fail");
 

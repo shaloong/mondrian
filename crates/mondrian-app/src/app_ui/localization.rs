@@ -216,6 +216,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_file_dialog_messages_exist_in_both_catalogs() {
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        for id in [
+            "file-dialog-create-project",
+            "file-dialog-open-project",
+            "file-dialog-import-media",
+            "file-dialog-install-clap",
+            "file-dialog-relink-media",
+            "file-dialog-save-as-project",
+            "file-dialog-package-project",
+            "file-dialog-export-output",
+            "file-dialog-import-ancillary",
+            "file-dialog-import-pse",
+            "file-dialog-select-icc",
+            "file-default-untitled",
+            "file-default-untitled-project",
+            "file-filter-project",
+            "file-filter-package",
+            "file-filter-video",
+            "file-filter-image",
+            "file-filter-audio",
+            "file-filter-clap",
+            "file-filter-media",
+            "file-filter-export",
+            "file-filter-ancillary",
+            "file-filter-pse",
+            "file-filter-icc",
+        ] {
+            assert!(
+                chinese.requested.get_message(id).is_some(),
+                "missing zh-CN: {id}"
+            );
+            assert!(
+                english.requested.get_message(id).is_some(),
+                "missing en-US: {id}"
+            );
+        }
+    }
+
+    #[test]
     fn startup_recovery_messages_exist_in_both_catalogs() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");

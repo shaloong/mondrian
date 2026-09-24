@@ -62,6 +62,11 @@ the alpha UI does not retain duplicate default-language constructors.
 Recent project rows retain file modification time and size as raw metadata;
 the startup panel formats relative age and unavailable-file status at paint time
 in the active locale. Switching locales never changes the recent project path.
+Native project, media, plugin, package, export, ancillary, and display-profile
+file dialogs receive the machine-local UI locale explicitly. Their titles,
+suggested untitled names, and extension-filter labels come from Fluent; only
+the visible text changes, while accepted extensions, cancellation, and emitted
+typed actions stay identical.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 

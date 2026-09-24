@@ -303,9 +303,9 @@ impl AppUiStartupScreen {
                 }
                 let Some(path) = platform
                     .save_file_dialog(
-                        "Create Mondrian Project",
+                        &self.localizer.text("file-dialog-create-project"),
                         &default_project_file_name(&draft.display_name()),
-                        &project_file_filters(),
+                        &project_file_filters(&self.localizer),
                     )
                     .map_err(|error| MondrianError::WorkflowStepFailed {
                         step_id: "startup.create_project_dialog".to_owned(),

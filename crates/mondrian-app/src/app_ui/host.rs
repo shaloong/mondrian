@@ -68,6 +68,7 @@ use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailAdapter;
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogAdapter;
+use crate::app_ui::localization::Localizer;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
@@ -1685,7 +1686,10 @@ impl AppUiHost {
             return false;
         }
 
-        match try_resolve_app_shell_action(action.clone(), platform, None) {
+        let locale =
+            self.preferences.locale_preference.resolve(sys_locale::get_locale().as_deref());
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        match try_resolve_app_shell_action(action.clone(), platform, None, &localizer) {
             Ok(Some(resolved)) => {
                 if let Err(err) = self.dispatch_editor_action(resolved) {
                     tracing::warn!("startup action failed: {err}");
