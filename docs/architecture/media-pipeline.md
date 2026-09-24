@@ -318,6 +318,11 @@ holding the relevant cache/permit lock, immediately before spawn, and
 immediately after spawn so no reader or child can escape a racing shutdown
 signal.
 
+The supervised-shutdown test holds a pump thread closed, waits within the
+native cleanup deadline for the permit to retire, then releases and joins the
+pump before asserting the ordering. This avoids a fixed 50 ms scheduler window
+under parallel test load.
+
 An execution owner that must prove phase isolation first obtains unique
 `AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
 through `shutdown_until` using the App's shared absolute deadline. The
