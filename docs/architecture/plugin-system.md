@@ -42,8 +42,11 @@ events beyond the native host queue's 4096-point block bound. A continuity
 entry creates a fresh instance from authored state. A real VST3 SDK Gain DLL
 has passed isolated stereo processing, parameter change, and reset checks.
 The App's hidden child dispatch, insertion UI, and persistent installed catalog
-restoration are present; Preview/Export end-to-end qualification and meaningful
-state round-trip remain before the product advertises VST3 support. Vendor
+restoration are present. The reference Gain bundle passed both App Preview and
+Export offline delivery with identical nonzero PCM samples. A separate stateful
+Gain fixture passed component/controller state capture, restoration, and worker
+audio after continuity re-entry. Broader vendor compatibility remains before
+the product advertises VST3 support. Vendor
 editors and auxiliary buses require separate qualified slices. Unbound
 definitions record `null` and cannot authorize native execution.
 

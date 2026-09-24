@@ -391,6 +391,94 @@ fn installed_vst3_reference_processes_through_isolated_worker() {
 }
 
 #[test]
+#[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_STATEFUL_TEST_PLUGIN"]
+fn stateful_vst3_snapshot_round_trips_and_restores_isolated_worker_audio() {
+    use super::vst3_discovery::probe_vst3_plugin_registration_with_state;
+
+    let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+        .map(PathBuf::from)
+        .expect("built Mondrian helper executable");
+    let plugin = std::env::var_os("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN")
+        .map(PathBuf::from)
+        .expect("built stateful VST3 Gain fixture");
+    let descriptors =
+        scan_vst3_binary_descriptors(&helper, &plugin).expect("scan stateful Gain class");
+    assert_eq!(descriptors.len(), 1);
+    let class_id = &descriptors[0].class_id;
+    let authored_state = stateful_gain_snapshot(0.37);
+    let probe = probe_vst3_plugin_registration_with_state(
+        &helper,
+        &plugin,
+        class_id,
+        test_render_contract(),
+        Some(&authored_state),
+        true,
+    )
+    .expect("restore and recapture nondefault state");
+    assert_eq!(
+        probe.captured_state.as_deref(),
+        Some(authored_state.as_slice())
+    );
+    assert_eq!(probe.current_values.len(), 1);
+    assert!((probe.current_values[0].1 - 0.37).abs() < 1.0e-9);
+    let id = probe.registration.parameters[0]
+        .parameter_id()
+        .expect("stateful VST3 stable parameter ID");
+
+    let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+        .expect("discover stateful Gain");
+    let instance = catalog
+        .create_instance(class_id, test_render_contract(), probe.captured_state)
+        .expect("capture stateful authoring instance");
+    let spec = catalog
+        .resolve(AudioProcessorPrepareRequest::new(
+            AudioProcessorOccurrence {
+                instance_id: instance.id,
+                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+            &instance.definition,
+            &instance.parameters,
+            instance.opaque_state.as_ref().map(AsRef::as_ref),
+            test_render_contract(),
+        ))
+        .expect("prepare exact stateful revision");
+    let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("prepare worker");
+    let mut worker = factory.create().expect("create isolated stateful Gain");
+    let empty_range = [Range { start: 0, end: 0 }];
+    for _ in 0..2 {
+        worker.enter_state(100).expect("enter saved state");
+        let source = vec![0.5, -0.25, 1.0, -0.75, 0.4, -0.2, 0.8, -0.6];
+        let mut audio = TestAudioIo { main: source.clone(), auxiliary: Vec::new() };
+        worker
+            .process(
+                test_context(100),
+                &mut audio,
+                AudioParameterEventBatch::new(100, 4, std::slice::from_ref(&id), &empty_range, &[]),
+            )
+            .expect("process restored state without parameter events");
+        for (actual, original) in audio.main.iter().zip(source) {
+            assert!((actual - original * 0.37).abs() < 1.0e-6);
+        }
+    }
+}
+
+fn stateful_gain_snapshot(gain: f64) -> Vec<u8> {
+    let mut component = Vec::with_capacity(16);
+    component.extend_from_slice(b"MSG1");
+    component.extend_from_slice(&1_u32.to_le_bytes());
+    component.extend_from_slice(&gain.to_le_bytes());
+    let mut snapshot = Vec::with_capacity(28 + 2 * component.len());
+    snapshot.extend_from_slice(b"VST3HOST_STATE\0\0");
+    snapshot.extend_from_slice(&1_u32.to_le_bytes());
+    snapshot.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    snapshot.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    snapshot.extend_from_slice(&component);
+    snapshot.extend_from_slice(&component);
+    snapshot
+}
+
+#[test]
 fn isolated_worker_abort_poisoning_does_not_terminate_parent() {
     let factory = prepare_test_factory(
         TestBehavior::Abort,

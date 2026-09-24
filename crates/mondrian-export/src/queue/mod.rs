@@ -16658,25 +16658,69 @@ mod tests {
         let instance = installed
             .create_instance(
                 &plugin_id,
-                AudioRenderContract {
-                    sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
-                    max_block_frames: 16_384,
-                    processing_mode: AudioProcessingMode::Offline,
-                    processor_session_scratch_budget_bytes:
-                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
-                    public_output_lookahead_budget_frames:
-                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
-                    compensation_delay_scratch_budget_bytes:
-                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
-                },
+                reference_plugin_export_contract(),
                 Some(0.5_f32.to_le_bytes().to_vec()),
             )
             .expect("capture pinned installed instance");
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_export_gain(instance, &resolver);
+    }
 
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER, MONDRIAN_VST3_TEST_PLUGIN, and FFmpeg"]
+    fn export_audio_delivery_executes_installed_vst3_on_nonzero_pcm() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        assert!(
+            ffmpeg_is_available_for_test(),
+            "FFmpeg is required for real VST3 export"
+        );
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("VST3 Gain reference file or bundle");
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover VST3 Gain");
+        let class_id = installed.descriptors()[0].class_id.clone();
+        let mut instance = installed
+            .create_instance(&class_id, reference_plugin_export_contract(), None)
+            .expect("capture pinned VST3 instance");
+        let id = instance.parameters.keys().next().cloned().expect("Gain parameter ID");
+        instance
+            .parameters
+            .get_mut(&id)
+            .expect("Gain parameter")
+            .set_automation(mondrian_core::ExactAutomationCurve::new(id, 0.5).expect("Gain curve"))
+            .expect("set Gain curve");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_export_gain(instance, &resolver);
+    }
+
+    fn reference_plugin_export_contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 16_384,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        }
+    }
+
+    fn assert_reference_export_gain(
+        instance: mondrian_timeline::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+    ) {
         let directory = tempfile::tempdir().expect("temporary source directory");
-        let source_path = directory.path().join("clap-constant-stereo.wav");
+        let source_path = directory.path().join("constant-stereo.wav");
         let sample_rate = 48_000_u32;
         let frames = sample_rate as usize;
         let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
@@ -16750,9 +16794,9 @@ mod tests {
             AudioChannelLayout::Stereo,
             &Arc::new(AudioSourceCache::new(sample_rate)),
             service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
-            &resolver,
+            resolver,
         )
-        .expect("prepare offline export delivery with real CLAP");
+        .expect("prepare offline export delivery with real plugin");
         if delivery.requires_state_entry() {
             delivery
                 .enter_state(AudioContinuityEpoch::new(1), 0)
@@ -16765,7 +16809,7 @@ mod tests {
                 &mut output,
                 &ExecutionCancellationToken::new(),
             )
-            .expect("execute installed CLAP through export queue delivery");
+            .expect("execute installed plugin through export queue delivery");
         for (frame, pair) in output.chunks_exact(2).enumerate() {
             assert!(
                 (pair[0] - 0.125).abs() <= 1e-6,

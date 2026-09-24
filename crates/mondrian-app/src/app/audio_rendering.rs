@@ -526,7 +526,6 @@ mod tests {
         use mondrian_audio::{
             DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
         };
-        use std::io::Write;
 
         let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
             .map(std::path::PathBuf::from)
@@ -540,28 +539,71 @@ mod tests {
         let instance = installed
             .create_instance(
                 &descriptor.plugin_id,
-                AudioRenderContract {
-                    sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
-                    max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
-                    processing_mode: AudioProcessingMode::Realtime,
-                    processor_session_scratch_budget_bytes:
-                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
-                    public_output_lookahead_budget_frames:
-                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
-                    compensation_delay_scratch_budget_bytes:
-                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
-                },
+                reference_render_contract(),
                 Some(0.5_f32.to_le_bytes().to_vec()),
             )
             .expect("capture pinned CLAP instance");
         let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_preview_gain(instance, &resolver);
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
+    fn preview_runtime_executes_installed_vst3_through_selected_resolver() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("VST3 Gain reference file or bundle");
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover VST3 Gain");
+        let class_id = installed.descriptors()[0].class_id.clone();
+        let mut instance = installed
+            .create_instance(&class_id, reference_render_contract(), None)
+            .expect("capture pinned VST3 instance");
+        let id = instance.parameters.keys().next().cloned().expect("Gain parameter ID");
+        instance
+            .parameters
+            .get_mut(&id)
+            .expect("Gain parameter")
+            .set_automation(mondrian_core::ExactAutomationCurve::new(id, 0.5).expect("Gain curve"))
+            .expect("set Gain curve");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_preview_gain(instance, &resolver);
+    }
+
+    fn reference_render_contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        }
+    }
+
+    fn assert_reference_preview_gain(
+        instance: mondrian_timeline::audio::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+    ) {
+        use std::io::Write;
+
         let root = std::env::temp_dir().join(format!(
-            "mondrian-preview-clap-{}",
+            "mondrian-preview-plugin-{}",
             mondrian_core::ProjectId::new()
         ));
         std::fs::create_dir_all(&root).expect("preview test directory");
-        let source_path = root.join("clap-constant-stereo.wav");
+        let source_path = root.join("constant-stereo.wav");
         let sample_rate = 48_000_u32;
         let frames = sample_rate as usize;
         let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
@@ -599,7 +641,7 @@ mod tests {
                 None,
             )
             .expect("register WAV source");
-        let mut sequence = Sequence::new("CLAP preview");
+        let mut sequence = Sequence::new("native plugin preview");
         let track_id = sequence.audio_tracks[0].id;
         sequence
             .add_media_audio_clip(
@@ -623,9 +665,9 @@ mod tests {
             AudioAuditionOverlay::default(),
             48_000,
             AudioChannelLayout::Stereo,
-            &resolver,
+            resolver,
         )
-        .expect("prepare actual CLAP preview");
+        .expect("prepare native plugin preview");
         assert!(renderer.execution_demand().requires_execution());
         let output = renderer
             .render(
@@ -638,7 +680,7 @@ mod tests {
                 },
                 &ExecutionCancellationToken::new(),
             )
-            .expect("render through actual CLAP worker");
+            .expect("render through native plugin worker");
         assert_eq!(output.samples.len(), 128);
         for (frame, pair) in output.samples.chunks_exact(2).enumerate() {
             assert!(

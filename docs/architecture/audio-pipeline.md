@@ -8,12 +8,19 @@ ABI boundary. Discovery and worker both reject unsupported auxiliary/multiple
 main buses, mode changes, metadata drift, and latency/tail drift. Worker
 continuity entry releases the previous class and reloads the exact class from
 the saved opaque state, while sample-offset points enter the VST3 process queue.
-A reference Gain DLL built
-from the permissively licensed `vst3-rs` example passed isolated realtime and
-offline stereo signal tests with gain `0.5`, plus a fresh continuity entry with
-gain `0.25`.
-That fixture does not implement meaningful VST3 state serialization, so
-state round-trip and App Preview/Export parity are still qualification gates.
+A reference Gain DLL built from the permissively licensed `vst3-rs` example
+passed isolated realtime and offline stereo signal tests with gain `0.5`, plus
+a fresh continuity entry with gain `0.25`. The same installed bundle passed
+the App Preview and Export offline delivery paths on nonzero stereo Float32
+PCM: both produced `+0.125/-0.125` from `+0.25/-0.25` with gain `0.5` over
+the first 64 frames (absolute tolerance `1e-6`).
+A separate stateful Gain fixture under
+`crates/mondrian-audio/tests/fixtures/vst3-stateful-gain` verifies the current
+host state envelope across component and controller state. Its ignored
+integration test restores a nondefault gain, captures identical state, and
+renders through an isolated worker without parameter events after two
+continuity entries. Broader vendor Preview/Export parity remains a qualification
+gate.
 The current control frame limits serialized VST3 state to 128 KiB; larger state
 is rejected explicitly. Third-party host/license notices are in `LICENSES/`.
 The App routes selected VST3 classes through the same resolver used for
