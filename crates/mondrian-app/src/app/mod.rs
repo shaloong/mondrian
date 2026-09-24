@@ -111,6 +111,7 @@ pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 mod audio_playback_acceptance;
 mod audio_rendering;
 mod basic_titles;
+mod clap_catalog_restore;
 mod clip_clipboard;
 mod clip_retime;
 mod dynamic_hdr_authoring;
@@ -524,6 +525,7 @@ pub struct AppState {
     audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
     /// Session-installed CLAP definitions shared by Preview and Export.
     clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
+    clap_restore: Option<clap_catalog_restore::ClapCatalogRestore>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
     audio_idle_warmup_terminal_cursor: u64,
@@ -560,7 +562,7 @@ impl AppState {
         }
     }
 
-    fn with_clap_catalog(catalog: Arc<InstalledClapAudioProcessorSpecResolver>) -> Self {
+    pub(crate) fn with_clap_catalog(catalog: Arc<InstalledClapAudioProcessorSpecResolver>) -> Self {
         let resolver: Arc<dyn AudioProcessorResolver> =
             Arc::new(IsolatedAudioProcessorResolver::new(catalog.clone()));
         let mut state = Self::with_audio_processor_resolver(resolver);
@@ -629,6 +631,7 @@ impl AppState {
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
             clap_catalog: None,
+            clap_restore: None,
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new_with_processor_resolver(
                 audio_processor_resolver,

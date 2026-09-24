@@ -35,7 +35,11 @@ mutable backend catalog. Library scans happen before the write lock and commit
 all descriptors from one selected path together; failed scans and cross-path
 plugin ID collisions preserve the previous snapshot. Preview/Export preparation
 copies one snapshot and retains the existing binary-revision checks. Selected
-paths still need machine-local persistence and restart recovery.
+paths are persisted in bounded machine-local UI preferences. The Host starts
+background restoration after its startup ownership checkpoints; each library
+is re-discovered independently, so an unavailable binary cannot prevent
+subsequent libraries from restoring. The App refreshes an active audio Program
+when a restored definition becomes available.
 The selected binary is fingerprinted with bounded SHA-256 reads before and
 after descriptor discovery and contract probing, then verified again in the
 processing child before native loading. A replaced binary fails admission.

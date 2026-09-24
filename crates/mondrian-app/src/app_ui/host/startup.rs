@@ -532,8 +532,9 @@ impl AppUiHostStartupOwner {
         self.checkpoint(AppUiHostStartupStage::RecoveryLoaded);
         self.checkpoint(AppUiHostStartupStage::Ready);
 
-        let app_state = self.app_state.take().expect("App installed");
+        let mut app_state = self.app_state.take().expect("App installed");
         let preferences = self.preferences.take().expect("preferences installed");
+        app_state.schedule_clap_catalog_restore(preferences.clap_libraries.clone());
         let preferences_path = self.preferences_path.take().expect("preferences path installed");
         let asset_thumbnails = self.thumbnail.take().expect("Thumbnail installed");
         let waveform_service = match self.waveform.take().expect("Waveform installed") {

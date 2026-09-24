@@ -925,6 +925,9 @@ The insertion dropdown projects built-ins and session-installed CLAP definitions
 through the same Rack address, then offers a native CLAP library picker. Dialog
 cancel is a no-op; a selected library is scanned in the audio isolation helper
 and atomically published to the App catalog. The UI does not load native code.
+The Host persists successfully selected paths in machine-local preferences and
+retries them on a background worker after startup. The UI refreshes the Rack
+menus as discoveries arrive and reports missing libraries in the status area.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact

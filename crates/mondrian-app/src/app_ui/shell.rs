@@ -1239,6 +1239,7 @@ impl AppUiAppRoot {
             locale_preference: self.preferences_model.locale_preference,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
+            clap_libraries: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,

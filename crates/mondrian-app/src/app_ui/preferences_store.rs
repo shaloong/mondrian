@@ -21,6 +21,8 @@ const APP_UI_PREFERENCES_FILE: &str = "app_ui_preferences.json";
 const APP_UI_PREFERENCES_VERSION: u32 = 1;
 /// Maximum number of recent projects kept by the app UI startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
+/// Bound the number of machine-local native libraries retried on startup.
+pub const MAX_CLAP_LIBRARIES: usize = 64;
 
 /// Versioned user preferences owned by the app UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +39,9 @@ pub struct AppUiPreferences {
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
     pub recent_projects: Vec<PathBuf>,
+    /// Explicitly selected CLAP binaries; project files store plugin IDs only.
+    #[serde(default)]
+    pub clap_libraries: Vec<PathBuf>,
     /// User overrides for app UI shell shortcut descriptors.
     #[serde(default)]
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
@@ -73,6 +78,7 @@ impl Default for AppUiPreferences {
             locale_preference: AppUiLocalePreference::System,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
+            clap_libraries: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
@@ -93,6 +99,15 @@ impl AppUiPreferences {
         self.recent_projects.truncate(MAX_RECENT_PROJECTS);
     }
 
+    /// Remember one successfully scanned native library without adding duplicates.
+    pub fn record_clap_library(&mut self, library: PathBuf) {
+        self.clap_libraries.retain(|existing| existing != &library);
+        self.clap_libraries.push(library);
+        if self.clap_libraries.len() > MAX_CLAP_LIBRARIES {
+            self.clap_libraries.remove(0);
+        }
+    }
+
     fn sanitize_loaded(mut self) -> Self {
         if self.version != APP_UI_PREFERENCES_VERSION {
             return Self::default();
@@ -109,6 +124,18 @@ impl AppUiPreferences {
             }
         }
         self.recent_projects = sanitized;
+
+        let mut libraries = Vec::new();
+        for path in self.clap_libraries {
+            if !path.is_absolute() || libraries.contains(&path) {
+                continue;
+            }
+            libraries.push(path);
+            if libraries.len() == MAX_CLAP_LIBRARIES {
+                break;
+            }
+        }
+        self.clap_libraries = libraries;
 
         let mut shortcut_overrides = Vec::new();
         for entry in self.shortcut_overrides {
@@ -222,6 +249,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -251,6 +279,7 @@ mod tests {
             locale_preference: AppUiLocalePreference::EnUs,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
+            clap_libraries: Vec::new(),
             shortcut_overrides: vec![AppUiShortcutOverride {
                 id: "panel.inspector".to_owned(),
                 binding: None,
@@ -323,6 +352,29 @@ mod tests {
         fs::remove_file(project_path).ok();
 
         assert_eq!(loaded, preferences);
+    }
+
+    #[test]
+    fn clap_paths_are_bounded_deduplicated_and_missing_files_remain_recoverable() {
+        let path = temp_preferences_path("clap-library-preferences");
+        let missing = temp_preferences_path("missing-plugin").with_extension("clap");
+        let mut preferences = AppUiPreferences::default();
+        preferences.record_clap_library(missing.clone());
+        preferences.record_clap_library(missing.clone());
+        assert_eq!(preferences.clap_libraries, vec![missing.clone()]);
+        persist_app_ui_preferences_to(&path, &preferences).expect("persist selections");
+        assert_eq!(
+            load_app_ui_preferences_from(&path).clap_libraries,
+            vec![missing.clone()]
+        );
+        for index in 0..=MAX_CLAP_LIBRARIES {
+            preferences.record_clap_library(
+                std::env::temp_dir().join(format!("mondrian-clap-library-{index}.dll")),
+            );
+        }
+        assert_eq!(preferences.clap_libraries.len(), MAX_CLAP_LIBRARIES);
+        assert!(!preferences.clap_libraries.contains(&missing));
+        fs::remove_file(path).ok();
     }
 
     #[test]
@@ -416,6 +468,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -482,6 +535,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -554,6 +608,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -585,6 +640,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: vec![
                     AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                     AppUiShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },

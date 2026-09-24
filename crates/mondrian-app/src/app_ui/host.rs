@@ -37,6 +37,7 @@ use crate::app::preview_runtime::{
     PreviewPresentationState, PreviewVisualGpuCompletionDisposition,
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
+use crate::app::product_action::{AudioProductAction, ProductAction};
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload,
     PreferencesDisplayManagementPayload, PreferencesLocalePayload, PreferencesShortcutPayload,
@@ -1171,6 +1172,7 @@ impl AppUiHost {
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
+        let clap_catalog_changed = self.app_state.borrow_mut().poll_clap_catalog_restore();
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1222,7 +1224,8 @@ impl AppUiHost {
         if preview_outcome.visible_change {
             self.preview_dirty.set(true);
         }
-        let full_model_changed = persistence_changed
+        let full_model_changed = clap_catalog_changed
+            || persistence_changed
             || project_close_changed
             || media_imports_changed
             || media_asset_mutations_changed
@@ -1704,12 +1707,31 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
+        let installed_clap_path = match ProductAction::decode_external(&action) {
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
+                Some(payload.path)
+            }
+            _ => None,
+        };
         let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
+            if let Some(path) = installed_clap_path {
+                let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+                self.preferences.record_clap_library(canonical_path);
+                if let Err(error) =
+                    persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
+                {
+                    tracing::warn!(%error, "failed to save CLAP library selection");
+                    self.app_state.borrow_mut().set_status_hint(
+                        format!("CLAP 插件已安装，但无法保存重启恢复信息：{error}"),
+                        true,
+                    );
+                }
+            }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
             if current_project_path.is_some() && current_project_path != previous_project_path {
@@ -2603,6 +2625,7 @@ pub(crate) enum ViewerGpuPreparation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::product_action::AudioInstallClapLibraryPayload;
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, ClipId, Color, TrackId};
     use mondrian_core::{FramePosition, TimelineTime};
@@ -2883,6 +2906,59 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-host-{name}-{nanos}.json"))
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_CLAP_TEST_HELPER and MONDRIAN_CLAP_TEST_PLUGIN"]
+    fn installed_clap_library_is_saved_and_restored_after_host_restart() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built app executable");
+        let library = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("Clack reference library");
+        let preferences_path = temp_preferences_path("clap-restart");
+        let make_state = || {
+            let catalog = Arc::new(
+                mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                    .expect("catalog"),
+            );
+            AppState::with_clap_catalog(catalog)
+        };
+        let mut first = AppUiHost::new_with_preferences_path(
+            make_state(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        first
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                    AudioInstallClapLibraryPayload { path: library.clone() },
+                ))
+                .into_external_action(),
+            )
+            .expect("install library");
+        let saved = load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(
+            saved.clap_libraries,
+            vec![library.canonicalize().expect("library path")]
+        );
+        drop(first);
+
+        let mut restarted =
+            AppUiHost::new_with_preferences_path(make_state(), saved, preferences_path.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted.app_state().installed_clap_processors().expect("catalog").is_empty()
+            && Instant::now() < deadline
+        {
+            restarted.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            restarted.app_state().installed_clap_processors().expect("catalog").len(),
+            1
+        );
+        std::fs::remove_file(preferences_path).ok();
     }
 
     fn temp_asset_library_dir(name: &str) -> PathBuf {
@@ -4463,6 +4539,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -4579,6 +4656,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5282,6 +5360,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5388,6 +5467,7 @@ mod tests {
                 locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                clap_libraries: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,

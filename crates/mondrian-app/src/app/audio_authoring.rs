@@ -59,6 +59,9 @@ impl AppState {
                     format!("已安装 {} 个 CLAP 处理器", descriptors.len()),
                     false,
                 );
+                if !descriptors.is_empty() && self.active_sequence().is_some() {
+                    self.reconcile_audio_after_committed_authoring_change("clap_install_library");
+                }
                 Ok(())
             }
             AudioProductAction::InsertClapProcessor(payload) => {

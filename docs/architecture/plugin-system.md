@@ -97,9 +97,14 @@ The Inspector and Mixer insertion menus expose session-installed definitions
 and a native picker for an explicitly selected CLAP binary. The App probes a
 selected definition in the isolated helper before submitting one Timeline Rack
 insert transaction. Canceling the picker changes neither catalog nor project;
-a failed scan retains the previous catalog. Installation is session-local and
-does not advance the project author generation. Automatic installed-path enumeration,
-selected-path persistence and restart recovery, state capture, parameter-control UI, project-persistent
+a failed scan retains the previous catalog. A successful selection records its
+canonical path in bounded machine-local UI preferences, never in `.mdp`.
+At restart, the Host schedules those paths on a dedicated background worker;
+each library is re-scanned in its isolated child and publishes only after
+validation. Missing or changed libraries report a visible restore failure
+without changing project author state. Installation and restoration do not
+advance the project author generation. Automatic installed-path enumeration,
+plugin management and relocation UI, state capture, parameter-control UI, project-persistent
 binary revision recovery, and a full Preview/Export signal-parity test remain required before
 CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
