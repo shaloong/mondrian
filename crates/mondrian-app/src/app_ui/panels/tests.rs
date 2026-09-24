@@ -531,6 +531,42 @@ fn asset_browser_tabs_expose_effect_browser() {
     assert_eq!(tabs[1], PanelKind::Effects);
 }
 
+#[test]
+fn dock_tabs_project_locale_without_changing_panel_identity() {
+    let state = AppState::new();
+    let english =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("English catalog");
+    let chinese =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("Chinese catalog");
+    let models_for = |localizer: &Localizer| {
+        AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            &state,
+            None,
+            None,
+            None,
+            Some(localizer),
+        )
+    };
+    let english_models = models_for(&english);
+    let chinese_models = models_for(&chinese);
+    assert_eq!(english_models.panel_title(PanelKind::Viewer), "Viewer");
+    assert_eq!(
+        english_models.panel_title(PanelKind::Inspector),
+        "Inspector"
+    );
+    assert_eq!(english_models.panel_title(PanelKind::Mixer), "Mixer");
+    assert_eq!(chinese_models.panel_title(PanelKind::Viewer), "预览");
+    assert_eq!(chinese_models.panel_title(PanelKind::Inspector), "检查器");
+    assert_eq!(english_models.panel_titles.len(), PanelKind::ALL.len());
+    assert_eq!(chinese_models.panel_titles.len(), PanelKind::ALL.len());
+    let dock = build_dock_tree(english_models);
+    let assets = dock_panel_for_kind(&dock, PanelKind::Assets).expect("assets panel");
+    assert_eq!(
+        assets.tab_kinds(),
+        vec![PanelKind::Assets, PanelKind::Effects]
+    );
+}
+
 fn dock_panel_for_kind(widget: &dyn Widget, kind: PanelKind) -> Option<&DockPanel> {
     if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>())
         && panel.kind() == kind

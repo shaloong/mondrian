@@ -314,6 +314,7 @@ pub enum AssetThumbnailState {
 /// Complete set of view models needed by the app UI panel shell.
 #[derive(Debug, Clone)]
 pub struct AppUiPanelModels {
+    panel_titles: HashMap<PanelKind, String>,
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
     pub viewer: ViewerPanelModel,
@@ -385,6 +386,7 @@ impl AppUiPanelModels {
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
+            panel_titles: localized_panel_titles(localizer),
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
                 state.asset_library(),
                 asset_folder_id,
@@ -411,6 +413,7 @@ impl AppUiPanelModels {
         let viewer = ViewerPanelModel::from_app_state(state);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
+            panel_titles: localized_panel_titles(None),
             assets: demo_asset_model(),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer,
@@ -441,6 +444,33 @@ impl AppUiPanelModels {
         let state = demo_app_state();
         Self::demo_from_app_state(&state)
     }
+
+    fn panel_title(&self, kind: PanelKind) -> &str {
+        self.panel_titles
+            .get(&kind)
+            .map(String::as_str)
+            .expect("every Dock panel has a title")
+    }
+}
+
+fn localized_panel_titles(localizer: Option<&Localizer>) -> HashMap<PanelKind, String> {
+    PanelKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let message_id = match kind {
+                PanelKind::Viewer => "panel-viewer",
+                PanelKind::Scopes => "panel-scopes",
+                PanelKind::Timeline => "panel-timeline",
+                PanelKind::Assets => "panel-assets",
+                PanelKind::Inspector => "panel-inspector",
+                PanelKind::Mixer => "panel-mixer",
+                PanelKind::Effects => "panel-effects",
+                PanelKind::NodeGraph => "panel-node-graph",
+                PanelKind::Export => "panel-export",
+            };
+            (kind, asset_text(localizer, message_id, kind.display_name()))
+        })
+        .collect()
 }
 
 fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
@@ -3306,7 +3336,7 @@ fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: AppUiPanelModels) -> Bo
         .iter()
         .enumerate()
         .map(|(index, kind)| TabInfo {
-            label: kind.display_name().to_string(),
+            label: models.panel_title(*kind).to_owned(),
             active: index == 0,
             panel_kind: Some(*kind),
         })

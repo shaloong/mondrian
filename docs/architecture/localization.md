@@ -67,6 +67,9 @@ file dialogs receive the machine-local UI locale explicitly. Their titles,
 suggested untitled names, and extension-filter labels come from Fluent; only
 the visible text changes, while accepted extensions, cancellation, and emitted
 typed actions stay identical.
+Dock tab labels use the same locale snapshot and existing panel message IDs.
+The underlying `PanelKind` remains stable across language changes, so saved
+layouts, active tabs, and drag targets never depend on translated text.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
