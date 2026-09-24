@@ -20,8 +20,11 @@ metadata after successful exit. Plugin code is loaded only in the child.
 The probe restores the same author state, validates a Mono/Stereo main port,
 and measures latency/tail for the requested rate and block extent. The
 subsequent audio worker rechecks those facts. Explicit library selection is
-available through the resolver; the application has not yet wired discovery
-into the insertion picker or its Preview/Export runtime paths.
+available through the resolver, which the application can bind to Preview and
+Export. The insertion picker and installed-library management are not yet wired.
+The selected binary is fingerprinted with bounded SHA-256 reads before and
+after descriptor discovery and contract probing, then verified again in the
+processing child before native loading. A replaced binary fails admission.
 
 The public Runtime builders for an audition compile request and for a frozen
 selected-range dependency closure accept an explicit processor resolver. Each
@@ -30,7 +33,7 @@ immutable resolver to Preview, idle audio warmup, and its Export queue. Export
 uses that queue resolver for normal audio and each stem, including the initial
 aggregate resource admission pass. Default construction still uses built-ins
 and rejects unresolved external definitions. Installed-plugin selection and
-binary revision binding remain product work.
+project-persistent binary revision recovery remain product work.
 
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different

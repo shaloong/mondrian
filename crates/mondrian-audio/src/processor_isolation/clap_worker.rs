@@ -1,5 +1,6 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
+use super::clap_discovery::fingerprint_clap_binary;
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -98,6 +99,8 @@ pub struct ClapPluginRegistration {
     pub plugin_id: String,
     /// Absolute path to the selected installed library.
     pub library_path: PathBuf,
+    /// SHA-256 of the exact installed binary admitted by discovery and probe.
+    pub binary_sha256: [u8; 32],
     /// Exact scheduling contract supplied by the caller and rechecked in the child.
     pub execution_contract: AudioProcessorExecutionContract,
 }
@@ -115,7 +118,7 @@ pub struct ClapAudioProcessorSpecResolver {
 /// occurrence's exact render contract before worker admission.
 pub struct DiscoveredClapAudioProcessorSpecResolver {
     helper_executable: PathBuf,
-    plugins: BTreeMap<String, (ClapPluginDescriptor, PathBuf)>,
+    plugins: BTreeMap<String, (ClapPluginDescriptor, PathBuf, [u8; 32])>,
 }
 
 impl DiscoveredClapAudioProcessorSpecResolver {
@@ -130,12 +133,21 @@ impl DiscoveredClapAudioProcessorSpecResolver {
         }
         let mut plugins = BTreeMap::new();
         for library in libraries {
-            let descriptors = scan_clap_library_descriptors(&helper_executable, &library)?;
             let path = std::fs::canonicalize(&library)
                 .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+            let fingerprint = fingerprint_clap_binary(&path)?;
+            let descriptors = scan_clap_library_descriptors(&helper_executable, &path)?;
+            if fingerprint_clap_binary(&path)? != fingerprint {
+                return Err(unavailable(
+                    "CLAP binary changed during descriptor discovery",
+                ));
+            }
             for descriptor in descriptors {
                 if plugins
-                    .insert(descriptor.plugin_id.clone(), (descriptor, path.clone()))
+                    .insert(
+                        descriptor.plugin_id.clone(),
+                        (descriptor, path.clone(), fingerprint),
+                    )
                     .is_some()
                 {
                     return Err(invalid(
@@ -149,7 +161,7 @@ impl DiscoveredClapAudioProcessorSpecResolver {
 
     /// Stable plugin descriptors available for an insertion picker.
     pub fn descriptors(&self) -> Vec<&ClapPluginDescriptor> {
-        self.plugins.values().map(|(descriptor, _)| descriptor).collect()
+        self.plugins.values().map(|(descriptor, _, _)| descriptor).collect()
     }
 }
 
@@ -163,7 +175,7 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
                 "only CLAP definitions are handled by this resolver",
             ));
         };
-        let (_, library_path) = self
+        let (_, library_path, fingerprint) = self
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
@@ -174,6 +186,11 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
             request.render_contract(),
             request.opaque_state(),
         )?;
+        if registration.binary_sha256 != *fingerprint {
+            return Err(unavailable(
+                "CLAP binary changed after descriptor discovery",
+            ));
+        }
         ClapAudioProcessorSpecResolver::new(self.helper_executable.clone(), [registration])?
             .resolve(request)
     }
@@ -193,6 +210,7 @@ impl ClapAudioProcessorSpecResolver {
             if plugin.plugin_id.is_empty()
                 || plugin.plugin_id.contains('\0')
                 || !plugin.library_path.is_absolute()
+                || plugin.binary_sha256 == [0; 32]
                 || !plugin.execution_contract.requires_state_entry()
                 || by_id.insert(plugin.plugin_id.clone(), plugin).is_some()
             {
@@ -229,6 +247,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         let payload = serde_json::to_vec(&ClapPayload {
             library_path: plugin.library_path.clone(),
             plugin_id: plugin.plugin_id.clone(),
+            binary_sha256: plugin.binary_sha256,
             state: request.opaque_state().map(ToOwned::to_owned),
         })
         .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
@@ -248,6 +267,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
 struct ClapPayload {
     library_path: PathBuf,
     plugin_id: String,
+    binary_sha256: [u8; 32],
     #[serde(default)]
     state: Option<Vec<u8>>,
 }
@@ -268,6 +288,9 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             return Err(invalid(
                 "CLAP library path must be absolute and plugin ID nonempty",
             ));
+        }
+        if fingerprint_clap_binary(&payload.library_path)? != payload.binary_sha256 {
+            return Err(unavailable("CLAP binary changed since processor admission"));
         }
         let plugin_id = CString::new(payload.plugin_id)
             .map_err(|_| invalid("CLAP plugin ID contains a NUL byte"))?;
@@ -665,6 +688,7 @@ mod tests {
         let registration = ClapPluginRegistration {
             plugin_id: "org.example.gain".to_owned(),
             library_path: helper.clone(),
+            binary_sha256: [1; 32],
             execution_contract: contract(),
         };
         assert!(ClapAudioProcessorSpecResolver::new(
@@ -703,6 +727,39 @@ mod tests {
         assert!(matches!(
             ClapAudioProcessorWorkerFactory.prepare(request),
             Err(AudioProcessorHostError::InvalidContract(_))
+        ));
+    }
+
+    #[test]
+    fn worker_rejects_changed_binary_before_native_loading() {
+        let temp = tempfile::tempdir().expect("temporary plugin directory");
+        let library = temp.path().join("gain.clap");
+        std::fs::write(&library, b"replacement binary").expect("write fake plugin");
+        let payload = serde_json::to_vec(&ClapPayload {
+            library_path: library,
+            plugin_id: "org.example.gain".to_owned(),
+            binary_sha256: [7; 32],
+            state: None,
+        })
+        .expect("payload");
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            payload,
+            plugin_execution_contract: contract(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: Vec::new(),
+            render_contract: AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 512,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: 1024 * 1024,
+                public_output_lookahead_budget_frames: 4096,
+                compensation_delay_scratch_budget_bytes: 1024 * 1024,
+            },
+        };
+        assert!(matches!(
+            ClapAudioProcessorWorkerFactory.prepare(request),
+            Err(AudioProcessorHostError::Unavailable(message)) if message.contains("changed")
         ));
     }
 

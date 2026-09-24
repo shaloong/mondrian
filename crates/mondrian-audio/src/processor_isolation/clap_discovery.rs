@@ -17,6 +17,7 @@ use clack_host::prelude::{
 };
 use mondrian_core::AudioChannelLayout;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::Read;
@@ -33,6 +34,40 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
+const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+
+pub(super) fn fingerprint_clap_binary(
+    library_path: &Path,
+) -> Result<[u8; 32], AudioProcessorHostError> {
+    let mut file = fs::File::open(library_path)
+        .map_err(|error| unavailable(format!("CLAP binary open failed: {error}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| unavailable(format!("CLAP binary metadata failed: {error}")))?;
+    if !metadata.is_file() || metadata.len() > MAX_CLAP_BINARY_BYTES {
+        return Err(invalid("CLAP binary is not a bounded regular file"));
+    }
+    let mut hash = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| unavailable(format!("CLAP binary read failed: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        if size > MAX_CLAP_BINARY_BYTES {
+            return Err(invalid("CLAP binary exceeds the fingerprint limit"));
+        }
+        hash.update(&buffer[..read]);
+    }
+    if size != metadata.len() {
+        return Err(unavailable("CLAP binary changed during fingerprinting"));
+    }
+    Ok(hash.finalize().into())
+}
 
 /// One discovered CLAP identity for display and persistent definition matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +156,9 @@ pub fn probe_clap_plugin_registration(
     if plugin_id.is_empty() || plugin_id.len() > 256 || plugin_id.contains('\0') {
         return Err(invalid("CLAP probe plugin ID is invalid"));
     }
+    let canonical = fs::canonicalize(library_path)
+        .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+    let fingerprint = fingerprint_clap_binary(&canonical)?;
     let (library_path, response) = request_discovery(
         helper_executable,
         library_path,
@@ -132,6 +170,9 @@ pub fn probe_clap_plugin_registration(
             state: state.map(ToOwned::to_owned),
         },
     )?;
+    if fingerprint_clap_binary(&library_path)? != fingerprint {
+        return Err(unavailable("CLAP binary changed during contract probing"));
+    }
     if !response.descriptors.is_empty() {
         return Err(invalid(
             "CLAP probe response unexpectedly contains descriptors",
@@ -157,6 +198,7 @@ pub fn probe_clap_plugin_registration(
     Ok(ClapPluginRegistration {
         plugin_id: plugin_id.to_owned(),
         library_path,
+        binary_sha256: fingerprint,
         execution_contract,
     })
 }
@@ -576,6 +618,25 @@ mod tests {
     }
 
     #[test]
+    fn binary_fingerprint_changes_with_file_and_rejects_oversized_file() {
+        let temp = tempfile::tempdir().expect("temporary plugin directory");
+        let library = temp.path().join("gain.clap");
+        fs::write(&library, b"plugin revision one").expect("first revision");
+        let first = fingerprint_clap_binary(&library).expect("first fingerprint");
+        fs::write(&library, b"plugin revision two").expect("second revision");
+        assert_ne!(
+            first,
+            fingerprint_clap_binary(&library).expect("second fingerprint")
+        );
+        let file = fs::OpenOptions::new().write(true).open(&library).expect("open plugin");
+        file.set_len(MAX_CLAP_BINARY_BYTES + 1).expect("grow sparse file");
+        assert!(matches!(
+            fingerprint_clap_binary(&library),
+            Err(AudioProcessorHostError::InvalidContract(_))
+        ));
+    }
+
+    #[test]
     fn scanner_reports_child_failure_without_editor_crash() {
         let test_executable = std::env::current_exe().expect("test executable path");
         assert!(matches!(
@@ -628,6 +689,10 @@ mod tests {
         )
         .expect("probe installed gain plugin");
         assert_eq!(registration.plugin_id, "org.rust-audio.clack.gain");
+        assert_eq!(
+            registration.binary_sha256,
+            fingerprint_clap_binary(&plugin).expect("reference fingerprint")
+        );
         assert_eq!(
             registration.execution_contract.algorithmic_latency_frames(),
             0
