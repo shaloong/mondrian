@@ -198,6 +198,7 @@ use crate::app_ui::audio_processor_rack::{
     clip_processing_scope_racks, insert_option_action as audio_processor_insert_option_action,
     move_before_action as audio_processor_move_before_action,
     move_to_end_action as audio_processor_move_to_end_action,
+    rebind_clap_action as audio_processor_rebind_clap_action,
     remove_action as audio_processor_remove_action,
     set_static_parameter_action as audio_processor_set_static_parameter_action,
     AudioProcessorRackModel,

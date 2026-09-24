@@ -1531,3 +1531,7 @@ generation enters at the exact first frame's rational sample position and all
 later windows must continue at the prior terminal sample. The Runtime shares
 the App's sole `AudioSourceCache`; it does not create a qualification-only
 decoder authority or borrow Monitor Path state.
+An explicit CLAP rebind probes the currently installed definition and checks
+its complete saved parameter schema against the authored snapshot before a
+single Rack transaction updates the binary revision. Curves, opaque state,
+bypass, and processor identity survive the edit and Undo/Redo.

@@ -1496,6 +1496,17 @@ pub(super) fn with_audio_processor_rack_sections(
                         .with_gap(8.0),
                     ),
                 ));
+            if processor.is_clap {
+                let rebind = audio_processor_rebind_clap_action(rack, processor);
+                section = section.with_row(PropertyRow::new(
+                    "插件绑定",
+                    Box::new(
+                        Button::new("重新绑定已安装版本")
+                            .enabled(rebind.is_some())
+                            .on_click(rebind),
+                    ),
+                ));
+            }
             for parameter in &processor.parameters {
                 let label = audio_processor_parameter_label(parameter);
                 if parameter.keyframe_count > 0 {

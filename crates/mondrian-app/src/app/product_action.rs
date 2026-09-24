@@ -14,8 +14,8 @@ use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioSourceComponentId, ClipId, EffectId, FramePosition, GeneratedAssetKind, JobId,
-    KeyframeId, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioProcessorInstanceId, AudioSourceComponentId, ClipId, EffectId, FramePosition,
+    GeneratedAssetKind, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, GalleryColorStatistics, GalleryStillId, GalleryStillRaster, GradeDefinitionId,
@@ -210,6 +210,7 @@ pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
 pub const AUDIO_INSTALL_CLAP_LIBRARY: &str = "install_clap_library";
 /// External action name for inserting one installed CLAP processor.
 pub const AUDIO_INSERT_CLAP_PROCESSOR: &str = "insert_clap_processor";
+pub const AUDIO_REBIND_CLAP_PROCESSOR: &str = "rebind_clap_processor";
 /// External action name for one normative Channel Strip edit.
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 /// External action name for one atomic Bus/Route graph edit.
@@ -453,6 +454,8 @@ pub enum AudioProductAction {
     InstallClapLibrary(AudioInstallClapLibraryPayload),
     /// Probe and insert an installed native processor in one author transaction.
     InsertClapProcessor(AudioProcessorInsertClapPayload),
+    /// Re-probe an installed CLAP binary and explicitly update one authored instance.
+    RebindClapProcessor(AudioProcessorRebindClapPayload),
     /// Apply one Track, Bus, or Program Output Channel Strip mutation.
     EditChannelStrip(AudioChannelStripEditRequest),
     /// Apply one Bus/Route graph mutation.
@@ -719,6 +722,11 @@ impl ProductAction {
                 }
                 AUDIO_INSERT_CLAP_PROCESSOR => {
                     Ok(Some(Self::Audio(AudioProductAction::InsertClapProcessor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_REBIND_CLAP_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::RebindClapProcessor(
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
@@ -1242,6 +1250,11 @@ impl ProductAction {
                 AUDIO_INSERT_CLAP_PROCESSOR,
                 serde_json::json!(payload),
             ),
+            Self::Audio(AudioProductAction::RebindClapProcessor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REBIND_CLAP_PROCESSOR,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_CHANNEL_STRIP,
@@ -1700,6 +1713,16 @@ pub struct AudioProcessorInsertClapPayload {
     pub plugin_id: String,
     /// Stable position inside the Rack.
     pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Existing processor selected for an explicit installed CLAP revision rebind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorRebindClapPayload {
+    /// Rack containing the processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Stable processor instance identity.
+    pub processor_id: AudioProcessorInstanceId,
 }
 
 /// Transient Track audition intent owned by the open App Session.
@@ -4150,6 +4173,12 @@ mod tests {
                     address,
                     plugin_id: "org.example.gain".to_owned(),
                     placement: AudioProcessorRackPlacement::End,
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::RebindClapProcessor(
+                AudioProcessorRebindClapPayload {
+                    address,
+                    processor_id: AudioProcessorInstanceId::new(),
                 },
             )),
         ] {

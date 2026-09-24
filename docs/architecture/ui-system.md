@@ -2519,3 +2519,7 @@ Export, Reference Output, media/background workers, Project persistence and cach
 receipts must all report closure; incomplete App closure returns an error from the
 Window entrypoint instead of accepting ordinary `Drop` as success. Validation may
 return the exact App owner to its caller for reuse and later consuming shutdown.
+The shared Inspector/Mixer Audio Processor Rack projection offers an explicit
+rebind control for CLAP instances. It submits a typed App action, which probes
+and validates the installed binary before authoring one undoable Rack edit;
+failed or canceled attempts leave the Project unchanged.

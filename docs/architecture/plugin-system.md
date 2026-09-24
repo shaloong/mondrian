@@ -93,6 +93,13 @@ inside its definition reference. Both Preview and Export compare that authored
 revision with the installed registration before preparing a worker. A legacy
 definition without a revision remains editable but needs explicit rebinding
 before native execution.
+The Inspector/Mixer exposes an explicit rebind action on each CLAP instance.
+The App re-probes the installed plugin with the instance's saved opaque state,
+requires the complete parameter schema and stable plugin identity to match,
+then submits one optimistic Rack edit that changes only the binary revision.
+The edit preserves processor identity, bypass, parameter curves, and opaque
+state and participates in Undo/Redo. Missing binaries, changed parameter
+schemas, locked Tracks, and stale edits leave the Project untouched.
 An installed reference-plugin test verifies the Preview adapter launches the
 real CLAP worker and renders a block. A local CLAP fixture verifies that parameter
 events retain their sample offsets at the ABI. The Clack Gain example receives
@@ -112,8 +119,7 @@ binding during audio preparation; the App surfaces that preparation failure
 and clears stale audio. Neither case changes project author state.
 Installation and restoration do not
 advance the project author generation. Automatic installed-path enumeration,
-plugin management and relocation UI, state capture, parameter-control UI, project-persistent
-binary revision recovery, and a full Preview/Export signal-parity test remain required before
+plugin management and relocation UI, state capture, parameter-control UI, and a full Preview/Export signal-parity test remain required before
 CLAP is advertised as a complete product feature. VST3 and OpenFX binaries remain
 unhosted and unavailable. The visual Effect registry/DSL does not host OpenFX.
 

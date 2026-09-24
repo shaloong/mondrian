@@ -1400,6 +1400,9 @@ preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
 CLAP processor definitions also store the selected binary's SHA-256 revision;
+an explicit rebind Rack edit compares the old definition before replacing only
+that revision. It rejects a different plugin ID, schema version, zero revision,
+or stale instance and commits only after complete Audio Program validation.
 the installed path remains machine-local. Legacy definitions without a revision
 stay readable for editing but fail native preparation until explicitly rebound.
 

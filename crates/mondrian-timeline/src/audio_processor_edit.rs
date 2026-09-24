@@ -1,8 +1,8 @@
 //! Atomic authoring operations for every Sequence-owned Audio Processor Rack.
 
 use crate::audio::{
-    AudioAuthoringError, AudioChannelStrip, AudioChannelStripOwner, AudioProcessorInstance,
-    AudioProcessorRack, AudioProgram,
+    AudioAuthoringError, AudioChannelStrip, AudioChannelStripOwner, AudioProcessorDefinitionRef,
+    AudioProcessorInstance, AudioProcessorRack, AudioProgram,
 };
 use crate::audio_channel_strip_edit::{
     audio_channel_strip, inspect_audio_channel_strip, AudioChannelStripAddressError,
@@ -92,6 +92,15 @@ pub enum AudioProcessorRackEdit {
         /// New authored bypass state.
         bypassed: bool,
     },
+    /// Bind an existing CLAP instance to a separately verified binary revision.
+    RebindClap {
+        /// Exact processor to update without replacing its automation or state.
+        processor_id: AudioProcessorInstanceId,
+        /// Definition observed before the external plugin probe.
+        expected_definition: AudioProcessorDefinitionRef,
+        /// Definition produced by the verified installed plugin probe.
+        new_definition: AudioProcessorDefinitionRef,
+    },
     /// Replace one parameter's unkeyed value by stable definition identity.
     SetParameterStaticValue {
         /// Processor identity to edit.
@@ -110,6 +119,7 @@ impl AudioProcessorRackEdit {
             Self::Remove { processor_id }
             | Self::Move { processor_id, .. }
             | Self::SetBypassed { processor_id, .. }
+            | Self::RebindClap { processor_id, .. }
             | Self::SetParameterStaticValue { processor_id, .. } => *processor_id,
         }
     }
@@ -177,6 +187,9 @@ pub enum AudioProcessorRackEditError {
         /// Missing stable parameter identity.
         parameter_id: ParameterId,
     },
+    /// A rebind raced with another edit or changed plugin identity/schema version.
+    #[error("CLAP Processor definition changed or rebind identity is incompatible")]
+    IncompatibleRebind,
     /// Complete resulting audio author state is invalid.
     #[error("Audio Processor Rack edit produced invalid author state: {0}")]
     AuthorState(AudioAuthoringError),
@@ -465,6 +478,41 @@ fn apply_to_rack(
                 return Ok(false);
             }
             rack.processors[index].bypassed = *bypassed;
+            Ok(true)
+        }
+        AudioProcessorRackEdit::RebindClap {
+            processor_id,
+            expected_definition,
+            new_definition,
+        } => {
+            let index = processor_index(rack, *processor_id)?;
+            let processor = &mut rack.processors[index];
+            let (
+                AudioProcessorDefinitionRef::Clap {
+                    plugin_id: old_id,
+                    schema_version: old_version,
+                    ..
+                },
+                AudioProcessorDefinitionRef::Clap {
+                    plugin_id: new_id,
+                    schema_version: new_version,
+                    binary_sha256: Some(new_hash),
+                },
+            ) = (expected_definition, new_definition)
+            else {
+                return Err(AudioProcessorRackEditError::IncompatibleRebind);
+            };
+            if &processor.definition != expected_definition
+                || old_id != new_id
+                || old_version != new_version
+                || *new_hash == [0; 32]
+            {
+                return Err(AudioProcessorRackEditError::IncompatibleRebind);
+            }
+            if &processor.definition == new_definition {
+                return Ok(false);
+            }
+            processor.definition = new_definition.clone();
             Ok(true)
         }
         AudioProcessorRackEdit::SetParameterStaticValue { processor_id, parameter_id, value } => {
@@ -771,6 +819,71 @@ mod tests {
             -6.0
         );
         assert!(gain.parameters[&parameter_id].automation.keyframes.is_empty());
+    }
+
+    #[test]
+    fn clap_rebind_preserves_instance_state_and_rejects_stale_or_cross_plugin_requests() {
+        let (mut sequence, track_id, _) = sequence_with_audio_clip();
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        processor.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: None,
+        };
+        processor.opaque_state = Some(vec![1, 2, 3].into());
+        let id = insert(&mut sequence, address, processor.clone());
+        let expected = processor.definition.clone();
+        let next = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        let rebind = |expected_definition, new_definition| {
+            request(
+                address,
+                AudioProcessorRackEdit::RebindClap {
+                    processor_id: id,
+                    expected_definition,
+                    new_definition,
+                },
+            )
+        };
+        let before = sequence.clone();
+        assert_eq!(
+            apply_audio_processor_rack_edit(
+                &mut sequence,
+                &rebind(
+                    expected.clone(),
+                    AudioProcessorDefinitionRef::Clap {
+                        plugin_id: "org.example.other".to_owned(),
+                        schema_version: 1,
+                        binary_sha256: Some([7; 32]),
+                    }
+                ),
+            ),
+            Err(AudioProcessorRackEditError::IncompatibleRebind)
+        );
+        assert_eq!(sequence, before);
+        assert!(
+            apply_audio_processor_rack_edit(&mut sequence, &rebind(expected.clone(), next.clone()))
+                .expect("rebind")
+                .changed
+        );
+        let updated = &audio_processor_rack(&sequence, &address).expect("rack").processors[0];
+        assert_eq!(updated.id, processor.id);
+        assert_eq!(updated.definition, next);
+        assert_eq!(updated.parameters, processor.parameters);
+        assert_eq!(updated.opaque_state, processor.opaque_state);
+        let after = sequence.clone();
+        assert_eq!(
+            apply_audio_processor_rack_edit(&mut sequence, &rebind(expected, next)),
+            Err(AudioProcessorRackEditError::IncompatibleRebind)
+        );
+        assert_eq!(sequence, after);
     }
 
     #[test]

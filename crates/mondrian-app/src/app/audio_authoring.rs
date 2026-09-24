@@ -6,18 +6,20 @@
 use mondrian_audio::{AudioProcessingMode, AudioRenderContract, ClapPluginDescriptor};
 use mondrian_core::{MondrianError, Result};
 use mondrian_timeline::audio::{
-    AudioComponentSource, AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
-    BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+    AudioComponentSource, AudioProcessorDefinitionRef, AudioProcessorInstance,
+    BUILTIN_GAIN_DEFINITION_ID, BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
 };
 use mondrian_timeline::{
     apply_audio_automation_edit, apply_audio_channel_strip_edit, apply_audio_component_edit,
     apply_audio_processor_rack_edit, apply_audio_routing_edit, inspect_audio_component,
-    AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditBlocker,
-    AudioComponentEditRequest, AudioComponentMutation, AudioProcessorRackEdit,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+    inspect_audio_processor_rack, AudioAutomationEditRequest, AudioChannelStripEditRequest,
+    AudioComponentEditBlocker, AudioComponentEditRequest, AudioComponentMutation,
+    AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioRoutingEditRequest,
 };
 
-use super::product_action::{AudioProcessorBuiltInPreset, AudioProductAction};
+use super::product_action::{
+    AudioProcessorBuiltInPreset, AudioProcessorRebindClapPayload, AudioProductAction,
+};
 use super::AppState;
 
 impl AppState {
@@ -97,6 +99,7 @@ impl AppState {
                     },
                 })
             }
+            AudioProductAction::RebindClapProcessor(payload) => self.rebind_clap_processor(payload),
             AudioProductAction::EditChannelStrip(request) => self.edit_audio_channel_strip(request),
             AudioProductAction::EditRouting(request) => self.edit_audio_routing(request),
         }
@@ -109,6 +112,66 @@ impl AppState {
             .as_ref()
             .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
         catalog.descriptors().map_err(|error| clap_unavailable(error.to_string()))
+    }
+
+    fn rebind_clap_processor(&mut self, payload: AudioProcessorRebindClapPayload) -> Result<()> {
+        let sequence =
+            self.active_sequence().ok_or_else(|| clap_unavailable("当前没有活动序列"))?;
+        let inspection = inspect_audio_processor_rack(sequence, &payload.address)
+            .map_err(|error| clap_unavailable(error.to_string()))?;
+        if let Some(blocker) = inspection.edit_blocker() {
+            return Err(clap_unavailable(blocker.to_string()));
+        }
+        let old = inspection
+            .rack()
+            .processors
+            .iter()
+            .find(|processor| processor.id == payload.processor_id)
+            .ok_or_else(|| clap_unavailable("目标 CLAP 处理器不存在"))?
+            .clone();
+        let AudioProcessorDefinitionRef::Clap { plugin_id, .. } = &old.definition else {
+            return Err(clap_unavailable("只能重新绑定 CLAP 处理器"));
+        };
+        let channel_layout = sequence.settings.audio_channel_layout;
+        let catalog = self
+            .clap_catalog
+            .as_ref()
+            .ok_or_else(|| clap_unavailable("native CLAP helper is unavailable"))?;
+        let candidate = catalog
+            .create_instance(
+                plugin_id,
+                AudioRenderContract {
+                    sample_rate: self.audio_sample_rate,
+                    channel_layout,
+                    max_block_frames: super::audio_rendering::MAX_AUDIO_RENDER_BLOCK_FRAMES,
+                    processing_mode: AudioProcessingMode::Realtime,
+                    processor_session_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                    public_output_lookahead_budget_frames:
+                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                    compensation_delay_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                },
+                old.opaque_state.as_ref().map(|state| state.iter().copied().collect()),
+            )
+            .map_err(|error| clap_unavailable(error.to_string()))?;
+        if old.parameters.len() != candidate.parameters.len()
+            || old.parameters.iter().any(|(id, parameter)| {
+                candidate.parameters.get(id).is_none_or(|new| new.schema != parameter.schema)
+            })
+        {
+            return Err(clap_unavailable(
+                "插件参数架构与项目中保存的架构不匹配；原自动化已保留",
+            ));
+        }
+        self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+            address: payload.address,
+            edit: AudioProcessorRackEdit::RebindClap {
+                processor_id: payload.processor_id,
+                expected_definition: old.definition,
+                new_definition: candidate.definition,
+            },
+        })
     }
 
     fn edit_audio_automation(&mut self, request: AudioAutomationEditRequest) -> Result<()> {
@@ -321,7 +384,8 @@ mod tests {
     use super::*;
     use crate::app::product_action::{
         AudioInstallClapLibraryPayload, AudioProcessorBuiltInPreset,
-        AudioProcessorInsertBuiltInPayload, AudioProcessorInsertClapPayload, ProductAction,
+        AudioProcessorInsertBuiltInPayload, AudioProcessorInsertClapPayload,
+        AudioProcessorRebindClapPayload, ProductAction,
     };
     use crate::app::ui_actions::{
         audio_automation_edit_action, audio_channel_strip_edit_action,
@@ -678,6 +742,53 @@ mod tests {
             } if plugin_id == &plugins[0].plugin_id && *hash != [0; 32]
         ));
         assert_eq!(state.project_author_generation(), generation + 1);
+        let mut legacy = state.active_sequence().expect("Sequence").clone();
+        let legacy_processor = &mut legacy
+            .audio_program
+            .track_channels
+            .get_mut(&legacy.audio_tracks[0].id)
+            .expect("Track channel")
+            .strip
+            .pre_fader
+            .processors[0];
+        let legacy_id = legacy_processor.id;
+        if let AudioProcessorDefinitionRef::Clap { binary_sha256, .. } =
+            &mut legacy_processor.definition
+        {
+            *binary_sha256 = None;
+        }
+        let old_parameters = legacy_processor.parameters.clone();
+        let mut restored = AppState::with_clap_catalog(
+            state.clap_catalog.as_ref().expect("installed catalog").clone(),
+        );
+        restored.test_set_sequence(Some(legacy));
+        let restore_generation = restored.project_author_generation();
+        restored
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::RebindClapProcessor(
+                    AudioProcessorRebindClapPayload { address, processor_id: legacy_id },
+                ))
+                .into_external_action(),
+            )
+            .expect("rebind legacy instance");
+        let rebound =
+            &audio_processor_rack(restored.active_sequence().expect("Sequence"), &address)
+                .expect("Rack")
+                .processors[0];
+        assert!(matches!(
+            rebound.definition,
+            AudioProcessorDefinitionRef::Clap { binary_sha256: Some(_), .. }
+        ));
+        assert_eq!(rebound.parameters, old_parameters);
+        assert_eq!(restored.project_author_generation(), restore_generation + 1);
+        assert!(restored.undo_timeline().expect("undo rebind"));
+        assert!(matches!(
+            audio_processor_rack(restored.active_sequence().expect("Sequence"), &address)
+                .expect("Rack")
+                .processors[0]
+                .definition,
+            AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
+        ));
         assert!(state.undo_timeline().expect("undo insertion"));
         assert!(
             audio_processor_rack(state.active_sequence().expect("Sequence"), &address)
