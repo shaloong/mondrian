@@ -1402,16 +1402,18 @@ rather than a live callback event.
 CLAP and VST3 processor definitions may store the selected binary's SHA-256
 revision; an all-zero revision is invalid. Processor parameters may also carry
 bounded plugin display metadata:
-the native default name and hidden-control flag. Older Projects omit this
-metadata and retain their stable parameter-ID fallback. The display snapshot
+the native default name and hidden-control flag. The `ui` snapshot is required
+in the alpha Project format; built-ins use an empty display name and visible
+control. The display snapshot
 does not alter `ParameterSchema`, automation identity, saved opaque state, or
 binary revision binding; malformed control text is rejected during validation.
 An explicit CLAP rebind Rack edit
 compares the old definition before replacing only that revision. It rejects a
 different plugin ID, schema version, or stale instance and commits only after
 complete Audio Program validation. The installed path remains machine-local.
-Legacy definitions without a revision stay readable for editing but fail native
-preparation until explicitly rebound. VST3 discovery, rebind, and native
+An explicitly unbound definition (`binary_sha256: null`) stays editable but
+fails native preparation until explicitly rebound. The alpha format requires
+this field in every plugin definition. VST3 discovery, rebind, and native
 preparation remain unimplemented; the persisted revision is only the necessary
 authoring identity contract for a future adapter.
 

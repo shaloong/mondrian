@@ -178,8 +178,7 @@ pub enum AudioProcessorDefinitionRef {
         vendor: Option<String>,
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
-        /// Older project files deserialize as `None` and require explicit rebinding.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// An unbound definition uses an explicit `null` until rebind.
         binary_sha256: Option<[u8; 32]>,
     },
     /// A CLAP audio-effect definition.
@@ -187,8 +186,7 @@ pub enum AudioProcessorDefinitionRef {
         plugin_id: String,
         schema_version: u32,
         /// Exact installed binary revision captured when the author inserted it.
-        /// Older project files deserialize as `None` and require explicit rebinding.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// An unbound definition uses an explicit `null` until rebind.
         binary_sha256: Option<[u8; 32]>,
     },
 }
@@ -205,10 +203,6 @@ pub struct AudioProcessorParameter {
     /// Exact owner-local parameter curve, including its unkeyed value.
     pub automation: ExactAutomationCurve,
     /// Captured plugin UI facts, separate from stable parameter identity and schema.
-    #[serde(
-        default,
-        skip_serializing_if = "AudioProcessorParameterUiMetadata::is_default"
-    )]
     pub ui: AudioProcessorParameterUiMetadata,
 }
 
@@ -222,10 +216,6 @@ pub struct AudioProcessorParameterUiMetadata {
 }
 
 impl AudioProcessorParameterUiMetadata {
-    fn is_default(&self) -> bool {
-        self.display_name.is_none() && !self.hidden
-    }
-
     fn validate(&self) -> Result<(), AudioAuthoringError> {
         if self.display_name.as_ref().is_some_and(|name| {
             name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
@@ -2005,14 +1995,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_parameter_ui_snapshot_is_backward_compatible_and_does_not_change_schema() {
+    fn plugin_parameter_ui_snapshot_round_trips_without_changing_schema() {
         let original =
             AudioProcessorParameter::from_schema(gain_parameter_schema()).expect("gain parameter");
-        let mut old_json = serde_json::to_value(&original).expect("serialize old parameter");
-        assert!(old_json.get("ui").is_none());
+        let json = serde_json::to_value(&original).expect("serialize parameter");
+        assert_eq!(json["ui"]["display_name"], serde_json::Value::Null);
+        assert_eq!(json["ui"]["hidden"], false);
         let restored: AudioProcessorParameter =
-            serde_json::from_value(old_json.take()).expect("older project parameter");
-        assert_eq!(restored.ui, AudioProcessorParameterUiMetadata::default());
+            serde_json::from_value(json).expect("restore parameter");
 
         let ui = AudioProcessorParameterUiMetadata {
             display_name: Some("Output Gain".to_owned()),
@@ -2043,7 +2033,7 @@ mod tests {
     }
 
     #[test]
-    fn clap_binary_revision_round_trips_and_legacy_definition_requires_rebinding() {
+    fn clap_binary_revision_round_trips_and_requires_an_explicit_unbound_state() {
         let pinned = AudioProcessorDefinitionRef::Clap {
             plugin_id: "org.example.gain".to_owned(),
             schema_version: 1,
@@ -2055,12 +2045,13 @@ mod tests {
                 .expect("restore pinned definition"),
             pinned
         );
-        let legacy: AudioProcessorDefinitionRef = serde_json::from_value(serde_json::json!({
-            "Clap": { "plugin_id": "org.example.gain", "schema_version": 1 }
-        }))
-        .expect("load older definition");
+        let unbound_json = serde_json::json!({
+            "Clap": { "plugin_id": "org.example.gain", "schema_version": 1, "binary_sha256": null }
+        });
+        let unbound: AudioProcessorDefinitionRef =
+            serde_json::from_value(unbound_json).expect("load unbound definition");
         assert!(matches!(
-            legacy,
+            unbound,
             AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
         ));
         let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
@@ -2076,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn vst3_binary_revision_round_trips_and_legacy_definition_requires_rebinding() {
+    fn vst3_binary_revision_round_trips_and_requires_an_explicit_unbound_state() {
         let pinned = AudioProcessorDefinitionRef::Vst3 {
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
             vendor: Some("Test Vendor".to_owned()),
@@ -2089,16 +2080,18 @@ mod tests {
                 .expect("restore pinned VST3 definition"),
             pinned
         );
-        let legacy: AudioProcessorDefinitionRef = serde_json::from_value(serde_json::json!({
+        let unbound_json = serde_json::json!({
             "Vst3": {
                 "class_id": "00112233445566778899aabbccddeeff",
                 "vendor": "Test Vendor",
-                "schema_version": 7
+                "schema_version": 7,
+                "binary_sha256": null
             }
-        }))
-        .expect("load older VST3 definition");
+        });
+        let unbound: AudioProcessorDefinitionRef =
+            serde_json::from_value(unbound_json).expect("load unbound VST3 definition");
         assert!(matches!(
-            legacy,
+            unbound,
             AudioProcessorDefinitionRef::Vst3 { binary_sha256: None, .. }
         ));
         let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);

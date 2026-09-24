@@ -30,9 +30,9 @@ installer separately. Sources: [Steinberg SDK README](https://github.com/steinbe
 [CLAP repository](https://github.com/free-audio/clap), and
 [OpenFX license](https://github.com/AcademySoftwareFoundation/openfx/blob/main/LICENSE.md).
 
-VST3 currently has an authoring identity and optional binary SHA-256 revision,
-but no discovery, rebind, or executable Adapter. A missing revision in an older
-Project remains editable and cannot authorize native execution. The first
+VST3 currently has an authoring identity and an explicit optional binary
+SHA-256 revision field, but no discovery, rebind, or executable Adapter. An
+unbound definition records `null` and cannot authorize native execution. The first
 supported VST3 slice must discover and validate one selected installed effect
 in a bounded child, recheck its class, buses, parameter IDs, latency/tail,
 state, and exact binary revision in the existing supervised processing child,
@@ -123,8 +123,8 @@ inside its definition reference and a bounded name/visibility snapshot for each
 editable parameter. The latter is display-only, so automation and execution
 remain keyed by CLAP parameter ID; hidden parameters stay authored but do not
 appear in ordinary controls. Both Preview and Export compare that authored
-revision with the installed registration before preparing a worker. A legacy
-definition without a revision remains editable but needs explicit rebinding
+revision with the installed registration before preparing a worker. An
+explicitly unbound definition remains editable but needs explicit rebinding
 before native execution.
 The Inspector/Mixer exposes an explicit rebind action on each CLAP instance.
 The App re-probes the installed plugin with the instance's saved opaque state,

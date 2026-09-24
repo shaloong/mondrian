@@ -17,7 +17,8 @@ instance when the worker closes; a restart request fails the current instance.
 New insertions retain the validated plugin parameter name and hidden flag as
 display-only author metadata. Hidden parameters remain in the definition and
 execution lane but ordinary Inspector controls omit them. Reopening without
-the binary keeps the last captured names; older snapshots fall back to IDs.
+the binary keeps the last captured names; parameters with no captured display
+name show their stable IDs.
 Selected-plugin instance creation captures the current values after restoring
 the same opaque state, so a first-block parameter event does not reset a saved
 setting to the plugin factory default. When no state is supplied, insertion
@@ -54,8 +55,9 @@ after descriptor discovery and contract probing, then verified again in the
 processing child before native loading. A replaced binary fails admission.
 Insertion captures the installed binary SHA-256 in the authored CLAP definition.
 The shared resolver requires that exact revision for both Preview and Export;
-older definitions without a revision remain readable but do not execute until
-the user explicitly rebinds them.
+explicitly unbound definitions (`binary_sha256: null`) remain editable but do
+not execute until the user explicitly rebinds them. The alpha format requires
+the revision field in every native plugin definition.
 
 The public Runtime builders for an audition compile request and for a frozen
 selected-range dependency closure accept an explicit processor resolver. Each

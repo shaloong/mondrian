@@ -929,7 +929,7 @@ cache, publication logic, or alternate shape-key writer.
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 For CLAP, it displays the captured plugin parameter name and omits parameters
 marked hidden, while retaining every parameter in Timeline author state and
-native execution. Legacy parameters without display metadata show their stable
+native execution. Parameters without a plugin display name show their stable
 IDs; rebinding preserves the existing display snapshot, while new insertions
 capture current labels.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
