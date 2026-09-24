@@ -920,7 +920,8 @@ mod tests {
         build_effect_render_graph, compile_reference_render_graph, EffectGraphNodeKind,
         EffectNodeExt, EffectRenderOp, EffectType,
     };
-    use mondrian_export::preset::TimelineExportRange;
+    use mondrian_export::preset::{ExportOutputPolicy, ExportPreset, TimelineExportRange};
+    use mondrian_export::queue::JobStatus;
     use mondrian_media::{
         clear_thread_local_preview_decode_session, decode_preview_frame_cancellable,
         DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
@@ -933,7 +934,7 @@ mod tests {
         TimelineSolidColorLayer,
     };
     use mondrian_timeline::{Clip, Sequence, SequenceCollection};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const RED_INVERT_CUBE_2: &str = "LUT_3D_SIZE 2\n\
 1 0 0\n\
@@ -1495,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_package_decodes_real_video_and_admits_export_from_bundled_media() {
+    fn moved_package_decodes_real_video_and_renders_from_bundled_media() {
         const VIDEO: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
         let root = tempfile::tempdir().expect("root");
         let library = AssetLibrary::open(root.path().join("library")).expect("library");
@@ -1538,6 +1539,7 @@ mod tests {
         clear_thread_local_preview_decode_session();
 
         let mut sequence = Sequence::new("portable video");
+        sequence.settings.resolution = mondrian_core::Resolution { width: 64, height: 64 };
         sequence.video_tracks[0]
             .add_clip(
                 Clip::new(
@@ -1626,5 +1628,52 @@ mod tests {
         assert_eq!(dependency.path, bundled);
         assert_eq!(dependency.video_stream_index, Some(stream_index));
         assert_eq!(dependency.source_fingerprint, rebound_fingerprint);
+
+        let output = root.path().join("render.pngseq");
+        let job_id = imported
+            .enqueue_timeline_export(super::super::exporting::TimelineExportRequest {
+                preset: ExportPreset::png_sequence(),
+                sequence_id: None,
+                range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
+                output_path: output.clone(),
+                output_policy: ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
+                regulatory_pse: None,
+                frozen_ancillary: None,
+            })
+            .expect("enqueue bundled media export");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let terminal = loop {
+            assert!(Instant::now() < deadline, "bundled media export timed out");
+            imported.refresh_execution_resource_decision(Default::default());
+            imported.poll_export_queue();
+            let job = imported
+                .export_jobs_snapshot()
+                .into_iter()
+                .find(|job| job.id == job_id)
+                .expect("export job");
+            if job.status.is_terminal() {
+                break job;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            matches!(terminal.status, JobStatus::Completed),
+            "{:?}",
+            terminal.status
+        );
+        assert!(
+            terminal.executed,
+            "export worker did not render the bundled media"
+        );
+        let frame = fs::read_dir(&output)
+            .expect("image sequence output")
+            .map(|entry| entry.expect("output entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .expect("completed export has a PNG frame");
+        let encoded = fs::read(frame).expect("encoded frame");
+        let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Png)
+            .expect("valid exported PNG");
+        assert_eq!((decoded.width(), decoded.height()), (64, 64));
     }
 }
