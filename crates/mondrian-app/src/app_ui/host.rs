@@ -1719,7 +1719,7 @@ impl AppUiHost {
                     path: payload.path,
                 })
             }
-            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Binary(payload)))) => {
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => {
                 Some(NativeAudioPluginSelection {
                     format: NativeAudioPluginFormat::Vst3,
                     path: payload.path,
@@ -2591,7 +2591,9 @@ pub(crate) enum ViewerGpuPreparation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::product_action::AudioInstallClapLibraryPayload;
+    use crate::app::product_action::{
+        AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload,
+    };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, ClipId, Color, TrackId};
     use mondrian_core::{FramePosition, TimelineTime};
@@ -2927,6 +2929,104 @@ mod tests {
             restarted.app_state().installed_clap_processors().expect("catalog").len(),
             1
         );
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
+    fn installed_vst3_bundle_is_saved_and_restored_after_host_restart() {
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built app executable");
+        let bundle = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("VST3 reference bundle");
+        assert!(
+            bundle.is_dir(),
+            "reference selection must exercise directory bundles"
+        );
+        let preferences_path = temp_preferences_path("vst3-bundle-restart");
+        let make_state = || {
+            let clap = Arc::new(
+                mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                    .expect("CLAP catalog"),
+            );
+            let vst3 = Arc::new(
+                mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper.clone())
+                    .expect("VST3 catalog"),
+            );
+            AppState::with_native_audio_catalogs(clap, vst3)
+        };
+        let mut first = AppUiHost::new_with_preferences_path(
+            make_state(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        first
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path: bundle.clone() },
+                ))
+                .into_external_action(),
+            )
+            .expect("install VST3 bundle");
+        let saved = load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(
+            saved.installed_audio_plugins,
+            vec![NativeAudioPluginSelection {
+                format: NativeAudioPluginFormat::Vst3,
+                path: bundle.canonicalize().expect("bundle path"),
+            }]
+        );
+        drop(first);
+
+        let mut restarted =
+            AppUiHost::new_with_preferences_path(make_state(), saved, preferences_path.clone());
+        let generation = restarted.app_state().project_author_generation();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted.app_state().installed_vst3_processors().expect("catalog").is_empty()
+            && Instant::now() < deadline
+        {
+            restarted.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            restarted.app_state().installed_vst3_processors().expect("catalog").len(),
+            1
+        );
+        assert_eq!(
+            restarted.app_state().project_author_generation(),
+            generation
+        );
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    fn rejected_vst3_folder_does_not_persist_an_installed_selection() {
+        let preferences_path = temp_preferences_path("invalid-vst3-folder");
+        let folder = preferences_path.with_extension("folder");
+        std::fs::create_dir_all(&folder).expect("ordinary folder");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let generation = host.app_state().project_author_generation();
+        assert!(host
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path: folder.clone() },
+                ))
+                .into_external_action(),
+            )
+            .is_err());
+        assert!(host.preferences.installed_audio_plugins.is_empty());
+        assert_eq!(host.app_state().project_author_generation(), generation);
+        assert!(load_app_ui_preferences_from(&preferences_path)
+            .installed_audio_plugins
+            .is_empty());
+        drop(host);
+        std::fs::remove_dir_all(folder).expect("remove fixture folder");
         std::fs::remove_file(preferences_path).ok();
     }
 

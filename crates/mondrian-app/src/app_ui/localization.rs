@@ -251,6 +251,7 @@ mod tests {
             "file-dialog-import-media",
             "file-dialog-install-clap",
             "file-dialog-install-vst3",
+            "file-dialog-install-vst3-bundle",
             "file-dialog-relink-media",
             "file-dialog-save-as-project",
             "file-dialog-package-project",

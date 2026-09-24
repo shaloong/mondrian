@@ -381,17 +381,85 @@ fn probe_loaded(
     })
 }
 
-fn canonical_binary(path: &Path) -> Result<(PathBuf, [u8; 32]), AudioProcessorHostError> {
+pub(super) fn canonical_binary(
+    path: &Path,
+) -> Result<(PathBuf, [u8; 32]), AudioProcessorHostError> {
     if !path.is_absolute() {
-        return Err(invalid("VST3 binary path must be absolute"));
+        return Err(invalid("VST3 selection path must be absolute"));
     }
     let path = fs::canonicalize(path)
-        .map_err(|error| unavailable(format!("VST3 binary is unavailable: {error}")))?;
+        .map_err(|error| unavailable(format!("VST3 selection is unavailable: {error}")))?;
+    let path = if path.is_dir() {
+        if !path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vst3"))
+        {
+            return Err(invalid("VST3 bundle directory must have a .vst3 extension"));
+        }
+        let (folder, extension) = bundle_native_layout()?;
+        let mut binary = None;
+        let entries = fs::read_dir(path.join(folder))
+            .map_err(|error| unavailable(format!("VST3 bundle has no native binary: {error}")))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                unavailable(format!("VST3 bundle entry is unreadable: {error}"))
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                unavailable(format!("VST3 bundle entry type is unavailable: {error}"))
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if extension.is_some_and(|expected| {
+                !entry_path
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            }) {
+                continue;
+            }
+            if extension.is_none()
+                && entry_path.file_name().and_then(OsStr::to_str).is_some_and(|name| {
+                    name.starts_with('.') || name.ends_with(".plist") || name.ends_with(".txt")
+                })
+            {
+                continue;
+            }
+            if binary.replace(entry_path).is_some() {
+                return Err(invalid("VST3 bundle has multiple native binaries"));
+            }
+        }
+        let binary = binary
+            .ok_or_else(|| invalid("VST3 bundle has no native binary for this architecture"))?;
+        let binary = fs::canonicalize(binary)
+            .map_err(|error| unavailable(format!("VST3 bundle binary is unavailable: {error}")))?;
+        if !binary.starts_with(&path) {
+            return Err(invalid("VST3 bundle binary escapes the selected bundle"));
+        }
+        binary
+    } else {
+        path
+    };
     if !path.is_file() {
         return Err(invalid("VST3 binary path must name a regular file"));
     }
     let hash = fingerprint(&path)?;
     Ok((path, hash))
+}
+
+fn bundle_native_layout() -> Result<(&'static str, Option<&'static str>), AudioProcessorHostError> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok(("Contents/x86_64-win", Some("vst3"))),
+        ("windows", "aarch64") => Ok(("Contents/arm64-win", Some("vst3"))),
+        ("windows", "x86") => Ok(("Contents/x86-win", Some("vst3"))),
+        ("linux", "x86_64") => Ok(("Contents/x86_64-linux", Some("so"))),
+        ("linux", "aarch64") => Ok(("Contents/aarch64-linux", Some("so"))),
+        ("linux", "x86") => Ok(("Contents/i386-linux", Some("so"))),
+        ("macos", _) => Ok(("Contents/MacOS", None)),
+        _ => Err(invalid("VST3 bundle layout is unsupported on this target")),
+    }
 }
 
 fn request(
@@ -474,4 +542,46 @@ fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
 
 fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::Unavailable(detail.into())
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn selected_bundle_resolves_one_native_binary_and_rejects_ambiguous_layout() {
+        let temp = tempfile::tempdir().expect("bundle fixture");
+        let root = temp.path().join("Example.vst3");
+        let (folder, extension) = bundle_native_layout().expect("supported test target");
+        let native = root.join(folder);
+        fs::create_dir_all(&native).expect("native bundle directory");
+        let first = native.join(format!("processor.{}", extension.unwrap_or("bin")));
+        fs::write(&first, b"reference binary").expect("first native binary");
+        let (resolved, hash) = canonical_binary(&root).expect("resolve bundle");
+        assert_eq!(resolved, first.canonicalize().expect("canonical binary"));
+        assert_eq!(hash, fingerprint(&first).expect("fingerprint"));
+
+        let second = native.join(format!("alternate.{}", extension.unwrap_or("bin")));
+        fs::write(second, b"ambiguous").expect("second native binary");
+        assert!(matches!(
+            canonical_binary(&root),
+            Err(AudioProcessorHostError::InvalidContract(message))
+                if message.contains("multiple native binaries")
+        ));
+    }
+
+    #[test]
+    fn selected_bundle_rejects_wrong_extension_and_missing_native_architecture() {
+        let temp = tempfile::tempdir().expect("bundle fixture");
+        let ordinary = temp.path().join("Example");
+        fs::create_dir_all(&ordinary).expect("ordinary directory");
+        assert!(matches!(
+            canonical_binary(&ordinary),
+            Err(AudioProcessorHostError::InvalidContract(message))
+                if message.contains(".vst3 extension")
+        ));
+        let bundle = temp.path().join("Missing.vst3");
+        fs::create_dir_all(&bundle).expect("empty bundle");
+        assert!(canonical_binary(&bundle).is_err());
+    }
 }

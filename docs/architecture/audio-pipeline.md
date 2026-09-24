@@ -1,14 +1,14 @@
 # Audio pipeline
 
-The VST3 adapter uses a selected-binary catalog, a deadline-bound metadata
+The VST3 adapter uses a selected-plugin catalog, a deadline-bound metadata
 child, and a distinct supervised audio-worker mode. Its authoring schema keeps
 continuous parameter values normalized to `0..=1`; stepped parameters use
 integer indices `0..=step_count` and hold interpolation, then normalize at the
 ABI boundary. Discovery and worker both reject unsupported auxiliary/multiple
 main buses, mode changes, metadata drift, and latency/tail drift. Worker
 continuity entry releases the previous class and reloads the exact class from
-the saved opaque state, while
-sample-offset points enter the VST3 process queue. A reference Gain DLL built
+the saved opaque state, while sample-offset points enter the VST3 process queue.
+A reference Gain DLL built
 from the permissively licensed `vst3-rs` example passed isolated realtime and
 offline stereo signal tests with gain `0.5`, plus a fresh continuity entry with
 gain `0.25`.
@@ -21,6 +21,11 @@ Preview, Export, and idle warmup; Inspector and Mixer use one shared Rack
 projection. Explicit format/path selections are machine-local UI preferences
 restored in one background catalog job, while `.mdp` retains only the VST3
 class, vendor, exact binary fingerprint, parameter curves, and opaque state.
+Selected `.vst3` directories resolve exactly one regular native binary under
+the current architecture's `Contents` directory. The catalog fingerprints
+that binary and rejects missing or ambiguous bundle layouts. Preferences keep
+the selected directory, so startup resolution follows the same rule; an
+individual native file remains a valid explicit selection.
 VST3 worker startup is bounded to 15 seconds and continuity entry to 10
 seconds; the realtime block deadline stays at 100 milliseconds. Those bounds
 are separate because plugin construction and state restoration can be much

@@ -944,14 +944,17 @@ type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
 were the playhead value.
 The insertion dropdown projects built-ins and session-installed CLAP/VST3
-definitions through the same Rack address, then offers format-specific native
-binary pickers. Dialog cancel is a no-op; a selected binary is scanned in its
-format's isolation helper and atomically published to the App catalog. The UI
-does not load native code. The Host persists selected format/path pairs in
+definitions through the same Rack address, then offers CLAP file and VST3 file
+or bundle folder pickers through `PlatformService`. Dialog cancel is a no-op;
+a selection is scanned in its format's isolation helper and atomically
+published to the App catalog. The UI does not load native code. The Host
+persists selected format/path pairs in
 machine-local preferences and retries them on one background worker after
 startup. The UI refreshes Rack menus as discoveries arrive and reports missing
-binaries in the status area. Current VST3 selection accepts an individual
-binary file; selecting directory bundles remains format work.
+plugins in the status area. The folder picker resolves only a `.vst3` directory
+with one native binary for the running architecture; the file picker retains
+direct binary selection. Both paths enter the same product action and
+machine-local preference list.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact

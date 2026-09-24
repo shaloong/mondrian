@@ -108,20 +108,20 @@ impl AppState {
                 })
             }
             AudioProductAction::RebindClapProcessor(payload) => self.rebind_clap_processor(payload),
-            AudioProductAction::InstallVst3Binary(payload) => {
+            AudioProductAction::InstallVst3Plugin(payload) => {
                 let catalog = self
                     .vst3_catalog
                     .as_ref()
                     .ok_or_else(|| vst3_unavailable("native VST3 helper is unavailable"))?;
                 let descriptors = catalog
-                    .install_binary(payload.path)
+                    .install_plugin(payload.path)
                     .map_err(|error| vst3_unavailable(error.to_string()))?;
                 self.set_status_hint(
                     format!("已安装 {} 个 VST3 处理器", descriptors.len()),
                     false,
                 );
                 if !descriptors.is_empty() && self.active_sequence().is_some() {
-                    self.reconcile_audio_after_committed_authoring_change("vst3_install_binary");
+                    self.reconcile_audio_after_committed_authoring_change("vst3_install_plugin");
                 }
                 Ok(())
             }
@@ -513,7 +513,7 @@ fn vst3_unavailable(reason: impl Into<String>) -> MondrianError {
 mod tests {
     use super::*;
     use crate::app::product_action::{
-        AudioInstallClapLibraryPayload, AudioInstallVst3BinaryPayload, AudioProcessorBuiltInPreset,
+        AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload, AudioProcessorBuiltInPreset,
         AudioProcessorInsertBuiltInPayload, AudioProcessorInsertClapPayload,
         AudioProcessorInsertVst3Payload, AudioProcessorRebindClapPayload,
         AudioProcessorRebindVst3Payload, ProductAction,
@@ -977,13 +977,13 @@ mod tests {
 
     #[test]
     #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
-    fn selected_vst3_binary_inserts_canonical_processor_and_round_trips_undo() {
+    fn selected_vst3_plugin_inserts_canonical_processor_and_round_trips_undo() {
         let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
             .map(std::path::PathBuf::from)
             .expect("built app executable");
-        let binary = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+        let selection = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
             .map(std::path::PathBuf::from)
-            .expect("VST3 reference binary");
+            .expect("VST3 reference file or bundle");
         let clap = std::sync::Arc::new(
             mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
                 .expect("CLAP catalog"),
@@ -1002,12 +1002,12 @@ mod tests {
         let generation = state.project_author_generation();
         state
             .dispatch_action(
-                ProductAction::Audio(AudioProductAction::InstallVst3Binary(
-                    AudioInstallVst3BinaryPayload { path: binary },
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path: selection },
                 ))
                 .into_external_action(),
             )
-            .expect("install reference VST3 binary");
+            .expect("install reference VST3 plugin");
         let classes = state.installed_vst3_processors().expect("VST3 catalog descriptors");
         assert_eq!(classes.len(), 1);
         assert_eq!(state.project_author_generation(), generation);

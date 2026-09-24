@@ -213,7 +213,7 @@ pub const AUDIO_INSTALL_CLAP_LIBRARY: &str = "install_clap_library";
 /// External action name for inserting one installed CLAP processor.
 pub const AUDIO_INSERT_CLAP_PROCESSOR: &str = "insert_clap_processor";
 pub const AUDIO_REBIND_CLAP_PROCESSOR: &str = "rebind_clap_processor";
-pub const AUDIO_INSTALL_VST3_BINARY: &str = "install_vst3_binary";
+pub const AUDIO_INSTALL_VST3_PLUGIN: &str = "install_vst3_plugin";
 pub const AUDIO_INSERT_VST3_PROCESSOR: &str = "insert_vst3_processor";
 pub const AUDIO_REBIND_VST3_PROCESSOR: &str = "rebind_vst3_processor";
 /// External action name for one normative Channel Strip edit.
@@ -463,8 +463,8 @@ pub enum AudioProductAction {
     InsertClapProcessor(AudioProcessorInsertClapPayload),
     /// Re-probe an installed CLAP binary and explicitly update one authored instance.
     RebindClapProcessor(AudioProcessorRebindClapPayload),
-    /// Discover the effect classes in a selected VST3 binary.
-    InstallVst3Binary(AudioInstallVst3BinaryPayload),
+    /// Discover the effect classes in a selected VST3 file or directory bundle.
+    InstallVst3Plugin(AudioInstallVst3PluginPayload),
     /// Probe and insert an installed VST3 class in one author transaction.
     InsertVst3Processor(AudioProcessorInsertVst3Payload),
     /// Re-probe and explicitly rebind an authored VST3 instance.
@@ -743,8 +743,8 @@ impl ProductAction {
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
-                AUDIO_INSTALL_VST3_BINARY => {
-                    Ok(Some(Self::Audio(AudioProductAction::InstallVst3Binary(
+                AUDIO_INSTALL_VST3_PLUGIN => {
+                    Ok(Some(Self::Audio(AudioProductAction::InstallVst3Plugin(
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
@@ -1286,9 +1286,9 @@ impl ProductAction {
                 AUDIO_REBIND_CLAP_PROCESSOR,
                 serde_json::json!(payload),
             ),
-            Self::Audio(AudioProductAction::InstallVst3Binary(payload)) => (
+            Self::Audio(AudioProductAction::InstallVst3Plugin(payload)) => (
                 AUDIO_NAMESPACE,
-                AUDIO_INSTALL_VST3_BINARY,
+                AUDIO_INSTALL_VST3_PLUGIN,
                 serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::InsertVst3Processor(payload)) => (
@@ -1779,8 +1779,8 @@ pub struct AudioProcessorRebindClapPayload {
 /// Explicit VST3 binary selected by the user for session discovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AudioInstallVst3BinaryPayload {
-    /// Absolute path selected by the native file dialog.
+pub struct AudioInstallVst3PluginPayload {
+    /// Absolute path to a selected VST3 file or directory bundle.
     pub path: PathBuf,
 }
 
@@ -4276,8 +4276,8 @@ mod tests {
                     processor_id: AudioProcessorInstanceId::new(),
                 },
             )),
-            ProductAction::Audio(AudioProductAction::InstallVst3Binary(
-                AudioInstallVst3BinaryPayload { path: PathBuf::from("C:/plugins/gain.vst3") },
+            ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path: PathBuf::from("C:/plugins/gain.vst3") },
             )),
             ProductAction::Audio(AudioProductAction::InsertVst3Processor(
                 AudioProcessorInsertVst3Payload {

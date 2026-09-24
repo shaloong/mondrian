@@ -265,6 +265,7 @@ file-dialog-open-project = 打开 Mondrian 项目
 file-dialog-import-media = 导入媒体
 file-dialog-install-clap = 安装 CLAP 插件
 file-dialog-install-vst3 = 安装 VST3 插件
+file-dialog-install-vst3-bundle = 选择 VST3 目录包
 file-dialog-relink-media = 重新链接媒体
 file-dialog-save-as-project = 另存 Mondrian 项目
 file-dialog-package-project = 打包 Mondrian 项目

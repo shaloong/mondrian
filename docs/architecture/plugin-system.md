@@ -31,9 +31,10 @@ installer separately. Sources: [Steinberg SDK README](https://github.com/steinbe
 [OpenFX license](https://github.com/AcademySoftwareFoundation/openfx/blob/main/LICENSE.md).
 
 VST3 now has a bounded class-discovery/probe child and a separate supervised
-audio-worker entrypoint. Selected binaries are identified by their canonical
-path and SHA-256 revision; class IDs and parameter IDs are independent of scan
-order. The worker reloads the class, restores the authored state, selects the
+audio-worker entrypoint. Selected files or `.vst3` directory bundles resolve
+to one canonical binary for the running architecture and SHA-256 revision;
+class IDs and parameter IDs are independent of scan order. The worker reloads
+the class, restores the authored state, selects the
 requested realtime or offline mode, and rechecks one active mono/stereo main
 input/output bus, parameter metadata, latency, and tail before processing. It
 delivers normalized VST3 parameter points with sample offsets and rejects
@@ -44,8 +45,7 @@ The App's hidden child dispatch, insertion UI, and persistent installed catalog
 restoration are present; Preview/Export end-to-end qualification and meaningful
 state round-trip remain before the product advertises VST3 support. Vendor
 editors and auxiliary buses require separate qualified slices. Unbound
-definitions record `null` and cannot
-authorize native execution.
+definitions record `null` and cannot authorize native execution.
 
 OpenFX has no implemented ABI Adapter today. Its image-effect host needs
 property, parameter, clip/image, memory, progress, threading, and render suites
@@ -167,7 +167,7 @@ advance the project author generation. Automatic installed-path enumeration,
 plugin management and relocation UI, state capture, expanded parameter-control UI,
 and broader vendor/plugin signal-parity coverage remain required before
 CLAP is advertised as a complete product feature. The VST3 audio backend can
-host an explicitly selected binary through the product's installation and
+host an explicitly selected binary or directory bundle through installation and
 insertion flow. OpenFX binaries remain unhosted. The visual
 Effect registry/DSL does not host OpenFX.
 

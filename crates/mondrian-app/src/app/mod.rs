@@ -590,7 +590,8 @@ impl AppState {
         }
     }
 
-    fn with_native_audio_catalogs(
+    /// Assemble one native audio resolver for explicitly selected CLAP and VST3 classes.
+    pub(crate) fn with_native_audio_catalogs(
         clap: Arc<InstalledClapAudioProcessorSpecResolver>,
         vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
     ) -> Self {

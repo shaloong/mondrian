@@ -146,7 +146,7 @@ fn restore_plugins(
                 .install_library(selection.path.clone())
                 .map(|descriptors| descriptors.len()),
             NativeAudioPluginFormat::Vst3 => {
-                vst3.install_binary(selection.path.clone()).map(|descriptors| descriptors.len())
+                vst3.install_plugin(selection.path.clone()).map(|descriptors| descriptors.len())
             }
         }
         .map_err(|error| error.to_string());

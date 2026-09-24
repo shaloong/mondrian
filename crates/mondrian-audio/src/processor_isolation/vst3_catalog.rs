@@ -1,6 +1,6 @@
 //! Installed VST3 catalog and exact authoring snapshots.
 
-use super::vst3_discovery::probe_vst3_plugin_registration_with_state;
+use super::vst3_discovery::{canonical_binary, probe_vst3_plugin_registration_with_state};
 use super::vst3_worker::fingerprint;
 use super::{
     probe_vst3_plugin_registration, scan_vst3_binary_descriptors,
@@ -35,9 +35,7 @@ impl DiscoveredVst3AudioProcessorSpecResolver {
         }
         let mut plugins = BTreeMap::new();
         for binary in binaries {
-            let path = std::fs::canonicalize(&binary)
-                .map_err(|error| unavailable(format!("VST3 binary is unavailable: {error}")))?;
-            let hash = fingerprint(&path)?;
+            let (path, hash) = canonical_binary(&binary)?;
             let descriptors = scan_vst3_binary_descriptors(&helper_executable, &path)?;
             if fingerprint(&path)? != hash {
                 return Err(unavailable("VST3 binary changed during discovery"));
@@ -181,14 +179,12 @@ impl InstalledVst3AudioProcessorSpecResolver {
         })
     }
 
-    /// Discover and atomically publish every effect class in one selected binary.
-    pub fn install_binary(
+    /// Discover and atomically publish every effect class in a selected file or bundle.
+    pub fn install_plugin(
         &self,
         binary: PathBuf,
     ) -> Result<Vec<Vst3PluginDescriptor>, AudioProcessorHostError> {
-        let selected = std::fs::canonicalize(&binary)
-            .map_err(|error| unavailable(format!("VST3 binary is unavailable: {error}")))?;
-        let before = fingerprint(&selected)?;
+        let (selected, before) = canonical_binary(&binary)?;
         let helper = self
             .catalog
             .read()

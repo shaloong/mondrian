@@ -298,6 +298,7 @@ file-dialog-open-project = Open Mondrian project
 file-dialog-import-media = Import media
 file-dialog-install-clap = Install CLAP plugin
 file-dialog-install-vst3 = Install VST3 plugin
+file-dialog-install-vst3-bundle = Select VST3 bundle folder
 file-dialog-relink-media = Relink media
 file-dialog-save-as-project = Save Mondrian project as
 file-dialog-package-project = Package Mondrian project

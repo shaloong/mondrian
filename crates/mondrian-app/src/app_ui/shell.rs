@@ -24,7 +24,7 @@ use mondrian_ui_widgets::{
 use std::path::Path;
 
 use crate::app::product_action::{
-    AudioInstallClapLibraryPayload, AudioInstallVst3BinaryPayload, AudioProductAction,
+    AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload, AudioProductAction,
     ProductAction,
 };
 use crate::app::ui_actions::{
@@ -47,9 +47,10 @@ use crate::app::ui_actions::{
     APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
     APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG, APP_SHELL_INSTALL_VST3_BINARY_DIALOG,
-    APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
+    APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG,
+    APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
     APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE, APP_SHELL_PREFERENCES_TAB_CHANGED,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED,
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
@@ -157,9 +158,15 @@ pub fn clap_library_filters(localizer: &Localizer) -> Vec<FileFilter> {
 
 /// Native binary extensions accepted by the VST3 discovery worker.
 pub fn vst3_binary_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    let extensions = match std::env::consts::OS {
+        "windows" => vec!["vst3", "dll"],
+        "linux" => vec!["so", "vst3"],
+        "macos" => vec!["dylib", "vst3"],
+        _ => vec!["vst3"],
+    };
     vec![FileFilter::new(
         localizer.text("file-filter-vst3"),
-        vec!["vst3", "dll"],
+        extensions,
     )]
 }
 
@@ -668,8 +675,22 @@ pub fn try_resolve_app_shell_action(
                 .into_selection()
                 .and_then(|paths| paths.into_iter().next());
             Ok(selected.map(|path| {
-                ProductAction::Audio(AudioProductAction::InstallVst3Binary(
-                    AudioInstallVst3BinaryPayload { path },
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path },
+                ))
+                .into_external_action()
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG =>
+        {
+            let selected = platform
+                .open_folder_dialog(&localizer.text("file-dialog-install-vst3-bundle"))
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection();
+            Ok(selected.map(|path| {
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path },
                 ))
                 .into_external_action()
             }))
@@ -2586,15 +2607,16 @@ mod tests {
         app_shell_export_portable_package_dialog_action, app_shell_import_media_dialog_action,
         app_shell_import_media_dialog_action_with_target,
         app_shell_install_clap_library_dialog_action, app_shell_install_vst3_binary_dialog_action,
-        app_shell_interpret_asset_dialog_action, app_shell_interpret_asset_draft_changed_action,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
-        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
-        app_shell_project_settings_action, app_shell_project_settings_draft_changed_action,
-        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
-        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-        app_shell_save_project_as_dialog_action, app_shell_select_custom_ocio_config_action,
-        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        app_shell_install_vst3_bundle_dialog_action, app_shell_interpret_asset_dialog_action,
+        app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_open_recent_project_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_project_settings_action,
+        app_shell_project_settings_draft_changed_action, app_shell_recover_project_action,
+        app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        app_shell_select_custom_ocio_config_action, app_shell_sequence_settings_action,
+        app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
@@ -2686,6 +2708,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakePlatform {
         open_paths: Option<Vec<PathBuf>>,
+        open_folder: Option<PathBuf>,
         save_path: Option<PathBuf>,
         revealed_paths: Mutex<Vec<PathBuf>>,
         dialog_titles: Mutex<Vec<String>>,
@@ -2709,6 +2732,17 @@ mod tests {
             self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
             Ok(match self.open_paths.clone() {
                 Some(paths) => FileDialogOutcome::Selected(paths),
+                None => FileDialogOutcome::Cancelled,
+            })
+        }
+
+        fn open_folder_dialog(
+            &self,
+            title: &str,
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            Ok(match self.open_folder.clone() {
+                Some(path) => FileDialogOutcome::Selected(path),
                 None => FileDialogOutcome::Cancelled,
             })
         }
@@ -4932,8 +4966,28 @@ mod tests {
         let action = resolve_app_shell_action(request, &platform, None).expect("selected binary");
         assert_eq!(
             ProductAction::decode_external(&action).expect("decode"),
-            Some(ProductAction::Audio(AudioProductAction::InstallVst3Binary(
-                AudioInstallVst3BinaryPayload { path }
+            Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path }
+            )))
+        );
+    }
+
+    #[test]
+    fn vst3_bundle_picker_cancels_cleanly_and_returns_selected_directory() {
+        let request = app_shell_install_vst3_bundle_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Gain.vst3");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected bundle");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path }
             )))
         );
     }

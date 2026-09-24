@@ -1440,7 +1440,11 @@ pub(super) fn with_audio_processor_rack_sections(
             app_shell_install_clap_library_dialog_action(),
         ));
         insert_items.push(MenuItem::new(
-            "安装 VST3 插件…",
+            "安装 VST3 目录包…",
+            app_shell_install_vst3_bundle_dialog_action(),
+        ));
+        insert_items.push(MenuItem::new(
+            "安装 VST3 插件文件…",
             app_shell_install_vst3_binary_dialog_action(),
         ));
         let mut rack_section = PropertySection::new(title)
