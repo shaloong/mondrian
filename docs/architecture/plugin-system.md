@@ -68,7 +68,7 @@ using vendored BSD-3-Clause OpenFX HostSupport source and a separate native
 render child. The caller supplies a pinned binary inspection, explicit frame
 time/rate/range/PAR, RGBA Float32 straight-alpha working-frame pixels, and
 Double/Boolean parameter values. The parent checks binary identity, bounded
-request/output sizes, finite pixels, and a render deadline; a native crash
+request/output sizes, finite input and output pixels, and a render deadline; a native crash
 remains in the child. The host advertises only the Filter context and RGBA,
 does not advertise tiles or temporal clip access, and rejects unsupported
 parameter types. A real official Basic Gain filter qualification covers all

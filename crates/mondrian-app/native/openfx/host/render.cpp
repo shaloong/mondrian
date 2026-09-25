@@ -64,6 +64,10 @@ static int run(const char* binary, const char* bundle, const char* identifier,
   input.seekg(0);
   input.read(reinterpret_cast<char*>(MondrianOpenFx::gInput.data()), pixels * sizeof(OfxRGBAColourF));
   if (!input) { return 2; }
+  for (const auto& pixel : MondrianOpenFx::gInput) {
+    if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
+        !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { return 2; }
+  }
   // set the version label in the global cache
   OFX::Host::PluginCache::getPluginCache()->setCacheVersion("mondrian-openfx-v1");
 

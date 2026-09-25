@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_render::{
-    render_openfx_filter_frame, OpenFxFloatFrame, OpenFxRenderTiming, OpenFxScalarValue,
+    render_openfx_filter_frame, OpenFxFloatFrame, OpenFxRenderError, OpenFxRenderTiming,
+    OpenFxScalarValue,
 };
 
 fn product_executable() -> &'static Path {
@@ -35,17 +36,18 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             OpenFxScalarValue::Boolean(false),
         ),
     ]);
+    let timing = OpenFxRenderTiming {
+        frame: 1.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 1.0,
+    };
     let output = render_openfx_filter_frame(
         product_executable(),
         &inspection,
         "uk.co.thefoundry.BasicGainPlugin",
-        &OpenFxRenderTiming {
-            frame: 1.0,
-            frame_rate: 24.0,
-            first_frame: 0.0,
-            last_frame: 100.0,
-            pixel_aspect_ratio: 1.0,
-        },
+        &timing,
         &parameters,
         &input,
     )
@@ -56,4 +58,16 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             assert!((channel - expected).abs() < 1e-6, "{channel} != {expected}");
         }
     }
+
+    let mut invalid = input;
+    invalid.pixels[7][2] = f32::NAN;
+    let rejected = render_openfx_filter_frame(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        &timing,
+        &parameters,
+        &invalid,
+    );
+    assert!(matches!(rejected, Err(OpenFxRenderError::Invalid(_))));
 }

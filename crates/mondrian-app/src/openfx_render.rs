@@ -146,6 +146,9 @@ pub fn render_openfx_filter_frame(
         return Err(invalid("helper must be an absolute regular file"));
     }
     let frame_bytes = validate_frame(frame.width, frame.height, frame.pixels.len())?;
+    if frame.pixels.iter().flatten().any(|channel| !channel.is_finite()) {
+        return Err(invalid("OpenFX input contains a nonfinite channel"));
+    }
     validate_timing(timing)?;
     if !inspection.plugins.iter().any(|plugin| plugin.identifier == plugin_identifier) {
         return Err(invalid("selected plugin is absent from the pinned binary"));
