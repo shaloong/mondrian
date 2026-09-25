@@ -76,6 +76,24 @@ and charges one full-frame scratch image for transactional execution. This is
 an internal prerequisite for the host; it does not load or execute OpenFX
 binaries by itself.
 
+An isolated host feasibility check used OpenFX upstream commit
+`e40728885390ec16276d11e00025de9b4282060c` and its Basic Gain example.
+The upstream HostSupport library and demo host were built outside the product
+tree. Replacing the demo's directory scan with `PluginBinary` for one selected
+`.ofx` file still completed `Load`, `Describe`, instance creation, and `Render`
+with `OFX_PLUGIN_PATH` pointing to a nonexistent directory. The locally
+modified demo passed RGBA Float32 rows and the reference effect returned its
+frame-1 first pixel as `(0.988235, 0.988235, 0.988235, 4.0)` from an input of
+`(63/255, 63/255, 63/255, 1.0)`; its fixed parameter getters supplied two
+successive gains of 2. The alpha value above 1 confirms this check did not
+silently clamp or quantize the working frame. This proves the selected-binary
+HostSupport route can execute the reference action at Float32 precision, but
+the demo's fixed 720×576 images, parameters, PAL timing, and PPM output still
+violate Mondrian's working-frame contract. None of its output is admitted as
+product OpenFX rendering. The product Adapter must replace those demo
+contracts with typed frame geometry, row stride, color/alpha intent, frame
+time, and authored parameters before registration.
+
 ## Effect Plugins
 
 Plugin effects are represented as `EffectType::Plugin(String)` and registered through `EffectDefinition`.
