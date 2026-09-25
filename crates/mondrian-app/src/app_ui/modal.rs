@@ -39,8 +39,8 @@ impl ShellModal {
     }
 
     /// Build the Interpret Footage modal from an initial draft.
-    pub fn interpret_asset(draft: AppUiInterpretAssetDraft) -> Self {
-        Self::InterpretAsset(Box::new(InterpretAssetDialog::new(draft)))
+    pub fn interpret_asset(draft: AppUiInterpretAssetDraft, locale: AppUiLocale) -> Self {
+        Self::InterpretAsset(Box::new(InterpretAssetDialog::new(draft, locale)))
     }
 
     /// Build the new-project modal from an initial draft.

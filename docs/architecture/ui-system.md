@@ -179,6 +179,12 @@ disabled for RAW because the Adapter's output is explicitly scene-linear
 Rec.709 full-range Float32. Non-RAW assets omit the RAW controls from the
 retained Widget tree. The import picker includes DNG, but extension spelling
 alone never grants RAW execution authority.
+The Interpret Footage modal captures the shell's selected locale when opened.
+Its controls, auto-detection status, RAW choices, signal evidence, and OCIO
+diagnostics use the App-owned Fluent catalog; only canonical color-space names,
+technical IDs, file names, and raw decoder values remain untranslated. The
+draft still contains author intent and media evidence only, so changing UI
+language cannot change the asset interpretation committed on Apply.
 The product action's external encode/decode and live-library rejection path
 are tested inside the App crate's isolated test runtime; they do not acquire
 production per-user Project leases.

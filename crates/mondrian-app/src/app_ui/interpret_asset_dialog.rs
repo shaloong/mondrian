@@ -22,6 +22,7 @@ use crate::app::ui_actions::{
     AppShellVideoSignalDiagnostics, AssetsSetInterpretationPayload,
     InterpretAssetDraftUpdatePayload,
 };
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 const CARD_MIN_WIDTH: f32 = 500.0;
 const CARD_WIDTH: f32 = 620.0;
@@ -109,6 +110,7 @@ pub struct InterpretAssetDialog {
     bounds: Rect,
     card: Rect,
     draft: AppUiInterpretAssetDraft,
+    localizer: Localizer,
     title_label: Label,
     asset_label: Label,
     status_label: Label,
@@ -130,7 +132,8 @@ pub struct InterpretAssetDialog {
 
 impl InterpretAssetDialog {
     /// Build an Interpret Footage dialog.
-    pub fn new(draft: AppUiInterpretAssetDraft) -> Self {
+    pub fn new(draft: AppUiInterpretAssetDraft, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         let raw_active = draft
             .video_signal
             .as_ref()
@@ -159,7 +162,7 @@ impl InterpretAssetDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
-            title_label: Label::new("解释素材")
+            title_label: Label::new(localizer.text("interpret-title"))
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
@@ -168,44 +171,53 @@ impl InterpretAssetDialog {
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            status_label: row_label("当前解释"),
+            status_label: row_label(localizer.text("interpret-current")),
             status_value_label: Label::new(String::new())
                 .popover_foreground()
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            color_space_label: row_label("输入色彩空间"),
+            color_space_label: row_label(localizer.text("interpret-input-color-space")),
             color_space_dropdown: color_space_dropdown_for(
                 AssetMediaInterpretation::default(),
                 None,
                 None,
+                &localizer,
             ),
-            range_label: row_label("信号范围"),
-            range_dropdown: range_dropdown_for(AssetMediaInterpretation::default(), None),
-            raw_exposure_label: row_label("RAW 曝光"),
+            range_label: row_label(localizer.text("interpret-signal-range")),
+            range_dropdown: range_dropdown_for(
+                AssetMediaInterpretation::default(),
+                None,
+                &localizer,
+            ),
+            raw_exposure_label: row_label(localizer.text("interpret-raw-exposure")),
             raw_exposure_dropdown: raw_exposure_dropdown_for(
                 AssetMediaInterpretation::default(),
                 raw_active,
             ),
-            raw_white_balance_label: row_label("RAW 白平衡"),
+            raw_white_balance_label: row_label(localizer.text("interpret-raw-white-balance")),
             raw_white_balance_dropdown: raw_white_balance_dropdown_for(
                 AssetMediaInterpretation::default(),
                 raw_active,
+                &localizer,
             ),
-            raw_quality_label: row_label("去马赛克"),
+            raw_quality_label: row_label(localizer.text("interpret-debayer")),
             raw_quality_dropdown: raw_quality_dropdown_for(
                 AssetMediaInterpretation::default(),
                 raw_active,
+                &localizer,
             ),
             diagnostics_label: Label::new(String::new())
                 .muted()
                 .with_font_size(BODY_FONT_SIZE)
                 .with_padding(0.0, 0.0)
                 .wrapped(),
-            apply_button: Button::new("应用")
+            apply_button: Button::new(localizer.text("interpret-apply"))
                 .on_click(app_shell_confirm_interpret_asset_dialog_action()),
-            cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
+            cancel_button: Button::new(localizer.text("interpret-cancel"))
+                .on_click(app_shell_close_modal_action()),
             draft,
+            localizer,
         };
         dialog.refresh_controls();
         dialog
@@ -226,26 +238,38 @@ impl InterpretAssetDialog {
         let raw_active = self.raw_active();
         let raw_controls_enabled = raw_active && self.can_apply();
         self.asset_label.set_text(self.draft.asset_name.clone());
-        self.status_value_label.set_text(interpretation_status(&self.draft));
+        self.status_value_label
+            .set_text(interpretation_status(&self.draft, &self.localizer));
         self.color_space_dropdown = color_space_dropdown_for(
             self.draft.interpretation,
             self.draft.auto_interpretation.as_ref(),
             self.draft.video_signal.as_ref(),
+            &self.localizer,
         )
         .enabled(!raw_active);
-        self.range_dropdown =
-            range_dropdown_for(self.draft.interpretation, self.draft.video_signal.as_ref())
-                .enabled(!raw_active);
+        self.range_dropdown = range_dropdown_for(
+            self.draft.interpretation,
+            self.draft.video_signal.as_ref(),
+            &self.localizer,
+        )
+        .enabled(!raw_active);
         self.raw_exposure_dropdown =
             raw_exposure_dropdown_for(self.draft.interpretation, raw_controls_enabled);
-        self.raw_white_balance_dropdown =
-            raw_white_balance_dropdown_for(self.draft.interpretation, raw_controls_enabled);
-        self.raw_quality_dropdown =
-            raw_quality_dropdown_for(self.draft.interpretation, raw_controls_enabled);
-        self.apply_button = Button::new("应用")
+        self.raw_white_balance_dropdown = raw_white_balance_dropdown_for(
+            self.draft.interpretation,
+            raw_controls_enabled,
+            &self.localizer,
+        );
+        self.raw_quality_dropdown = raw_quality_dropdown_for(
+            self.draft.interpretation,
+            raw_controls_enabled,
+            &self.localizer,
+        );
+        self.apply_button = Button::new(self.localizer.text("interpret-apply"))
             .enabled(self.can_apply())
             .on_click(app_shell_confirm_interpret_asset_dialog_action());
-        self.diagnostics_label.set_text(input_color_diagnostics_text(&self.draft));
+        self.diagnostics_label
+            .set_text(input_color_diagnostics_text(&self.draft, &self.localizer));
     }
 
     fn raw_active(&self) -> bool {
@@ -276,13 +300,14 @@ fn color_space_dropdown_for(
     interpretation: AssetMediaInterpretation,
     auto_interpretation: Option<&DetectedColorInterpretation>,
     signal: Option<&AppShellVideoSignalDiagnostics>,
+    localizer: &Localizer,
 ) -> Dropdown {
     let selected = selected_override_color_space(
         interpretation,
         auto_executable_color_space(auto_interpretation, signal),
     );
     let mut items = vec![MenuItem::new(
-        auto_option_label(auto_interpretation, signal),
+        auto_option_label(auto_interpretation, signal, localizer),
         draft_update_action(interpretation, MediaColorInterpretation::Auto),
     )
     .checked(matches!(
@@ -306,7 +331,7 @@ fn color_space_dropdown_for(
     }));
 
     let label = match interpretation.color {
-        MediaColorInterpretation::Auto => auto_option_label(auto_interpretation, signal),
+        MediaColorInterpretation::Auto => auto_option_label(auto_interpretation, signal, localizer),
         MediaColorInterpretation::Override { color_space } => {
             color_space_label(color_space).to_owned()
         }
@@ -326,8 +351,9 @@ fn draft_update_action(
 fn range_dropdown_for(
     interpretation: AssetMediaInterpretation,
     signal: Option<&AppShellVideoSignalDiagnostics>,
+    localizer: &Localizer,
 ) -> Dropdown {
-    let auto_label = range_auto_option_label(signal);
+    let auto_label = range_auto_option_label(signal, localizer);
     let items = vec![
         MenuItem::new(
             auto_label.clone(),
@@ -338,7 +364,7 @@ fn range_dropdown_for(
             MediaRangeInterpretation::Auto
         )),
         MenuItem::new(
-            "Full（全范围）",
+            localizer.text("interpret-range-full"),
             range_draft_update_action(
                 interpretation,
                 MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
@@ -349,7 +375,7 @@ fn range_dropdown_for(
             MediaRangeInterpretation::Override { range: MediaSignalRange::Full }
         )),
         MenuItem::new(
-            "Limited（视频范围）",
+            localizer.text("interpret-range-limited"),
             range_draft_update_action(
                 interpretation,
                 MediaRangeInterpretation::Override { range: MediaSignalRange::Limited },
@@ -363,10 +389,10 @@ fn range_dropdown_for(
     let label = match interpretation.range {
         MediaRangeInterpretation::Auto => auto_label,
         MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
-            "Full（全范围）".to_owned()
+            localizer.text("interpret-range-full")
         }
         MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
-            "Limited（视频范围）".to_owned()
+            localizer.text("interpret-range-limited")
         }
     };
     Dropdown::new(label, items)
@@ -406,10 +432,11 @@ fn raw_exposure_label(exposure_millistops: i16) -> String {
 fn raw_white_balance_dropdown_for(
     interpretation: AssetMediaInterpretation,
     enabled: bool,
+    localizer: &Localizer,
 ) -> Dropdown {
     let current = interpretation.camera_raw.white_balance;
     let mut items = vec![MenuItem::new(
-        "As Shot（相机元数据）",
+        localizer.text("interpret-raw-as-shot"),
         raw_white_balance_action(interpretation, CameraRawWhiteBalance::CameraMetadata),
     )
     .checked(current == CameraRawWhiteBalance::CameraMetadata)];
@@ -425,7 +452,7 @@ fn raw_white_balance_dropdown_for(
         }),
     );
     let label = match current {
-        CameraRawWhiteBalance::CameraMetadata => "As Shot（相机元数据）".to_owned(),
+        CameraRawWhiteBalance::CameraMetadata => localizer.text("interpret-raw-as-shot"),
         CameraRawWhiteBalance::TemperatureTint { temperature_kelvin, tint_milli } => {
             format!("{temperature_kelvin} K · Tint {tint_milli:+}")
         }
@@ -441,24 +468,35 @@ fn raw_white_balance_action(
     raw_draft_update_action(interpretation)
 }
 
-fn raw_quality_dropdown_for(interpretation: AssetMediaInterpretation, enabled: bool) -> Dropdown {
+fn raw_quality_dropdown_for(
+    interpretation: AssetMediaInterpretation,
+    enabled: bool,
+    localizer: &Localizer,
+) -> Dropdown {
     let current = interpretation.camera_raw.debayer_quality;
     let items = [
-        (CameraRawDebayerQuality::Bilinear, "Bilinear（快速）"),
-        (CameraRawDebayerQuality::EdgeAware, "Edge Aware（高质量）"),
+        (
+            CameraRawDebayerQuality::Bilinear,
+            "interpret-debayer-bilinear",
+        ),
+        (
+            CameraRawDebayerQuality::EdgeAware,
+            "interpret-debayer-edge-aware",
+        ),
     ]
     .into_iter()
-    .map(|(quality, label)| {
+    .map(|(quality, message_id)| {
         let mut updated = interpretation;
         updated.camera_raw.debayer_quality = quality;
-        MenuItem::new(label, raw_draft_update_action(updated)).checked(current == quality)
+        MenuItem::new(localizer.text(message_id), raw_draft_update_action(updated))
+            .checked(current == quality)
     })
     .collect();
-    let label = match current {
-        CameraRawDebayerQuality::Bilinear => "Bilinear（快速）",
-        CameraRawDebayerQuality::EdgeAware => "Edge Aware（高质量）",
+    let message_id = match current {
+        CameraRawDebayerQuality::Bilinear => "interpret-debayer-bilinear",
+        CameraRawDebayerQuality::EdgeAware => "interpret-debayer-edge-aware",
     };
-    Dropdown::new(label, items).enabled(enabled)
+    Dropdown::new(localizer.text(message_id), items).enabled(enabled)
 }
 
 fn raw_draft_update_action(
@@ -469,9 +507,12 @@ fn raw_draft_update_action(
     })
 }
 
-fn range_auto_option_label(signal: Option<&AppShellVideoSignalDiagnostics>) -> String {
+fn range_auto_option_label(
+    signal: Option<&AppShellVideoSignalDiagnostics>,
+    localizer: &Localizer,
+) -> String {
     let detected = signal.map(|signal| range_label_text(signal.range)).unwrap_or("Unknown");
-    format!("自动 — {detected}")
+    localizer.format_text("interpret-range-auto", "range", detected)
 }
 
 fn range_label_text(range: DecodedVideoRange) -> &'static str {
@@ -514,62 +555,80 @@ fn auto_executable_color_space(
 fn auto_option_label(
     auto_interpretation: Option<&DetectedColorInterpretation>,
     signal: Option<&AppShellVideoSignalDiagnostics>,
+    localizer: &Localizer,
 ) -> String {
     let Some(interpretation) = auto_interpretation else {
-        return "自动 — 未明确标记".to_owned();
+        return localizer.text("interpret-auto-unmarked");
     };
     let base = match (
         interpretation.candidate_color_space,
         auto_executable_color_space(Some(interpretation), signal),
     ) {
-        (Some(color_space), Some(_)) => {
-            format!("自动 — 已识别为 {}", color_space_label(color_space))
-        }
-        (Some(color_space), None) => format!(
-            "自动 — 建议 {}（仅诊断，不应用）",
-            color_space_label(color_space)
+        (Some(color_space), Some(_)) => localizer.format_text(
+            "interpret-auto-identified",
+            "space",
+            color_space_label(color_space),
         ),
-        (None, _) => "自动 — 未明确标记".to_owned(),
+        (Some(color_space), None) => localizer.format_text(
+            "interpret-auto-suggested",
+            "space",
+            color_space_label(color_space),
+        ),
+        (None, _) => localizer.text("interpret-auto-unmarked"),
     };
     let mut details = vec![
-        confidence_label(interpretation.confidence).to_owned(),
-        method_label(interpretation.method).to_owned(),
+        confidence_label(interpretation.confidence, localizer),
+        method_label(interpretation.method, localizer),
     ];
     if !interpretation.warnings.is_empty() {
-        details.push(format!("{} 个警告", interpretation.warnings.len()));
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", interpretation.warnings.len() as i64);
+        details.push(localizer.format("interpret-warning-count", Some(&args)));
     }
-    format!("{base}（{}）", details.join("，"))
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("base", base);
+    args.set(
+        "details",
+        details.join(localizer.text("interpret-detail-separator").as_str()),
+    );
+    localizer.format("interpret-auto-details", Some(&args))
 }
 
-fn confidence_label(confidence: VideoColorInterpretationConfidence) -> &'static str {
-    match confidence {
-        VideoColorInterpretationConfidence::None => "无置信度",
-        VideoColorInterpretationConfidence::Low => "低置信度",
-        VideoColorInterpretationConfidence::Medium => "中置信度",
-        VideoColorInterpretationConfidence::High => "高置信度",
-    }
+fn confidence_label(
+    confidence: VideoColorInterpretationConfidence,
+    localizer: &Localizer,
+) -> String {
+    localizer.text(match confidence {
+        VideoColorInterpretationConfidence::None => "interpret-confidence-none",
+        VideoColorInterpretationConfidence::Low => "interpret-confidence-low",
+        VideoColorInterpretationConfidence::Medium => "interpret-confidence-medium",
+        VideoColorInterpretationConfidence::High => "interpret-confidence-high",
+    })
 }
 
-fn method_label(method: VideoColorDetectionMethod) -> &'static str {
-    match method {
-        VideoColorDetectionMethod::MetadataHint => "元数据提示",
-        VideoColorDetectionMethod::IccProfile => "ICC 配置文件",
-        VideoColorDetectionMethod::CicpTags => "CICP",
-        VideoColorDetectionMethod::MissingMetadata => "无元数据",
-        VideoColorDetectionMethod::UnsupportedCicpTags => "CICP 不支持",
-        VideoColorDetectionMethod::DecoderUnavailable => "解码器不可用",
-    }
+fn method_label(method: VideoColorDetectionMethod, localizer: &Localizer) -> String {
+    localizer.text(match method {
+        VideoColorDetectionMethod::MetadataHint => "interpret-method-metadata-hint",
+        VideoColorDetectionMethod::IccProfile => "interpret-method-icc-profile",
+        VideoColorDetectionMethod::CicpTags => "interpret-method-cicp-tags",
+        VideoColorDetectionMethod::MissingMetadata => "interpret-method-missing-metadata",
+        VideoColorDetectionMethod::UnsupportedCicpTags => "interpret-method-unsupported-cicp",
+        VideoColorDetectionMethod::DecoderUnavailable => "interpret-method-decoder-unavailable",
+    })
 }
 
-fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
+fn interpretation_status(draft: &AppUiInterpretAssetDraft, localizer: &Localizer) -> String {
     match draft.interpretation.color {
         MediaColorInterpretation::Auto => auto_option_label(
             draft.auto_interpretation.as_ref(),
             draft.video_signal.as_ref(),
+            localizer,
         ),
-        MediaColorInterpretation::Override { color_space } => {
-            format!("手动 — {}", color_space_label(color_space))
-        }
+        MediaColorInterpretation::Override { color_space } => localizer.format_text(
+            "interpret-manual-color-space",
+            "space",
+            color_space_label(color_space),
+        ),
     }
 }
 
@@ -577,9 +636,9 @@ fn button_y_for_card(card: Rect) -> f32 {
     card.y + card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT
 }
 
-fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
+fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft, localizer: &Localizer) -> String {
     let Some(pipeline) = draft.input_pipeline.as_ref() else {
-        return "输入诊断：未提供项目色彩上下文".to_owned();
+        return localizer.text("interpret-diagnostics-no-context");
     };
     let interpretation = draft.auto_interpretation.as_ref();
     let source = match draft.interpretation.color {
@@ -589,58 +648,99 @@ fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
         }
     };
     let decision = match draft.interpretation.color {
-        MediaColorInterpretation::Override { .. } => "用户显式覆盖".to_owned(),
+        MediaColorInterpretation::Override { .. } => localizer.text("interpret-decision-explicit"),
         MediaColorInterpretation::Auto => interpretation
             .map(|value| {
                 let inference = if value.confidence == VideoColorInterpretationConfidence::High {
-                    "确定/声明"
+                    localizer.text("interpret-inference-declared")
                 } else if value.candidate_color_space.is_some() {
-                    "仅建议/不执行"
+                    localizer.text("interpret-inference-suggested")
                 } else {
-                    "未知"
+                    localizer.text("interpret-inference-unknown")
                 };
-                format!(
-                    "自动 · {} · {} · {}",
-                    method_label(value.method),
-                    confidence_label(value.confidence),
-                    inference
+                format_values(
+                    localizer,
+                    "interpret-decision-auto",
+                    [
+                        ("method", method_label(value.method, localizer)),
+                        ("confidence", confidence_label(value.confidence, localizer)),
+                        ("inference", inference),
+                    ],
                 )
             })
-            .unwrap_or_else(|| "自动 · 未探测".to_owned()),
+            .unwrap_or_else(|| localizer.text("interpret-decision-unprobed")),
     };
-    let signal = video_signal_summary(draft);
+    let signal = video_signal_summary(draft, localizer);
     let evidence = interpretation
-        .map(|value| summarize_entries(&value.evidence, evidence_summary, 3))
+        .map(|value| {
+            summarize_entries(
+                &value.evidence,
+                |entry| evidence_summary(entry, localizer),
+                3,
+                localizer,
+            )
+        })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "无".to_owned());
+        .unwrap_or_else(|| localizer.text("interpret-none"));
     let warnings = interpretation
-        .map(|value| summarize_entries(&value.warnings, warning_summary, 3))
+        .map(|value| {
+            summarize_entries(
+                &value.warnings,
+                |entry| warning_summary(entry, localizer),
+                3,
+                localizer,
+            )
+        })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "无".to_owned());
+        .unwrap_or_else(|| localizer.text("interpret-none"));
     let working = working_color_space_label(pipeline.working_color_space);
     let processor = source.map_or_else(
-        || "不可用：输入空间尚未解析，保持 Unknown/按项目缺失元数据策略处理".to_owned(),
+        || localizer.text("interpret-processor-unresolved"),
         |source| {
             mondrian_core::ocio_identity_processor_cache_id(
                 &pipeline.engine,
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Working(pipeline.working_color_space),
             )
-            .unwrap_or_else(|error| format!("不可用：{error}"))
+            .unwrap_or_else(|error| {
+                localizer.format_text("interpret-processor-error", "error", &error.to_string())
+            })
         },
     );
     let path = source
         .map(|source| color_space_label(source).to_owned())
         .unwrap_or_else(|| "Unknown".to_owned());
-    format!(
-        "识别：{decision}\n{signal}\n依据：{evidence}\n警告：{warnings}\n路径：{path} → {working}（{}）\nOCIO processor cache-id：{processor}",
-        pipeline.engine.name()
+    format_values(
+        localizer,
+        "interpret-diagnostics",
+        [
+            ("decision", decision),
+            ("signal", signal),
+            ("evidence", evidence),
+            ("warnings", warnings),
+            ("path", path),
+            ("working", working.to_owned()),
+            ("engine", pipeline.engine.name().to_owned()),
+            ("processor", processor),
+        ],
     )
 }
 
-fn video_signal_summary(draft: &AppUiInterpretAssetDraft) -> String {
+fn format_values<const N: usize>(
+    localizer: &Localizer,
+    message_id: &str,
+    values: [(&str, String); N],
+) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    for (name, value) in values {
+        args.set(name, value);
+    }
+    localizer.format(message_id, Some(&args))
+}
+
+fn video_signal_summary(draft: &AppUiInterpretAssetDraft, localizer: &Localizer) -> String {
     let Some(signal) = draft.video_signal.as_ref() else {
-        return "Range/Primaries/Transfer/Matrix：无视频信号".to_owned();
+        return localizer.text("interpret-signal-missing");
     };
     let detected_range = range_label_text(signal.range);
     if let Some(raw) = signal.camera_raw.as_ref() {
@@ -648,38 +748,47 @@ fn video_signal_summary(draft: &AppUiInterpretAssetDraft) -> String {
             (Some(make), Some(model)) => format!("{make} {model}"),
             (Some(make), None) => make.clone(),
             (None, Some(model)) => model.clone(),
-            (None, None) => "未标记相机".to_owned(),
+            (None, None) => localizer.text("interpret-camera-untagged"),
         };
-        return format!(
-            "Camera RAW：{:?} · {}x{} · {}-bit · CFA {:?} · compression {} · {} · ColorMatrix={} · AsShotNeutral={}",
-            raw.adapter,
-            raw.width,
-            raw.height,
-            raw.bit_depth,
-            raw.cfa_pattern,
-            raw.compression,
-            camera,
-            raw.has_color_matrix,
-            raw.has_as_shot_neutral
+        return format_values(
+            localizer,
+            "interpret-signal-camera-raw",
+            [
+                ("adapter", format!("{:?}", raw.adapter)),
+                ("width", raw.width.to_string()),
+                ("height", raw.height.to_string()),
+                ("bits", raw.bit_depth.to_string()),
+                ("cfa", format!("{:?}", raw.cfa_pattern)),
+                ("compression", raw.compression.to_string()),
+                ("camera", camera),
+                ("matrix", raw.has_color_matrix.to_string()),
+                ("neutral", raw.has_as_shot_neutral.to_string()),
+            ],
         );
     }
     let range = match draft.interpretation.range {
-        MediaRangeInterpretation::Auto => format!("{detected_range}（自动/探测）"),
+        MediaRangeInterpretation::Auto => {
+            localizer.format_text("interpret-signal-range-auto", "detected", detected_range)
+        }
         MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
-            format!("Full（用户覆盖；探测为 {detected_range}）")
+            localizer.format_text("interpret-signal-range-full", "detected", detected_range)
         }
         MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
-            format!("Limited（用户覆盖；探测为 {detected_range}）")
+            localizer.format_text("interpret-signal-range-limited", "detected", detected_range)
         }
     };
     signal.color_metadata.as_ref().map_or_else(
-        || format!("Range：{range} · Primaries/Transfer/Matrix：未提供"),
+        || localizer.format_text("interpret-signal-no-metadata", "range", &range),
         |metadata| {
-            format!(
-                "Range：{range} · Primaries：{} · Transfer：{} · Matrix：{}",
-                video_color_tag_summary(&metadata.primaries),
-                video_color_tag_summary(&metadata.transfer),
-                video_color_tag_summary(&metadata.matrix)
+            format_values(
+                localizer,
+                "interpret-signal-metadata",
+                [
+                    ("range", range.clone()),
+                    ("primaries", video_color_tag_summary(&metadata.primaries)),
+                    ("transfer", video_color_tag_summary(&metadata.transfer)),
+                    ("matrix", video_color_tag_summary(&metadata.matrix)),
+                ],
             )
         },
     )
@@ -695,7 +804,7 @@ fn video_color_tag_summary(tag: &VideoColorTag) -> String {
         .unwrap_or_else(|| tag.code.to_string())
 }
 
-fn evidence_summary(evidence: &VideoColorInterpretationEvidence) -> String {
+fn evidence_summary(evidence: &VideoColorInterpretationEvidence, localizer: &Localizer) -> String {
     match evidence {
         VideoColorInterpretationEvidence::MetadataHint {
             scope,
@@ -703,83 +812,140 @@ fn evidence_summary(evidence: &VideoColorInterpretationEvidence) -> String {
             value,
             detected_color_space,
             authority,
-        } => format!(
-            "{:?} {:?} metadata {key}={value} → {}",
-            scope,
-            authority,
-            color_space_label(*detected_color_space)
+        } => format_values(
+            localizer,
+            "interpret-evidence-metadata-hint",
+            [
+                ("scope", format!("{scope:?}")),
+                ("authority", format!("{authority:?}")),
+                ("key", key.clone()),
+                ("value", value.clone()),
+                ("space", color_space_label(*detected_color_space).to_owned()),
+            ],
         ),
         VideoColorInterpretationEvidence::ExactCicpTags {
             primaries,
             transfer,
             matrix,
             detected_color_space,
-        } => format!(
-            "完整 CICP {}/{}/{} → {}",
-            video_color_tag_summary(primaries),
-            video_color_tag_summary(transfer),
-            video_color_tag_summary(matrix),
-            color_space_label(*detected_color_space)
+        } => format_values(
+            localizer,
+            "interpret-evidence-exact-cicp",
+            [
+                (
+                    "tags",
+                    format!(
+                        "{}/{}/{}",
+                        video_color_tag_summary(primaries),
+                        video_color_tag_summary(transfer),
+                        video_color_tag_summary(matrix)
+                    ),
+                ),
+                ("space", color_space_label(*detected_color_space).to_owned()),
+            ],
         ),
         VideoColorInterpretationEvidence::PartialCicpTags {
             primaries,
             transfer,
             matrix,
             detected_color_space,
-        } => format!(
-            "部分 CICP {}/{}/{} → {}",
-            video_color_tag_summary(primaries),
-            video_color_tag_summary(transfer),
-            video_color_tag_summary(matrix),
-            color_space_label(*detected_color_space)
+        } => format_values(
+            localizer,
+            "interpret-evidence-partial-cicp",
+            [
+                (
+                    "tags",
+                    format!(
+                        "{}/{}/{}",
+                        video_color_tag_summary(primaries),
+                        video_color_tag_summary(transfer),
+                        video_color_tag_summary(matrix)
+                    ),
+                ),
+                ("space", color_space_label(*detected_color_space).to_owned()),
+            ],
         ),
         VideoColorInterpretationEvidence::UnsupportedCicpTags { primaries, transfer, matrix } => {
-            format!(
-                "不支持的 CICP {}/{}/{}",
-                video_color_tag_summary(primaries),
-                video_color_tag_summary(transfer),
-                video_color_tag_summary(matrix)
+            localizer.format_text(
+                "interpret-evidence-unsupported-cicp",
+                "tags",
+                &format!(
+                    "{}/{}/{}",
+                    video_color_tag_summary(primaries),
+                    video_color_tag_summary(transfer),
+                    video_color_tag_summary(matrix)
+                ),
             )
         }
-        VideoColorInterpretationEvidence::DecoderUnavailable => "解码器不可用".to_owned(),
+        VideoColorInterpretationEvidence::DecoderUnavailable => {
+            localizer.text("interpret-method-decoder-unavailable")
+        }
         VideoColorInterpretationEvidence::IccProfile { mapped_color_space, profile_name } => {
-            format!(
-                "ICC {} → {}",
-                profile_name.as_deref().unwrap_or("未命名"),
-                mapped_color_space.map(color_space_label).unwrap_or("未映射")
+            format_values(
+                localizer,
+                "interpret-evidence-icc",
+                [
+                    (
+                        "profile",
+                        profile_name.clone().unwrap_or_else(|| localizer.text("interpret-unnamed")),
+                    ),
+                    (
+                        "space",
+                        mapped_color_space
+                            .map(color_space_label)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| localizer.text("interpret-unmapped")),
+                    ),
+                ],
             )
         }
     }
 }
 
-fn warning_summary(warning: &VideoColorInterpretationWarning) -> String {
-    match warning {
-        VideoColorInterpretationWarning::MultipleMetadataHints { .. } => "多个 metadata hint 冲突",
+fn warning_summary(warning: &VideoColorInterpretationWarning, localizer: &Localizer) -> String {
+    localizer.text(match warning {
+        VideoColorInterpretationWarning::MultipleMetadataHints { .. } => {
+            "interpret-warning-conflicting-hints"
+        }
         VideoColorInterpretationWarning::MetadataHintOverridesCicpTags { .. } => {
-            "metadata hint 覆盖冲突 CICP"
+            "interpret-warning-hint-overrides-cicp"
         }
         VideoColorInterpretationWarning::DescriptiveMetadataHintInference { .. } => {
-            "仅依据描述性 metadata 推断"
+            "interpret-warning-descriptive-hint"
         }
         VideoColorInterpretationWarning::LowerPriorityMetadataHints { .. } => {
-            "已忽略冲突的低优先级 hint"
+            "interpret-warning-lower-priority-hints"
         }
-        VideoColorInterpretationWarning::PartialCicpTags { .. } => "仅有部分 CICP",
-        VideoColorInterpretationWarning::MissingCicpTags => "CICP 缺失",
-        VideoColorInterpretationWarning::UnsupportedCicpTags => "CICP 不支持或冲突",
-        VideoColorInterpretationWarning::DecoderUnavailable => "解码器不可用",
-        VideoColorInterpretationWarning::IccProfileUnmapped { .. } => "ICC 无法映射",
-        VideoColorInterpretationWarning::IccCicpMismatch { .. } => "ICC 与 CICP 冲突",
-    }
-    .to_owned()
+        VideoColorInterpretationWarning::PartialCicpTags { .. } => "interpret-warning-partial-cicp",
+        VideoColorInterpretationWarning::MissingCicpTags => "interpret-warning-missing-cicp",
+        VideoColorInterpretationWarning::UnsupportedCicpTags => {
+            "interpret-warning-unsupported-cicp"
+        }
+        VideoColorInterpretationWarning::DecoderUnavailable => {
+            "interpret-method-decoder-unavailable"
+        }
+        VideoColorInterpretationWarning::IccProfileUnmapped { .. } => {
+            "interpret-warning-icc-unmapped"
+        }
+        VideoColorInterpretationWarning::IccCicpMismatch { .. } => {
+            "interpret-warning-icc-cicp-mismatch"
+        }
+    })
 }
 
-fn summarize_entries<T>(entries: &[T], summarize: fn(&T) -> String, maximum: usize) -> String {
+fn summarize_entries<T>(
+    entries: &[T],
+    summarize: impl Fn(&T) -> String,
+    maximum: usize,
+    localizer: &Localizer,
+) -> String {
     let mut summaries = entries.iter().take(maximum).map(summarize).collect::<Vec<_>>();
     if entries.len() > maximum {
-        summaries.push(format!("另有 {} 项", entries.len() - maximum));
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", (entries.len() - maximum) as i64);
+        summaries.push(localizer.format("interpret-more-items", Some(&args)));
     }
-    summaries.join("；")
+    summaries.join(&localizer.text("interpret-entry-separator"))
 }
 
 fn working_color_space_label(working: mondrian_core::WorkingColorSpace) -> &'static str {
@@ -1070,6 +1236,14 @@ mod tests {
     use mondrian_editor_state::Action;
     use mondrian_media::{VideoColorInterpretationWarning, VideoColorSpaceSource};
 
+    fn chinese_localizer() -> Localizer {
+        Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog")
+    }
+
+    fn chinese_dialog(draft: AppUiInterpretAssetDraft) -> InterpretAssetDialog {
+        InterpretAssetDialog::new(draft, AppUiLocale::ZhCn)
+    }
+
     #[test]
     fn draft_converts_to_asset_payload() {
         let asset_id = AssetId::new();
@@ -1105,7 +1279,7 @@ mod tests {
         )
         .with_input_diagnostics(Some(signal), None);
 
-        let status = interpretation_status(&draft);
+        let status = interpretation_status(&draft, &chinese_localizer());
 
         assert!(status.contains("自动"));
         assert!(status.contains("已识别为"));
@@ -1113,6 +1287,66 @@ mod tests {
         assert!(status.contains("高置信度"));
         assert!(status.contains("CICP"));
         assert!(!status.contains("预览/导出"));
+    }
+
+    #[test]
+    fn english_dialog_localizes_controls_and_color_diagnostics() {
+        let (interpretation, signal) = exact_cicp_fixture(ColorSpace::Rec709);
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Camera A.mov",
+            AssetMediaInterpretation::default(),
+            Some(interpretation),
+        )
+        .with_input_diagnostics(
+            Some(signal),
+            Some(AppShellInputColorPipelineDiagnostics {
+                engine: mondrian_core::ColorEngine::mondrian_standard(),
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+            }),
+        );
+        let dialog = InterpretAssetDialog::new(draft, AppUiLocale::EnUs);
+
+        assert_eq!(dialog.title_label.text(), "Interpret Footage");
+        assert_eq!(dialog.color_space_label.text(), "Input color space");
+        assert_eq!(dialog.range_label.text(), "Signal range");
+        assert!(dialog.status_value_label.text().contains("Auto"));
+        assert!(dialog.range_dropdown.label().contains("Auto"));
+        let diagnostics = dialog.diagnostics_label.text();
+        assert!(diagnostics.contains("Detection:"));
+        assert!(diagnostics.contains("Exact CICP"));
+        assert!(diagnostics.contains("OCIO processor cache ID:"));
+        assert!(!diagnostics
+            .chars()
+            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
+
+        let raw_dialog = InterpretAssetDialog::new(
+            AppUiInterpretAssetDraft::new(
+                AssetId::new(),
+                "Frame.dng",
+                AssetMediaInterpretation::default(),
+                None,
+            )
+            .with_input_diagnostics(
+                Some(camera_raw_signal()),
+                Some(AppShellInputColorPipelineDiagnostics {
+                    engine: mondrian_core::ColorEngine::mondrian_standard(),
+                    working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+                }),
+            ),
+            AppUiLocale::EnUs,
+        );
+        assert_eq!(
+            raw_dialog.raw_white_balance_dropdown.label(),
+            "As Shot (camera metadata)"
+        );
+        assert_eq!(raw_dialog.raw_quality_dropdown.label(), "Edge Aware (high quality)");
+        assert!(raw_dialog.diagnostics_label.text().contains("Camera RAW:"));
+        assert!(!raw_dialog
+            .diagnostics_label
+            .text()
+            .chars()
+            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
     }
 
     #[test]
@@ -1133,7 +1367,7 @@ mod tests {
             Some(interpretation.clone()),
         );
 
-        let status = interpretation_status(&draft);
+        let status = interpretation_status(&draft, &chinese_localizer());
         assert!(status.contains("建议"));
         assert!(status.contains("仅诊断，不应用"));
         assert_eq!(
@@ -1144,7 +1378,7 @@ mod tests {
 
     #[test]
     fn auto_mode_uses_enabled_color_space_dropdown() {
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Shot",
             AssetMediaInterpretation::default(),
@@ -1176,7 +1410,7 @@ mod tests {
                 working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
             }),
         );
-        let dialog = InterpretAssetDialog::new(draft);
+        let dialog = chinese_dialog(draft);
 
         assert!(dialog.raw_active());
         assert_eq!(dialog.child_count(), 17);
@@ -1193,7 +1427,7 @@ mod tests {
     fn incomplete_camera_raw_metadata_disables_development_commit() {
         let mut signal = camera_raw_signal();
         signal.camera_raw.as_mut().expect("RAW metadata").has_color_matrix = false;
-        let dialog = InterpretAssetDialog::new(
+        let dialog = chinese_dialog(
             AppUiInterpretAssetDraft::new(
                 AssetId::new(),
                 "Incomplete.dng",
@@ -1213,7 +1447,7 @@ mod tests {
 
     #[test]
     fn non_raw_dialog_keeps_raw_controls_out_of_the_widget_tree() {
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Shot.mov",
             AssetMediaInterpretation::default(),
@@ -1233,7 +1467,7 @@ mod tests {
             payload: AssetColorPayload::NonColorData,
             ..AssetMediaInterpretation::default()
         };
-        let dialog = InterpretAssetDialog::new(
+        let dialog = chinese_dialog(
             AppUiInterpretAssetDraft::new(AssetId::new(), "Frame.dng", interpretation, None)
                 .with_input_diagnostics(Some(camera_raw_signal()), None),
         );
@@ -1253,7 +1487,7 @@ mod tests {
 
     #[test]
     fn override_is_a_color_space_dropdown_option() {
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Shot",
             AssetMediaInterpretation {
@@ -1284,7 +1518,7 @@ mod tests {
             payload: AssetColorPayload::NonColorData,
             ..AssetMediaInterpretation::default()
         };
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Matte",
             interpretation,
@@ -1315,7 +1549,7 @@ mod tests {
             payload: AssetColorPayload::NonColorData,
             ..AssetMediaInterpretation::default()
         };
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Tagged incorrectly",
             interpretation,
@@ -1348,7 +1582,7 @@ mod tests {
             payload: AssetColorPayload::NonColorData,
             ..AssetMediaInterpretation::default()
         };
-        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+        let dialog = chinese_dialog(AppUiInterpretAssetDraft::new(
             AssetId::new(),
             "Matte",
             interpretation,
@@ -1391,9 +1625,12 @@ mod tests {
             Some(interpretation),
         );
 
-        let status = interpretation_status(&draft);
+        let status = interpretation_status(&draft, &chinese_localizer());
 
-        assert!(status.contains("1 个警告"));
+        assert!(
+            status.contains('1') && status.contains("个警告"),
+            "{status}"
+        );
     }
 
     #[test]
@@ -1414,11 +1651,14 @@ mod tests {
             }),
         );
 
-        let diagnostics = input_color_diagnostics_text(&draft);
+        let diagnostics = input_color_diagnostics_text(&draft, &chinese_localizer());
         assert!(diagnostics.contains("Limited"));
-        assert!(diagnostics.contains("Primaries：bt709(1)"));
+        assert!(diagnostics.contains("Primaries：") && diagnostics.contains("bt709(1)"));
         assert!(diagnostics.contains("完整 CICP"));
-        assert!(diagnostics.contains("Rec. 709 → Mondrian Working Linear Rec.2020"));
+        assert!(
+            diagnostics.contains("Rec. 709")
+                && diagnostics.contains("Mondrian Working Linear Rec.2020")
+        );
         assert!(diagnostics.contains("OCIO processor cache-id："));
         assert!(!diagnostics.contains("processor cache-id：不可用"));
     }
@@ -1433,7 +1673,7 @@ mod tests {
         );
 
         assert_eq!(
-            input_color_diagnostics_text(&draft),
+            input_color_diagnostics_text(&draft, &chinese_localizer()),
             "输入诊断：未提供项目色彩上下文"
         );
     }

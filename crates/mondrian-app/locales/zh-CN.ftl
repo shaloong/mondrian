@@ -356,3 +356,77 @@ audio-mixer-missing-bus = 缺失 Bus · { $identity }
 audio-mixer-missing-output = 缺失节目输出 · { $identity }
 audio-mixer-locked-strip = 轨道 { $identity } 已锁定；处理器、输入增益和推子为只读
 audio-mixer-locked-route = 轨道 { $identity } 已锁定；其 Route 为只读
+interpret-title = 解释素材
+interpret-current = 当前解释
+interpret-input-color-space = 输入色彩空间
+interpret-signal-range = 信号范围
+interpret-raw-exposure = RAW 曝光
+interpret-raw-white-balance = RAW 白平衡
+interpret-debayer = 去马赛克
+interpret-apply = 应用
+interpret-cancel = 取消
+interpret-range-full = Full（全范围）
+interpret-range-limited = Limited（视频范围）
+interpret-range-auto = 自动 — { $range }
+interpret-raw-as-shot = As Shot（相机元数据）
+interpret-debayer-bilinear = Bilinear（快速）
+interpret-debayer-edge-aware = Edge Aware（高质量）
+interpret-auto-unmarked = 自动 — 未明确标记
+interpret-auto-identified = 自动 — 已识别为 { $space }
+interpret-auto-suggested = 自动 — 建议 { $space }（仅诊断，不应用）
+interpret-manual-color-space = 手动 — { $space }
+interpret-auto-details = { $base }（{ $details }）
+interpret-detail-separator = ，
+interpret-warning-count = { $count } 个警告
+interpret-confidence-none = 无置信度
+interpret-confidence-low = 低置信度
+interpret-confidence-medium = 中置信度
+interpret-confidence-high = 高置信度
+interpret-method-metadata-hint = 元数据提示
+interpret-method-icc-profile = ICC 配置文件
+interpret-method-cicp-tags = CICP
+interpret-method-missing-metadata = 无元数据
+interpret-method-unsupported-cicp = CICP 不支持
+interpret-method-decoder-unavailable = 解码器不可用
+interpret-diagnostics-no-context = 输入诊断：未提供项目色彩上下文
+interpret-decision-explicit = 用户显式覆盖
+interpret-inference-declared = 确定/声明
+interpret-inference-suggested = 仅建议/不执行
+interpret-inference-unknown = 未知
+interpret-decision-auto = 自动 · { $method } · { $confidence } · { $inference }
+interpret-decision-unprobed = 自动 · 未探测
+interpret-none = 无
+interpret-processor-unresolved = 不可用：输入空间尚未解析，保持 Unknown/按项目缺失元数据策略处理
+interpret-processor-error = 不可用：{ $error }
+interpret-diagnostics = 识别：{ $decision }
+    { $signal }
+    依据：{ $evidence }
+    警告：{ $warnings }
+    路径：{ $path } → { $working }（{ $engine }）
+    OCIO processor cache-id：{ $processor }
+interpret-signal-missing = Range/Primaries/Transfer/Matrix：无视频信号
+interpret-camera-untagged = 未标记相机
+interpret-signal-camera-raw = Camera RAW：{ $adapter } · { $width }x{ $height } · { $bits }-bit · CFA { $cfa } · compression { $compression } · { $camera } · ColorMatrix={ $matrix } · AsShotNeutral={ $neutral }
+interpret-signal-range-auto = { $detected }（自动/探测）
+interpret-signal-range-full = Full（用户覆盖；探测为 { $detected }）
+interpret-signal-range-limited = Limited（用户覆盖；探测为 { $detected }）
+interpret-signal-no-metadata = Range：{ $range } · Primaries/Transfer/Matrix：未提供
+interpret-signal-metadata = Range：{ $range } · Primaries：{ $primaries } · Transfer：{ $transfer } · Matrix：{ $matrix }
+interpret-evidence-metadata-hint = { $scope } { $authority } metadata { $key }={ $value } → { $space }
+interpret-evidence-exact-cicp = 完整 CICP { $tags } → { $space }
+interpret-evidence-partial-cicp = 部分 CICP { $tags } → { $space }
+interpret-evidence-unsupported-cicp = 不支持的 CICP { $tags }
+interpret-evidence-icc = ICC { $profile } → { $space }
+interpret-unnamed = 未命名
+interpret-unmapped = 未映射
+interpret-warning-conflicting-hints = 多个 metadata hint 冲突
+interpret-warning-hint-overrides-cicp = metadata hint 覆盖冲突 CICP
+interpret-warning-descriptive-hint = 仅依据描述性 metadata 推断
+interpret-warning-lower-priority-hints = 已忽略冲突的低优先级 hint
+interpret-warning-partial-cicp = 仅有部分 CICP
+interpret-warning-missing-cicp = CICP 缺失
+interpret-warning-unsupported-cicp = CICP 不支持或冲突
+interpret-warning-icc-unmapped = ICC 无法映射
+interpret-warning-icc-cicp-mismatch = ICC 与 CICP 冲突
+interpret-more-items = 另有 { $count } 项
+interpret-entry-separator = ；

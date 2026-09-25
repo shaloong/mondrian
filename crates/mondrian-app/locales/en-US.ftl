@@ -389,3 +389,83 @@ audio-mixer-missing-bus = Missing Bus · { $identity }
 audio-mixer-missing-output = Missing Program Output · { $identity }
 audio-mixer-locked-strip = Track { $identity } is locked; processors, input trim, and fader are read-only
 audio-mixer-locked-route = Track { $identity } is locked; its routes are read-only
+interpret-title = Interpret Footage
+interpret-current = Current interpretation
+interpret-input-color-space = Input color space
+interpret-signal-range = Signal range
+interpret-raw-exposure = RAW exposure
+interpret-raw-white-balance = RAW white balance
+interpret-debayer = Demosaic quality
+interpret-apply = Apply
+interpret-cancel = Cancel
+interpret-range-full = Full range
+interpret-range-limited = Limited (video) range
+interpret-range-auto = Auto — { $range }
+interpret-raw-as-shot = As Shot (camera metadata)
+interpret-debayer-bilinear = Bilinear (fast)
+interpret-debayer-edge-aware = Edge Aware (high quality)
+interpret-auto-unmarked = Auto — untagged
+interpret-auto-identified = Auto — identified as { $space }
+interpret-auto-suggested = Auto — suggested { $space } (diagnostic only)
+interpret-manual-color-space = Manual — { $space }
+interpret-auto-details = { $base } ({ $details })
+interpret-detail-separator = ,
+interpret-warning-count = { $count ->
+    [one] { $count } warning
+   *[other] { $count } warnings
+}
+interpret-confidence-none = No confidence
+interpret-confidence-low = Low confidence
+interpret-confidence-medium = Medium confidence
+interpret-confidence-high = High confidence
+interpret-method-metadata-hint = Metadata hint
+interpret-method-icc-profile = ICC profile
+interpret-method-cicp-tags = CICP tags
+interpret-method-missing-metadata = No metadata
+interpret-method-unsupported-cicp = Unsupported CICP tags
+interpret-method-decoder-unavailable = Decoder unavailable
+interpret-diagnostics-no-context = Input diagnostics: project color context unavailable
+interpret-decision-explicit = Explicit user override
+interpret-inference-declared = Declared/high confidence
+interpret-inference-suggested = Suggestion only; not applied
+interpret-inference-unknown = Unknown
+interpret-decision-auto = Auto · { $method } · { $confidence } · { $inference }
+interpret-decision-unprobed = Auto · not probed
+interpret-none = None
+interpret-processor-unresolved = Unavailable: input color space unresolved; Unknown is handled by the project missing-metadata policy
+interpret-processor-error = Unavailable: { $error }
+interpret-diagnostics = Detection: { $decision }
+    { $signal }
+    Evidence: { $evidence }
+    Warnings: { $warnings }
+    Path: { $path } → { $working } ({ $engine })
+    OCIO processor cache ID: { $processor }
+interpret-signal-missing = Range/Primaries/Transfer/Matrix: no video signal
+interpret-camera-untagged = Untagged camera
+interpret-signal-camera-raw = Camera RAW: { $adapter } · { $width }x{ $height } · { $bits }-bit · CFA { $cfa } · compression { $compression } · { $camera } · ColorMatrix={ $matrix } · AsShotNeutral={ $neutral }
+interpret-signal-range-auto = { $detected } (auto/detected)
+interpret-signal-range-full = Full (user override; detected { $detected })
+interpret-signal-range-limited = Limited (user override; detected { $detected })
+interpret-signal-no-metadata = Range: { $range } · Primaries/Transfer/Matrix: unavailable
+interpret-signal-metadata = Range: { $range } · Primaries: { $primaries } · Transfer: { $transfer } · Matrix: { $matrix }
+interpret-evidence-metadata-hint = { $scope } { $authority } metadata { $key }={ $value } → { $space }
+interpret-evidence-exact-cicp = Exact CICP { $tags } → { $space }
+interpret-evidence-partial-cicp = Partial CICP { $tags } → { $space }
+interpret-evidence-unsupported-cicp = Unsupported CICP { $tags }
+interpret-evidence-icc = ICC { $profile } → { $space }
+interpret-unnamed = Unnamed
+interpret-unmapped = Unmapped
+interpret-warning-conflicting-hints = Conflicting metadata hints
+interpret-warning-hint-overrides-cicp = Metadata hint overrides conflicting CICP tags
+interpret-warning-descriptive-hint = Inferred from descriptive metadata only
+interpret-warning-lower-priority-hints = Conflicting lower-priority hints ignored
+interpret-warning-partial-cicp = Partial CICP tags only
+interpret-warning-missing-cicp = Missing CICP tags
+interpret-warning-unsupported-cicp = Unsupported or conflicting CICP tags
+interpret-warning-icc-unmapped = ICC profile could not be mapped
+interpret-warning-icc-cicp-mismatch = ICC and CICP conflict
+interpret-more-items = { $count ->
+    [one] { $count } more item
+   *[other] { $count } more items
+}
+interpret-entry-separator = ;{ " " }

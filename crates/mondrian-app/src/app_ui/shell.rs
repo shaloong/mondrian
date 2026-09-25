@@ -1973,7 +1973,7 @@ impl AppUiAppRoot {
                     payload.auto_interpretation,
                 )
                 .with_input_diagnostics(payload.video_signal, payload.input_pipeline);
-                self.modal = Some(ShellModal::interpret_asset(draft));
+                self.modal = Some(ShellModal::interpret_asset(draft, self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }

@@ -136,6 +136,9 @@ a diagnostic; they do not change the parameter's stable key or execution.
 Start with shared shell, menus, dialogs, Inspector enum labels, notifications,
 and errors. Migrate one panel at a time. A catalog audit checks duplicate IDs,
 argument names, fallback coverage, and remaining literal user-facing strings.
+The Interpret Footage modal is now one complete localized slice: controls,
+auto-detection, RAW options, and evidence diagnostics use the same locale
+snapshot and Fluent catalogs. Its draft and Product Action stay locale-free.
 Avoid a custom string dictionary or `format!` templates for translatable copy:
 neither handles plural and grammar variants without later changing every call
 site.
