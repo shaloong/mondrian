@@ -8,18 +8,19 @@ use mondrian_media::{
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
-    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
-    kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
-    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
-    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
-    kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
-    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange, CVMetalTexture, CVMetalTextureCache,
-    CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetHeightOfPlane,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidthOfPlane,
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange as CV_420_YPCBCR10_BIPLANAR_FULL_RANGE,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange as CV_420_YPCBCR10_BIPLANAR_VIDEO_RANGE,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange as CV_420_YPCBCR8_BIPLANAR_FULL_RANGE,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as CV_420_YPCBCR8_BIPLANAR_VIDEO_RANGE,
+    kCVPixelFormatType_422YpCbCr10BiPlanarFullRange as CV_422_YPCBCR10_BIPLANAR_FULL_RANGE,
+    kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange as CV_422_YPCBCR10_BIPLANAR_VIDEO_RANGE,
+    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange as CV_422_YPCBCR16_BIPLANAR_VIDEO_RANGE,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange as CV_444_YPCBCR10_BIPLANAR_FULL_RANGE,
+    kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange as CV_444_YPCBCR10_BIPLANAR_VIDEO_RANGE,
+    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange as CV_444_YPCBCR16_BIPLANAR_VIDEO_RANGE,
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
+    CVPixelBufferGetWidthOfPlane,
 };
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 
@@ -277,8 +278,7 @@ fn metal_plane_formats(
         GpuNativeDecodedFrameTextureFormat::Nv12
             if matches!(
                 actual,
-                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-                    | kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                CV_420_YPCBCR8_BIPLANAR_VIDEO_RANGE | CV_420_YPCBCR8_BIPLANAR_FULL_RANGE
             ) =>
         {
             Ok((
@@ -289,8 +289,7 @@ fn metal_plane_formats(
         GpuNativeDecodedFrameTextureFormat::P010
             if matches!(
                 actual,
-                kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-                    | kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+                CV_420_YPCBCR10_BIPLANAR_VIDEO_RANGE | CV_420_YPCBCR10_BIPLANAR_FULL_RANGE
             ) =>
         {
             Ok((
@@ -301,8 +300,7 @@ fn metal_plane_formats(
         GpuNativeDecodedFrameTextureFormat::P210
             if matches!(
                 actual,
-                kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
-                    | kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+                CV_422_YPCBCR10_BIPLANAR_VIDEO_RANGE | CV_422_YPCBCR10_BIPLANAR_FULL_RANGE
             ) =>
         {
             Ok((
@@ -311,7 +309,7 @@ fn metal_plane_formats(
             ))
         }
         GpuNativeDecodedFrameTextureFormat::P216
-            if actual == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange =>
+            if actual == CV_422_YPCBCR16_BIPLANAR_VIDEO_RANGE =>
         {
             Ok((
                 (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
@@ -321,8 +319,7 @@ fn metal_plane_formats(
         GpuNativeDecodedFrameTextureFormat::P410
             if matches!(
                 actual,
-                kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
-                    | kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
+                CV_444_YPCBCR10_BIPLANAR_VIDEO_RANGE | CV_444_YPCBCR10_BIPLANAR_FULL_RANGE
             ) =>
         {
             Ok((
@@ -331,7 +328,7 @@ fn metal_plane_formats(
             ))
         }
         GpuNativeDecodedFrameTextureFormat::P416
-            if actual == kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange =>
+            if actual == CV_444_YPCBCR16_BIPLANAR_VIDEO_RANGE =>
         {
             Ok((
                 (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),

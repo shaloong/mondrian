@@ -614,6 +614,8 @@ Metal and Vulkan use the same shared direct-plane Module. Their platform
 Adapters wrap CVPixelBuffer/IOSurface or DMA-BUF planes, while the shared Module
 retains the complete Media frame handle through `on_submitted_work_done`; wgpu
 texture drop alone is not treated as proof of the final GPU read.
+The Metal Adapter matches exact CoreVideo pixel-format constants through
+Rust-style uppercase import aliases; the native numeric values are unchanged.
 
 Production-path real-media gates must prove native D3D12VA/P010 residency,
 zero bridge-copy/readback/upload counts, native import execution, GPU timestamp
