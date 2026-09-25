@@ -363,6 +363,11 @@ substitution of another config, approximate LUT, or non-conformant native conver
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
+When creating a Custom OCIO Project, `$OCIO` is a selection input only: the
+constructor resolves it to a canonical regular file and persists that path in
+the pinned identity. Later environment changes cannot retarget the Project,
+and portable packaging can copy the same config and its dependency resources.
+Explicit Custom OCIO file selections also pin a canonical regular file.
 `ColorEngine::output_display_view(target)` is the engine-owned resolution
 boundary. Standard and ACES resolve from their immutable package/preset; Custom
 OCIO resolves only an exact binding saved for that target. Its unqualified

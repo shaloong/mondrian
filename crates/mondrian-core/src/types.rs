@@ -1585,6 +1585,7 @@ pub enum OcioConfigSource {
     },
     /// 使用 `OCIO` 环境变量（行业标准）。
     /// 未设置或指向缺失文件时必须显式报错，不能扫描系统路径回退。
+    /// Custom OCIO 工程创建时会把它解析为固定文件路径，之后不再依赖环境变量。
     #[default]
     #[serde(rename = "environment")]
     Environment,

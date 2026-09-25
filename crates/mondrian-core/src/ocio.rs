@@ -2666,6 +2666,30 @@ fn pin_custom_ocio_project_for_output_selections(
     working_space: WorkingColorSpace,
     output_selections: Vec<(ColorSpace, Option<(String, String)>)>,
 ) -> Result<ColorEngine, String> {
+    let source = match source {
+        OcioConfigSource::Environment => {
+            OcioConfigSource::Path { path: resolve_from_environment()? }
+        }
+        source => source,
+    };
+    let source = match source {
+        OcioConfigSource::Path { path: selected } => {
+            let path = std::fs::canonicalize(&selected).map_err(|error| {
+                format!(
+                    "selected OCIO config {} cannot be pinned to a file: {error}",
+                    selected.display()
+                )
+            })?;
+            if !path.is_file() {
+                return Err(format!(
+                    "selected OCIO config {} is not a regular file",
+                    path.display()
+                ));
+            }
+            OcioConfigSource::Path { path }
+        }
+        source => source,
+    };
     if matches!(source, OcioConfigSource::MondrianStandard { .. }) {
         return Err(
             "Mondrian's embedded config must be selected through Mondrian Standard".to_owned(),
@@ -4998,6 +5022,36 @@ mod tests {
         assert!(err.contains(missing_path.to_string_lossy().as_ref()));
 
         set_ocio_env_for_test(original.as_deref().map(std::path::Path::new));
+    }
+
+    #[test]
+    fn custom_ocio_environment_selection_pins_a_portable_file_source() {
+        let _guard = ocio_env_test_lock();
+        let original = std::env::var_os("OCIO");
+        let directory = tempfile::tempdir().expect("config fixture directory");
+        let config = directory.path().join("config.ocio");
+        std::fs::write(&config, mondrian_default_ocio_config_text())
+            .expect("write real Custom OCIO config");
+        set_ocio_env_for_test(Some(&config));
+        let selected = ColorEngine::custom_ocio(
+            OcioConfigSource::Environment,
+            WorkingColorSpace::LinearRec2020,
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+        );
+        set_ocio_env_for_test(original.as_deref().map(std::path::Path::new));
+
+        let engine = selected.expect("pin environment-selected config");
+        assert_eq!(
+            engine.ocio_source(),
+            OcioConfigSource::Path {
+                path: std::fs::canonicalize(&config).expect("canonical selected config")
+            }
+        );
+        engine
+            .ensure_loaded()
+            .expect("pinned source works after environment is restored");
     }
 
     #[test]

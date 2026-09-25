@@ -133,7 +133,9 @@ impl ColorEngine {
     /// Resolve and pin a Custom OCIO config plus its project color semantics.
     ///
     /// This constructor reads and validates the selected config immediately;
-    /// a bare path is never persisted as a complete project mode.
+    /// a bare path is never persisted as a complete project mode. An `$OCIO`
+    /// selection pins its resolved file path at authoring time. Explicit paths
+    /// are canonicalized by the same boundary.
     pub fn custom_ocio(
         source: OcioConfigSource,
         working_space: WorkingColorSpace,
