@@ -2422,6 +2422,7 @@ dependencies = [
  "glam",
  "image",
  "libc",
+ "libloading",
  "mondrian-assets",
  "mondrian-audio",
  "mondrian-broadcast",

@@ -167,6 +167,7 @@ url              = "2"
 # ---- 文件 / 路径 ----
 walkdir          = "2"
 tempfile         = "3"
+libloading       = "0.8.9"
 memmap2          = "0.9.11"
 clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
 clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }

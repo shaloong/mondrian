@@ -50,14 +50,28 @@ the product advertises VST3 support. Vendor
 editors and auxiliary buses require separate qualified slices. Unbound
 definitions record `null` and cannot authorize native execution.
 
-OpenFX has no implemented ABI Adapter today. Its image-effect host needs
+OpenFX has a supervised binary-header discovery boundary in
+`mondrian-app::openfx_adapter`. The app's hidden discovery child alone loads a
+selected native binary, calls `OfxGetNumberOfPlugins` and `OfxGetPlugin`, and
+returns bounded image-effect API v1 identifiers/versions. The parent pins the
+canonical binary path and full SHA-256 before and after the child, validates
+unique descriptors, and enforces a deadline; native failure never loads the
+binary in the editor process. A selected `.ofx.bundle` resolves through the
+current platform's `Contents/<architecture>` directory only when exactly one
+regular `.ofx` binary is present. Discovery does not invoke `setHost`, image-effect
+description, instance creation, or render, so it is not an executable OpenFX
+Adapter and is not exposed as a usable effect. An independently built official
+Float32 Basic example provides the local ABI discovery qualification fixture;
+its binary stays outside the shipped product.
+
+The remaining image-effect host needs
 property, parameter, clip/image, memory, progress, threading, and render suites
 with explicit pixel-depth, region-of-interest, frame-time, and render-thread
 contracts. Admission must preserve the same compiled visual graph semantics
 for Viewer and Export, run native plugin code outside the editor process, and
 compare real reference-plugin pixels over time, color, alpha, and failure cases.
 An effect definition alone does not qualify OpenFX support.
-The visual processor seam now admits an explicitly bound CPU Float32 callback
+The visual processor seam admits an explicitly bound CPU Float32 callback
 and charges one full-frame scratch image for transactional execution. This is
 an internal prerequisite for the host; it does not load or execute OpenFX
 binaries by itself.
