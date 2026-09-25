@@ -63,7 +63,7 @@ pub fn register_selected_openfx_filter(
     plugin_identifier: &str,
 ) -> Result<EffectType, OpenFxEffectRegistrationError> {
     let description = describe_openfx_filter(helper_executable, inspection, plugin_identifier)?;
-    let effect_type = EffectType::Plugin(stable_key("openfx.", plugin_identifier.as_bytes()));
+    let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
     let definition = build_definition(helper_executable, inspection, description, &effect_type)?;
     register_effect_definition(definition)?;
     Ok(effect_type)
@@ -270,6 +270,27 @@ fn stable_key(prefix: &str, bytes: &[u8]) -> String {
     format!("{prefix}{digest:x}")
 }
 
+fn effect_type_for_filter(
+    inspection: &OpenFxBinaryInspection,
+    plugin_identifier: &str,
+) -> Result<EffectType, OpenFxEffectRegistrationError> {
+    let plugin = inspection
+        .plugins
+        .iter()
+        .find(|plugin| plugin.identifier == plugin_identifier)
+        .ok_or_else(|| {
+            OpenFxEffectRegistrationError::Schema("selected plugin is missing".into())
+        })?;
+    let identity = format!(
+        "{}\0{}.{}\0{}",
+        plugin_identifier, plugin.version_major, plugin.version_minor, inspection.binary_sha256
+    );
+    Ok(EffectType::Plugin(stable_key(
+        "openfx.",
+        identity.as_bytes(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +348,7 @@ mod tests {
                 },
             ],
         };
-        let effect_type = EffectType::Plugin(stable_key("openfx.", identifier.as_bytes()));
+        let effect_type = effect_type_for_filter(&inspection, identifier).expect("effect identity");
         let definition = build_definition(
             Path::new("C:/selected/mondrian.exe"),
             &inspection,
@@ -381,5 +402,36 @@ mod tests {
             PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709,),
             Err(EffectGraphBuildError::InvalidAuthorState { .. })
         ));
+    }
+
+    #[test]
+    fn binary_revision_changes_effect_identity_without_rebinding_old_instances() {
+        let inspection = OpenFxBinaryInspection {
+            binary_path: std::path::PathBuf::from("C:/selected/Basic.ofx"),
+            binary_sha256: "a".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: "test.mondrian.openfx.revision".to_owned(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            }],
+        };
+        let original = effect_type_for_filter(&inspection, &inspection.plugins[0].identifier)
+            .expect("original identity");
+        let mut changed = inspection.clone();
+        changed.binary_sha256 = "b".repeat(64);
+        let updated = effect_type_for_filter(&changed, &changed.plugins[0].identifier)
+            .expect("updated identity");
+        assert_ne!(original, updated);
+        changed.binary_sha256 = inspection.binary_sha256.clone();
+        changed.plugins[0].version_minor = 1;
+        let versioned = effect_type_for_filter(&changed, &changed.plugins[0].identifier)
+            .expect("versioned identity");
+        assert_ne!(original, versioned);
+        assert_eq!(
+            original,
+            effect_type_for_filter(&inspection, &inspection.plugins[0].identifier)
+                .expect("stable identity")
+        );
     }
 }

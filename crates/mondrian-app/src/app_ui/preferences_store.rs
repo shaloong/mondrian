@@ -19,11 +19,13 @@ use crate::app_ui::shortcuts::{is_known_shortcut_id, AppUiShortcutOverride};
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 const APP_UI_PREFERENCES_FILE: &str = "app_ui_preferences.json";
-const APP_UI_PREFERENCES_VERSION: u32 = 2;
+const APP_UI_PREFERENCES_VERSION: u32 = 3;
 /// Maximum number of recent projects kept by the app UI startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
 /// Bound the number of machine-local native libraries retried on startup.
 pub const MAX_NATIVE_AUDIO_PLUGINS: usize = 64;
+/// Bound the number of selected OpenFX bundles restored on startup.
+pub const MAX_NATIVE_OPENFX_BUNDLES: usize = 64;
 
 /// Versioned user preferences owned by the app UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +44,8 @@ pub struct AppUiPreferences {
     pub recent_projects: Vec<PathBuf>,
     /// Explicitly selected native audio binaries; project files store plugin identities only.
     pub installed_audio_plugins: Vec<NativeAudioPluginSelection>,
+    /// Explicitly selected native OpenFX bundles; project files retain effect identities.
+    pub installed_openfx_bundles: Vec<PathBuf>,
     /// User overrides for app UI shell shortcut descriptors.
     #[serde(default)]
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
@@ -79,6 +83,7 @@ impl Default for AppUiPreferences {
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
             installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
@@ -106,6 +111,15 @@ impl AppUiPreferences {
         self.installed_audio_plugins.push(NativeAudioPluginSelection { format, path });
         if self.installed_audio_plugins.len() > MAX_NATIVE_AUDIO_PLUGINS {
             self.installed_audio_plugins.remove(0);
+        }
+    }
+
+    /// Remember one successfully admitted OpenFX bundle without duplicates.
+    pub fn record_openfx_bundle(&mut self, path: PathBuf) {
+        self.installed_openfx_bundles.retain(|existing| existing != &path);
+        self.installed_openfx_bundles.push(path);
+        if self.installed_openfx_bundles.len() > MAX_NATIVE_OPENFX_BUNDLES {
+            self.installed_openfx_bundles.remove(0);
         }
     }
 
@@ -137,6 +151,18 @@ impl AppUiPreferences {
             }
         }
         self.installed_audio_plugins = plugins;
+
+        let mut bundles = Vec::new();
+        for path in self.installed_openfx_bundles {
+            if !path.is_absolute() || bundles.contains(&path) {
+                continue;
+            }
+            bundles.push(path);
+            if bundles.len() == MAX_NATIVE_OPENFX_BUNDLES {
+                break;
+            }
+        }
+        self.installed_openfx_bundles = bundles;
 
         let mut shortcut_overrides = Vec::new();
         for entry in self.shortcut_overrides {
@@ -251,6 +277,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -281,6 +308,7 @@ mod tests {
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
             installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: vec![AppUiShortcutOverride {
                 id: "panel.inspector".to_owned(),
                 binding: None,
@@ -383,6 +411,29 @@ mod tests {
             MAX_NATIVE_AUDIO_PLUGINS
         );
         assert!(!preferences.installed_audio_plugins.contains(&expected));
+
+        let missing_bundle = temp_preferences_path("missing-openfx").with_extension("ofx.bundle");
+        preferences.record_openfx_bundle(missing_bundle.clone());
+        preferences.record_openfx_bundle(missing_bundle.clone());
+        assert_eq!(
+            preferences.installed_openfx_bundles,
+            vec![missing_bundle.clone()]
+        );
+        persist_app_ui_preferences_to(&path, &preferences).expect("persist bundle selection");
+        assert_eq!(
+            load_app_ui_preferences_from(&path).installed_openfx_bundles,
+            vec![missing_bundle.clone()]
+        );
+        for index in 0..=MAX_NATIVE_OPENFX_BUNDLES {
+            preferences.record_openfx_bundle(
+                std::env::temp_dir().join(format!("mondrian-filter-{index}.ofx.bundle")),
+            );
+        }
+        assert_eq!(
+            preferences.installed_openfx_bundles.len(),
+            MAX_NATIVE_OPENFX_BUNDLES
+        );
+        assert!(!preferences.installed_openfx_bundles.contains(&missing_bundle));
         fs::remove_file(path).ok();
     }
 
@@ -478,6 +529,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -545,6 +597,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -618,6 +671,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -650,6 +704,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: vec![
                     AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                     AppUiShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },

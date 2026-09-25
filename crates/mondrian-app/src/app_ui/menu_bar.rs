@@ -12,6 +12,7 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem, MenuItemKind};
 
+use crate::app::ui_actions::app_shell_install_openfx_bundle_dialog_action;
 use crate::app::AppState;
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::commands::command_by_id;
@@ -102,7 +103,15 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         // ── Graphics ────────────────────────────────────────────────────
         (
             "图形",
-            vec![command_menu_item("timeline.create_basic_title")],
+            vec![
+                command_menu_item("timeline.create_basic_title"),
+                MenuItem::separator(),
+                MenuItem::new(
+                    "安装 OpenFX Filter…",
+                    app_shell_install_openfx_bundle_dialog_action(),
+                )
+                .with_message_id("menu-install-openfx-filter"),
+            ],
         ),
         // ── Window ──────────────────────────────────────────────────────
         (

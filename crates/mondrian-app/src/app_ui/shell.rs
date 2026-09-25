@@ -25,7 +25,7 @@ use std::path::Path;
 
 use crate::app::product_action::{
     AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload, AudioProductAction,
-    ProductAction,
+    ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
 };
 use crate::app::ui_actions::{
     app_shell_export_portable_package_action,
@@ -46,11 +46,11 @@ use crate::app::ui_actions::{
     APP_SHELL_CONFIRM_PROJECT_SETTINGS, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
     APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG,
     APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
-    APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG, APP_SHELL_INSTALL_VST3_BINARY_DIALOG,
-    APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG, APP_SHELL_INTERPRET_ASSET_DIALOG,
-    APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
-    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
+    APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG, APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG,
+    APP_SHELL_INSTALL_VST3_BINARY_DIALOG, APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG,
+    APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
+    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
     APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE, APP_SHELL_PREFERENCES_TAB_CHANGED,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED,
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
@@ -691,6 +691,21 @@ pub fn try_resolve_app_shell_action(
             Ok(selected.map(|path| {
                 ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
                     AudioInstallVst3PluginPayload { path },
+                ))
+                .into_external_action()
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG =>
+        {
+            let selected = platform
+                .open_folder_dialog(&localizer.text("file-dialog-install-openfx-bundle"))
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection();
+            Ok(selected.map(|path| {
+                ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload { path },
                 ))
                 .into_external_action()
             }))
@@ -1344,12 +1359,13 @@ impl AppUiAppRoot {
     /// Refresh panel contents from the current application state snapshot.
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
         let preferences = AppUiPreferences {
-            version: 1,
+            version: AppUiPreferences::default().version,
             theme_preference: self.preferences_model.theme_preference,
             locale_preference: self.preferences_model.locale_preference,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
             installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
@@ -2606,7 +2622,8 @@ mod tests {
         app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
         app_shell_export_portable_package_dialog_action, app_shell_import_media_dialog_action,
         app_shell_import_media_dialog_action_with_target,
-        app_shell_install_clap_library_dialog_action, app_shell_install_vst3_binary_dialog_action,
+        app_shell_install_clap_library_dialog_action,
+        app_shell_install_openfx_bundle_dialog_action, app_shell_install_vst3_binary_dialog_action,
         app_shell_install_vst3_bundle_dialog_action, app_shell_interpret_asset_dialog_action,
         app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
         app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
@@ -4989,6 +5006,28 @@ mod tests {
             Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
                 AudioInstallVst3PluginPayload { path }
             )))
+        );
+    }
+
+    #[test]
+    fn openfx_bundle_picker_cancels_without_installing_and_keeps_selected_directory() {
+        let request = app_shell_install_openfx_bundle_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Basic.ofx.bundle");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected bundle");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::VisualEffect(
+                VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload { path },
+                ),
+            ))
         );
     }
 

@@ -130,6 +130,8 @@ pub const APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG: &str = "install_clap_library_di
 pub const APP_SHELL_INSTALL_VST3_BINARY_DIALOG: &str = "install_vst3_binary_dialog";
 /// Request a native folder picker for a directory-backed VST3 bundle.
 pub const APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG: &str = "install_vst3_bundle_dialog";
+/// Open the native directory picker for an installed `.ofx.bundle`.
+pub const APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG: &str = "install_openfx_bundle_dialog";
 /// App-shell request to navigate the Asset browser to one folder.
 pub const APP_SHELL_ASSET_BROWSER_OPEN_FOLDER: &str = "asset_browser_open_folder";
 
@@ -1399,6 +1401,11 @@ pub fn app_shell_install_vst3_bundle_dialog_action() -> Action {
         name: APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG.to_owned(),
         payload: serde_json::Value::Null,
     }
+}
+
+/// Open the native OpenFX bundle picker from the Graphics menu.
+pub fn app_shell_install_openfx_bundle_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG)
 }
 
 /// Build an app-shell request for importing media files into a target folder.

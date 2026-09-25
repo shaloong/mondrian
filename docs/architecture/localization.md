@@ -12,6 +12,8 @@ complete application menu bar, Startup screen chrome, Asset Browser chrome/cards
 categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
 changes update retained dropdown widgets, including nested rows, without
 discarding their open submenu or focus state, and remeasure trigger hit regions.
+The Graphics menu's OpenFX installation entry and its native bundle picker
+also use stable message IDs. Plugin-supplied names remain untranslated data.
 Effect Browser projection uses definition keys for built-in messages and stable
 category path IDs for tree state and action payloads. Locale changes rebuild
 only displayed labels, then restore the retained panel state by stable IDs.

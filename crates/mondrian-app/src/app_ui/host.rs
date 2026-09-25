@@ -1175,6 +1175,7 @@ impl AppUiHost {
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
         let native_audio_catalog_changed =
             self.app_state.borrow_mut().poll_native_audio_catalog_restore();
+        let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog_restore();
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1227,6 +1228,7 @@ impl AppUiHost {
             self.preview_dirty.set(true);
         }
         let full_model_changed = native_audio_catalog_changed
+            || openfx_catalog_changed
             || persistence_changed
             || project_close_changed
             || media_imports_changed
@@ -1712,40 +1714,55 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
-        let installed_plugin = match ProductAction::decode_external(&action) {
-            Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
-                Some(NativeAudioPluginSelection {
-                    format: NativeAudioPluginFormat::Clap,
-                    path: payload.path,
-                })
-            }
-            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => {
-                Some(NativeAudioPluginSelection {
-                    format: NativeAudioPluginFormat::Vst3,
-                    path: payload.path,
-                })
-            }
-            _ => None,
-        };
+        let (installed_plugin, installed_openfx_bundle) =
+            match ProductAction::decode_external(&action) {
+                Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
+                    (
+                        Some(NativeAudioPluginSelection {
+                            format: NativeAudioPluginFormat::Clap,
+                            path: payload.path,
+                        }),
+                        None,
+                    )
+                }
+                Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => (
+                    Some(NativeAudioPluginSelection {
+                        format: NativeAudioPluginFormat::Vst3,
+                        path: payload.path,
+                    }),
+                    None,
+                ),
+                Ok(Some(ProductAction::VisualEffect(
+                    crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
+                        payload,
+                    ),
+                ))) => (None, Some(payload.path)),
+                _ => (None, None),
+            };
         let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
+            let had_installed_plugin = installed_plugin.is_some();
             if let Some(selection) = installed_plugin {
                 let canonical_path =
                     std::fs::canonicalize(&selection.path).unwrap_or(selection.path);
                 self.preferences.record_native_audio_plugin(selection.format, canonical_path);
-                if let Err(error) =
+            }
+            if let Some(path) = installed_openfx_bundle.as_ref() {
+                let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                self.preferences.record_openfx_bundle(canonical_path);
+            }
+            if (had_installed_plugin || installed_openfx_bundle.is_some())
+                && let Err(error) =
                     persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
-                {
-                    tracing::warn!(%error, "failed to save native audio plugin selection");
-                    self.app_state.borrow_mut().set_status_hint(
-                        format!("音频插件已安装，但无法保存重启恢复信息：{error}"),
-                        true,
-                    );
-                }
+            {
+                tracing::warn!(%error, "failed to save selected native plugin");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
             }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -4629,6 +4646,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -4746,6 +4764,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5450,6 +5469,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5557,6 +5577,7 @@ mod tests {
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
                 installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,

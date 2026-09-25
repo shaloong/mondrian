@@ -163,6 +163,8 @@ pub const VISUAL_EFFECT_NAMESPACE: &str = "ui.visual_effect";
 
 /// External action name for inserting one registered visual Effect on a Clip.
 pub const VISUAL_EFFECT_ADD_TO_CLIP: &str = "add_to_clip";
+/// External action name for installing a selected OpenFX Filter bundle.
+pub const VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE: &str = "install_openfx_bundle";
 /// External action name for selecting one visual Effect instance.
 pub const VISUAL_EFFECT_SELECT: &str = "select";
 /// External action name for changing one visual Effect enabled state.
@@ -375,9 +377,11 @@ pub enum ExportProductAction {
     ClearTerminalHistory,
 }
 
-/// Closed Clip-local visual Effect operations.
+/// Closed visual Effect installation, authoring, and selection operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VisualEffectProductAction {
+    /// Discover and register supported Filters from one selected bundle.
+    InstallOpenFxBundle(VisualEffectInstallOpenFxBundlePayload),
     /// Instantiate one currently registered definition and append it to a Clip.
     AddToClip(VisualEffectAddToClipPayload),
     /// Select one existing Effect instance in the App selection scope.
@@ -933,6 +937,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             VISUAL_EFFECT_NAMESPACE => match name.as_str() {
+                VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::InstallOpenFxBundle(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 VISUAL_EFFECT_ADD_TO_CLIP => Ok(Some(Self::VisualEffect(
                     VisualEffectProductAction::AddToClip(decode_payload(namespace, name, payload)?),
                 ))),
@@ -1427,6 +1436,11 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::AddToClip(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_ADD_TO_CLIP,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE,
                 serde_json::json!(payload),
             ),
             Self::VisualEffect(VisualEffectProductAction::Select(payload)) => (
@@ -2215,6 +2229,14 @@ struct ExportCancelWirePayload {
     job_id: JobId,
 }
 
+/// Machine-local OpenFX bundle explicitly selected for Filter installation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectInstallOpenFxBundlePayload {
+    /// Absolute `.ofx.bundle` directory chosen through the native picker.
+    pub path: PathBuf,
+}
+
 /// Clip and registered definition selected for one visual Effect insertion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2982,10 +3004,14 @@ impl<'a> ProductActionAvailability<'a> {
     }
 
     fn allows_visual_effect(&self, action: &VisualEffectProductAction) -> bool {
+        if let VisualEffectProductAction::InstallOpenFxBundle(payload) = action {
+            return payload.path.is_absolute();
+        }
         let Some(sequence) = self.state.active_sequence() else {
             return false;
         };
         match action {
+            VisualEffectProductAction::InstallOpenFxBundle(_) => false,
             VisualEffectProductAction::AddToClip(payload) => {
                 visual_effect_clip(sequence, payload.clip_id).is_some_and(|target| {
                     target.track_unlocked
@@ -3956,6 +3982,11 @@ mod tests {
             parameter_id: mondrian_core::ParameterId::new_static("mondrian.effect.test.amount"),
         };
         let actions = [
+            ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                VisualEffectInstallOpenFxBundlePayload {
+                    path: PathBuf::from("E:/plugins/Basic.ofx.bundle"),
+                },
+            )),
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
                 VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
             )),
@@ -4731,6 +4762,22 @@ mod tests {
         assert!(!state.product_action_availability().allows(&set_changed));
         assert!(!state.product_action_availability().allows(&move_after));
         assert!(state.product_action_availability().allows(&select));
+    }
+
+    #[test]
+    fn openfx_install_is_machine_local_and_requires_an_absolute_selection() {
+        let state = AppState::new();
+        let availability = state.product_action_availability();
+        let absolute = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload {
+                path: std::env::temp_dir().join("Basic.ofx.bundle"),
+            },
+        ));
+        let relative = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload { path: PathBuf::from("Basic.ofx.bundle") },
+        ));
+        assert!(availability.allows(&absolute));
+        assert!(!availability.allows(&relative));
     }
 
     #[test]

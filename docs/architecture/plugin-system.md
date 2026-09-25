@@ -87,7 +87,10 @@ pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
 described Filter as a Float32 CPU definition in the shared compiled visual
 effect graph. Stable parameter IDs derive from the plugin identifier and OFX
 parameter name; the definition captures defaults, hard/display numeric bounds,
-animation capability, order, and exact binary identity. Hidden or initially
+animation capability, order, and exact binary identity. The persisted Effect
+key includes the plugin identifier, declared version, and full binary SHA-256;
+a changed binary therefore has a new identity and cannot reinterpret an
+existing Clip instance. Hidden or initially
 disabled controls retain their plugin defaults without becoming editable.
 The graph evaluates author values at exact Clip-local time, lowers the bound
 sequence frame rate, source range, and sample aspect ratio, and invokes the
@@ -96,10 +99,19 @@ is uncacheable and determinism conservative until a vendor-specific contract
 is qualified. The official Basic reference test now also compares direct host
 pixels with graph execution when that external fixture is supplied.
 
-The product still lacks a native selection/insertion UI and persistent installed
-filter catalog, so OpenFX is not yet a usable end-user feature. Plugin
-page/group layout and dynamic control enablement still need to be represented
-by Inspector metadata before the product exposes broader plugin admission.
+The Graphics menu selects one installed `.ofx.bundle` directory through the
+native folder picker. A closed product action inspects the bundle, describes
+its image-effect entries, and registers only admitted Filter definitions; the
+Effect Browser then exposes those definitions for ordinary Clip insertion.
+Successful machine-local selections are saved in app UI preferences and
+restored on a background catalog job at startup. A changed binary may offer
+a new Effect definition, while authored instances retain their old key and
+fail closed until the original revision is available. The
+project does not embed native plugin binaries.
+
+Broader product admission still needs plugin page/group layout and dynamic
+control enablement in Inspector metadata, representative vendor-plugin
+qualification, and a resident worker to avoid one process launch per frame.
 
 Broader image-effect support needs qualified property, parameter, clip/image,
 memory, progress, threading, and render suites across vendor plugins.
