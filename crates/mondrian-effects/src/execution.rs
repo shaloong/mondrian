@@ -1630,6 +1630,8 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
         EffectRenderOp::ColorCurves { .. } => "color_curves",
+        EffectRenderOp::HueSaturationLightness { .. } => "hue_saturation_lightness",
+        EffectRenderOp::ChromaKey { .. } => "chroma_key",
         EffectRenderOp::Qualifier { .. } => "qualifier",
         EffectRenderOp::MattePreview { .. } => "matte_preview",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",

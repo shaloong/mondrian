@@ -39,7 +39,8 @@ pub struct QualifierAuthoring<'a> {
     pub luminance_low: f32,
     pub luminance_high: f32,
     pub luminance_softness: f32,
-    pub samples: &'a QualifierSampleSet,
+    /// Three-dimensional samples; HSL qualification has no sample dependency.
+    pub samples: Option<&'a QualifierSampleSet>,
     pub three_d_tolerance: f32,
     pub three_d_softness: f32,
     pub denoise_radius: u32,
@@ -108,7 +109,13 @@ impl PreparedQualifier {
         authored: QualifierAuthoring<'_>,
         working_color_space: WorkingColorSpace,
     ) -> Result<Self, QualifierError> {
-        authored.samples.validate().map_err(|_| QualifierError::InvalidSamples)?;
+        match (authored.mode, authored.samples) {
+            (QualifierMode::Hsl, None) => {}
+            (QualifierMode::ThreeDimensional, Some(samples)) => {
+                samples.validate().map_err(|_| QualifierError::InvalidSamples)?;
+            }
+            _ => return Err(QualifierError::InvalidSamples),
+        }
         let finite = [
             authored.hue_center_degrees,
             authored.hue_width_degrees,
@@ -140,13 +147,17 @@ impl PreparedQualifier {
         let luminance_high = authored.luminance_low.max(authored.luminance_high).clamp(0.0, 1.0);
         let samples = authored
             .samples
-            .samples()
-            .iter()
-            .map(|sample| PreparedQualifierSample {
-                coordinate: normalized_rgb_coordinate(sample.rgb),
-                operation: sample.operation,
+            .filter(|_| authored.mode == QualifierMode::ThreeDimensional)
+            .map(|set| {
+                set.samples()
+                    .iter()
+                    .map(|sample| PreparedQualifierSample {
+                        coordinate: normalized_rgb_coordinate(sample.rgb),
+                        operation: sample.operation,
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         let mut prepared = Self {
             mode: authored.mode,
             hue_center: positive_mod(authored.hue_center_degrees / 360.0, 1.0),
@@ -601,7 +612,7 @@ mod tests {
                 luminance_low: 0.0,
                 luminance_high: 1.0,
                 luminance_softness: 0.0,
-                samples: &samples,
+                samples: (mode == QualifierMode::ThreeDimensional).then_some(&samples),
                 three_d_tolerance: 0.12,
                 three_d_softness: 0.08,
                 denoise_radius: 0,
@@ -612,6 +623,41 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         )
         .expect("qualifier")
+    }
+
+    #[test]
+    fn three_dimensional_qualifier_requires_samples() {
+        let samples = QualifierSampleSet::green_screen();
+        let mut authoring = QualifierAuthoring {
+            mode: QualifierMode::ThreeDimensional,
+            hue_center_degrees: 120.0,
+            hue_width_degrees: 80.0,
+            hue_softness_degrees: 20.0,
+            saturation_low: 0.0,
+            saturation_high: 1.0,
+            saturation_softness: 0.0,
+            luminance_low: 0.0,
+            luminance_high: 1.0,
+            luminance_softness: 0.0,
+            samples: None,
+            three_d_tolerance: 0.12,
+            three_d_softness: 0.08,
+            denoise_radius: 0,
+            blur_radius: 0.0,
+            clean_black: 0.0,
+            clean_white: 0.0,
+        };
+        assert_eq!(
+            PreparedQualifier::new(authoring, WorkingColorSpace::LinearRec709),
+            Err(QualifierError::InvalidSamples),
+        );
+        authoring.samples = Some(&samples);
+        assert!(PreparedQualifier::new(authoring, WorkingColorSpace::LinearRec709).is_ok());
+        authoring.mode = QualifierMode::Hsl;
+        assert_eq!(
+            PreparedQualifier::new(authoring, WorkingColorSpace::LinearRec709),
+            Err(QualifierError::InvalidSamples),
+        );
     }
 
     #[test]

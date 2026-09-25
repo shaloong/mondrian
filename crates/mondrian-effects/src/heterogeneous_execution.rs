@@ -2429,13 +2429,15 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Crop { .. } => 10,
         EffectRenderOp::WhiteBalance { .. } => 11,
         EffectRenderOp::Primaries { .. } => 12,
-        EffectRenderOp::HdrGrading { .. } => 14,
+        EffectRenderOp::HdrGrading { .. } => 19,
         EffectRenderOp::AscCdl { .. } => 13,
         EffectRenderOp::ColorCurves { .. } => 14,
         EffectRenderOp::Qualifier { .. } => 15,
         EffectRenderOp::MattePreview { .. } => 16,
         EffectRenderOp::GamutCompression { .. } => 17,
         EffectRenderOp::HighlightRecovery { .. } => 18,
+        EffectRenderOp::HueSaturationLightness { .. } => 20,
+        EffectRenderOp::ChromaKey { .. } => 21,
     }
 }
 
@@ -3974,6 +3976,8 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::GamutCompression { .. }
             | crate::EffectRenderOp::HighlightRecovery { .. }
             | crate::EffectRenderOp::ColorCurves { .. }
+            | crate::EffectRenderOp::HueSaturationLightness { .. }
+            | crate::EffectRenderOp::ChromaKey { .. }
             | crate::EffectRenderOp::Qualifier { .. }
             | crate::EffectRenderOp::MattePreview { .. }
             | crate::EffectRenderOp::Vignette { .. }

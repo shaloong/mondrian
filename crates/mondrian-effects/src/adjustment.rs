@@ -185,6 +185,18 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::HueSaturationLightness { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "hue_saturation_lightness",
+                parameter: "requires_float32",
+            });
+        }
+        EffectRenderOp::ChromaKey { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "chroma_key",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::GaussianBlur { radius } => {
             let Some(radius) = valid_gaussian_radius(*radius) else {
                 return Err(EffectExecutionError::InvalidRenderParameter {
@@ -378,6 +390,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::GamutCompression { .. }
         | EffectRenderOp::HighlightRecovery { .. }
         | EffectRenderOp::ColorCurves { .. }
+        | EffectRenderOp::HueSaturationLightness { .. }
+        | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Grain { .. }
@@ -552,6 +566,19 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::ColorCurves { curves } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| curves.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::HueSaturationLightness { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::ChromaKey { keyer } => {
+            for chunk in working.chunks_mut(256) {
+                checkpoint()?;
+                for pixel in chunk {
+                    *pixel = [0.0, 0.0, 0.0, keyer.matte([pixel[0], pixel[1], pixel[2]])];
+                }
+            }
             Ok(true)
         }
         EffectRenderOp::Qualifier { qualifier } => {

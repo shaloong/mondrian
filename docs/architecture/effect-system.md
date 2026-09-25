@@ -678,9 +678,10 @@ cannot change the meaning of an author/program revision. No compile-time or
 per-frame global Custom implementation lookup exists.
 
 Disabled instances are the only implicit identity operation. An enabled
-modeled-only effect, missing plugin definition, unbound/invalid LUT, or failed
-builder never becomes an unchanged frame. The shared timeline render-plan
-compiler maps these failures into `MondrianError::EffectGraphEvaluationFailed`,
+effect without an executable evaluator, missing plugin definition,
+unbound/invalid LUT, or failed builder never becomes an unchanged frame. The
+shared timeline render-plan compiler maps these failures into
+`MondrianError::EffectGraphEvaluationFailed`,
 so preview and export both stop before publishing a misleading result. Any
 future operator-approved plugin bypass must be an explicit, diagnosable policy
 above this compiler seam rather than a warning followed by identity output.
@@ -784,6 +785,31 @@ identity. CPU execution uses two bounded scalar scratch planes; GPU execution
 uses one, two, or four explicit passes according to the admitted refinement.
 No UI-private key color, hidden matte allocation, or Preview-only algorithm is
 allowed.
+
+`builtin.luma_key` reuses this graph contract. Its threshold and softness
+select bright pixels from tone-mapped positive working-space luminance; the
+"Keep dark" switch inverts only the matte. The Mask node multiplies the
+selected coverage by the source's existing alpha. HSL qualification carries no
+dummy color samples; only 3D qualification requires an authored sample set.
+The keyer remains a pixel-local CPU/GPU Float32 operation and never quantizes
+the source through RGBA8.
+
+`builtin.hue_saturation_lightness` is an explicitly CPU Float32 point effect.
+Hue rotates the RGB chroma sector in the current working primaries, saturation
+scales channel distance from the HSL midpoint, and lightness adds a linear
+offset. The operation leaves alpha unchanged and does not clamp negative or
+extended-range RGB. Its neutral controls omit the graph node; invalid or
+non-finite authored controls fail preparation. GPU execution is not declared
+until a kernel with matching semantics exists.
+
+`builtin.chroma_key` selects a user-chosen color by positive RGB chromaticity,
+so a bright and shadowed screen with the same channel proportions produce the
+same matte. Similarity and edge softness bound a smooth transition in
+chromaticity distance; black has no chromaticity and fails author preparation
+with a Luma Key suggestion. The graph's Mask inverts the selection by default
+to remove the key color, or retains it when requested, while preserving source
+alpha and extended-range RGB. The scalar operation admits CPU Float32 only;
+GPU support requires an explicitly equivalent kernel.
 
 ## Ordering
 

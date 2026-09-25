@@ -2291,6 +2291,8 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         crate::EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
         crate::EffectRenderOp::ColorCurves { .. } => "color_curves",
+        crate::EffectRenderOp::HueSaturationLightness { .. } => "hue_saturation_lightness",
+        crate::EffectRenderOp::ChromaKey { .. } => "chroma_key",
         crate::EffectRenderOp::Qualifier { .. } => "qualifier",
         crate::EffectRenderOp::MattePreview { .. } => "matte_preview",
         crate::EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
