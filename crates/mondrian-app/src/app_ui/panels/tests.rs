@@ -834,7 +834,7 @@ fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
 #[test]
 fn empty_inspector_panel_shows_status_only_and_does_not_dispatch_clip_controls() {
     let model = InspectorPanelModel::empty();
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     assert_eq!(
@@ -6582,7 +6582,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     let actions = RefCell::new(Vec::<Action>::new());
@@ -6977,7 +6977,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 340.0, 720.0));
 
     let actions = RefCell::new(Vec::<Action>::new());

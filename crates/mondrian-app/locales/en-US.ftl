@@ -469,3 +469,18 @@ interpret-more-items = { $count ->
    *[other] { $count } more items
 }
 interpret-entry-separator = ;{ " " }
+audio-mapping-standard-unavailable = Standard mapping unavailable: { $error }; playback and export will not guess
+audio-mapping-source-unproven = Exact source layout cannot be proven from current dependencies; playback and export will not guess
+audio-mapping-layout-mismatch = Explicit matrix requires { $required }, but current dependencies provide { $observed }; playback and export reject mismatched signals
+audio-mapping-explicit-source-unproven = Explicit matrix retained, but the source layout cannot be proven; execution remains fail-closed
+audio-mapping-mode-standard = Standard (automatic)
+audio-mapping-mode-explicit = Custom (explicit matrix)
+audio-mapping-standard-option = Standard (automatic; fail-closed at execution)
+audio-mapping-snapshot-option = Custom: snapshot the current standard matrix
+audio-mapping-blank-option = Custom: empty matrix
+audio-mapping-channel-row = Channel mapping
+audio-mapping-layout-row = Signal layout
+audio-mapping-unknown-source = Unknown → { $destination }
+audio-mapping-diagnostic-row = Mapping diagnostics
+audio-mapping-add-to = Add to { $destination }
+audio-mapping-choose-source = Choose source channel…

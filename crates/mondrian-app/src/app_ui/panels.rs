@@ -317,6 +317,7 @@ pub enum AssetThumbnailState {
 /// Complete set of view models needed by the app UI panel shell.
 #[derive(Debug, Clone)]
 pub struct AppUiPanelModels {
+    locale: AppUiLocale,
     panel_titles: HashMap<PanelKind, String>,
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
@@ -395,6 +396,7 @@ impl AppUiPanelModels {
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
+            locale: inspector_localizer.locale(),
             panel_titles: localized_panel_titles(localizer),
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
                 state.asset_library(),
@@ -424,6 +426,7 @@ impl AppUiPanelModels {
         let viewer = ViewerPanelModel::from_app_state(state);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
+            locale: localizer.locale(),
             panel_titles: localized_panel_titles(None),
             assets: demo_asset_model(),
             effects: PanelListModel::from_app_effect_registry(state),
@@ -2617,7 +2620,13 @@ impl InspectorPanelModel {
             ),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: opacity_curve_model_for_clip(clip, time),
-            audio_components: inspector_audio_components(state, sequence, resolved_selection, clip),
+            audio_components: inspector_audio_components(
+                state,
+                sequence,
+                resolved_selection,
+                clip,
+                localizer,
+            ),
             audio_processor_racks: {
                 let mut racks = clip_processing_scope_racks(sequence, clip, localizer);
                 if let Ok(descriptors) = state.installed_clap_processors() {
@@ -3480,9 +3489,14 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
         ))))),
-        PanelKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
-            &models.inspector,
-        ))))),
+        PanelKind::Inspector => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(ScrollView::new(Some(Box::new(inspector_panel(
+                &models.inspector,
+                &localizer,
+            )))))
+        }
         PanelKind::Mixer => Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
             &models.mixer,
         ))))),
@@ -4427,6 +4441,7 @@ fn inspector_audio_components(
     sequence: &Sequence,
     selection: SelectedClipRef,
     clip: &Clip,
+    localizer: &Localizer,
 ) -> Vec<InspectorAudioComponentModel> {
     let asset = (!clip.is_nested_sequence())
         .then(|| {
@@ -4455,6 +4470,7 @@ fn inspector_audio_components(
                         sequence,
                         selection.track_id,
                         clip.id,
+                        localizer,
                     );
                 };
                 let source_options = asset
@@ -4522,6 +4538,7 @@ fn inspector_audio_components(
                     sequence,
                     selection.track_id,
                     clip.id,
+                    localizer,
                 )
             }
             AudioComponentSource::NestedOutput { output_id } => {
@@ -4562,6 +4579,7 @@ fn inspector_audio_components(
                     sequence,
                     selection.track_id,
                     clip.id,
+                    localizer,
                 )
             }
         })
@@ -4578,6 +4596,7 @@ fn inspector_audio_component_model(
     sequence: &Sequence,
     track_id: TrackId,
     clip_id: ClipId,
+    localizer: &Localizer,
 ) -> InspectorAudioComponentModel {
     let viewport = component_automation_viewport(edit.id, edit.local_time_in, clip_duration);
     InspectorAudioComponentModel {
@@ -4589,6 +4608,7 @@ fn inspector_audio_component_model(
             &edit.channel_mapping,
             observed_source_layout,
             sequence.settings.audio_channel_layout,
+            localizer,
         ),
         enabled: edit.enabled,
         volume_db: edit.volume_db,

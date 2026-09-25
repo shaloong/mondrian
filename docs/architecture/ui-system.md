@@ -185,6 +185,10 @@ diagnostics use the App-owned Fluent catalog; only canonical color-space names,
 technical IDs, file names, and raw decoder values remain untranslated. The
 draft still contains author intent and media evidence only, so changing UI
 language cannot change the asset interpretation committed on Apply.
+The Inspector's audio Component mapping rows use the same panel locale
+snapshot for matrix policy, layout evidence, and fail-closed diagnostics.
+Localization changes only the projected labels; all matrix coefficient edits
+continue to dispatch the typed placement-local Component mutation.
 The product action's external encode/decode and live-library rejection path
 are tested inside the App crate's isolated test runtime; they do not acquire
 production per-user Project leases.

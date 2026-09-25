@@ -1340,7 +1340,10 @@ mod tests {
             raw_dialog.raw_white_balance_dropdown.label(),
             "As Shot (camera metadata)"
         );
-        assert_eq!(raw_dialog.raw_quality_dropdown.label(), "Edge Aware (high quality)");
+        assert_eq!(
+            raw_dialog.raw_quality_dropdown.label(),
+            "Edge Aware (high quality)"
+        );
         assert!(raw_dialog.diagnostics_label.text().contains("Camera RAW:"));
         assert!(!raw_dialog
             .diagnostics_label

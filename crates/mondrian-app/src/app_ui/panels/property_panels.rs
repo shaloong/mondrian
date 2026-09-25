@@ -328,7 +328,7 @@ pub(super) fn audio_meter_dbfs_label(linear: f64) -> String {
     }
 }
 
-pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
+pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer) -> PropertyPanel {
     let selected_clip = model.selected_clip;
     let opacity_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.opacity.clone());
@@ -599,6 +599,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 edit_id,
                 &component.channel_mapping,
                 can_edit,
+                localizer,
             );
             let max_fade_seconds = component.clip_duration.to_f64().max(0.0) as f32;
             let fade_in_curve =

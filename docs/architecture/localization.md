@@ -139,6 +139,9 @@ argument names, fallback coverage, and remaining literal user-facing strings.
 The Interpret Footage modal is now one complete localized slice: controls,
 auto-detection, RAW options, and evidence diagnostics use the same locale
 snapshot and Fluent catalogs. Its draft and Product Action stay locale-free.
+Inspector audio Component mapping follows the same boundary: the model's
+diagnostics and the widget's policy controls share the panel locale, while
+channel layout identities and edit addresses remain typed author data.
 Avoid a custom string dictionary or `format!` templates for translatable copy:
 neither handles plural and grammar variants without later changing every call
 site.
