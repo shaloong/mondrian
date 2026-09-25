@@ -197,9 +197,11 @@ windows-sys = { workspace = true, features = ["Win32_Security", "Win32_UI_Window
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[build-dependencies]
+cc = "1"
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
-cc = "1"
 
 [dev-dependencies]
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
