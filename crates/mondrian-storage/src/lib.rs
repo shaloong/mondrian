@@ -1509,85 +1509,95 @@ fn publish_file_atomically(
         } else {
             0
         };
-    // SAFETY: both buffers are live and NUL-terminated for the call.
-    let succeeded = unsafe { MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), flags) };
-    let operation_error = (succeeded == 0).then(std::io::Error::last_os_error);
-    let source_state = match observe(source) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
-                retained_new_path: None,
-                source: std::io::Error::other(format!(
-                    "source postcondition probe failed after {operation_error:?}: {error}"
-                )),
-            });
-        }
-    };
-    let retained_new_path =
-        (source_state == Observed::DirectFile(new_identity)).then(|| source.to_path_buf());
-    let target_state = match observe(target) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
-                retained_new_path,
-                source: std::io::Error::other(format!(
-                    "target postcondition probe failed after {operation_error:?}: {error}"
-                )),
-            });
-        }
-    };
+    let mut sharing_retries = 0;
+    loop {
+        // SAFETY: both buffers are live and NUL-terminated for the call.
+        let succeeded = unsafe { MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), flags) };
+        let operation_error = (succeeded == 0).then(std::io::Error::last_os_error);
+        let source_state = match observe(source) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
+                    retained_new_path: None,
+                    source: std::io::Error::other(format!(
+                        "source postcondition probe failed after {operation_error:?}: {error}"
+                    )),
+                });
+            }
+        };
+        let retained_new_path =
+            (source_state == Observed::DirectFile(new_identity)).then(|| source.to_path_buf());
+        let target_state = match observe(target) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
+                    retained_new_path,
+                    source: std::io::Error::other(format!(
+                        "target postcondition probe failed after {operation_error:?}: {error}"
+                    )),
+                });
+            }
+        };
 
-    if target_state == Observed::DirectFile(new_identity) {
-        if source_state != Observed::Absent {
+        if target_state == Observed::DirectFile(new_identity) {
+            if source_state != Observed::Absent {
+                return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
+                    retained_new_path,
+                    source: std::io::Error::other(
+                        "new object is visible at target but source namespace remains",
+                    ),
+                });
+            }
+            return Ok(match operation_error {
+                Some(source) => AtomicPublicationOutcome::PublishedDurabilityUnconfirmed {
+                    disposition: SourceDisposition::Moved,
+                    source,
+                },
+                None => AtomicPublicationOutcome::Published(SourceDisposition::Moved),
+            });
+        }
+        if operation_error.is_none() {
             return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
                 retained_new_path,
                 source: std::io::Error::other(
-                    "new object is visible at target but source namespace remains",
+                    "MoveFileExW reported success but target identity is not the new object",
                 ),
             });
         }
-        return Ok(match operation_error {
-            Some(source) => AtomicPublicationOutcome::PublishedDurabilityUnconfirmed {
-                disposition: SourceDisposition::Moved,
-                source,
-            },
-            None => AtomicPublicationOutcome::Published(SourceDisposition::Moved),
-        });
-    }
-    if operation_error.is_none() {
-        return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
-            retained_new_path,
-            source: std::io::Error::other(
-                "MoveFileExW reported success but target identity is not the new object",
-            ),
-        });
-    }
-    let proven_unchanged = source_state == Observed::DirectFile(new_identity)
-        && match mode {
-            FilePublicationMode::CreateNew => true,
-            FilePublicationMode::ReplaceExisting => match replaced_identity {
-                Some(identity) => target_state == Observed::DirectFile(identity),
-                None => target_state == Observed::Absent,
-            },
+        let proven_unchanged = source_state == Observed::DirectFile(new_identity)
+            && match mode {
+                FilePublicationMode::CreateNew => true,
+                FilePublicationMode::ReplaceExisting => match replaced_identity {
+                    Some(identity) => target_state == Observed::DirectFile(identity),
+                    None => target_state == Observed::Absent,
+                },
+            };
+        let operation_error = match operation_error {
+            Some(error) => error,
+            None => {
+                return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
+                    retained_new_path,
+                    source: std::io::Error::other("unclassified Windows publication state"),
+                });
+            }
         };
-    let operation_error = match operation_error {
-        Some(error) => error,
-        None => {
+        if proven_unchanged {
+            // Windows scanners and readers can briefly deny replacement. Retry only
+            // after object identities prove the failed call changed neither name.
+            if matches!(operation_error.raw_os_error(), Some(5 | 32)) && sharing_retries < 4 {
+                sharing_retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * sharing_retries));
+                continue;
+            }
+            return Err(operation_error);
+        } else {
             return Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
-                retained_new_path,
-                source: std::io::Error::other("unclassified Windows publication state"),
-            });
-        }
-    };
-    if proven_unchanged {
-        Err(operation_error)
-    } else {
-        Ok(AtomicPublicationOutcome::NamespaceIndeterminate {
             retained_new_path,
             source: std::io::Error::other(format!(
                 "MoveFileExW reported {operation_error}, but identities do not prove an unchanged namespace"
             )),
-        })
+        });
+        }
     }
 }
 
@@ -1865,6 +1875,32 @@ mod tests {
         staging.file_mut().expect("handle").write_all(b"new").expect("new bytes");
         let evidence = staging.publish(FilePublicationMode::ReplaceExisting).expect("replace");
         assert_eq!(evidence.published_path(), target);
+        assert_eq!(fs::read(&target).expect("target"), b"new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_target_sharing_denial_retries_only_unchanged_namespace() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let root = unique_root("transient-sharing-denial");
+        let target = root.join("target.bin");
+        fs::write(&target, b"old").expect("old target");
+        let mut staging = OwnedPublicationFile::create_sibling(&target, "test").expect("staging");
+        staging.file_mut().expect("handle").write_all(b"new").expect("new bytes");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&target)
+            .expect("hold target without delete sharing");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        let published = staging.publish(FilePublicationMode::ReplaceExisting);
+        releaser.join().expect("release target handle");
+        published.expect("retry after transient sharing denial");
         assert_eq!(fs::read(&target).expect("target"), b"new");
     }
 
