@@ -34,8 +34,8 @@ pub enum ShellModal {
 
 impl ShellModal {
     /// Build the product about modal.
-    pub fn about() -> Self {
-        Self::About(Box::default())
+    pub fn about(locale: AppUiLocale) -> Self {
+        Self::About(Box::new(AboutDialog::new(locale)))
     }
 
     /// Build the Interpret Footage modal from an initial draft.

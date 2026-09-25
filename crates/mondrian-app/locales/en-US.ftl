@@ -1,4 +1,11 @@
 app-name = Mondrian
+about-version = Version: { $version }
+about-renderer = Renderer: { $renderer }
+about-rust = Rust: { $version }
+about-os = OS: { $description }
+about-gpu = GPU: { $name }
+about-copy = Copy
+about-close = Close
 startup-heading = Get started
 startup-new-project = New project
 startup-open-project = Open project

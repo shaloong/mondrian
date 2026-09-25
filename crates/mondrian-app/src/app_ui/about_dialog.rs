@@ -8,6 +8,7 @@ use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_widgets::{Button, DialogSurface, Label};
 
 use crate::app::ui_actions::{app_shell_close_modal_action, app_shell_copy_system_info_action};
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 const CARD_WIDTH: f32 = 380.0;
 const CARD_MIN_HEIGHT: f32 = 200.0;
@@ -66,23 +67,26 @@ impl AboutSystemInfo {
         }
     }
 
-    fn format(&self) -> String {
-        let mut s = format!(
-            "Mondrian\n\
-             \n\
-             版本: {}\n\
-             渲染器: {}\n\
-             Rust: {}\n\
-             OS: {} {}",
-            self.pkg_version, self.wgpu_backend, self.rust_version, self.os, self.arch,
-        );
-        if !self.os_version.is_empty() {
-            s.push_str(&format!(" {}", self.os_version));
-        }
+    fn rows(&self, localizer: &Localizer) -> Vec<String> {
+        let os_description = if self.os_version.is_empty() {
+            format!("{} {}", self.os, self.arch)
+        } else {
+            format!("{} {} {}", self.os, self.arch, self.os_version)
+        };
+        let mut rows = vec![
+            localizer.format_text("about-version", "version", &self.pkg_version),
+            localizer.format_text("about-renderer", "renderer", &self.wgpu_backend),
+            localizer.format_text("about-rust", "version", &self.rust_version),
+            localizer.format_text("about-os", "description", &os_description),
+        ];
         if !self.gpu_name.is_empty() {
-            s.push_str(&format!("\nGPU: {}", self.gpu_name));
+            rows.push(localizer.format_text("about-gpu", "name", &self.gpu_name));
         }
-        s
+        rows
+    }
+
+    fn format(&self, localizer: &Localizer) -> String {
+        format!("Mondrian\n\n{}", self.rows(localizer).join("\n"))
     }
 }
 
@@ -105,45 +109,17 @@ pub struct AboutDialog {
 }
 
 impl AboutDialog {
-    /// Build the default Mondrian About dialog.
-    pub fn new() -> Self {
+    /// Build the Mondrian About dialog in the machine-local UI language.
+    pub fn new(locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
         let info = SYSTEM_INFO.get().cloned().unwrap_or_default();
-        let version_text = format!("版本: {}", info.pkg_version);
-        let renderer_text = format!("渲染器: {}", info.wgpu_backend);
-        let rust_text = format!("Rust: {}", info.rust_version);
-        let os_text = format!("OS: {} {} {}", info.os, info.arch, info.os_version);
-        let gpu_text = if info.gpu_name.is_empty() {
-            String::new()
-        } else {
-            format!("GPU: {}", info.gpu_name)
-        };
-
-        let mut info_rows: Vec<Label> = vec![
-            Label::new(version_text)
-                .muted()
-                .with_font_size(LABEL_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-            Label::new(renderer_text)
-                .muted()
-                .with_font_size(LABEL_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-            Label::new(rust_text)
-                .muted()
-                .with_font_size(LABEL_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-            Label::new(os_text)
-                .muted()
-                .with_font_size(LABEL_FONT_SIZE)
-                .with_padding(0.0, 0.0),
-        ];
-        if !gpu_text.is_empty() {
-            info_rows.push(
-                Label::new(gpu_text)
-                    .muted()
-                    .with_font_size(LABEL_FONT_SIZE)
-                    .with_padding(0.0, 0.0),
-            );
-        }
+        let info_rows: Vec<Label> = info
+            .rows(&localizer)
+            .into_iter()
+            .map(|text| {
+                Label::new(text).muted().with_font_size(LABEL_FONT_SIZE).with_padding(0.0, 0.0)
+            })
+            .collect();
 
         Self {
             id: WidgetId::new(),
@@ -159,17 +135,12 @@ impl AboutDialog {
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
             info_rows,
-            copy_button: Button::new("复制").minimal().on_click(app_shell_copy_system_info_action(
-                SYSTEM_INFO.get().cloned().unwrap_or_default().format(),
-            )),
-            close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
+            copy_button: Button::new(localizer.text("about-copy"))
+                .minimal()
+                .on_click(app_shell_copy_system_info_action(info.format(&localizer))),
+            close_button: Button::new(localizer.text("about-close"))
+                .on_click(app_shell_close_modal_action()),
         }
-    }
-}
-
-impl Default for AboutDialog {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -304,7 +275,7 @@ mod tests {
 
     #[test]
     fn about_dialog_layout_exposes_children_inside_centered_card() {
-        let mut dialog = AboutDialog::new();
+        let mut dialog = AboutDialog::new(AppUiLocale::ZhCn);
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
         assert!(dialog.child_count() >= 2);
         assert_eq!(dialog.card.width, CARD_WIDTH);
@@ -313,7 +284,7 @@ mod tests {
 
     #[test]
     fn about_dialog_escape_dispatches_close_modal() {
-        let mut dialog = AboutDialog::new();
+        let mut dialog = AboutDialog::new(AppUiLocale::ZhCn);
         let actions = RefCell::new(Vec::new());
         let mut focus = DummyFocus;
         let mut shortcut = DummyShortcut;
@@ -340,7 +311,7 @@ mod tests {
 
     #[test]
     fn about_dialog_close_button_dispatches_close_modal() {
-        let mut dialog = AboutDialog::new();
+        let mut dialog = AboutDialog::new(AppUiLocale::ZhCn);
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
         let close_x = dialog.card.x + dialog.card.width - CONTENT_PADDING - BUTTON_WIDTH * 0.5;
         let button_y =
@@ -397,7 +368,9 @@ mod tests {
             wgpu_backend: "DirectX 12".into(),
             gpu_name: "NVIDIA GeForce RTX 4090".into(),
         };
-        let formatted = info.format();
+        let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let formatted = info.format(&chinese);
         assert!(formatted.contains("Mondrian"));
         assert!(formatted.contains("0.1.0"));
         assert!(formatted.contains("DirectX 12"));
@@ -405,5 +378,15 @@ mod tests {
         assert!(formatted.contains("Windows"));
         assert!(formatted.contains("x86_64"));
         assert!(formatted.contains("RTX 4090"));
+        assert!(formatted.contains("版本:"));
+        let english_text = info.format(&english);
+        assert!(english_text.contains("Version:"));
+        assert!(english_text.contains("RTX 4090"));
+        assert!(!english_text.contains("版本:"));
+        let mut without_os_version = info;
+        without_os_version.os_version.clear();
+        let os_row = &without_os_version.rows(&english)[3];
+        assert!(os_row.contains("Windows x86_64"));
+        assert!(!os_row.contains("x86_64 "));
     }
 }

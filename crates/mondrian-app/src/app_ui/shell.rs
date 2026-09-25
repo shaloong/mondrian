@@ -1901,7 +1901,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
             {
-                self.modal = Some(ShellModal::about());
+                self.modal = Some(ShellModal::about(self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }

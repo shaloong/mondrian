@@ -1,4 +1,11 @@
 app-name = Mondrian
+about-version = 版本: { $version }
+about-renderer = 渲染器: { $renderer }
+about-rust = Rust: { $version }
+about-os = OS: { $description }
+about-gpu = GPU: { $name }
+about-copy = 复制
+about-close = 关闭
 startup-heading = 开始工作
 startup-new-project = 新建项目
 startup-open-project = 打开项目

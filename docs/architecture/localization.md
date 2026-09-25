@@ -80,6 +80,10 @@ actions and checked state, so changing language cannot change the authored
 mode or menu grouping.
 The underlying `PanelKind` remains stable across language changes, so saved
 layouts, active tabs, and drag targets never depend on translated text.
+The About dialog projects system-information labels and the copied diagnostic
+text from the selected UI locale at opening time. Its version, OS, renderer,
+and GPU facts remain raw system evidence; the modal has no default-language
+constructor in the alpha UI.
 Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
