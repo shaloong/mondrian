@@ -1,46 +1,15 @@
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use mondrian_app::app::product_action::{
-    ProductAction, DYNAMIC_HDR_APPLY_EDIT, DYNAMIC_HDR_NAMESPACE,
-};
-use mondrian_app::app::AppState;
-use mondrian_app::app_ui::panels::ExportPanelModel;
+use crate::app::product_action::{ProductAction, DYNAMIC_HDR_APPLY_EDIT, DYNAMIC_HDR_NAMESPACE};
+use crate::app::AppState;
+use crate::app_ui::panels::ExportPanelModel;
 use mondrian_core::{
-    DynamicHdrMetadataFamily, DynamicHdrShotMetadata, DynamicHdrStandard, Rational,
+    DynamicHdrMetadataFamily, DynamicHdrShotMetadata, DynamicHdrStandard,
     St2094Application4ShotMetadata, St2094DistributionPoint, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_timeline::{
     DynamicHdrAnalysisProvenance, DynamicHdrAuthorEdit, DynamicHdrDeliveryIntent,
-    DynamicHdrProgram, DynamicHdrShot,
+    DynamicHdrProgram, DynamicHdrShot, Sequence,
 };
-
-static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
-
-struct FixtureRoot(PathBuf);
-
-impl FixtureRoot {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "mondrian-dynamic-hdr-authoring-{}-{}-{}",
-            std::process::id(),
-            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).expect("create Dynamic HDR fixture root");
-        Self(path)
-    }
-}
-
-impl Drop for FixtureRoot {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn analyzed_program() -> DynamicHdrProgram {
     let range = TimelineTimeRange::new(
@@ -115,17 +84,10 @@ fn dynamic_hdr_external_codec_round_trips_every_operation() {
 
 #[test]
 fn dynamic_hdr_authoring_is_atomic_undoable_and_projected_without_brand_claims() {
-    let fixture = FixtureRoot::new();
     let mut state = AppState::new();
-    state
-        .create_new_project_at(
-            fixture.0.join("dynamic-hdr.mdp"),
-            "Dynamic HDR",
-            1920,
-            1080,
-            Rational::new(24, 1),
-        )
-        .expect("create Dynamic HDR project");
+    let mut sequence = Sequence::new("Dynamic HDR");
+    sequence.settings.frame_rate = mondrian_core::Rational::FPS_24;
+    state.test_set_sequence(Some(sequence));
 
     let initial = ExportPanelModel::from_app_state(&state);
     assert_eq!(initial.dynamic_hdr.intent_label, "省略 Dynamic HDR");
@@ -195,6 +157,4 @@ fn dynamic_hdr_authoring_is_atomic_undoable_and_projected_without_brand_claims()
         state.active_sequence().expect("Sequence").dynamic_hdr.delivery_intent(),
         DynamicHdrDeliveryIntent::Remake { program_id: id } if *id == program_id
     ));
-
-    state.close_project().expect("close Dynamic HDR project");
 }

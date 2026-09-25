@@ -65,6 +65,13 @@ retain straight alpha, do no frame allocation or readback, and are qualified on
 a real wgpu device for Rec.709 and ACEScg. They never become a renderer-only
 filter or a Preview/Export fork.
 
+Chroma Key and Luma Key are executable Float32 Effect graphs. Prepared visual
+program evaluation retains each keyer on its Clip in an Export render plan;
+CPU compositor admission and graph execution then use the same compiled graph
+as Preview. A regression test checks that the planned graph removes a known
+keyed pixel, rather than expecting these former modeled-only definitions to
+fail closed.
+
 The intended render path is shared by preview and export:
 
 Tests that inspect prepared-program dependency currency must bind all assertions to

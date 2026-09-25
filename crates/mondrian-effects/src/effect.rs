@@ -2609,31 +2609,8 @@ fn builtin_parameter_id(effect_type: &EffectType, parameter: &str) -> ParameterI
     })
 }
 
-fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
-    match effect_type {
-        EffectType::BasicCorrection
-        | EffectType::WhiteBalance
-        | EffectType::ColorWheel
-        | EffectType::HdrGrading
-        | EffectType::AscCdl
-        | EffectType::Curves
-        | EffectType::GamutCompression
-        | EffectType::HighlightRecovery
-        | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
-        EffectType::Qualifier => vec!["抠像".to_string(), "Qualifier".to_string()],
-        EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
-        EffectType::Crop => vec!["变换".to_string()],
-        EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
-        EffectType::Vignette | EffectType::ChromaticAberration | EffectType::Grain => {
-            vec!["风格化".to_string()]
-        }
-        EffectType::ChromaKey | EffectType::LumaKey => vec!["抠像".to_string()],
-        EffectType::Plugin(_) => vec!["插件".to_string()],
-    }
-}
-
 fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
-    let category = builtin_effect_category(&effect_type);
+    let category = effect_type.category_path().into_iter().map(str::to_owned).collect();
     let definition = EffectDefinition::new(
         effect_type.key(),
         builtin_display_name(&effect_type),

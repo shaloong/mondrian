@@ -1,5 +1,10 @@
 # Effect System
 
+Built-in Effect definitions project their category path from the canonical
+`EffectType::category_path` contract. The registry supplies that same path to
+the Effect Browser; it does not maintain a second built-in category table.
+Plugin definitions declare their own category paths.
+
 Timeline text generation is not an Effect capability. Basic Title is closed
 Clip content whose generated working-linear frame enters this effect system at
 the ordinary Clip source boundary. The former disconnected renderer-only

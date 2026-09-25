@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mondrian_app::app::product_action::{
+use crate::app::product_action::{
     GradeActivateVersionPayload, GradeAddEffectPayload, GradeAddVersionPayload, GradeAssignPayload,
     GradeCreateDefinitionPayload, GradeCreateGroupPayload, GradeProductAction,
     GradeReplaceActiveGraphPayload, ProductAction, TimelineProductAction, TrackAuthorControl,
     TrackProductAction, TrackSetAuthorControlPayload,
 };
-use mondrian_app::app::AppState;
-use mondrian_app::app_ui::localization::{AppUiLocale, Localizer};
-use mondrian_app::app_ui::panels::InspectorPanelModel;
+use crate::app::AppState;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
+use crate::app_ui::panels::InspectorPanelModel;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::{GradeDefinitionId, GradeGraph, GradeGroupId, GradeVersionId, Rational};
 use mondrian_editor_state::Action;
@@ -25,7 +25,7 @@ struct FixtureRoot(PathBuf);
 
 impl FixtureRoot {
     fn new() -> Self {
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        let path = std::env::temp_dir().join(format!(
             "mondrian-grade-authoring-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)

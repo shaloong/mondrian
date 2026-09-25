@@ -179,6 +179,9 @@ disabled for RAW because the Adapter's output is explicitly scene-linear
 Rec.709 full-range Float32. Non-RAW assets omit the RAW controls from the
 retained Widget tree. The import picker includes DNG, but extension spelling
 alone never grants RAW execution authority.
+The product action's external encode/decode and live-library rejection path
+are tested inside the App crate's isolated test runtime; they do not acquire
+production per-user Project leases.
 
 ## Crate Split
 
@@ -2321,6 +2324,16 @@ without implying HDR10+ certification and states that Remake requires a
 qualified/licensed Adapter plus independent validation and human QC. The App
 commits every action through the normal Authoring Session, so availability is a
 read-only early projection and dispatch revalidates the complete Sequence.
+The external codec, atomic authoring, Undo/Redo, and Export UI projection are
+covered in the App crate's isolated test Session so tests never acquire the
+production per-user Project authority namespace.
+
+App-level Gallery, Grade, Reference Output, and timeline-interchange contracts
+likewise run inside the App crate's isolated test runtime. They exercise the
+real Project transaction and device/session APIs, including create/close where
+needed, without claiming the production per-user authority namespace. The
+production lock location remains stable across processes; tests do not redirect
+it with an environment override.
 
 Professional Reference Output routing is a machine-local preference and App
 runtime service, never a ProductAction or `.mdp` author field. Preferences may

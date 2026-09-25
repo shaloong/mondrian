@@ -4565,11 +4565,17 @@ mod tests {
             ..AssetMediaInterpretation::default()
         };
 
-        state
-            .dispatch_action(assets_set_interpretation_action(
-                AssetsSetInterpretationPayload { asset_id, interpretation },
-            ))
-            .expect("set interpretation");
+        let product = ProductAction::Asset(AssetProductAction::SetInterpretation(
+            crate::app::product_action::AssetSetInterpretationPayload { asset_id, interpretation },
+        ));
+        let external = product.clone().into_external_action();
+        assert_eq!(
+            ProductAction::decode_external(&external)
+                .expect("decode external interpretation action")
+                .expect("recognized asset action"),
+            product
+        );
+        state.dispatch_action(external).expect("set interpretation");
 
         let asset = state
             .asset_library()
@@ -4584,6 +4590,35 @@ mod tests {
             })
         );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        let invalid = AssetMediaInterpretation {
+            camera_raw: mondrian_core::CameraRawInterpretation {
+                exposure_millistops: 5_001,
+                ..mondrian_core::CameraRawInterpretation::default()
+            },
+            ..interpretation
+        };
+        state
+            .dispatch_action(
+                ProductAction::Asset(AssetProductAction::SetInterpretation(
+                    crate::app::product_action::AssetSetInterpretationPayload {
+                        asset_id,
+                        interpretation: invalid,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .expect_err("invalid RAW bounds must fail closed");
+        assert_eq!(
+            state
+                .asset_library()
+                .expect("library")
+                .get_asset(asset_id)
+                .expect("get asset")
+                .expect("asset")
+                .interpretation,
+            interpretation
+        );
 
         remove_temp_path(&library_root);
     }

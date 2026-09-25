@@ -2728,19 +2728,37 @@ mod tests {
     }
 
     #[test]
-    fn modeled_keyers_remain_reachable_fail_closed_effects() {
-        for effect_type in [EffectType::ChromaKey, EffectType::LumaKey] {
+    fn keyers_remain_reachable_and_execute_in_export_plan() {
+        for (effect_type, keyed_pixel) in [
+            (EffectType::ChromaKey, [0.0, 1.0, 0.0, 0.5]),
+            (EffectType::LumaKey, [0.0, 0.0, 0.0, 0.5]),
+        ] {
             let sequence =
                 single_solid_sequence(Some(EffectNode::with_defaults(effect_type.clone())));
             let program = prepare_stable(&sequence);
-            let error = evaluate_prepared_visual_program(
+            let plan = evaluate_prepared_visual_program(
                 &program,
                 TimelineEvaluationRequest::export(fp(&sequence, 0)),
             )
-            .expect_err("modeled-only keyer must not produce plausible pixels");
+            .expect("keyer must remain in the export plan");
+            admit_timeline_render_plan_for_cpu_compositor(&plan)
+                .expect("keyer export plan must admit exact Float32 execution");
+            let [TimelineRenderPlanElement::SolidColor(solid)] = plan.elements.as_slice() else {
+                panic!("keyer must remain attached to the solid Clip");
+            };
+            let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                &[keyed_pixel],
+                1,
+                1,
+                &solid.effect_graph,
+                solid.frame_seed,
+            )
+            .expect("keyer must execute in the exported graph");
             assert!(
-                error.to_string().contains(&effect_type.key()),
-                "blocker should identify the unavailable definition: {error}"
+                output[0][3] <= 1.0e-6,
+                "{} must remove its keyed pixel: {:?}",
+                effect_type.key(),
+                output[0]
             );
         }
     }

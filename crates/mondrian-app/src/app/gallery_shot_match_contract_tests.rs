@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use image::ImageEncoder;
-use mondrian_app::app::product_action::{
+use crate::app::product_action::{
     GalleryApplyShotMatchPayload, GalleryCaptureStillPayload, GalleryComparisonLayout,
     GalleryProductAction, GalleryRenameStillPayload, GallerySetComparisonPayload,
     GalleryStillTargetPayload, GradeCreateDefinitionPayload, GradeProductAction, ProductAction,
 };
-use mondrian_app::app::AppState;
-use mondrian_app::app_ui::panels::ViewerPanelModel;
+use crate::app::AppState;
+use crate::app_ui::panels::ViewerPanelModel;
+use image::ImageEncoder;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::{
     GalleryColorStatistics, GalleryRasterColorSpace, GalleryStillId, GalleryStillRaster,
@@ -22,7 +22,7 @@ struct FixtureRoot(PathBuf);
 
 impl FixtureRoot {
     fn new() -> Self {
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        let path = std::env::temp_dir().join(format!(
             "mondrian-gallery-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)

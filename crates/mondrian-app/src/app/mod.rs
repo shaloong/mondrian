@@ -158,9 +158,15 @@ pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
 mod gallery_authoring;
+#[cfg(test)]
+#[path = "gallery_shot_match_contract_tests.rs"]
+mod gallery_shot_match_contract_tests;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
 mod grade_authoring;
+#[cfg(test)]
+#[path = "grade_authoring_contract_tests.rs"]
+mod grade_authoring_contract_tests;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_av_evidence;
 #[cfg(any(test, feature = "validation"))]
@@ -181,6 +187,15 @@ mod packaged_worker;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod perf_process_memory;
 mod playback;
+#[cfg(test)]
+#[path = "reference_output_contract_tests.rs"]
+mod reference_output_contract_tests;
+#[cfg(all(test, feature = "validation"))]
+#[path = "reference_output_pump_tests.rs"]
+mod reference_output_pump_tests;
+#[cfg(test)]
+#[path = "timeline_interchange_tests.rs"]
+mod timeline_interchange_tests;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
 pub(crate) mod viewer_gpu_startup;

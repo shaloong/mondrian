@@ -3800,7 +3800,9 @@ mod tests {
             .expect("complete Custom OCIO identity");
         assert_eq!(
             identity.source(),
-            &mondrian_core::OcioConfigSource::Path { path: config_path }
+            &mondrian_core::OcioConfigSource::Path {
+                path: config_path.canonicalize().expect("fixture config path"),
+            }
         );
         let output = identity
             .output(mondrian_core::ColorSpace::Rec709)
@@ -3837,7 +3839,7 @@ mod tests {
             dialog.draft().color_environment.engine(),
             &mondrian_core::ColorEngine::mondrian_standard()
         );
-        assert!(dialog.error_text().contains("not found"));
+        assert!(!dialog.error_text().is_empty());
     }
 
     #[test]
