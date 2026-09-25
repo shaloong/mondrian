@@ -3,6 +3,8 @@
 
 #include <iostream>
 #include <fstream>
+#include <cstdio>
+#include <cstring>
 
 // ofx
 #include "ofxCore.h"
@@ -98,22 +100,22 @@ namespace MondrianOpenFx
   {
     bool isQuestion = false;
     const char *prefix = "Message : ";
-    if (strcmp(type, kOfxMessageLog) == 0) {
+    if (std::strcmp(type, kOfxMessageLog) == 0) {
       prefix = "Log : ";
     }
-    else if(strcmp(type, kOfxMessageFatal) == 0 ||
-            strcmp(type, kOfxMessageError) == 0) {
+    else if(std::strcmp(type, kOfxMessageFatal) == 0 ||
+            std::strcmp(type, kOfxMessageError) == 0) {
       prefix = "Error : ";
     }
-    else if(strcmp(type, kOfxMessageQuestion) == 0)  {
+    else if(std::strcmp(type, kOfxMessageQuestion) == 0)  {
       prefix = "Question : ";
       isQuestion = true;
     }
 
     // The isolated render worker has no interactive UI.
-    fputs(prefix, stdout);
-    vprintf(format, args);
-    printf("\n");
+    std::fputs(prefix, stdout);
+    std::vprintf(format, args);
+    std::printf("\n");
 
     if(isQuestion) {
       return kOfxStatReplyNo;
