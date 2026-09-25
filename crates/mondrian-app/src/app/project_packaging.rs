@@ -1563,11 +1563,18 @@ colorspaces:
             fs::read(moved.with_extension("mdp")).expect("existing sibling"),
             b"existing project"
         );
+        let imported_project_file = imported.authoring.as_ref().expect("Session").project_file();
         assert_eq!(
-            imported.authoring.as_ref().expect("Session").project_file(),
-            moved.with_file_name("moved-imported-1.mdp")
+            imported_project_file.file_name().and_then(|name| name.to_str()),
+            Some("moved-imported-1.mdp")
         );
-        assert!(!moved.with_file_name("moved-imported-1.mdp").exists());
+        assert_eq!(
+            fs::canonicalize(imported_project_file.parent().expect("import destination parent"))
+                .expect("canonical import destination parent"),
+            fs::canonicalize(moved.parent().expect("package parent"))
+                .expect("canonical package parent")
+        );
+        assert!(!imported_project_file.exists());
         drop(imported);
 
         let mut omitted_lut = manifest.clone();

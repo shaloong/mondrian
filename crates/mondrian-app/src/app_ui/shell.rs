@@ -4282,7 +4282,11 @@ mod tests {
         state.test_set_active_sequence(sequence.id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let mut root = AppUiAppRoot::from_app_state(&state);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
 
         root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None);
         root.handle_shell_action(
@@ -5772,7 +5776,11 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
-        let mut root = AppUiAppRoot::from_app_state(&state);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.models.viewer.zoom_label, "适合");
@@ -5795,7 +5803,11 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
-        let mut root = AppUiAppRoot::from_app_state(&state);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let resolved = root
