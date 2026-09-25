@@ -86,7 +86,8 @@ pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
 `mondrian-app::openfx_effect` can now register one explicitly selected and
 described Filter as a Float32 CPU definition in the shared compiled visual
 effect graph. Stable parameter IDs derive from the plugin identifier and OFX
-parameter name; the definition captures defaults, hard/display numeric bounds,
+parameter name; the definition displays the plugin's bounded UTF-8 label and
+captures defaults, hard/display numeric bounds,
 animation capability, order, and exact binary identity. The persisted Effect
 key includes the plugin identifier, declared version, and full binary SHA-256;
 a changed binary therefore has a new identity and cannot reinterpret an

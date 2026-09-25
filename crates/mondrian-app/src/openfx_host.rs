@@ -81,6 +81,8 @@ pub struct OpenFxParameterDescription {
 pub struct OpenFxFilterDescription {
     /// Identifier pinned by the prior binary inspection.
     pub identifier: String,
+    /// Plugin-provided display name, with the identifier as fallback.
+    pub label: String,
     /// Parameters in the order declared by the plugin.
     pub parameters: Vec<OpenFxParameterDescription>,
 }
@@ -223,6 +225,9 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        label: *mut c_char,
+        label_capacity: usize,
+        label_length: *mut usize,
         callback: unsafe extern "C" fn(*mut c_void, *const NativeParameterInfo) -> c_int,
         context: *mut c_void,
     ) -> c_int;
@@ -454,6 +459,8 @@ fn describe_in_worker(request: &DescribeRequest) -> Result<DescribeResponse, Ope
     let identifier = CString::new(request.plugin_identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
     let mut sink = ParameterSink::default();
+    let mut label = [0_u8; 256];
+    let mut label_length = 0_usize;
     // SAFETY: The C strings, callback, and sink outlive this synchronous call.
     // Native code runs only in the supervised child.
     let status = unsafe {
@@ -461,6 +468,9 @@ fn describe_in_worker(request: &DescribeRequest) -> Result<DescribeResponse, Ope
             binary.as_ptr(),
             bundle.as_ptr(),
             identifier.as_ptr(),
+            label.as_mut_ptr().cast(),
+            label.len(),
+            &mut label_length,
             collect_native_parameter,
             (&mut sink as *mut ParameterSink).cast(),
         )
@@ -468,8 +478,18 @@ fn describe_in_worker(request: &DescribeRequest) -> Result<DescribeResponse, Ope
     if status != 0 {
         return Ok(DescribeResponse::Rejected { status, reason: sink.error });
     }
+    let label = label
+        .get(..label_length)
+        .ok_or_else(|| invalid("OpenFX display name exceeds its bound"))?;
+    let label =
+        std::str::from_utf8(label).map_err(|_| invalid("OpenFX display name is not UTF-8"))?;
     let description = OpenFxFilterDescription {
         identifier: request.plugin_identifier.clone(),
+        label: if label.is_empty() {
+            request.plugin_identifier.clone()
+        } else {
+            label.to_owned()
+        },
         parameters: sink.parameters,
     };
     validate_description(&description, &request.plugin_identifier)?;
@@ -779,6 +799,12 @@ fn validate_description(
         return Err(invalid(
             "OpenFX filter description has an invalid identity or size",
         ));
+    }
+    if description.label.is_empty()
+        || description.label.len() > 256
+        || description.label.chars().any(char::is_control)
+    {
+        return Err(invalid("OpenFX filter display name is invalid"));
     }
     let mut names = std::collections::BTreeSet::new();
     for parameter in &description.parameters {

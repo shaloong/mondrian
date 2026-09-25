@@ -39,6 +39,8 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         "uk.co.thefoundry.BasicGainPlugin",
     )
     .expect("describe the selected native Filter context in a child");
+    assert!(!description.label.is_empty());
+    assert_ne!(description.label, description.identifier);
     assert_eq!(description.parameters.len(), 6);
     let scale = description
         .parameters

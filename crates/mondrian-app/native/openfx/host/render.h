@@ -50,6 +50,9 @@ int mondrian_openfx_describe(
     const char* binary,
     const char* bundle,
     const char* identifier,
+    char* label,
+    size_t label_capacity,
+    size_t* label_length,
     MondrianOpenFxParameterCallback callback,
     void* context)
 #ifdef __cplusplus

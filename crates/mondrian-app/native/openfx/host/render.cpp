@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <set>
 #include <memory>
+#include <cstring>
 
 #include "render.h"
 
@@ -177,6 +178,7 @@ static int run(const char* binary, const char* bundle, const char* identifier,
 
 static int describe(const char* binary, const char* bundle,
                     const char* identifier,
+                    char* label, size_t labelCapacity, size_t* labelLength,
                     MondrianOpenFxParameterCallback callback, void* context)
 {
   OFX::Host::PluginCache::getPluginCache()->setCacheVersion("mondrian-openfx-v1");
@@ -189,6 +191,10 @@ static int describe(const char* binary, const char* bundle,
   if (!plugin) { return 3; }
   auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
   if (!descriptor) { return 7; }
+  const std::string& displayName = descriptor->getLabel();
+  if (displayName.size() > labelCapacity) { return 7; }
+  std::memcpy(label, displayName.data(), displayName.size());
+  *labelLength = displayName.size();
   const auto& clips = descriptor->getClips();
   if (clips.find("Source") == clips.end() ||
       clips.find("Output") == clips.end()) { return 7; }
@@ -255,11 +261,14 @@ static int describe(const char* binary, const char* bundle,
 
 extern "C" int mondrian_openfx_describe(
     const char* binary, const char* bundle, const char* identifier,
+    char* label, size_t labelCapacity, size_t* labelLength,
     MondrianOpenFxParameterCallback callback, void* context) noexcept
 {
   try {
-    if (!binary || !bundle || !identifier || !callback || !context) { return 2; }
-    return describe(binary, bundle, identifier, callback, context);
+    if (!binary || !bundle || !identifier || !label || !labelLength ||
+        !callback || !context) { return 2; }
+    return describe(binary, bundle, identifier, label, labelCapacity,
+                    labelLength, callback, context);
   } catch (const std::exception& error) {
     std::cerr << "OpenFX description failed: " << error.what() << std::endl;
     return 6;

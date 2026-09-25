@@ -242,7 +242,7 @@ fn build_definition(
     );
     Ok(EffectDefinition::new(
         effect_type.key(),
-        description.identifier,
+        description.label,
         properties,
         EffectColorDomainContract::SCENE_LINEAR,
     )
@@ -317,6 +317,7 @@ mod tests {
         };
         let description = OpenFxFilterDescription {
             identifier: identifier.to_owned(),
+            label: "Example Gain".to_owned(),
             parameters: vec![
                 crate::openfx_host::OpenFxParameterDescription {
                     name: "gain".to_owned(),
@@ -356,6 +357,7 @@ mod tests {
             &effect_type,
         )
         .expect("build selected filter definition");
+        assert_eq!(definition.display_name(), "Example Gain");
         register_effect_definition(definition).expect("register filter definition");
         let mut effect = instantiate_effect_node(effect_type).expect("insert filter instance");
         assert_eq!(
