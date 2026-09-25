@@ -93,6 +93,12 @@ violate Mondrian's working-frame contract. None of its output is admitted as
 product OpenFX rendering. The product Adapter must replace those demo
 contracts with typed frame geometry, row stride, color/alpha intent, frame
 time, and authored parameters before registration.
+After replacing the demo's fixed getter with descriptor defaults and mutable
+parameter instances, authoring `scale = 1.5` before `CreateInstance` and
+disabling per-component scaling produced the Float32 pixel
+`(0.370588, 0.370588, 0.370588, 1.5)` from the same input. This checks the
+parameter-suite path separately from the hardcoded-gain render check; it is
+still an external feasibility fixture, not a product Adapter.
 
 ## Effect Plugins
 
