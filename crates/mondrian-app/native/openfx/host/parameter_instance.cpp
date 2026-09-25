@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <cmath>
 
 // ofx
 #include "ofxCore.h"
@@ -78,19 +79,26 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::get(OfxTime time, double& d)
   {
-    d = _value;
-    return kOfxStatOK;
+    return std::isfinite(time) && time == gFrame
+        ? get(d) : kOfxStatErrMissingHostFeature;
   }
 
   OfxStatus DoubleParameter::set(double value)
   {
+    const auto& properties = _descriptor.getProperties();
+    if (!std::isfinite(value) ||
+        value < properties.getDoubleProperty(kOfxParamPropMin) ||
+        value > properties.getDoubleProperty(kOfxParamPropMax)) {
+      return kOfxStatErrValue;
+    }
     _value = value;
     return kOfxStatOK;
   }
 
   OfxStatus DoubleParameter::set(OfxTime time, double value)
   {
-    return set(value);
+    return std::isfinite(time) && time == gFrame
+        ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
   OfxStatus DoubleParameter::derive(OfxTime time, double&)
@@ -122,8 +130,8 @@ namespace MondrianOpenFx {
 
   OfxStatus BooleanParameter::get(OfxTime time, bool& b)
   {
-    b = _value;
-    return kOfxStatOK;
+    return std::isfinite(time) && time == gFrame
+        ? get(b) : kOfxStatErrMissingHostFeature;
   }
 
   OfxStatus BooleanParameter::set(bool value)
@@ -133,7 +141,8 @@ namespace MondrianOpenFx {
   }
 
   OfxStatus BooleanParameter::set(OfxTime time, bool value) {
-    return set(value);
+    return std::isfinite(time) && time == gFrame
+        ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
   //

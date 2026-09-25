@@ -12,10 +12,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
-            mondrian_app::openfx_render::OPENFX_RENDER_WORKER_ARGUMENT,
+            mondrian_app::openfx_host::OPENFX_DESCRIBE_WORKER_ARGUMENT,
         ))
     {
-        return mondrian_app::openfx_render::run_openfx_render_worker().map_err(Into::into);
+        return mondrian_app::openfx_host::run_openfx_describe_worker().map_err(Into::into);
+    }
+    #[cfg(windows)]
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_app::openfx_host::OPENFX_RENDER_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_app::openfx_host::run_openfx_render_worker().map_err(Into::into);
     }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(

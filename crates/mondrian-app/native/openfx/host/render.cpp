@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <set>
+#include <memory>
 
 #include "render.h"
 
@@ -31,6 +32,26 @@
 #include "host_descriptor.h"
 #include "effect_instance.h"
 #include "image_clip.h"
+
+static OFX::Host::ImageEffect::ImageEffectPlugin* selectFilter(
+    OFX::Host::ImageEffect::PluginCache& cache,
+    OFX::Host::PluginBinary& binary,
+    const char* identifier)
+{
+  for (int index = 0; index < binary.getNPlugins(); ++index) {
+    OFX::Host::Plugin& candidate = binary.getPlugin(index);
+    if (candidate.getIdentifier() != identifier) { continue; }
+    cache.loadFromPlugin(&candidate);
+    std::string reason;
+    if (!cache.pluginSupported(&candidate, reason)) {
+      std::cerr << reason << std::endl;
+      return nullptr;
+    }
+    cache.confirmPlugin(&candidate);
+    return cache.getPluginById(candidate.getIdentifier());
+  }
+  return nullptr;
+}
 
 static int run(const char* binary, const char* bundle, const char* identifier,
                const char* inputPath, const char* outputPath,
@@ -68,38 +89,12 @@ static int run(const char* binary, const char* bundle, const char* identifier,
     if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
         !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { return 2; }
   }
-  // set the version label in the global cache
   OFX::Host::PluginCache::getPluginCache()->setCacheVersion("mondrian-openfx-v1");
-
-  // create our derived image effect host which provides
-  // a factory to make plugin instances and acts
-  // as a description of the host application
-  MondrianOpenFx::Host myHost;
-
-  // make an image effect plugin cache. This is what knows about
-  // all the plugins.
-  OFX::Host::ImageEffect::PluginCache imageEffectPluginCache(myHost);
-
-  // register the image effect cache with the global plugin cache
+  MondrianOpenFx::Host host;
+  OFX::Host::ImageEffect::PluginCache imageEffectPluginCache(host);
   imageEffectPluginCache.registerInCache(*OFX::Host::PluginCache::getPluginCache());
-
   OFX::Host::PluginBinary selectedBinary(binary, bundle, OFX::Host::PluginCache::getPluginCache());
-  OFX::Host::ImageEffect::ImageEffectPlugin* plugin = nullptr;
-  for (int i = 0; i < selectedBinary.getNPlugins(); ++i) {
-    OFX::Host::Plugin& candidate = selectedBinary.getPlugin(i);
-    if (candidate.getIdentifier() == identifier) {
-      imageEffectPluginCache.loadFromPlugin(&candidate);
-      std::string reason;
-      if (!imageEffectPluginCache.pluginSupported(&candidate, reason)) {
-        std::cerr << reason << std::endl;
-        return 3;
-      }
-      imageEffectPluginCache.confirmPlugin(&candidate);
-      plugin = imageEffectPluginCache.getPluginById(candidate.getIdentifier());
-      break;
-    }
-  }
-
+  auto* plugin = selectFilter(imageEffectPluginCache, selectedBinary, identifier);
   if (!plugin) { return 3; }
   std::unique_ptr<OFX::Host::ImageEffect::Instance> instance(
       plugin->createInstance(kOfxImageEffectContextFilter, nullptr));
@@ -114,7 +109,11 @@ static int run(const char* binary, const char* bundle, const char* identifier,
     if (!parameter) { return 4; }
     if (authored.kind == 1) {
       auto* value = dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter);
-      if (!value || value->set(authored.value) != kOfxStatOK) { return 4; }
+      if (!value) { return 4; }
+      const auto& properties = value->getProperties();
+      if (authored.value < properties.getDoubleProperty(kOfxParamPropMin) ||
+          authored.value > properties.getDoubleProperty(kOfxParamPropMax) ||
+          value->set(authored.value) != kOfxStatOK) { return 4; }
     } else if (authored.kind == 2) {
       auto* value = dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter);
       if (!value || (authored.value != 0.0 && authored.value != 1.0) ||
@@ -174,6 +173,99 @@ static int run(const char* binary, const char* bundle, const char* identifier,
   if (status != kOfxStatOK || !outputWritten ||
       (endStatus != kOfxStatOK && endStatus != kOfxStatReplyDefault)) { return 5; }
   return 0;
+}
+
+static int describe(const char* binary, const char* bundle,
+                    const char* identifier,
+                    MondrianOpenFxParameterCallback callback, void* context)
+{
+  OFX::Host::PluginCache::getPluginCache()->setCacheVersion("mondrian-openfx-v1");
+  MondrianOpenFx::Host host;
+  OFX::Host::ImageEffect::PluginCache imageEffectPluginCache(host);
+  imageEffectPluginCache.registerInCache(*OFX::Host::PluginCache::getPluginCache());
+  OFX::Host::PluginBinary selectedBinary(binary, bundle,
+                                         OFX::Host::PluginCache::getPluginCache());
+  auto* plugin = selectFilter(imageEffectPluginCache, selectedBinary, identifier);
+  if (!plugin) { return 3; }
+  auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
+  if (!descriptor) { return 7; }
+  const auto& clips = descriptor->getClips();
+  if (clips.find("Source") == clips.end() ||
+      clips.find("Output") == clips.end()) { return 7; }
+  for (const auto& entry : clips) {
+    if (entry.first != "Source" && entry.first != "Output" &&
+        !entry.second->isOptional()) { return 7; }
+  }
+
+  int count = 0;
+  for (const auto* parameter : descriptor->getParamList()) {
+    const std::string& type = parameter->getType();
+    if (type == kOfxParamTypeGroup || type == kOfxParamTypePage ||
+        type == kOfxParamTypePushButton) { continue; }
+    if (++count > 4096) { return 7; }
+    MondrianOpenFxParameterInfo info{};
+    const std::string& name = parameter->getName();
+    const std::string& label = parameter->getLabel();
+    const std::string& hint = parameter->getHint();
+    info.name = name.data();
+    info.name_length = name.size();
+    info.label = label.data();
+    info.label_length = label.size();
+    info.hint = hint.data();
+    info.hint_length = hint.size();
+    info.can_animate = parameter->getCanAnimate();
+    info.secret = parameter->getSecret();
+    info.enabled = parameter->getEnabled();
+    const auto& properties = parameter->getProperties();
+    if (type == kOfxParamTypeDouble) {
+      const std::string& doubleType = parameter->getDoubleType();
+      if (doubleType == kOfxParamDoubleTypePlain) {
+        info.double_type = 0;
+      } else if (doubleType == kOfxParamDoubleTypeScale) {
+        info.double_type = 1;
+      } else { return 7; }
+      info.kind = 1;
+      info.default_value = properties.getDoubleProperty(kOfxParamPropDefault);
+      info.minimum = properties.getDoubleProperty(kOfxParamPropMin);
+      info.maximum = properties.getDoubleProperty(kOfxParamPropMax);
+      info.display_minimum = properties.getDoubleProperty(kOfxParamPropDisplayMin);
+      info.display_maximum = properties.getDoubleProperty(kOfxParamPropDisplayMax);
+      if (!std::isfinite(info.default_value) || !std::isfinite(info.minimum) ||
+          !std::isfinite(info.maximum) || !std::isfinite(info.display_minimum) ||
+          !std::isfinite(info.display_maximum) || info.minimum > info.maximum ||
+          info.display_minimum > info.display_maximum) { return 7; }
+    } else if (type == kOfxParamTypeBoolean) {
+      info.kind = 2;
+      info.double_type = -1;
+      const int value = properties.getIntProperty(kOfxParamPropDefault);
+      if (value != 0 && value != 1) { return 7; }
+      info.default_value = value;
+      info.minimum = 0.0;
+      info.maximum = 1.0;
+      info.display_minimum = 0.0;
+      info.display_maximum = 1.0;
+    } else {
+      std::cerr << "unsupported parameter type: " << type << std::endl;
+      return 7;
+    }
+    if (callback(context, &info) != 0) { return 8; }
+  }
+  return 0;
+}
+
+extern "C" int mondrian_openfx_describe(
+    const char* binary, const char* bundle, const char* identifier,
+    MondrianOpenFxParameterCallback callback, void* context) noexcept
+{
+  try {
+    if (!binary || !bundle || !identifier || !callback || !context) { return 2; }
+    return describe(binary, bundle, identifier, callback, context);
+  } catch (const std::exception& error) {
+    std::cerr << "OpenFX description failed: " << error.what() << std::endl;
+    return 6;
+  } catch (...) {
+    return 6;
+  }
 }
 
 extern "C" int mondrian_openfx_render(

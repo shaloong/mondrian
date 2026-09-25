@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mondrian_app::openfx_adapter::inspect_openfx_binary;
-use mondrian_app::openfx_render::{
-    render_openfx_filter_frame, OpenFxFloatFrame, OpenFxRenderError, OpenFxRenderTiming,
-    OpenFxScalarValue,
+use mondrian_app::openfx_host::{
+    describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFloatFrame,
+    OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
 };
 
 fn product_executable() -> &'static Path {
@@ -24,6 +24,39 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     );
     let inspection = inspect_openfx_binary(product_executable(), &binary)
         .expect("discover pinned official Basic binary");
+    let description = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("describe the selected native Filter context in a child");
+    assert_eq!(description.parameters.len(), 6);
+    let scale = description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scale")
+        .expect("overall gain control");
+    assert_eq!(scale.default_value, OpenFxScalarValue::Double(1.0));
+    assert_eq!(scale.double_type, Some(OpenFxDoubleType::Scale));
+    assert_eq!(scale.minimum, Some(0.0));
+    assert_eq!(scale.display_maximum, Some(100.0));
+    let switch = description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scaleComponents")
+        .expect("component scaling switch");
+    assert_eq!(switch.default_value, OpenFxScalarValue::Boolean(false));
+    assert_eq!(switch.label, "Scale Individual Components");
+    let mut stale = inspection.clone();
+    stale.binary_sha256 = "0".repeat(64);
+    assert!(matches!(
+        describe_openfx_filter(
+            product_executable(),
+            &stale,
+            "uk.co.thefoundry.BasicGainPlugin",
+        ),
+        Err(OpenFxHostError::Invalid(_))
+    ));
     let input = OpenFxFloatFrame {
         width: 4,
         height: 4,
@@ -59,7 +92,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         }
     }
 
-    let mut invalid = input;
+    let mut invalid = input.clone();
     invalid.pixels[7][2] = f32::NAN;
     let rejected = render_openfx_filter_frame(
         product_executable(),
@@ -69,5 +102,24 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &parameters,
         &invalid,
     );
-    assert!(matches!(rejected, Err(OpenFxRenderError::Invalid(_))));
+    assert!(matches!(rejected, Err(OpenFxHostError::Invalid(_))));
+
+    let out_of_range = BTreeMap::from([
+        ("scale".to_owned(), OpenFxScalarValue::Double(-0.5)),
+        (
+            "scaleComponents".to_owned(),
+            OpenFxScalarValue::Boolean(false),
+        ),
+    ]);
+    assert!(matches!(
+        render_openfx_filter_frame(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            &timing,
+            &out_of_range,
+            &input,
+        ),
+        Err(OpenFxHostError::WorkerFailed(_))
+    ));
 }
