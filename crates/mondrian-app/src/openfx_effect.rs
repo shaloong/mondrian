@@ -11,9 +11,9 @@ use mondrian_core::automation::{
 use mondrian_core::{MondrianError, ParameterId};
 use mondrian_effects::{
     register_effect_definition, EffectCachePolicy, EffectColorDomainContract, EffectDefinition,
-    EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphBuildError,
-    EffectGraphTopology, EffectPluginContract, EffectResourceLifetime, EffectRoiPropagation,
-    EffectStateModel, EffectTemporalInputExtent, EffectType,
+    EffectDefinitionError, EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+    EffectGraphBuildError, EffectGraphTopology, EffectPluginContract, EffectResourceLifetime,
+    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,8 +34,8 @@ pub enum OpenFxEffectRegistrationError {
     #[error("OpenFX filter schema is unsupported: {0}")]
     Schema(String),
     /// The definition registry rejected the admitted schema.
-    #[error("OpenFX effect registration failed: {0}")]
-    Registry(String),
+    #[error(transparent)]
+    Registry(#[from] EffectDefinitionError),
 }
 
 #[derive(Clone)]
@@ -65,8 +65,7 @@ pub fn register_selected_openfx_filter(
     let description = describe_openfx_filter(helper_executable, inspection, plugin_identifier)?;
     let effect_type = EffectType::Plugin(stable_key("openfx.", plugin_identifier.as_bytes()));
     let definition = build_definition(helper_executable, inspection, description, &effect_type)?;
-    register_effect_definition(definition)
-        .map_err(|error| OpenFxEffectRegistrationError::Registry(error.to_string()))?;
+    register_effect_definition(definition)?;
     Ok(effect_type)
 }
 
@@ -247,7 +246,7 @@ fn build_definition(
         properties,
         EffectColorDomainContract::SCENE_LINEAR,
     )
-    .with_category(vec!["OpenFX".to_owned()])
+    .with_category(vec!["插件".to_owned(), "OpenFX".to_owned()])
     .with_execution_contract(EffectExecutionContract {
         execution_modes: EffectExecutionModes::CPU_F32,
         determinism: EffectDeterminism::Nondeterministic,

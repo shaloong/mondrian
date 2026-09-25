@@ -43,11 +43,11 @@ pub use effect::{
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
     register_effect_definition, CustomEffectProcessorBinding, EffectCacheKeyBuilder,
     EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
-    EffectDefinition, EffectEvalContext, EffectFrameContext, EffectFrameContextError,
-    EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer, EffectInstantiationError,
-    EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp, EffectRenderParamsBuilder,
-    EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery, EffectType,
-    PreparedEffectEvaluator, PreparedLut3D,
+    EffectDefinition, EffectDefinitionError, EffectEvalContext, EffectFrameContext,
+    EffectFrameContextError, EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer,
+    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp,
+    EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
+    EffectType, PreparedEffectEvaluator, PreparedLut3D,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,

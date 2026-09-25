@@ -14,6 +14,10 @@ and no second result cache.
 
 Effects are timeline-instance operations that transform image data through a compiled render graph.
 
+The public definition-registration error remains typed across the application
+adapter boundary; native effect admission reports that error directly rather
+than flattening it into a string.
+
 Clip effect preparation binds an exact `EffectFrameContext`: sequence frame rate,
 sample aspect ratio, and the Clip's half-open source-time interval. The context
 travels through zero-time graph compilation and subsequent parameter evaluation.

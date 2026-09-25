@@ -820,12 +820,21 @@ impl PanelListModel {
         _apply_blocker: Option<&'static str>,
         localizer: Option<&Localizer>,
     ) -> Self {
-        let mut effects = effect_library_types();
-        effects.sort_by(|left, right| {
-            let left_categories = left.category_path();
-            let right_categories = right.category_path();
-            effect_category_order(&left_categories)
-                .cmp(&effect_category_order(&right_categories))
+        let mut effects = effect_library_types()
+            .into_iter()
+            .map(|effect| {
+                let categories = mondrian_effects::effect_definition(&effect)
+                    .map(|definition| definition.category_path().to_vec())
+                    .filter(|categories| !categories.is_empty())
+                    .unwrap_or_else(|| {
+                        effect.category_path().into_iter().map(str::to_owned).collect()
+                    });
+                (effect, categories)
+            })
+            .collect::<Vec<_>>();
+        effects.sort_by(|(left, left_categories), (right, right_categories)| {
+            effect_category_order(left_categories)
+                .cmp(&effect_category_order(right_categories))
                 .then_with(|| {
                     localized_effect_name(left, localizer)
                         .cmp(&localized_effect_name(right, localizer))
@@ -840,8 +849,7 @@ impl PanelListModel {
         } else {
             let mut items = Vec::new();
             let mut emitted_categories = std::collections::BTreeSet::<String>::new();
-            for effect_type in effects {
-                let categories = effect_type.category_path();
+            for (effect_type, categories) in effects {
                 let mut prefix = String::new();
                 for (depth, category) in categories.iter().enumerate() {
                     if !prefix.is_empty() {
@@ -901,15 +909,15 @@ fn localized_effect_category(category: &str, localizer: Option<&Localizer>) -> S
     }
 }
 
-fn effect_category_order(categories: &[&str]) -> (u8, u8) {
-    let primary = match categories.first().copied() {
+fn effect_category_order(categories: &[String]) -> (u8, u8) {
+    let primary = match categories.first().map(String::as_str) {
         Some("颜色") => 0,
         Some("变换") => 1,
         Some("抠像") => 2,
         Some("插件") => 3,
         _ => 4,
     };
-    let secondary = match categories.get(1).copied() {
+    let secondary = match categories.get(1).map(String::as_str) {
         Some("调色") => 0,
         Some("模糊与锐化") => 1,
         Some("风格化") => 2,

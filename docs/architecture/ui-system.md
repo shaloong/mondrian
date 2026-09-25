@@ -2555,3 +2555,8 @@ The shared Inspector/Mixer Audio Processor Rack projection offers an explicit
 rebind control for CLAP and VST3 instances. It submits a typed App action, which probes
 and validates the installed binary before authoring one undoable Rack edit;
 failed or canceled attempts leave the Project unchanged.
+
+The Effect Browser reads category paths from registered executable Definitions,
+including native plugin definitions, instead of reducing every Plugin key to
+the generic core-data category. Built-in categories retain their semantic
+ordering and plugin subcategories retain stable tree IDs across locale changes.
