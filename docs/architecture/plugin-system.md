@@ -265,8 +265,10 @@ plugin management and relocation UI, state capture, expanded parameter-control U
 and broader vendor/plugin signal-parity coverage remain required before
 CLAP is advertised as a complete product feature. The VST3 audio backend can
 host an explicitly selected binary or directory bundle through installation and
-insertion flow. The selected OpenFX filter host remains disconnected from the
-visual Effect registry/DSL and product insertion flow.
+insertion flow. The selected OpenFX Filter host now registers admitted
+definitions in the visual Effect registry and exposes them through the Effect
+Browser; its current contract is limited to the qualified Filter/Float32
+subset described above.
 
 The ignored installed-reference acceptance tests use a built `mondrian`
 executable and the separately built MIT/Apache licensed Clack gain example
@@ -291,15 +293,16 @@ Earlier SDK releases have different terms and are not an implicit substitute.
 The host must not ship third-party plugin binaries. Keep required SDK copyright
 and license notices, and review the trademark rules before using VST branding.
 
-The first OpenFX Adapter should run a user-installed CPU image effect behind a
-separate supervised worker and lower its declared image depth, components,
-premultiplication, pixel aspect, render scale, temporal extent, region of
-definition/interest, and parameter state into the canonical Effect contract.
-Begin with a reference plugin that accepts the supported Float32 working-frame
-contract; unsupported formats or color/premultiplication assumptions fail
-admission. Never silently round-trip through RGBA8 or substitute a differently
-interpreted effect in Export. Native GPU texture sharing and vendor overlays
-are separate qualifications.
+The admitted OpenFX Adapter runs a user-installed CPU Filter behind a separate
+supervised worker, with frame timing, pixel aspect, Float32 RGBA, and authored
+scalar parameters lowered into the canonical Effect graph. The official Basic
+Gain reference plugin passed direct host and graph pixel comparison on Windows
+at the pinned upstream source revision above. Broader depth/component/
+premultiplication, render-scale, temporal, region-of-definition, and
+region-of-interest behavior still requires vendor qualification. Unsupported
+color and alpha contracts must fail admission. Never silently round-trip through
+RGBA8 or substitute a differently interpreted effect in Export. Native GPU
+texture sharing and vendor overlays are separate qualifications.
 
 LV2 is a later Linux audio Adapter. Apple Audio Units belong to the macOS
 platform Adapter and hardware/release qualification. Do not plan VST2 as a new
