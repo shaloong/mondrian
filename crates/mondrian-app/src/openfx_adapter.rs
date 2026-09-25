@@ -179,7 +179,7 @@ pub fn inspect_openfx_binary(
     Ok(OpenFxBinaryInspection { binary_path, binary_sha256: before, plugins })
 }
 
-fn resolve_openfx_binary(selection: &Path) -> Result<PathBuf, OpenFxDiscoveryError> {
+pub(crate) fn resolve_openfx_binary(selection: &Path) -> Result<PathBuf, OpenFxDiscoveryError> {
     let selection = fs::canonicalize(selection)
         .map_err(|error| unavailable(format!("binary path cannot be resolved: {error}")))?;
     if selection.is_file() {
@@ -378,7 +378,7 @@ fn valid_identifier(identifier: &str) -> bool {
         && identifier.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
-fn sha256_file(path: &Path) -> Result<String, OpenFxDiscoveryError> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String, OpenFxDiscoveryError> {
     let mut file = File::open(path)
         .map_err(|error| unavailable(format!("OpenFX binary cannot be read: {error}")))?;
     let mut digest = Sha256::new();
@@ -395,7 +395,7 @@ fn sha256_file(path: &Path) -> Result<String, OpenFxDiscoveryError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>, OpenFxDiscoveryError> {
+pub(crate) fn read_bounded(path: &Path) -> Result<Vec<u8>, OpenFxDiscoveryError> {
     let metadata = fs::metadata(path)
         .map_err(|error| unavailable(format!("OpenFX worker message is unavailable: {error}")))?;
     if !metadata.is_file() || metadata.len() > MAX_MESSAGE_BYTES {

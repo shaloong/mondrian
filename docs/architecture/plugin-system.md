@@ -59,15 +59,28 @@ unique descriptors, and enforces a deadline; native failure never loads the
 binary in the editor process. A selected `.ofx.bundle` resolves through the
 current platform's `Contents/<architecture>` directory only when exactly one
 regular `.ofx` binary is present. Discovery does not invoke `setHost`, image-effect
-description, instance creation, or render, so it is not an executable OpenFX
-Adapter and is not exposed as a usable effect. An independently built official
+description, instance creation, or render. An independently built official
 Float32 Basic example provides the local ABI discovery qualification fixture;
 its binary stays outside the shipped product.
 
-The remaining image-effect host needs
-property, parameter, clip/image, memory, progress, threading, and render suites
-with explicit pixel-depth, region-of-interest, frame-time, and render-thread
-contracts. Admission must preserve the same compiled visual graph semantics
+The Windows application now includes a selected-binary Float32 filter host
+using vendored BSD-3-Clause OpenFX HostSupport source and a separate native
+render child. The caller supplies a pinned binary inspection, explicit frame
+time/rate/range/PAR, RGBA Float32 straight-alpha working-frame pixels, and
+Double/Boolean parameter values. The parent checks binary identity, bounded
+request/output sizes, finite pixels, and a render deadline; a native crash
+remains in the child. The host advertises only the Filter context and RGBA,
+does not advertise tiles or temporal clip access, and rejects unsupported
+parameter types. A real official Basic Gain filter qualification covers all
+pixels in a nonuniform 4x4 frame at an authored gain of 1.5. Its reference
+binary remains outside the product tree. The host ABI uses OpenFX bottom-left
+pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
+The host is not yet connected to the compiled visual effect graph or product
+insertion UI, so OpenFX is not yet a usable product feature.
+
+Broader image-effect support needs qualified property, parameter, clip/image,
+memory, progress, threading, and render suites across vendor plugins.
+Admission must preserve the same compiled visual graph semantics
 for Viewer and Export, run native plugin code outside the editor process, and
 compare real reference-plugin pixels over time, color, alpha, and failure cases.
 An effect definition alone does not qualify OpenFX support.
@@ -213,8 +226,8 @@ plugin management and relocation UI, state capture, expanded parameter-control U
 and broader vendor/plugin signal-parity coverage remain required before
 CLAP is advertised as a complete product feature. The VST3 audio backend can
 host an explicitly selected binary or directory bundle through installation and
-insertion flow. OpenFX binaries remain unhosted. The visual
-Effect registry/DSL does not host OpenFX.
+insertion flow. The selected OpenFX filter host remains disconnected from the
+visual Effect registry/DSL and product insertion flow.
 
 The ignored installed-reference acceptance tests use a built `mondrian`
 executable and the separately built MIT/Apache licensed Clack gain example

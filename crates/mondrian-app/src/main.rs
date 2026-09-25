@@ -9,6 +9,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return mondrian_app::openfx_adapter::run_openfx_discovery_worker().map_err(Into::into);
     }
+    #[cfg(windows)]
+    if mode.as_deref()
+        == Some(std::ffi::OsStr::new(
+            mondrian_app::openfx_render::OPENFX_RENDER_WORKER_ARGUMENT,
+        ))
+    {
+        return mondrian_app::openfx_render::run_openfx_render_worker().map_err(Into::into);
+    }
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
             mondrian_audio::CLAP_DISCOVERY_WORKER_ARGUMENT,
