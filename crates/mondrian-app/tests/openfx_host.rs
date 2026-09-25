@@ -6,9 +6,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mondrian_app::openfx_adapter::inspect_openfx_binary;
+use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
     describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFloatFrame,
     OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
+};
+use mondrian_core::automation::PropertyValue;
+use mondrian_core::{
+    Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
+};
+use mondrian_effects::{
+    apply_compiled_effect_graph_rgba_f32, instantiate_effect_node, EffectFrameContext,
+    LutPreparationCache, PreparedEffectProgram,
 };
 
 fn product_executable() -> &'static Path {
@@ -122,4 +131,55 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         ),
         Err(OpenFxHostError::WorkerFailed(_))
     ));
+
+    let effect_type = register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("register the selected native Filter as a visual effect");
+    let mut effect = instantiate_effect_node(effect_type).expect("insert the Filter");
+    let scale_parameter = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.display_name == scale.label)
+        .expect("described scale control")
+        .1
+        .descriptor
+        .parameter_id()
+        .clone();
+    effect
+        .set_static_value_by_parameter(&scale_parameter, PropertyValue::Double(1.5))
+        .expect("author the gain control");
+    let frame_context = EffectFrameContext::new(
+        Rational::FPS_24,
+        SampleAspectRatio::SQUARE,
+        TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(101, 24).expect("source duration"),
+        )
+        .expect("source range"),
+    )
+    .expect("effect frame contract");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &[effect],
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        frame_context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("compile the selected Filter into the shared graph");
+    let graph = program
+        .evaluate(TimelineTime::new(1, 24).expect("frame time"))
+        .expect("evaluate the authored Filter");
+    let integrated =
+        apply_compiled_effect_graph_rgba_f32(&input.pixels, input.width, input.height, &graph, 991)
+            .expect("render the native Filter through the shared graph");
+    for (actual, expected) in integrated.iter().zip(&output.pixels) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
 }
