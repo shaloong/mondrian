@@ -70,8 +70,9 @@ time/rate/range/PAR, RGBA Float32 straight-alpha working-frame pixels, and
 Double/Boolean parameter values. The parent checks binary identity, bounded
 request/output sizes, finite input and output pixels, and a render deadline; a native crash
 remains in the child. The host advertises only the Filter context and RGBA,
-does not advertise tiles or temporal clip access, and rejects unsupported
-parameter types. A real official Basic Gain filter qualification covers all
+does not advertise tiles or temporal clip access, rejects unsupported
+parameter types, and pairs each successful BeginRender with EndRender even on
+render failure. A real official Basic Gain filter qualification covers all
 pixels in a nonuniform 4x4 frame at an authored gain of 1.5. Its reference
 binary remains outside the product tree. The host ABI uses OpenFX bottom-left
 pixel coordinates with negative row bytes over Mondrian's top-row-first frame.

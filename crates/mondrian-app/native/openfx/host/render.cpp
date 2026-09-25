@@ -101,122 +101,78 @@ static int run(const char* binary, const char* bundle, const char* identifier,
   }
 
   if (!plugin) { return 3; }
+  std::unique_ptr<OFX::Host::ImageEffect::Instance> instance(
+      plugin->createInstance(kOfxImageEffectContextFilter, nullptr));
+  if (!instance) { return 4; }
 
-  if(plugin) {
-    // create an instance of it as a filter
-    // the first arg is the context, the second is client data we are allowed to pass down the call chain
-
-    std::unique_ptr<OFX::Host::ImageEffect::Instance> instance(plugin->createInstance(kOfxImageEffectContextFilter, NULL));
-
-    if (!instance) { return 4; }
-
-    if(instance)
-    {
-        OfxStatus stat;
-
-      std::set<std::string> authoredNames;
-      for (int index = 0; index < parameterCount; ++index) {
-        const auto& authored = parameters[index];
-        if (!authored.name || !std::isfinite(authored.value) ||
-            !authoredNames.insert(authored.name).second) { return 4; }
-        auto* parameter = instance->getParam(authored.name);
-        if (!parameter) { return 4; }
-        if (authored.kind == 1) {
-          auto* value = dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter);
-          if (!value || value->set(authored.value) != kOfxStatOK) { return 4; }
-        } else if (authored.kind == 2) {
-          auto* value = dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter);
-          if (!value || (authored.value != 0.0 && authored.value != 1.0) ||
-              value->set(authored.value == 1.0) != kOfxStatOK) { return 4; }
-        } else { return 4; }
-      }
-      for (const auto& entry : instance->getParams()) {
-        auto* parameter = entry.second;
-        const std::string& type = parameter->getType();
-        if (type == kOfxParamTypeGroup || type == kOfxParamTypePage ||
-            type == kOfxParamTypePushButton) { continue; }
-        if (!dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter) &&
-            !dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter)) {
-          std::cerr << "unsupported parameter type: " << type << std::endl;
-          return 7;
-        }
-      }
-
-      // now we need to call the create instance action. Only call this once you have initialised all the params
-      // and clips to their correct values. So if you are loading a saved plugin state, set up your params from
-      // that state, _then_ call create instance.
-      stat = instance->createInstanceAction();
-      if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) { return 4; }
-
-      // now we need to to call getClipPreferences on the instance so that it does the clip component/depth
-      // logic and caches away the components and depth on each clip.
-      bool ok = instance->getClipPreferences();
-      if (!ok) { return 4; }
-      for (const char* name : {"Source", "Output"}) {
-        auto* clip = instance->getClip(name);
-        if (!clip || clip->getPixelDepth() != kOfxBitDepthFloat ||
-            clip->getComponents() != kOfxImageComponentRGBA) {
-          return 7;
-        }
-      }
-
-      // current render scale of 1
-      OfxPointD renderScale;
-      renderScale.x = renderScale.y = 1.0;
-
-      // The render window is in pixel coordinates
-      // ie: render scale and a PAR of not 1
-      OfxRectI  renderWindow;
-      renderWindow.x1 = renderWindow.y1 = 0;
-      renderWindow.x2 = MondrianOpenFx::gWidth;
-      renderWindow.y2 = MondrianOpenFx::gHeight;
-
-      /// RoI is in canonical coords,
-      OfxRectD  regionOfInterest;
-      regionOfInterest.x1 = regionOfInterest.y1 = 0;
-      regionOfInterest.x2 = renderWindow.x2 * instance->getProjectPixelAspectRatio();
-      regionOfInterest.y2 = MondrianOpenFx::gHeight;
-
-      // say we are about to render a bunch of frames
-      stat = instance->beginRenderAction(frame, frame, 1.0, false, renderScale, /*sequential=*/true, /*interactive=*/false
-                                         );
-      if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) { return 5; }
-
-      // get the output clip
-      MondrianOpenFx::FilterClipInstance* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
-      if (!outputClip) { return 5; }
-
-      {
-        // call get region of interest on each of the inputs
-
-        // get the RoI for each input clip
-        // the regions of interest for each input clip are returned in a std::map
-        // on a real host, these will be the regions of each input clip that the
-        // effect needs to render a given frame (clipped to the RoD).
-        //
-        // In our example we are doing full frame fetches regardless.
-        std::map<OFX::Host::ImageEffect::ClipInstance *, OfxRectD> rois;
-        stat = instance->getRegionOfInterestAction(frame, renderScale,
-                                                   regionOfInterest, rois);
-        if (stat != kOfxStatOK && stat != kOfxStatReplyDefault) { return 5; }
-
-        // render a frame
-        stat = instance->renderAction(frame,kOfxImageFieldBoth,renderWindow, renderScale, /*sequential=*/true, /*interactive=*/false, /*draft=*/false);
-        if (stat != kOfxStatOK) { return 5; }
-
-        // get the output image buffer
-        MondrianOpenFx::FrameImage *outputImage = outputClip->getOutputImage();
-        if (!outputImage) { return 5; }
-        std::ofstream output(std::filesystem::u8path(outputPath), std::ios::binary);
-        output.write(reinterpret_cast<const char*>(outputImage->rawData()), pixels * sizeof(OfxRGBAColourF));
-        if (!output) { return 5; }
-      }
-
-      instance->endRenderAction(frame, frame, 1.0, false, renderScale, /*sequential=*/true, /*interactive=*/false
-                                );
+  std::set<std::string> authoredNames;
+  for (int index = 0; index < parameterCount; ++index) {
+    const auto& authored = parameters[index];
+    if (!authored.name || !std::isfinite(authored.value) ||
+        !authoredNames.insert(authored.name).second) { return 4; }
+    auto* parameter = instance->getParam(authored.name);
+    if (!parameter) { return 4; }
+    if (authored.kind == 1) {
+      auto* value = dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter);
+      if (!value || value->set(authored.value) != kOfxStatOK) { return 4; }
+    } else if (authored.kind == 2) {
+      auto* value = dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter);
+      if (!value || (authored.value != 0.0 && authored.value != 1.0) ||
+          value->set(authored.value == 1.0) != kOfxStatOK) { return 4; }
+    } else { return 4; }
+  }
+  for (const auto& entry : instance->getParams()) {
+    auto* parameter = entry.second;
+    const std::string& type = parameter->getType();
+    if (type == kOfxParamTypeGroup || type == kOfxParamTypePage ||
+        type == kOfxParamTypePushButton) { continue; }
+    if (!dynamic_cast<OFX::Host::Param::DoubleInstance*>(parameter) &&
+        !dynamic_cast<OFX::Host::Param::BooleanInstance*>(parameter)) {
+      std::cerr << "unsupported parameter type: " << type << std::endl;
+      return 7;
     }
   }
-  OFX::Host::PluginCache::clearPluginCache();
+
+  // Authored values must be set before the plugin's CreateInstance action.
+  OfxStatus status = instance->createInstanceAction();
+  if (status != kOfxStatOK && status != kOfxStatReplyDefault) { return 4; }
+  if (!instance->getClipPreferences()) { return 4; }
+  for (const char* name : {"Source", "Output"}) {
+    auto* clip = instance->getClip(name);
+    if (!clip || clip->getPixelDepth() != kOfxBitDepthFloat ||
+        clip->getComponents() != kOfxImageComponentRGBA) { return 7; }
+  }
+  auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
+  if (!outputClip) { return 5; }
+
+  const OfxPointD renderScale{1.0, 1.0};
+  const OfxRectI renderWindow{0, 0, info.width, info.height};
+  const OfxRectD regionOfInterest{0.0, 0.0,
+      info.width * info.pixel_aspect_ratio, static_cast<double>(info.height)};
+  status = instance->beginRenderAction(frame, frame, 1.0, false, renderScale,
+                                       true, false);
+  if (status != kOfxStatOK && status != kOfxStatReplyDefault) { return 5; }
+
+  std::map<OFX::Host::ImageEffect::ClipInstance*, OfxRectD> rois;
+  status = instance->getRegionOfInterestAction(frame, renderScale,
+                                               regionOfInterest, rois);
+  if (status == kOfxStatOK || status == kOfxStatReplyDefault) {
+    status = instance->renderAction(frame, kOfxImageFieldBoth, renderWindow,
+                                    renderScale, true, false, false);
+  }
+  bool outputWritten = false;
+  if (status == kOfxStatOK) {
+    if (auto* image = outputClip->getOutputImage()) {
+      std::ofstream output(std::filesystem::u8path(outputPath), std::ios::binary);
+      output.write(reinterpret_cast<const char*>(image->rawData()),
+                   pixels * sizeof(OfxRGBAColourF));
+      outputWritten = static_cast<bool>(output);
+    }
+  }
+  const OfxStatus endStatus = instance->endRenderAction(frame, frame, 1.0,
+      false, renderScale, true, false);
+  if (status != kOfxStatOK || !outputWritten ||
+      (endStatus != kOfxStatOK && endStatus != kOfxStatReplyDefault)) { return 5; }
   return 0;
 }
 
