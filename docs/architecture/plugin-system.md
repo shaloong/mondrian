@@ -100,11 +100,14 @@ is qualified. The official Basic reference test now also compares direct host
 pixels with graph execution when that external fixture is supplied.
 
 The Graphics menu selects one installed `.ofx.bundle` directory through the
-native folder picker. A closed product action inspects the bundle, describes
-its image-effect entries, and registers only admitted Filter definitions; the
-Effect Browser then exposes those definitions for ordinary Clip insertion.
-Successful machine-local selections are saved in app UI preferences and
-restored on a background catalog job at startup. A changed binary may offer
+native folder picker. A closed product action queues the selected bundle in
+the same background catalog worker used for startup restoration. That worker
+inspects the bundle, describes its image-effect entries, and registers only
+admitted Filter definitions; the Effect Browser then exposes those definitions
+for ordinary Clip insertion. Successful machine-local selections are saved in
+app UI preferences only after the completed worker result is polled. A failed
+scan cannot leave a persisted selection; dismissing the native picker queues
+nothing. A changed binary may offer
 a new Effect definition, while authored instances retain their old key and
 fail closed until the original revision is available. The
 project does not embed native plugin binaries.

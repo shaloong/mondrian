@@ -531,7 +531,8 @@ pub struct AppState {
     /// Session-installed CLAP definitions shared by Preview and Export.
     clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
     native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
-    openfx_restore: Option<openfx_catalog::OpenFxCatalogRestore>,
+    openfx_catalog: Option<openfx_catalog::OpenFxCatalog>,
+    completed_openfx_installs: Vec<PathBuf>,
     vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
@@ -678,7 +679,8 @@ impl AppState {
             audio_processor_resolver: Arc::clone(&audio_processor_resolver),
             clap_catalog: None,
             native_audio_restore: None,
-            openfx_restore: None,
+            openfx_catalog: None,
+            completed_openfx_installs: Vec::new(),
             vst3_catalog: None,
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new_with_processor_resolver(

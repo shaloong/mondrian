@@ -1175,7 +1175,22 @@ impl AppUiHost {
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
         let native_audio_catalog_changed =
             self.app_state.borrow_mut().poll_native_audio_catalog_restore();
-        let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog_restore();
+        let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
+        let installed_openfx_bundles = self.app_state.borrow_mut().take_completed_openfx_installs();
+        if !installed_openfx_bundles.is_empty() {
+            for path in installed_openfx_bundles {
+                let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+                self.preferences.record_openfx_bundle(canonical_path);
+            }
+            if let Err(error) =
+                persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
+            {
+                tracing::warn!(%error, "failed to save selected OpenFX bundle");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
+            }
+        }
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1714,31 +1729,21 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
-        let (installed_plugin, installed_openfx_bundle) =
-            match ProductAction::decode_external(&action) {
-                Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
-                    (
-                        Some(NativeAudioPluginSelection {
-                            format: NativeAudioPluginFormat::Clap,
-                            path: payload.path,
-                        }),
-                        None,
-                    )
-                }
-                Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => (
-                    Some(NativeAudioPluginSelection {
-                        format: NativeAudioPluginFormat::Vst3,
-                        path: payload.path,
-                    }),
-                    None,
-                ),
-                Ok(Some(ProductAction::VisualEffect(
-                    crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
-                        payload,
-                    ),
-                ))) => (None, Some(payload.path)),
-                _ => (None, None),
-            };
+        let installed_plugin = match ProductAction::decode_external(&action) {
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Clap,
+                    path: payload.path,
+                })
+            }
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => {
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Vst3,
+                    path: payload.path,
+                })
+            }
+            _ => None,
+        };
         let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1751,11 +1756,7 @@ impl AppUiHost {
                     std::fs::canonicalize(&selection.path).unwrap_or(selection.path);
                 self.preferences.record_native_audio_plugin(selection.format, canonical_path);
             }
-            if let Some(path) = installed_openfx_bundle.as_ref() {
-                let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                self.preferences.record_openfx_bundle(canonical_path);
-            }
-            if (had_installed_plugin || installed_openfx_bundle.is_some())
+            if had_installed_plugin
                 && let Err(error) =
                     persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
             {
@@ -3044,6 +3045,44 @@ mod tests {
             .is_empty());
         drop(host);
         std::fs::remove_dir_all(folder).expect("remove fixture folder");
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    fn failed_background_openfx_install_never_persists_a_selection() {
+        let preferences_path = temp_preferences_path("invalid-openfx-bundle");
+        let missing = preferences_path.with_extension("ofx.bundle");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let generation = host.app_state().project_author_generation();
+        host.dispatch_editor_action(
+            ProductAction::VisualEffect(
+                crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
+                    crate::app::product_action::VisualEffectInstallOpenFxBundlePayload {
+                        path: missing,
+                    },
+                ),
+            )
+            .into_external_action(),
+        )
+        .expect("queue selected bundle");
+        assert!(host.preferences.installed_openfx_bundles.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error)
+            && Instant::now() < deadline
+        {
+            host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error));
+        assert!(host.preferences.installed_openfx_bundles.is_empty());
+        assert!(load_app_ui_preferences_from(&preferences_path)
+            .installed_openfx_bundles
+            .is_empty());
+        assert_eq!(host.app_state().project_author_generation(), generation);
         std::fs::remove_file(preferences_path).ok();
     }
 
