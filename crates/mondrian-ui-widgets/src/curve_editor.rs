@@ -13,6 +13,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::Theme;
 
+use crate::context_menu::ContextMenu;
+use crate::menu::MenuItem;
 use crate::paint::{color_with_alpha, paint_focus_ring};
 
 const DEFAULT_WIDTH: f32 = 220.0;
@@ -134,6 +136,8 @@ pub struct CurveEditor {
     enabled: bool,
     on_change: Option<Box<CurveChangeAction>>,
     on_edit: Option<Box<CurveEditAction>>,
+    point_context_menus: Vec<Option<Vec<MenuItem>>>,
+    context_menu: Option<ContextMenu>,
 }
 
 impl CurveEditor {
@@ -167,6 +171,8 @@ impl CurveEditor {
             enabled: true,
             on_change: None,
             on_edit: None,
+            point_context_menus: Vec::new(),
+            context_menu: None,
         };
         editor.set_points(points);
         editor
@@ -179,6 +185,15 @@ impl CurveEditor {
     /// fixed, non-deletable endpoints and editable interior points.
     pub fn with_point_policies(mut self, policies: Vec<CurvePointPolicy>) -> Self {
         self.set_point_policies(policies);
+        self
+    }
+
+    /// Set optional context menu commands for each editable point.
+    /// A mismatched list is ignored, and points without commands use `None`.
+    pub fn with_point_context_menus(mut self, menus: Vec<Option<Vec<MenuItem>>>) -> Self {
+        if menus.len() == self.points.len() {
+            self.point_context_menus = menus;
+        }
         self
     }
 
@@ -255,6 +270,7 @@ impl CurveEditor {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
+            self.context_menu = None;
             if self.dragging.is_some() {
                 self.pending_capture_release = true;
             }
@@ -273,6 +289,8 @@ impl CurveEditor {
     pub fn set_points(&mut self, points: Vec<CurvePoint>) {
         self.points = normalize_points(points);
         self.point_policies = default_point_policies(self.points.len());
+        self.point_context_menus.clear();
+        self.context_menu = None;
         self.selected = self.selected.filter(|index| *index < self.points.len());
         self.dragging = self.dragging.filter(|index| *index < self.points.len());
         if self.dragging.is_none() {
@@ -511,6 +529,16 @@ impl Widget for CurveEditor {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(menu) = self.context_menu.as_mut() {
+            let result = menu.event(event, ctx);
+            if !menu.is_visible() {
+                self.context_menu = None;
+                ctx.request_repaint();
+            }
+            if result == EventResult::Handled {
+                return result;
+            }
+        }
         if self.pending_capture_release || (!self.enabled && self.dragging.is_some()) {
             ctx.release_pointer_capture(self.id);
             self.pending_capture_release = false;
@@ -523,6 +551,22 @@ impl Widget for CurveEditor {
         }
 
         match event {
+            UiEvent::MouseDown { position, button: MouseButton::Right, .. }
+                if self.bounds.contains(*position) =>
+            {
+                if let Some(index) = self.hit_point(*position)
+                    && let Some(Some(items)) = self.point_context_menus.get(index)
+                    && items.iter().any(MenuItem::is_activatable)
+                {
+                    self.selected = Some(index);
+                    let mut menu = ContextMenu::new(*position, items.clone());
+                    menu.layout(self.bounds);
+                    self.context_menu = Some(menu);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
             UiEvent::MouseDown { position, button: MouseButton::Left, .. }
                 if self.bounds.contains(*position) =>
             {
@@ -589,6 +633,16 @@ impl Widget for CurveEditor {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some(menu) = &self.context_menu {
+            menu.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.context_menu.as_ref().is_some_and(|menu| menu.overlay_hit_test(point))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -772,6 +826,36 @@ mod tests {
             editor.points(),
             &[CurvePoint::new(0.0, 0.25), CurvePoint::new(1.0, 0.25)]
         );
+    }
+
+    #[test]
+    fn right_click_opens_key_context_menu_without_editing_curve() {
+        let mut editor = CurveEditor::with_points(vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .with_point_context_menus(vec![
+            None,
+            Some(vec![MenuItem::new("自动贝塞尔", Action::Paste)]),
+            None,
+        ]);
+        editor.layout(Rect::new(0.0, 0.0, 200.0, 100.0));
+        let middle = editor.to_screen(editor.points()[1]);
+        let mut ctx = event_ctx();
+        assert_eq!(
+            editor.event(
+                &UiEvent::MouseDown {
+                    position: middle,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(editor.context_menu.is_some());
+        assert_eq!(editor.points()[1], CurvePoint::new(0.5, 0.5));
     }
 
     #[test]

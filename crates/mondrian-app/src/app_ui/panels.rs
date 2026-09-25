@@ -14,16 +14,18 @@ use mondrian_assets::library::FolderRecord;
 use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
-    AnimationParameterAddress, NormalizedCurve, NormalizedCurvePoint, ParameterResourceReference,
-    ParameterSchema, PropertyValue, QualifierSample, QualifierSampleOperation, QualifierSampleSet,
-    MAX_QUALIFIER_SAMPLES,
+    AnimationParameterAddress, InterpolationType, KeyframeInterpolation, NormalizedCurve,
+    NormalizedCurvePoint, ParameterInterpolation, ParameterResourceReference, ParameterSchema,
+    PropertyValue, PropertyValueType, QualifierSample, QualifierSampleOperation,
+    QualifierSampleSet, MAX_QUALIFIER_SAMPLES,
 };
 use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::mask_data::{MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings};
 use mondrian_core::types::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
-    EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, BlendMode, ClipId, ClipLinkGroupId,
+    ColorSpace, EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId,
+    VideoTransitionId,
 };
 use mondrian_core::{
     AudioChannelLayout, Color, DynamicHdrMetadataFamily, FramePosition, FrameRounding,
@@ -81,14 +83,15 @@ use mondrian_ui_widgets::{
     PropertyPanel, PropertyPanelOptions, PropertyRow, PropertySection, RasterImage, ScrollView,
     Slider, TextInput, TimelineAssetDrop, TimelineClip, TimelineClipKind, TimelineClipMove,
     TimelineClipRef, TimelineClipSelectionMode, TimelineClipTrim, TimelineCutRef,
-    TimelineEditCommand, TimelineInOutPoint, TimelineSeek,
+    TimelineEditCommand, TimelineFileDrop, TimelineInOutPoint, TimelineSeek,
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
     TimelineView, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
-    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
-    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    ViewerCanvasBackground, ViewerClipTransform, ViewerClipTransformEdit, ViewerComparisonLayout,
+    ViewerComparisonReference, ViewerControl, ViewerFrameContent, ViewerPowerWindow,
+    ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerStatusTone, ViewerSurface,
+    WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -102,30 +105,34 @@ pub use crate::app::thumbnail_service::{
 };
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
-    app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
-    app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-    app_shell_scopes_settings_changed_action, assets_create_adjustment_layer_action,
-    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
-    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
-    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
-    assets_open_folder_action, assets_prepare_drag_action, assets_rebind_audio_component_action,
+    app_shell_install_clap_library_dialog_action, app_shell_install_vst3_binary_dialog_action,
+    app_shell_install_vst3_bundle_dialog_action, app_shell_interpret_asset_dialog_action,
+    app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+    app_shell_reveal_in_file_manager_action, app_shell_scopes_settings_changed_action,
+    assets_create_adjustment_layer_action, assets_create_folder_action,
+    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
+    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
+    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
+    assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
     export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
-    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_extract_range_action,
-    timeline_lift_range_action, timeline_link_selected_clips_action, timeline_move_clip_action,
-    timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-    timeline_seek_with_source_action, timeline_select_clip_action,
-    timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
-    timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
-    timeline_unlink_selected_clips_action, track_add_action, track_move_action,
-    track_set_author_control_action, track_set_edit_policy_action,
-    video_transition_create_cross_dissolve_action, video_transition_select_action,
-    video_transition_set_range_action, viewer_set_preview_resolution_scale_action,
-    viewer_set_zoom_scale_action, visual_effect_add_to_clip_action, visual_effect_remove_action,
-    visual_effect_reorder_action, visual_effect_select_action, visual_effect_set_enabled_action,
-    visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_drop_file_action,
+    timeline_extract_range_action, timeline_lift_range_action, timeline_link_selected_clips_action,
+    timeline_move_clip_action, timeline_open_nested_sequence_action,
+    timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
+    timeline_select_clip_action, timeline_set_in_out_point_action,
+    timeline_set_selected_clips_enabled_action, timeline_trim_clips_action,
+    timeline_trim_selected_clips_to_playhead_action, timeline_unlink_selected_clips_action,
+    track_add_action, track_move_action, track_set_author_control_action,
+    track_set_edit_policy_action, video_transition_create_cross_dissolve_action,
+    video_transition_select_action, video_transition_set_range_action,
+    viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
+    visual_effect_add_to_clip_action, visual_effect_edit_numeric_curve_action,
+    visual_effect_remove_action, visual_effect_reorder_action, visual_effect_select_action,
+    visual_effect_set_enabled_action, visual_effect_set_parameter_value_action,
+    visual_effect_toggle_current_key_action, visual_mask_add_to_clip_action,
     visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
     visual_mask_set_enabled_action, visual_mask_set_locked_action,
@@ -143,15 +150,17 @@ use crate::app::ui_actions::{
     ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
     ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, DockDropAreaPayload,
     ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
-    TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload, TrackAuthorControl,
-    TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
-    TrackSetEditPolicyPayload, VideoTransitionCreateCrossDissolvePayload,
-    VideoTransitionHandlePolicy, VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineDropFilePayload,
+    TimelineExportRequest, TimelineInOutPointKind, TimelineMoveClipPayload,
+    TimelineSeekSource as AppTimelineSeekSource, TimelineSelectClipPayload,
+    TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
+    TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
+    TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
+    VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
+    VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
-    VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+    VisualEffectAddToClipPayload, VisualEffectEditNumericCurvePayload,
+    VisualEffectParameterTargetPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
@@ -163,7 +172,8 @@ use crate::app::{
 };
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::audio_automation::{
-    audio_automation_curve_edit_action, component_automation_viewport, project_audio_automation,
+    audio_automation_curve_edit_action, audio_automation_interpolation_action,
+    audio_keyframe_interpolation, component_automation_viewport, project_audio_automation,
     AudioAutomationCurveModel,
 };
 use crate::app_ui::audio_component_mapping::{
@@ -186,10 +196,12 @@ use crate::app_ui::audio_mixer::{
     AudioMixerGainModel, AudioMixerPanelModel,
 };
 use crate::app_ui::audio_processor_rack::{
+    append_clap_insert_options, append_vst3_insert_options,
     bypass_action as audio_processor_bypass_action, clip_processing_scope_racks,
-    insert_action as audio_processor_insert_action,
+    insert_option_action as audio_processor_insert_option_action,
     move_before_action as audio_processor_move_before_action,
     move_to_end_action as audio_processor_move_to_end_action,
+    rebind_native_action as audio_processor_rebind_native_action,
     remove_action as audio_processor_remove_action,
     set_static_parameter_action as audio_processor_set_static_parameter_action,
     AudioProcessorRackModel,
@@ -200,6 +212,9 @@ use crate::app_ui::inspector_source_timing::{
 };
 pub use crate::app_ui::inspector_source_timing::{
     InspectorSourceTimingMode, InspectorSourceTimingModel,
+};
+use crate::app_ui::localization::{
+    builtin_effect_message_id, effect_category_message_id, AppUiLocale, Localizer,
 };
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
@@ -302,6 +317,8 @@ pub enum AssetThumbnailState {
 /// Complete set of view models needed by the app UI panel shell.
 #[derive(Debug, Clone)]
 pub struct AppUiPanelModels {
+    locale: AppUiLocale,
+    panel_titles: HashMap<PanelKind, String>,
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
     pub viewer: ViewerPanelModel,
@@ -351,23 +368,50 @@ impl AppUiPanelModels {
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
-        let viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        Self::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            state,
+            asset_folder_id,
+            thumbnails,
+            preview,
+            None,
+        )
+    }
+
+    /// Build panel labels for one UI locale snapshot without changing author data.
+    pub(crate) fn from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+        state: &AppState,
+        asset_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        preview: Option<&dyn ViewerPreviewSource>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
+        let default_localizer = localizer.is_none().then(|| {
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid")
+        });
+        let inspector_localizer = localizer
+            .or(default_localizer.as_ref())
+            .expect("explicit or default locale must exist");
+        let viewer =
+            ViewerPanelModel::from_app_state_with_preview_and_locale(state, preview, localizer);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
-            assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
+            locale: inspector_localizer.locale(),
+            panel_titles: localized_panel_titles(localizer),
+            assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
                 state.asset_library(),
                 asset_folder_id,
                 thumbnails,
                 Some(state.proxy_mode_assets()),
                 Some(&input_pipeline),
+                localizer,
             ),
-            effects: PanelListModel::from_app_effect_registry(state),
+            effects: PanelListModel::from_app_effect_registry_with_localizer(state, localizer),
             viewer,
             scopes,
             timeline: TimelinePanelModel::from_app_state(state),
-            inspector: InspectorPanelModel::from_app_state(state),
-            mixer: AudioMixerPanelModel::from_app_state(state),
+            inspector: InspectorPanelModel::from_app_state(state, inspector_localizer),
+            mixer: AudioMixerPanelModel::from_app_state(state, inspector_localizer),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -377,9 +421,13 @@ impl AppUiPanelModels {
     /// inspector state from an `AppState` snapshot.
     #[cfg(test)]
     pub fn demo_from_app_state(state: &AppState) -> Self {
+        let localizer =
+            Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog must be valid");
         let viewer = ViewerPanelModel::from_app_state(state);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
+            locale: localizer.locale(),
+            panel_titles: localized_panel_titles(None),
             assets: demo_asset_model(),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer,
@@ -396,8 +444,8 @@ impl AppUiPanelModels {
                     .with_app_edit_availability(state)
                 })
                 .unwrap_or_else(demo_timeline_model),
-            inspector: InspectorPanelModel::from_app_state(state),
-            mixer: AudioMixerPanelModel::from_app_state(state),
+            inspector: InspectorPanelModel::from_app_state(state, &localizer),
+            mixer: AudioMixerPanelModel::from_app_state(state, &localizer),
             export: ExportPanelModel::from_app_state(state),
             node_graph: NodeGraphPanelModel::from_app_state(state),
         }
@@ -410,6 +458,33 @@ impl AppUiPanelModels {
         let state = demo_app_state();
         Self::demo_from_app_state(&state)
     }
+
+    fn panel_title(&self, kind: PanelKind) -> &str {
+        self.panel_titles
+            .get(&kind)
+            .map(String::as_str)
+            .expect("every Dock panel has a title")
+    }
+}
+
+fn localized_panel_titles(localizer: Option<&Localizer>) -> HashMap<PanelKind, String> {
+    PanelKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let message_id = match kind {
+                PanelKind::Viewer => "panel-viewer",
+                PanelKind::Scopes => "panel-scopes",
+                PanelKind::Timeline => "panel-timeline",
+                PanelKind::Assets => "panel-assets",
+                PanelKind::Inspector => "panel-inspector",
+                PanelKind::Mixer => "panel-mixer",
+                PanelKind::Effects => "panel-effects",
+                PanelKind::NodeGraph => "panel-node-graph",
+                PanelKind::Export => "panel-export",
+            };
+            (kind, asset_text(localizer, message_id, kind.display_name()))
+        })
+        .collect()
 }
 
 fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
@@ -461,6 +536,9 @@ pub struct AssetGridModel {
     pub filter_placeholder: Option<String>,
     pub accepts_file_drop: bool,
     pub current_folder_id: Option<String>,
+    selection_delete_label: String,
+    context_menu_items: Vec<MenuItem>,
+    empty_state_copy: [String; 4],
 }
 
 impl AssetGridModel {
@@ -472,6 +550,14 @@ impl AssetGridModel {
             filter_placeholder: None,
             accepts_file_drop: false,
             current_folder_id: None,
+            selection_delete_label: "Delete selected".to_owned(),
+            context_menu_items: Vec::new(),
+            empty_state_copy: [
+                "拖入媒体开始编辑".to_owned(),
+                "支持视频、音频、图片与序列".to_owned(),
+                "没有匹配的素材".to_owned(),
+                "换个关键词或清空搜索条件".to_owned(),
+            ],
         }
     }
 
@@ -519,62 +605,105 @@ impl AssetGridModel {
         proxy_mode_assets: Option<&BTreeSet<AssetId>>,
         input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
     ) -> Self {
+        Self::from_asset_library_in_folder_with_thumbnails_and_locale(
+            library,
+            current_folder_id,
+            thumbnails,
+            proxy_mode_assets,
+            input_pipeline,
+            None,
+        )
+    }
+
+    fn from_asset_library_in_folder_with_thumbnails_and_locale(
+        library: Option<&AssetLibrary>,
+        current_folder_id: Option<&str>,
+        thumbnails: Option<&dyn AssetThumbnailSource>,
+        proxy_mode_assets: Option<&BTreeSet<AssetId>>,
+        input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let colors = current_theme().colors.clone();
+        let title = asset_text(localizer, "panel-assets", "Assets");
+        let library_label = asset_text(localizer, "asset-library", "项目素材库");
+        let search = asset_text(localizer, "asset-search", "搜索素材");
+        let selection_delete_label =
+            asset_text(localizer, "asset-delete-selected", "Delete selected");
+        let empty_state_copy = [
+            asset_text(localizer, "asset-empty-title", "拖入媒体开始编辑"),
+            asset_text(
+                localizer,
+                "asset-empty-description",
+                "支持视频、音频、图片与序列",
+            ),
+            asset_text(localizer, "asset-no-results-title", "没有匹配的素材"),
+            asset_text(
+                localizer,
+                "asset-no-results-description",
+                "换个关键词或清空搜索条件",
+            ),
+        ];
         let Some(library) = library else {
             return AssetGridModel::new(
-                "Assets",
+                title,
                 vec![asset_empty_item(
                     "asset-library-disconnected",
-                    "没有项目素材库",
-                    "打开或创建项目后浏览素材",
+                    asset_text(localizer, "asset-library-disconnected", "没有项目素材库"),
+                    "",
                     colors.muted_foreground,
                     AppIcon::Folder,
                 )],
             )
-            .with_subtitle("项目素材库")
-            .with_filter_placeholder("搜索素材");
+            .with_subtitle(library_label)
+            .with_filter_placeholder(search)
+            .with_selection_delete_label(selection_delete_label)
+            .with_empty_state_copy(empty_state_copy);
         };
 
         let folders = match library.list_folders() {
             Ok(folders) => folders,
             Err(err) => {
                 return AssetGridModel::new(
-                    "Assets",
+                    title,
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "素材库不可用",
+                        asset_text(localizer, "asset-library-unavailable", "素材库不可用"),
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("项目素材库")
-                .with_filter_placeholder("搜索素材");
+                .with_subtitle(library_label)
+                .with_filter_placeholder(search)
+                .with_selection_delete_label(selection_delete_label)
+                .with_empty_state_copy(empty_state_copy);
             }
         };
         let assets = match library.list_assets() {
             Ok(assets) => assets,
             Err(err) => {
                 return AssetGridModel::new(
-                    "Assets",
+                    title,
                     vec![asset_empty_item(
                         "asset-library-error",
-                        "素材库不可用",
+                        asset_text(localizer, "asset-library-unavailable", "素材库不可用"),
                         err.to_string(),
                         colors.error,
                         AppIcon::Warning,
                     )],
                 )
-                .with_subtitle("项目素材库")
-                .with_filter_placeholder("搜索素材");
+                .with_subtitle(library_label)
+                .with_filter_placeholder(search)
+                .with_selection_delete_label(selection_delete_label)
+                .with_empty_state_copy(empty_state_copy);
             }
         };
 
         let current_folder =
             current_folder_id.and_then(|id| folders.iter().find(|folder| folder.id == id));
         let subtitle = current_folder
-            .map(|folder| format!("项目素材库 / {}", folder.name))
-            .unwrap_or_else(|| "项目素材库".to_owned());
+            .map(|folder| format!("{library_label} / {}", folder.name))
+            .unwrap_or_else(|| library_label.clone());
         let current_folder_id = current_folder.map(|folder| folder.id.clone());
         let items = asset_grid_items_from_library_records(
             &folders,
@@ -583,26 +712,54 @@ impl AssetGridModel {
             thumbnails,
             proxy_mode_assets,
             input_pipeline,
+            localizer,
         );
+        let context_menu_items =
+            asset_grid_context_menu_items(current_folder_id.as_deref(), localizer);
         if items.is_empty() {
-            return AssetGridModel::new("Assets", Vec::new())
+            return AssetGridModel::new(title, Vec::new())
                 .with_subtitle(subtitle)
-                .with_filter_placeholder("搜索素材")
+                .with_filter_placeholder(search)
                 .accepts_file_drop(true)
-                .with_current_folder_id(current_folder_id);
+                .with_current_folder_id(current_folder_id)
+                .with_selection_delete_label(selection_delete_label)
+                .with_context_menu_items(context_menu_items)
+                .with_empty_state_copy(empty_state_copy);
         }
 
-        AssetGridModel::new("Assets", items)
+        AssetGridModel::new(title, items)
             .with_subtitle(subtitle)
-            .with_filter_placeholder("搜索素材")
+            .with_filter_placeholder(search)
             .accepts_file_drop(true)
             .with_current_folder_id(current_folder_id)
+            .with_selection_delete_label(selection_delete_label)
+            .with_context_menu_items(context_menu_items)
+            .with_empty_state_copy(empty_state_copy)
     }
 
     pub fn with_current_folder_id(mut self, folder_id: Option<String>) -> Self {
         self.current_folder_id = folder_id;
         self
     }
+
+    fn with_selection_delete_label(mut self, label: String) -> Self {
+        self.selection_delete_label = label;
+        self
+    }
+
+    fn with_context_menu_items(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
+        self
+    }
+
+    fn with_empty_state_copy(mut self, copy: [String; 4]) -> Self {
+        self.empty_state_copy = copy;
+        self
+    }
+}
+
+fn asset_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
 }
 
 impl PanelListModel {
@@ -631,6 +788,13 @@ impl PanelListModel {
     /// the current selection cannot receive an effect; only the apply action is
     /// withheld in those states.
     pub fn from_app_effect_registry(state: &AppState) -> Self {
+        Self::from_app_effect_registry_with_localizer(state, None)
+    }
+
+    fn from_app_effect_registry_with_localizer(
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let target = state.primary_selected_clip().filter(|selection| selection.is_video_track);
         let apply_blocker = match target {
             Some(selection) if selected_clip_track_is_locked(state, selection) => {
@@ -644,28 +808,51 @@ impl PanelListModel {
         } else {
             None
         };
-        Self::effect_registry_model(action_target, apply_blocker)
+        Self::effect_registry_model(action_target, apply_blocker, localizer)
     }
 
     /// Build the visible effect browser from the shared effect registry.
     pub fn from_effect_registry(selected_clip: Option<SelectedClipRef>) -> Self {
         let effect_target = selected_clip.filter(|selection| selection.is_video_track);
         let apply_blocker = effect_target.is_none().then_some("选择视频剪辑后应用效果");
-        Self::effect_registry_model(effect_target, apply_blocker)
+        Self::effect_registry_model(effect_target, apply_blocker, None)
     }
 
     fn effect_registry_model(
         effect_target: Option<SelectedClipRef>,
         _apply_blocker: Option<&'static str>,
+        localizer: Option<&Localizer>,
     ) -> Self {
-        let effects = effect_library_types();
+        let mut effects = effect_library_types()
+            .into_iter()
+            .map(|effect| {
+                let categories = mondrian_effects::effect_definition(&effect)
+                    .map(|definition| definition.category_path().to_vec())
+                    .filter(|categories| !categories.is_empty())
+                    .unwrap_or_else(|| {
+                        effect.category_path().into_iter().map(str::to_owned).collect()
+                    });
+                (effect, categories)
+            })
+            .collect::<Vec<_>>();
+        effects.sort_by(|(left, left_categories), (right, right_categories)| {
+            effect_category_order(left_categories)
+                .cmp(&effect_category_order(right_categories))
+                .then_with(|| {
+                    localized_effect_name(left, localizer)
+                        .cmp(&localized_effect_name(right, localizer))
+                })
+        });
         let items = if effects.is_empty() {
-            vec![PanelListItem::new("没有可用效果").disabled(true)]
+            vec![PanelListItem::new(localizer.map_or_else(
+                || "没有可用效果".to_owned(),
+                |localizer| localizer.text("effect-empty"),
+            ))
+            .disabled(true)]
         } else {
             let mut items = Vec::new();
             let mut emitted_categories = std::collections::BTreeSet::<String>::new();
-            for effect_type in effects {
-                let categories = effect_type.category_path();
+            for (effect_type, categories) in effects {
                 let mut prefix = String::new();
                 for (depth, category) in categories.iter().enumerate() {
                     if !prefix.is_empty() {
@@ -674,14 +861,14 @@ impl PanelListModel {
                     prefix.push_str(category);
                     if emitted_categories.insert(prefix.clone()) {
                         items.push(
-                            PanelListItem::new((*category).to_owned())
+                            PanelListItem::new(localized_effect_category(category, localizer))
                                 .with_tree_depth(depth as u8)
                                 .with_tree_node(prefix.clone(), true),
                         );
                     }
                 }
 
-                let name = effect_display_name(&effect_type);
+                let name = localized_effect_name(&effect_type, localizer);
                 let depth = categories.len();
                 let mut item = PanelListItem::new(name).with_tree_depth(depth as u8);
                 if let Some(selection) = effect_target {
@@ -694,8 +881,52 @@ impl PanelListModel {
             items
         };
 
-        PanelListModel::new("Effects", items).with_filter_placeholder("搜索效果")
+        PanelListModel::new(
+            localizer.map_or_else(
+                || "Effects".to_owned(),
+                |localizer| localizer.text("panel-effects"),
+            ),
+            items,
+        )
+        .with_filter_placeholder(localizer.map_or_else(
+            || "搜索效果".to_owned(),
+            |localizer| localizer.text("effect-search"),
+        ))
     }
+}
+
+fn localized_effect_name(effect_type: &EffectType, localizer: Option<&Localizer>) -> String {
+    if let (Some(localizer), Some(message_id)) = (localizer, builtin_effect_message_id(effect_type))
+    {
+        localizer.text(&message_id)
+    } else {
+        effect_display_name(effect_type)
+    }
+}
+
+fn localized_effect_category(category: &str, localizer: Option<&Localizer>) -> String {
+    if let (Some(localizer), Some(message_id)) = (localizer, effect_category_message_id(category)) {
+        localizer.text(message_id)
+    } else {
+        category.to_owned()
+    }
+}
+
+fn effect_category_order(categories: &[String]) -> (u8, u8) {
+    let primary = match categories.first().map(String::as_str) {
+        Some("颜色") => 0,
+        Some("变换") => 1,
+        Some("抠像") => 2,
+        Some("插件") => 3,
+        _ => 4,
+    };
+    let secondary = match categories.get(1).map(String::as_str) {
+        Some("调色") => 0,
+        Some("模糊与锐化") => 1,
+        Some("风格化") => 2,
+        _ => 3,
+    };
+    (primary, secondary)
 }
 
 /// Viewer panel data independent from preview texture plumbing.
@@ -708,6 +939,7 @@ pub struct ViewerPanelModel {
     pub position_label: String,
     pub duration_label: String,
     pub zoom_label: String,
+    pub fit_label: String,
     pub zoom_scale: Option<f32>,
     pub preview_quality_label: String,
     pub preview_resolution_scale: f32,
@@ -729,6 +961,8 @@ pub struct ViewerPanelModel {
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
     /// Selected Clip-local Power Window projected at the current author time.
     pub power_window: Option<ViewerPowerWindowModel>,
+    /// Selected visible Clip transform projected at the current author time.
+    pub clip_transform: Option<ViewerClipTransformModel>,
 }
 
 /// App-owned identity plus domain-light Viewer geometry for one Power Window.
@@ -737,6 +971,17 @@ pub struct ViewerPowerWindowModel {
     pub clip_id: ClipId,
     pub mask_id: MaskId,
     pub overlay: ViewerPowerWindow,
+}
+
+/// App-owned stable parameter addresses and domain-light Viewer transform geometry.
+#[derive(Debug, Clone)]
+pub struct ViewerClipTransformModel {
+    pub clip_id: ClipId,
+    pub position: AnimationParameterAddress,
+    pub scale: AnimationParameterAddress,
+    pub rotation: AnimationParameterAddress,
+    pub anchor: AnimationParameterAddress,
+    pub overlay: ViewerClipTransform,
 }
 
 /// Program Output scopes data independent from renderer GPU handles.
@@ -775,7 +1020,12 @@ impl ViewerPanelModel {
     /// Transport actions must not synchronously re-enter Preview production,
     /// but they also must not erase the last usable output or its typed
     /// lifecycle while a later Preview turn proves the replacement.
-    pub(crate) fn retain_presentation_from(&mut self, current: &Self, state: &AppState) {
+    pub(crate) fn retain_presentation_from(
+        &mut self,
+        current: &Self,
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) {
         self.frame_content = current.frame_content.clone();
         self.canvas_background = current.canvas_background;
         self.transparent_canvas = current.transparent_canvas;
@@ -792,13 +1042,18 @@ impl ViewerPanelModel {
             self.preview_waiting,
             color_rejected,
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+            localizer,
         );
         self.status = status;
         self.status_tone = status_tone;
     }
 
     /// Keep a usable fallback visible while a transport intent awaits exact proof.
-    pub(crate) fn mark_presentation_pending_after_transport_intent(&mut self, state: &AppState) {
+    pub(crate) fn mark_presentation_pending_after_transport_intent(
+        &mut self,
+        state: &AppState,
+        localizer: Option<&Localizer>,
+    ) {
         if self.frame_content.is_none() && !self.transparent_canvas {
             return;
         }
@@ -808,6 +1063,7 @@ impl ViewerPanelModel {
             true,
             false,
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+            localizer,
         );
         self.status = status;
         self.status_tone = status_tone;
@@ -840,8 +1096,16 @@ impl ViewerPanelModel {
         state: &AppState,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
+        Self::from_app_state_with_preview_and_locale(state, preview, None)
+    }
+
+    pub(crate) fn from_app_state_with_preview_and_locale(
+        state: &AppState,
+        preview: Option<&dyn ViewerPreviewSource>,
+        localizer: Option<&Localizer>,
+    ) -> Self {
         let Some(sequence) = state.active_sequence() else {
-            return Self::empty();
+            return Self::empty_with_locale(localizer);
         };
         let resolution = sequence.settings.resolution;
         let current_frame = state.current_frame();
@@ -862,7 +1126,7 @@ impl ViewerPanelModel {
             time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Ceil)
                 .map_err(Into::into)
         }) else {
-            return Self::empty();
+            return Self::empty_with_locale(localizer);
         };
         let duration_frame = duration_frame.frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
@@ -935,6 +1199,7 @@ impl ViewerPanelModel {
             preview_waiting,
             color_rejected,
             unavailability_disposition,
+            localizer,
         );
 
         Self {
@@ -946,8 +1211,9 @@ impl ViewerPanelModel {
                 resolution.width, resolution.height, fps
             ),
             position_label,
-            duration_label: format!("{duration_frame} 帧"),
-            zoom_label: "适合".into(),
+            duration_label: viewer_frame_count(duration_frame, localizer),
+            zoom_label: viewer_text(localizer, "viewer-fit", "适合"),
+            fit_label: viewer_text(localizer, "viewer-fit", "适合"),
             zoom_scale: None,
             preview_quality_label,
             preview_resolution_scale,
@@ -968,9 +1234,9 @@ impl ViewerPanelModel {
             empty_message: if let Some(rejection) =
                 color_rejection.as_ref().filter(|_| color_rejected)
             {
-                Some(viewer_color_rejection_empty_message(rejection))
+                Some(viewer_color_rejection_empty_message(rejection, localizer))
             } else if matches!(preview_state.as_ref(), Some(ViewerPreviewState::Loading)) {
-                Some("预览准备中".into())
+                Some(viewer_text(localizer, "viewer-loading", "预览准备中"))
             } else {
                 preview_unavailability
                     .as_ref()
@@ -984,19 +1250,25 @@ impl ViewerPanelModel {
             color_pipeline_status: preview
                 .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
             power_window: viewer_power_window_model(state, sequence),
+            clip_transform: viewer_clip_transform_model(state, sequence),
         }
     }
 
     /// Empty viewer shown before a sequence is open.
     pub fn empty() -> Self {
+        Self::empty_with_locale(None)
+    }
+
+    fn empty_with_locale(localizer: Option<&Localizer>) -> Self {
         Self {
-            title: "预览".into(),
-            status: "没有序列".into(),
+            title: viewer_text(localizer, "panel-viewer", "预览"),
+            status: viewer_text(localizer, "viewer-no-sequence", "没有序列"),
             status_tone: ViewerStatusTone::Neutral,
-            resolution_label: "无信号".into(),
+            resolution_label: viewer_text(localizer, "viewer-no-signal", "无信号"),
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
-            zoom_label: "适合".into(),
+            zoom_label: viewer_text(localizer, "viewer-fit", "适合"),
+            fit_label: viewer_text(localizer, "viewer-fit", "适合"),
             zoom_scale: None,
             preview_quality_label: "1/1".into(),
             preview_resolution_scale: 1.0,
@@ -1010,13 +1282,93 @@ impl ViewerPanelModel {
             comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas: false,
-            empty_message: Some("未载入序列".into()),
+            empty_message: Some(viewer_text(
+                localizer,
+                "viewer-no-sequence-loaded",
+                "未载入序列",
+            )),
             preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
             power_window: None,
+            clip_transform: None,
         }
     }
+}
+
+fn viewer_clip_transform_model(
+    state: &AppState,
+    sequence: &Sequence,
+) -> Option<ViewerClipTransformModel> {
+    let selection = state.primary_selected_clip()?;
+    let (selection, clip) = clip_for_selection(sequence, &selection)?;
+    if !selection.is_video_track
+        || state
+            .primary_selected_mask()
+            .is_some_and(|(_, clip_id, _)| clip_id == selection.clip_id)
+    {
+        return None;
+    }
+    let track = sequence.video_tracks.iter().find(|track| track.id == selection.track_id)?;
+    if !track.is_visible || track.is_muted || clip.is_disabled {
+        return None;
+    }
+    let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
+    if !clip.contains(time).ok()? {
+        return None;
+    }
+    let author_time = clip.clamped_visual_author_time(time).ok()?;
+    let parameters = clip.intrinsic_parameter_bag();
+    let frame_extent = viewer_clip_frame_extent(state, sequence, clip)?;
+    Some(ViewerClipTransformModel {
+        clip_id: clip.id,
+        position: parameters.address_for_path(Transform2D::POSITION_PATH)?,
+        scale: parameters.address_for_path(Transform2D::SCALE_PATH)?,
+        rotation: parameters.address_for_path(Transform2D::ROTATION_PATH)?,
+        anchor: parameters.address_for_path(Transform2D::ANCHOR_POINT_PATH)?,
+        overlay: ViewerClipTransform {
+            frame_extent,
+            position: clip.transform.get_position(author_time).to_array(),
+            scale: clip.transform.get_scale(author_time).to_array(),
+            rotation_degrees: clip_rotation_degrees(clip, time),
+            anchor: clip.transform.get_anchor_point(author_time).to_array(),
+            editable: !state.is_playing() && !track.is_locked,
+        },
+    })
+}
+
+fn viewer_clip_frame_extent(
+    state: &AppState,
+    sequence: &Sequence,
+    clip: &Clip,
+) -> Option<[f32; 2]> {
+    let resolution = if let Some(asset_id) = clip.media_asset_id() {
+        let asset = state.asset_library()?.get_asset(asset_id).ok()??;
+        let video = asset.media_probe()?.primary_video()?;
+        let geometry = mondrian_core::ResolvedPictureGeometry::resolve_with_overrides(
+            mondrian_core::Resolution { width: video.width, height: video.height },
+            video.picture,
+            clip.media_interpretation()?.picture_overrides(),
+        )
+        .ok()?;
+        let [width, height] = geometry.display_extent();
+        [width as f32, height as f32]
+    } else if let Some(child_id) = clip.nested_sequence_id() {
+        let child = state.sequences().iter().find(|child| child.id == child_id)?;
+        [
+            child.settings.resolution.width as f32,
+            child.settings.resolution.height as f32,
+        ]
+    } else {
+        [
+            sequence.settings.resolution.width as f32,
+            sequence.settings.resolution.height as f32,
+        ]
+    };
+    resolution
+        .into_iter()
+        .all(|extent| extent.is_finite() && extent > 0.0)
+        .then_some(resolution)
 }
 
 fn viewer_power_window_model(
@@ -1104,19 +1456,20 @@ fn viewer_status(
     preview_waiting: bool,
     color_rejected: bool,
     unavailability: Option<PreviewUnavailabilityDisposition>,
+    localizer: Option<&Localizer>,
 ) -> (String, ViewerStatusTone) {
-    let status = if preview_waiting {
-        "预览准备中"
+    let (id, fallback) = if preview_waiting {
+        ("viewer-loading", "预览准备中")
     } else if color_rejected {
-        "色彩解释被拒绝"
+        ("viewer-color-rejected", "色彩解释被拒绝")
     } else if unavailability == Some(PreviewUnavailabilityDisposition::Blocked) {
-        "预览被阻止"
+        ("viewer-blocked", "预览被阻止")
     } else if unavailability == Some(PreviewUnavailabilityDisposition::Failed) {
-        "预览失败"
+        ("viewer-failed", "预览失败")
     } else if playing {
-        "播放中"
+        ("viewer-playing", "播放中")
     } else {
-        "就绪"
+        ("viewer-ready", "就绪")
     };
     let tone = if preview_waiting
         || color_rejected
@@ -1133,26 +1486,55 @@ fn viewer_status(
     } else {
         ViewerStatusTone::Neutral
     };
-    (status.to_owned(), tone)
+    (viewer_text(localizer, id, fallback), tone)
 }
 
-fn viewer_color_rejection_empty_message(rejection: &ViewerPreviewColorRejectionModel) -> String {
+fn viewer_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+}
+
+fn viewer_frame_count(count: i64, localizer: Option<&Localizer>) -> String {
+    if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", count);
+        localizer.format("viewer-frame-count", Some(&args))
+    } else {
+        format!("{count} 帧")
+    }
+}
+
+fn viewer_color_rejection_empty_message(
+    rejection: &ViewerPreviewColorRejectionModel,
+    localizer: Option<&Localizer>,
+) -> String {
     let summary = &rejection.diagnostic_issue_summary;
     let issue_tags = color_issue_summary_tags(summary);
-    let issue_line = if issue_tags.is_empty() {
-        "问题：none".to_owned()
+    let issues = if issue_tags.is_empty() {
+        "none".to_owned()
     } else {
-        format!("问题：{}", issue_tags.join(" / "))
+        issue_tags.join(" / ")
     };
+    if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("asset", rejection.path.display().to_string());
+        args.set("policy", format!("{:?}", rejection.missing_metadata_policy));
+        args.set("source", format!("{:?}", rejection.source));
+        args.set("method", format!("{:?}", summary.method));
+        args.set("confidence", format!("{:?}", summary.confidence));
+        args.set("warnings", summary.warning_count as i64);
+        args.set("issues", issues);
+        args.set("detail", rejection.diagnostic_summary.clone());
+        return localizer.format("viewer-color-rejection-detail", Some(&args));
+    }
     format!(
-        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n检测：{:?} / {:?} / warnings {}\n{}\n{}",
+        "色彩解释被拒绝\n素材：{}\n策略：{:?} / {:?}\n检测：{:?} / {:?} / warnings {}\n问题：{}\n{}",
         rejection.path.display(),
         rejection.missing_metadata_policy,
         rejection.source,
         summary.method,
         summary.confidence,
         summary.warning_count,
-        issue_line,
+        issues,
         rejection.diagnostic_summary
     )
 }
@@ -1643,6 +2025,19 @@ impl TimelinePanelModel {
         })
     }
 
+    fn file_drop_payload(&self, drop: TimelineFileDrop) -> Option<TimelineDropFilePayload> {
+        let target = self.track_identity(drop.track_ref)?;
+        let frame_rate = self.timeline_display.frame_rate();
+        Some(TimelineDropFilePayload {
+            path: drop.path,
+            target_track_id: target.track_id,
+            position: FramePosition::new(
+                drop.frame.max(0),
+                Rational::new(frame_rate.den, frame_rate.num),
+            ),
+        })
+    }
+
     fn move_payload(&self, movement: TimelineClipMove) -> Option<TimelineMoveClipPayload> {
         let clip_id = self.clip_id(movement.clip_ref)?;
         let source = *self.track_refs.get(movement.clip_ref.track_index)?;
@@ -1692,6 +2087,8 @@ impl TimelinePanelModel {
 pub struct InspectorCurveKeyModel {
     /// Stable author identity. Virtual Clip-boundary points have no key yet.
     pub keyframe_id: Option<KeyframeId>,
+    /// Current authoring preset when one complete key exists.
+    pub interpolation: Option<InterpolationType>,
     /// Normalized screen-space position.
     pub point: CurvePoint,
 }
@@ -1739,6 +2136,8 @@ pub struct InspectorPanelModel {
     pub edit_disabled_reason: Option<String>,
     /// Whether the selected clip is enabled.
     pub enabled: bool,
+    /// Video Clip blend-mode override and localized menu presentation.
+    pub blend_mode: Option<InspectorBlendModeModel>,
     /// Opacity shown in UI percent units.
     pub opacity: f32,
     /// Solid/tint color shown by the color trigger.
@@ -1787,6 +2186,30 @@ pub struct InspectorPanelModel {
     pub grade: InspectorGradeHierarchyModel,
     /// Masks currently attached to the selected video Clip.
     pub masks: Vec<InspectorMaskModel>,
+}
+
+/// One localized Clip blend-mode control; authoring uses typed modes only.
+#[derive(Debug, Clone)]
+pub struct InspectorBlendModeModel {
+    /// Selected override, or `None` when inheriting the Track mode.
+    pub selected: Option<BlendMode>,
+    /// Localized property row label.
+    pub row_label: String,
+    /// Localized trigger text for the selected mode.
+    pub selected_label: String,
+    /// Canonical semantic ordering with group boundaries.
+    pub options: Vec<InspectorBlendModeOption>,
+}
+
+/// One typed blend-mode choice in Inspector display order.
+#[derive(Debug, Clone)]
+pub struct InspectorBlendModeOption {
+    /// Typed Clip override; `None` inherits the owning Track mode.
+    pub mode: Option<BlendMode>,
+    /// Localized display label.
+    pub label: String,
+    /// Whether this option begins a new visual group.
+    pub separator_before: bool,
 }
 
 /// One placement-local audio Component Edit shown by the Inspector.
@@ -1944,6 +2367,15 @@ pub struct InspectorEffectPropertyModel {
     pub step: Option<f64>,
     /// Whether the property supports animation.
     pub is_animatable: bool,
+    /// Exact numeric key state and sampled curve for scalar Effect parameters.
+    pub numeric_curve: Option<InspectorPropertyCurveModel>,
+}
+
+/// One scalar parameter curve plus its exact current-time key identity.
+#[derive(Debug, Clone)]
+pub struct InspectorPropertyCurveModel {
+    pub curve: InspectorCurveModel,
+    pub current_keyframe_id: Option<KeyframeId>,
 }
 
 fn inspector_property_model(
@@ -1968,7 +2400,23 @@ fn inspector_property_model(
         hard_max: numeric.map(|contract| contract.hard_range.max),
         step: numeric.and_then(|contract| contract.step),
         is_animatable: property.descriptor.schema.is_animatable,
+        numeric_curve: None,
     }
+}
+
+fn inspector_effect_property_model(
+    path: &str,
+    property: &mondrian_core::automation::AnimatedProperty,
+    author_time: TimelineTime,
+    clip: &Clip,
+) -> InspectorEffectPropertyModel {
+    let mut model = inspector_property_model(path, property, author_time);
+    model.numeric_curve =
+        numeric_curve_model_for_property(property, clip).map(|curve| InspectorPropertyCurveModel {
+            curve,
+            current_keyframe_id: property.keyframe_at(author_time).map(|key| key.id),
+        });
+    model
 }
 
 fn inspector_grade_hierarchy_model(
@@ -2040,8 +2488,37 @@ fn inspector_grade_hierarchy_model(
     }
 }
 
+fn inspector_blend_mode_model(
+    selected: Option<BlendMode>,
+    localizer: &Localizer,
+) -> InspectorBlendModeModel {
+    let options = mondrian_core::display_labels::blend_mode_options()
+        .iter()
+        .map(|option| InspectorBlendModeOption {
+            mode: option.mode,
+            label: localizer.text(&format!("blend-mode-{}", option.value.to_ascii_lowercase())),
+            separator_before: matches!(
+                option.value,
+                "Normal" | "Darken" | "Lighten" | "Overlay" | "Difference" | "Hue"
+            ),
+        })
+        .collect::<Vec<_>>();
+    let selected_label = options
+        .iter()
+        .find(|option| option.mode == selected)
+        .expect("every BlendMode must have an Inspector option")
+        .label
+        .clone();
+    InspectorBlendModeModel {
+        selected,
+        row_label: localizer.text("inspector-blend-mode"),
+        selected_label,
+        options,
+    }
+}
+
 impl InspectorPanelModel {
-    pub fn from_app_state(state: &AppState) -> Self {
+    pub fn from_app_state(state: &AppState, localizer: &Localizer) -> Self {
         let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
@@ -2094,6 +2571,9 @@ impl InspectorPanelModel {
             is_editable,
             edit_disabled_reason: (!is_editable).then(|| "所选剪辑所在轨道已锁定".to_owned()),
             enabled: !clip.is_disabled,
+            blend_mode: resolved_selection
+                .is_video_track
+                .then(|| inspector_blend_mode_model(clip.blend_mode, localizer)),
             opacity,
             tint: clip
                 .content
@@ -2140,8 +2620,23 @@ impl InspectorPanelModel {
             ),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             opacity_curve: opacity_curve_model_for_clip(clip, time),
-            audio_components: inspector_audio_components(state, sequence, resolved_selection, clip),
-            audio_processor_racks: clip_processing_scope_racks(sequence, clip),
+            audio_components: inspector_audio_components(
+                state,
+                sequence,
+                resolved_selection,
+                clip,
+                localizer,
+            ),
+            audio_processor_racks: {
+                let mut racks = clip_processing_scope_racks(sequence, clip, localizer);
+                if let Ok(descriptors) = state.installed_clap_processors() {
+                    append_clap_insert_options(&mut racks, &descriptors);
+                }
+                if let Ok(descriptors) = state.installed_vst3_processors() {
+                    append_vst3_insert_options(&mut racks, &descriptors);
+                }
+                racks
+            },
             clip_properties,
             effects: clip
                 .effects
@@ -2165,7 +2660,12 @@ impl InspectorPanelModel {
                         properties
                             .into_iter()
                             .map(|(path, property)| {
-                                inspector_property_model(path, property, clip_author_time)
+                                inspector_effect_property_model(
+                                    path,
+                                    property,
+                                    clip_author_time,
+                                    clip,
+                                )
                             })
                             .collect()
                     },
@@ -2214,6 +2714,7 @@ impl InspectorPanelModel {
             is_editable: false,
             edit_disabled_reason: None,
             enabled: false,
+            blend_mode: None,
             opacity: 100.0,
             tint: Color::from_rgba8(128, 128, 128, 255),
             shows_tint: false,
@@ -2251,6 +2752,7 @@ impl InspectorPanelModel {
             is_editable: false,
             edit_disabled_reason: None,
             enabled: true,
+            blend_mode: None,
             opacity: 72.0,
             tint: Color::from_rgba8(132, 180, 255, 220),
             shows_tint: true,
@@ -2925,7 +3427,7 @@ fn slot_with_tabs(mut tab_kinds: Vec<PanelKind>, models: AppUiPanelModels) -> Bo
         .iter()
         .enumerate()
         .map(|(index, kind)| TabInfo {
-            label: kind.display_name().to_string(),
+            label: models.panel_title(*kind).to_owned(),
             active: index == 0,
             panel_kind: Some(*kind),
         })
@@ -2987,12 +3489,22 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
         ))))),
-        PanelKind::Inspector => Box::new(ScrollView::new(Some(Box::new(inspector_panel(
-            &models.inspector,
-        ))))),
-        PanelKind::Mixer => Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
-            &models.mixer,
-        ))))),
+        PanelKind::Inspector => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(ScrollView::new(Some(Box::new(inspector_panel(
+                &models.inspector,
+                &localizer,
+            )))))
+        }
+        PanelKind::Mixer => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
+                &models.mixer,
+                &localizer,
+            )))))
+        }
         PanelKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
 }
@@ -3015,6 +3527,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_position_label(model.position_label.clone())
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
+        .with_fit_label(model.fit_label.clone())
         .with_zoom_scale(model.zoom_scale)
         .with_sample_aspect_ratio(model.sample_aspect_ratio)
         .with_preview_quality_label(model.preview_quality_label.clone())
@@ -3042,7 +3555,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         Some(reference) => surface.with_comparison_reference(reference),
         None => surface,
     };
-    if let Some(window) = model.power_window.clone() {
+    let surface = if let Some(window) = model.power_window.clone() {
         let clip_id = window.clip_id;
         let mask_id = window.mask_id;
         surface.with_power_window(window.overlay).on_power_window_edit(move |shape| {
@@ -3053,6 +3566,42 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
                 interpolation: MaskShapeInterpolation::Hold,
             })
         })
+    } else {
+        surface
+    };
+    if let Some(transform) = model.clip_transform.clone() {
+        surface
+            .with_clip_transform(transform.overlay)
+            .on_clip_transform_edit(move |edit| {
+                let writes = match edit {
+                    ViewerClipTransformEdit::Position(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.position.clone(),
+                        value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
+                    }],
+                    ViewerClipTransformEdit::Scale(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.scale.clone(),
+                        value: PropertyValue::Vec2(glam::Vec2::from_array(value)),
+                    }],
+                    ViewerClipTransformEdit::Rotation(value) => vec![ClipParameterValueWrite {
+                        parameter: transform.rotation.clone(),
+                        value: PropertyValue::Float(value),
+                    }],
+                    ViewerClipTransformEdit::Anchor { anchor, position } => vec![
+                        ClipParameterValueWrite {
+                            parameter: transform.anchor.clone(),
+                            value: PropertyValue::Vec2(glam::Vec2::from_array(anchor)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: transform.position.clone(),
+                            value: PropertyValue::Vec2(glam::Vec2::from_array(position)),
+                        },
+                    ],
+                };
+                clip_write_parameter_values_action(ClipWriteParameterValuesPayload {
+                    clip_id: transform.clip_id,
+                    writes,
+                })
+            })
     } else {
         surface
     }
@@ -3387,7 +3936,23 @@ fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
 fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<InspectorCurveModel> {
     let bag = clip.transform.to_property_bag();
     let opacity = bag.property(Transform2D::OPACITY_PATH)?;
-    let numeric = opacity.descriptor.schema.numeric?;
+    numeric_curve_model_for_property(opacity, clip)
+}
+
+fn numeric_curve_model_for_property(
+    property: &mondrian_core::automation::AnimatedProperty,
+    clip: &Clip,
+) -> Option<InspectorCurveModel> {
+    if !property.descriptor.schema.is_animatable
+        || property.channel_count() != 1
+        || !matches!(
+            property.value_type(),
+            PropertyValueType::Float | PropertyValueType::Double
+        )
+    {
+        return None;
+    }
+    let numeric = property.descriptor.schema.numeric?;
     let value_span = numeric.soft_range.max - numeric.soft_range.min;
     if !value_span.is_finite() || value_span <= 0.0 {
         return None;
@@ -3400,7 +3965,7 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
     }
 
     let normalized_value = |value: PropertyValue| {
-        let value = f64::from(value.as_f32()?);
+        let value = value.as_f64()?;
         Some(((value - numeric.soft_range.min) / value_span).clamp(0.0, 1.0) as f32)
     };
     let normalized_time = |keyframe_time: TimelineTime| {
@@ -3413,25 +3978,28 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
         start_tick,
         InspectorCurveKeyModel {
             keyframe_id: None,
-            point: CurvePoint::new(0.0, normalized_value(opacity.evaluate(start_tick))?),
+            interpolation: None,
+            point: CurvePoint::new(0.0, normalized_value(property.evaluate(start_tick))?),
         },
     );
     keys.insert(
         end_tick,
         InspectorCurveKeyModel {
             keyframe_id: None,
-            point: CurvePoint::new(1.0, normalized_value(opacity.evaluate(end_tick))?),
+            interpolation: None,
+            point: CurvePoint::new(1.0, normalized_value(property.evaluate(end_tick))?),
         },
     );
-    for keyframe_time in opacity.keyframe_times() {
+    for keyframe_time in property.keyframe_times() {
         if keyframe_time < start_tick || keyframe_time > end_tick {
             continue;
         }
-        let keyframe = opacity.keyframe_at(keyframe_time)?;
+        let keyframe = property.keyframe_at(keyframe_time)?;
         keys.insert(
             keyframe_time,
             InspectorCurveKeyModel {
                 keyframe_id: Some(keyframe.id),
+                interpolation: Some(interpolation_preset_for_keyframe(&keyframe)),
                 point: CurvePoint::new(
                     normalized_time(keyframe_time)?,
                     normalized_value(keyframe.value)?,
@@ -3448,16 +4016,38 @@ fn opacity_curve_model_for_clip(clip: &Clip, _time: TimelineTime) -> Option<Insp
                 start_tick.checked_add(duration_ticks.checked_scale(scale).ok()?).ok()?;
             Some(CurvePoint::new(
                 index as f32 / DISPLAY_SEGMENTS as f32,
-                normalized_value(opacity.evaluate(sample_time))?,
+                normalized_value(property.evaluate(sample_time))?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
 
     Some(InspectorCurveModel {
-        property: opacity.address(),
+        property: property.address(),
         keys: keys.into_values().collect(),
         display_points,
     })
+}
+
+fn interpolation_preset_for_keyframe(
+    keyframe: &mondrian_core::automation::Keyframe<PropertyValue>,
+) -> InterpolationType {
+    if keyframe.temporal_flags.auto_bezier {
+        return InterpolationType::AutoBezier;
+    }
+    if keyframe.temporal_flags.continuous && !keyframe.temporal_flags.broken_handles {
+        return InterpolationType::ContinuousBezier;
+    }
+    match (keyframe.interp_in, keyframe.interp_out) {
+        (KeyframeInterpolation::Hold, KeyframeInterpolation::Hold) => InterpolationType::Hold,
+        (KeyframeInterpolation::Linear, KeyframeInterpolation::Linear) => InterpolationType::Linear,
+        (KeyframeInterpolation::Linear, KeyframeInterpolation::Bezier(_)) => {
+            InterpolationType::EaseIn
+        }
+        (KeyframeInterpolation::Bezier(_), KeyframeInterpolation::Linear) => {
+            InterpolationType::EaseOut
+        }
+        _ => InterpolationType::Bezier,
+    }
 }
 
 fn asset_grid_item_from_asset(
@@ -3465,13 +4055,14 @@ fn asset_grid_item_from_asset(
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode: bool,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> AssetGridItem {
-    let badge = asset_kind_badge(&asset.kind);
+    let badge = asset_kind_badge(&asset.kind, localizer);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
     let context_menu_items =
-        asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline);
+        asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline, localizer);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
     let duration_label = asset
@@ -3488,9 +4079,15 @@ fn asset_grid_item_from_asset(
         .with_context_menu(context_menu_items)
         .renamable(true);
     if offline {
-        item = item.with_badge_tone("离线", AssetGridBadgeTone::Warning);
+        item = item.with_badge_tone(
+            asset_text(localizer, "asset-offline", "离线"),
+            AssetGridBadgeTone::Warning,
+        );
     } else if proxied {
-        item = item.with_badge_tone("代理", AssetGridBadgeTone::Success);
+        item = item.with_badge_tone(
+            asset_text(localizer, "asset-proxy", "代理"),
+            AssetGridBadgeTone::Success,
+        );
     }
     if let Some(state) = thumbnail_state {
         item = match state {
@@ -3507,13 +4104,14 @@ fn asset_grid_asset_context_menu_items(
     asset: &AssetRecord,
     proxy_mode: bool,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if let Some(file_path) = asset.file_path() {
         let media_probe = asset.media_probe();
         items.push(asset_menu_item(
             MenuItem::new(
-                "解释素材...",
+                asset_text(localizer, "asset-interpret", "解释素材..."),
                 app_shell_interpret_asset_dialog_action(AppShellInterpretAssetDialogPayload {
                     asset_id: asset.id,
                     asset_name: asset.name.clone(),
@@ -3537,7 +4135,7 @@ fn asset_grid_asset_context_menu_items(
         ));
         items.push(asset_menu_item(
             MenuItem::new(
-                "在文件管理器中显示",
+                asset_text(localizer, "asset-reveal", "在文件管理器中显示"),
                 app_shell_reveal_in_file_manager_action(AppShellRevealInFileManagerPayload {
                     path: file_path.to_path_buf(),
                 }),
@@ -3547,7 +4145,7 @@ fn asset_grid_asset_context_menu_items(
         if asset_is_offline(asset) {
             items.push(asset_menu_item(
                 MenuItem::new(
-                    "重新链接媒体...",
+                    asset_text(localizer, "asset-relink", "重新链接媒体..."),
                     app_shell_relink_asset_dialog_action(AppShellRelinkAssetDialogPayload {
                         asset_id: asset.id,
                     }),
@@ -3556,9 +4154,15 @@ fn asset_grid_asset_context_menu_items(
             ));
         } else if matches!(asset.kind, AssetKind::Video) {
             let (label, enabled) = if proxy_mode {
-                ("关闭代理模式", false)
+                (
+                    asset_text(localizer, "asset-disable-proxy", "关闭代理模式"),
+                    false,
+                )
             } else {
-                ("启用代理模式", true)
+                (
+                    asset_text(localizer, "asset-enable-proxy", "启用代理模式"),
+                    true,
+                )
             };
             items.push(asset_menu_item(
                 MenuItem::new(
@@ -3575,7 +4179,7 @@ fn asset_grid_asset_context_menu_items(
     }
     items.push(asset_menu_item(
         MenuItem::new(
-            "删除素材",
+            asset_text(localizer, "asset-delete", "删除素材"),
             assets_delete_asset_action(AssetsDeleteAssetPayload { asset_id: asset.id }),
         ),
         AppIcon::Trash,
@@ -3594,16 +4198,17 @@ fn asset_grid_items_from_library_records(
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode_assets: Option<&BTreeSet<AssetId>>,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+    localizer: Option<&Localizer>,
 ) -> Vec<AssetGridItem> {
     let mut items =
         Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
     let parent_id = current_folder.map(|folder| folder.id.as_str());
     if let Some(folder) = current_folder {
-        items.push(asset_grid_parent_item(folder.parent_id.clone()));
+        items.push(asset_grid_parent_item(folder.parent_id.clone(), localizer));
     }
     for folder in folders.iter().filter(|folder| folder.parent_id.as_deref() == parent_id) {
         let item_count = asset_folder_direct_item_count(folders, &assets, folder);
-        items.push(asset_grid_item_from_folder(folder, item_count));
+        items.push(asset_grid_item_from_folder(folder, item_count, localizer));
     }
     items.extend(
         assets
@@ -3611,7 +4216,7 @@ fn asset_grid_items_from_library_records(
             .filter(|asset| asset.folder_id.as_deref() == parent_id)
             .map(|asset| {
                 let proxy_mode = proxy_mode_assets.is_some_and(|ids| ids.contains(&asset.id));
-                asset_grid_item_from_asset(asset, thumbnails, proxy_mode, input_pipeline)
+                asset_grid_item_from_asset(asset, thumbnails, proxy_mode, input_pipeline, localizer)
             }),
     );
     items
@@ -3634,11 +4239,20 @@ fn asset_folder_direct_item_count(
     child_folders + child_assets
 }
 
-fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
+fn asset_grid_parent_item(
+    parent_id: Option<String>,
+    localizer: Option<&Localizer>,
+) -> AssetGridItem {
     let (title, badge) = if parent_id.is_some() {
-        ("返回", "上级")
+        (
+            asset_text(localizer, "asset-back", "返回"),
+            asset_text(localizer, "asset-parent", "上级"),
+        )
     } else {
-        ("全部素材", "全部")
+        (
+            asset_text(localizer, "asset-all", "全部素材"),
+            asset_text(localizer, "asset-all-badge", "全部"),
+        )
     };
     with_asset_icon(
         AssetGridItem::new("asset-folder-up", title, current_theme().colors.secondary)
@@ -3650,8 +4264,18 @@ fn asset_grid_parent_item(parent_id: Option<String>) -> AssetGridItem {
     )
 }
 
-fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> AssetGridItem {
-    let badge = format!("{item_count} 项");
+fn asset_grid_item_from_folder(
+    folder: &FolderRecord,
+    item_count: usize,
+    localizer: Option<&Localizer>,
+) -> AssetGridItem {
+    let badge = if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("count", item_count as i64);
+        localizer.format("asset-item-count", Some(&args))
+    } else {
+        format!("{item_count} 项")
+    };
     let folder_id = folder.id.clone();
     with_asset_icon(
         AssetGridItem::new(
@@ -3666,7 +4290,7 @@ fn asset_grid_item_from_folder(folder: &FolderRecord, item_count: usize) -> Asse
         }))
         .with_context_menu(vec![asset_menu_item(
             MenuItem::new(
-                "删除文件夹",
+                asset_text(localizer, "asset-delete-folder", "删除文件夹"),
                 assets_delete_folder_action(AssetsDeleteFolderPayload { folder_id }),
             ),
             AppIcon::Trash,
@@ -3695,8 +4319,8 @@ fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
 
 fn effect_icon_button(
     icon: AppIcon,
-    fallback_label: &'static str,
-    tooltip: &'static str,
+    fallback_label: impl Into<String>,
+    tooltip: impl Into<String>,
     enabled: bool,
     action: Option<Action>,
 ) -> Box<dyn Widget> {
@@ -3714,14 +4338,15 @@ fn color_picker_trigger(color: Color) -> ColorPickerTrigger {
     trigger
 }
 
-fn asset_kind_badge(kind: &AssetKind) -> &'static str {
-    match kind {
-        AssetKind::Video => "视频",
-        AssetKind::StillImage => "静帧",
-        AssetKind::Audio => "音频",
-        AssetKind::AdjustmentLayer => "序列",
-        AssetKind::SolidColor => "图片",
-    }
+fn asset_kind_badge(kind: &AssetKind, localizer: Option<&Localizer>) -> String {
+    let (id, fallback) = match kind {
+        AssetKind::Video => ("asset-kind-video", "视频"),
+        AssetKind::StillImage => ("asset-kind-still", "静帧"),
+        AssetKind::Audio => ("asset-kind-audio", "音频"),
+        AssetKind::AdjustmentLayer => ("asset-kind-adjustment", "序列"),
+        AssetKind::SolidColor => ("asset-kind-solid", "图片"),
+    };
+    asset_text(localizer, id, fallback)
 }
 
 fn asset_duration_label(duration: std::time::Duration) -> String {
@@ -3821,6 +4446,7 @@ fn inspector_audio_components(
     sequence: &Sequence,
     selection: SelectedClipRef,
     clip: &Clip,
+    localizer: &Localizer,
 ) -> Vec<InspectorAudioComponentModel> {
     let asset = (!clip.is_nested_sequence())
         .then(|| {
@@ -3849,6 +4475,7 @@ fn inspector_audio_components(
                         sequence,
                         selection.track_id,
                         clip.id,
+                        localizer,
                     );
                 };
                 let source_options = asset
@@ -3916,6 +4543,7 @@ fn inspector_audio_components(
                     sequence,
                     selection.track_id,
                     clip.id,
+                    localizer,
                 )
             }
             AudioComponentSource::NestedOutput { output_id } => {
@@ -3956,6 +4584,7 @@ fn inspector_audio_components(
                     sequence,
                     selection.track_id,
                     clip.id,
+                    localizer,
                 )
             }
         })
@@ -3972,6 +4601,7 @@ fn inspector_audio_component_model(
     sequence: &Sequence,
     track_id: TrackId,
     clip_id: ClipId,
+    localizer: &Localizer,
 ) -> InspectorAudioComponentModel {
     let viewport = component_automation_viewport(edit.id, edit.local_time_in, clip_duration);
     InspectorAudioComponentModel {
@@ -3983,6 +4613,7 @@ fn inspector_audio_component_model(
             &edit.channel_mapping,
             observed_source_layout,
             sequence.settings.audio_channel_layout,
+            localizer,
         ),
         enabled: edit.enabled,
         volume_db: edit.volume_db,
@@ -4157,12 +4788,19 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
     let mut grid = AssetGrid::new(model.title.clone(), model.items.clone())
         .with_subtitle(model.subtitle.clone())
         .with_embedded_panel_chrome()
+        .with_empty_state_copy(
+            &model.empty_state_copy[0],
+            &model.empty_state_copy[1],
+            &model.empty_state_copy[2],
+            &model.empty_state_copy[3],
+        )
         .on_rename(asset_grid_rename_action);
     if let Some(placeholder) = &model.filter_placeholder {
         grid = grid.with_filter(placeholder.clone());
     }
     if model.accepts_file_drop {
         let drop_folder_id = model.current_folder_id.clone();
+        let selection_delete_label = model.selection_delete_label.clone();
         grid = grid
             .on_drop(move |payload, _position| match payload {
                 DragPayload::File(paths) if !paths.is_empty() => {
@@ -4221,10 +4859,14 @@ fn asset_grid(model: &AssetGridModel) -> AssetGrid {
                     _ => AssetGridDropOutcome::Unhandled,
                 }
             })
-            .with_context_menu(asset_grid_context_menu_items(
-                model.current_folder_id.as_deref(),
-            ))
-            .with_selection_context_menu(asset_grid_selection_context_menu_items);
+            .with_context_menu(if model.context_menu_items.is_empty() {
+                asset_grid_context_menu_items(model.current_folder_id.as_deref(), None)
+            } else {
+                model.context_menu_items.clone()
+            })
+            .with_selection_context_menu(move |indices, items| {
+                asset_grid_selection_context_menu_items(indices, items, &selection_delete_label)
+            });
     }
     grid
 }
@@ -4260,6 +4902,7 @@ fn effect_badge(effect_type: &EffectType) -> &'static str {
 fn asset_grid_selection_context_menu_items(
     _indices: &[usize],
     items: &[&AssetGridItem],
+    delete_label: &str,
 ) -> Vec<MenuItem> {
     let mut asset_ids = Vec::new();
     let mut folder_ids = Vec::new();
@@ -4275,7 +4918,7 @@ fn asset_grid_selection_context_menu_items(
     }
     vec![asset_menu_item(
         MenuItem::new(
-            "Delete selected",
+            delete_label,
             assets_delete_selection_action(AssetsDeleteSelectionPayload { asset_ids, folder_ids }),
         ),
         AppIcon::Trash,
@@ -4302,11 +4945,14 @@ fn move_asset_selection_action(
     }))
 }
 
-fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuItem> {
+fn asset_grid_context_menu_items(
+    current_folder_id: Option<&str>,
+    localizer: Option<&Localizer>,
+) -> Vec<MenuItem> {
     vec![
         asset_menu_item(
             MenuItem::new(
-                "导入媒体...",
+                asset_text(localizer, "asset-import", "导入媒体..."),
                 app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload {
                     folder_id: current_folder_id.map(str::to_owned),
                 }),
@@ -4316,11 +4962,11 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
         MenuItem::separator(),
         asset_menu_item(
             MenuItem::submenu(
-                "新建",
+                asset_text(localizer, "asset-new", "新建"),
                 vec![
                     asset_menu_item(
                         MenuItem::new(
-                            "调整图层",
+                            asset_text(localizer, "asset-new-adjustment", "调整图层"),
                             assets_create_adjustment_layer_action(AssetsCreateAssetPayload {
                                 folder_id: current_folder_id.map(str::to_owned),
                             }),
@@ -4329,7 +4975,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
                     ),
                     asset_menu_item(
                         MenuItem::new(
-                            "纯色",
+                            asset_text(localizer, "asset-new-solid", "纯色"),
                             assets_create_solid_color_action(AssetsCreateAssetPayload {
                                 folder_id: current_folder_id.map(str::to_owned),
                             }),
@@ -4338,7 +4984,7 @@ fn asset_grid_context_menu_items(current_folder_id: Option<&str>) -> Vec<MenuIte
                     ),
                     asset_menu_item(
                         MenuItem::new(
-                            "文件夹",
+                            asset_text(localizer, "asset-new-folder", "文件夹"),
                             assets_create_folder_action(AssetsCreateFolderPayload {
                                 parent_folder_id: current_folder_id.map(str::to_owned),
                             }),
@@ -4608,6 +5254,10 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             move |drop, _track| {
                 action_model.asset_drop_payload(drop).map(timeline_drop_asset_action)
             }
+        })
+        .on_file_drop({
+            let action_model = action_model.clone();
+            move |drop, _track| action_model.file_drop_payload(drop).map(timeline_drop_file_action)
         })
         .on_edit_command({
             let action_model = action_model.clone();

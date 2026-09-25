@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     emit_cargo_build_attestation();
+    build_openfx_host();
 
     #[cfg(target_os = "linux")]
     emit_linux_link_resource_policy();
@@ -19,6 +20,41 @@ fn main() {
             println!("cargo:warning=部署 Windows 媒体运行时失败: {err}");
         }
     }
+}
+
+fn build_openfx_host() {
+    let vendor = std::path::Path::new("native/openfx/vendor");
+    let mut build = cc::Build::new();
+    build.cpp(true).std("c++17").define("NOMINMAX", None);
+    build.include(vendor.join("include"));
+    build.include(vendor.join("host/include"));
+    for name in [
+        "ofxhBinary",
+        "ofxhClip",
+        "ofxhHost",
+        "ofxhImageEffect",
+        "ofxhImageEffectAPI",
+        "ofxhInteract",
+        "ofxhMemory",
+        "ofxhParam",
+        "ofxhPluginAPICache",
+        "ofxhPluginCache",
+        "ofxhPropertySuite",
+        "ofxhUtilities",
+    ] {
+        build.file(vendor.join("host/src").join(format!("{name}.cpp")));
+    }
+    for name in [
+        "render",
+        "image_clip",
+        "effect_instance",
+        "host_descriptor",
+        "parameter_instance",
+    ] {
+        build.file(format!("native/openfx/host/{name}.cpp"));
+    }
+    println!("cargo:rerun-if-changed=native/openfx");
+    build.compile("mondrian_openfx_host");
 }
 
 #[cfg(target_os = "linux")]

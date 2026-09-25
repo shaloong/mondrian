@@ -112,6 +112,7 @@ fn public_plugin_sdk_contract_compiles_from_crate_reexports() {
     let context = EffectEvalContext {
         time: TimelineTime::ZERO,
         working_color_space: WorkingColorSpace::LinearRec709,
+        frame_context: None,
     };
     assert_eq!(context.working_color_space, WorkingColorSpace::LinearRec709);
 

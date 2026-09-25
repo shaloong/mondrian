@@ -3,6 +3,7 @@
 //! Reusable widget crates remain domain-light. UI adapters attach stable app ids
 //! to `Action::Custom` payloads before actions reach the app state layer.
 
+use crate::app_ui::localization::AppUiLocalePreference;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, JobId};
 use mondrian_core::{
@@ -33,13 +34,14 @@ pub use super::product_action::{
     AssetRelinkPayload, AssetRenameFolderPayload, AssetRenamePayload,
     AssetSetInterpretationPayload, AssetSetProxyModePayload, AssetTargetPayload,
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
-    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
-    ClipSetRatePayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
-    GalleryApplyShotMatchPayload, GalleryCaptureStillPayload, GalleryRenameStillPayload,
-    GallerySetComparisonPayload, GalleryStillTargetPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
+    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetBlendModePayload,
+    ClipSetEnabledPayload, ClipSetRatePayload, ClipSetSolidColorPayload,
+    ClipWriteParameterValuesPayload, ExportDraftEdit, GalleryApplyShotMatchPayload,
+    GalleryCaptureStillPayload, GalleryRenameStillPayload, GallerySetComparisonPayload,
+    GalleryStillTargetPayload, ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
+    TimelineDropAssetPayload, TimelineDropFilePayload, TimelineInOutPointKind,
     TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
     TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
     TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
@@ -48,6 +50,7 @@ pub use super::product_action::{
     VideoTransitionCreateCrossDissolvePayload, VideoTransitionHandlePolicy,
     VideoTransitionSetRangePayload, VideoTransitionTargetPayload,
     ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
+    VisualEffectEditNumericCurvePayload, VisualEffectParameterTargetPayload,
     VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
@@ -58,26 +61,26 @@ pub use super::product_action::{
     ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK, ASSET_REMOVE_ENTRIES, ASSET_RENAME,
     ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT,
     AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
-    CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL,
-    EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
-    PROJECT_UPDATE_COLOR_ENVIRONMENT, PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_OPEN_NESTED,
-    SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION, TIMELINE_INSERT_ASSET,
-    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET, TIMELINE_PRECOMPOSE_SELECTION,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_TRIM_CLIPS, TRACK_ADD,
-    TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
-    VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
-    VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
-    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
-    VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_CANCEL_TRACKING,
-    VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING, VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER,
-    VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED, VISUAL_MASK_SET_LOCKED,
-    VISUAL_MASK_SET_PARAMETER_VALUE, VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED,
-    VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
+    CLIP_SET_BLEND_MODE, CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES,
+    EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE,
+    EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
+    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
+    SEQUENCE_NEW, SEQUENCE_OPEN_NESTED, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION,
+    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET,
+    TIMELINE_PRECOMPOSE_SELECTION, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL,
+    TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
+    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_EDIT_NUMERIC_CURVE, VISUAL_EFFECT_NAMESPACE,
+    VISUAL_EFFECT_REMOVE, VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_EFFECT_TOGGLE_CURRENT_KEY, VISUAL_MASK_ADD_TO_CLIP,
+    VISUAL_MASK_CANCEL_TRACKING, VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING,
+    VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER, VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED,
+    VISUAL_MASK_SET_LOCKED, VISUAL_MASK_SET_PARAMETER_VALUE,
+    VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED, VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction,
@@ -122,6 +125,13 @@ pub const APP_SHELL_RECOVERY_DIALOG: &str = "recovery_dialog";
 pub const APP_SHELL_CONFIRM_RECOVERY_DIALOG: &str = "confirm_recovery_dialog";
 /// App-shell request to open a platform media import dialog.
 pub const APP_SHELL_IMPORT_MEDIA_DIALOG: &str = "import_media_dialog";
+/// Request a native file picker for one CLAP binary.
+pub const APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG: &str = "install_clap_library_dialog";
+pub const APP_SHELL_INSTALL_VST3_BINARY_DIALOG: &str = "install_vst3_binary_dialog";
+/// Request a native folder picker for a directory-backed VST3 bundle.
+pub const APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG: &str = "install_vst3_bundle_dialog";
+/// Open the native directory picker for an installed `.ofx.bundle`.
+pub const APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG: &str = "install_openfx_bundle_dialog";
 /// App-shell request to navigate the Asset browser to one folder.
 pub const APP_SHELL_ASSET_BROWSER_OPEN_FOLDER: &str = "asset_browser_open_folder";
 
@@ -137,6 +147,12 @@ pub const APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED: &str = "interpret_asset_draft
 pub const APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG: &str = "confirm_interpret_asset_dialog";
 /// App-shell request to open a platform project save-as dialog.
 pub const APP_SHELL_SAVE_PROJECT_AS_DIALOG: &str = "save_project_as_dialog";
+/// App-shell request to choose a new portable Project directory.
+pub const APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG: &str = "export_portable_package_dialog";
+/// App-shell command after choosing the portable package destination.
+pub const APP_SHELL_EXPORT_PORTABLE_PACKAGE: &str = "export_portable_package";
+/// App-shell command to cancel an active portable package export.
+pub const APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT: &str = "cancel_portable_package_export";
 /// App-shell request to choose a timeline export output file.
 pub const APP_SHELL_EXPORT_OUTPUT_DIALOG: &str = "export_output_dialog";
 /// Native file selection for one canonical ANC export attachment.
@@ -159,6 +175,8 @@ pub const APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED: &str = "sequence_settings_tab
 pub const APP_SHELL_PREFERENCES_TAB_CHANGED: &str = "preferences_tab_changed";
 /// App-shell request to switch the active app UI theme preset.
 pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed";
+/// App-shell request to switch the machine-local UI language.
+pub const APP_SHELL_PREFERENCES_LOCALE_CHANGED: &str = "preferences_locale_changed";
 /// App-shell request to switch the waveform display mode.
 pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
     "preferences_waveform_display_changed";
@@ -229,6 +247,13 @@ pub struct AppShellCopySystemInfoPayload {
 pub struct PreferencesThemePayload {
     /// Theme preference to apply and persist.
     pub preference: ThemePreference,
+}
+
+/// Machine-local UI language selected in product preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesLocalePayload {
+    /// Locale preference to apply and persist.
+    pub preference: AppUiLocalePreference,
 }
 
 /// Waveform display mode selected by the app UI preferences UI.
@@ -762,6 +787,11 @@ pub fn timeline_drop_asset_action(payload: TimelineDropAssetPayload) -> Action {
     ProductAction::Timeline(TimelineProductAction::PlaceAsset(payload)).into_external_action()
 }
 
+/// Build an action that probes an external file before an atomic Timeline drop.
+pub fn timeline_drop_file_action(payload: TimelineDropFilePayload) -> Action {
+    ProductAction::Timeline(TimelineProductAction::PlaceFile(payload)).into_external_action()
+}
+
 /// Build an action that performs one professional Insert Edit from an Asset.
 pub fn timeline_insert_asset_action(payload: TimelineInsertAssetPayload) -> Action {
     ProductAction::Timeline(TimelineProductAction::InsertAsset(Box::new(payload)))
@@ -787,6 +817,11 @@ pub fn clip_set_enabled_action(payload: ClipSetEnabledPayload) -> Action {
 /// Build an action that changes one Solid Color Clip source color.
 pub fn clip_set_solid_color_action(payload: ClipSetSolidColorPayload) -> Action {
     ProductAction::Clip(ClipProductAction::SetSolidColor(payload)).into_external_action()
+}
+
+/// Build an action that sets or clears one video Clip's blend-mode override.
+pub fn clip_set_blend_mode_action(payload: ClipSetBlendModePayload) -> Action {
+    ProductAction::Clip(ClipProductAction::SetBlendMode(payload)).into_external_action()
 }
 
 /// Build an action that changes one Clip or linked group to an exact signed rate.
@@ -846,6 +881,24 @@ pub fn visual_effect_set_parameter_value_action(
         payload,
     )))
     .into_external_action()
+}
+
+/// Build an action that edits one visual Effect numeric curve by stable key identity.
+pub fn visual_effect_edit_numeric_curve_action(
+    payload: VisualEffectEditNumericCurvePayload,
+) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
+        payload,
+    )))
+    .into_external_action()
+}
+
+/// Build an action that toggles one Effect parameter key at exact current author time.
+pub fn visual_effect_toggle_current_key_action(
+    payload: VisualEffectParameterTargetPayload,
+) -> Action {
+    ProductAction::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(payload))
+        .into_external_action()
 }
 
 /// Build an action that appends one Mask to a video Clip.
@@ -1323,6 +1376,38 @@ pub fn app_shell_import_media_dialog_action() -> Action {
     app_shell_import_media_dialog_action_with_target(ImportMediaDialogPayload { folder_id: None })
 }
 
+/// Open the native CLAP library picker from an Audio Rack insertion menu.
+pub fn app_shell_install_clap_library_dialog_action() -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.to_owned(),
+        name: APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG.to_owned(),
+        payload: serde_json::Value::Null,
+    }
+}
+
+/// Open the native VST3 binary picker from an Audio Rack insertion menu.
+pub fn app_shell_install_vst3_binary_dialog_action() -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.to_owned(),
+        name: APP_SHELL_INSTALL_VST3_BINARY_DIALOG.to_owned(),
+        payload: serde_json::Value::Null,
+    }
+}
+
+/// Open the native VST3 bundle folder picker from an Audio Rack insertion menu.
+pub fn app_shell_install_vst3_bundle_dialog_action() -> Action {
+    Action::Custom {
+        namespace: APP_SHELL_NAMESPACE.to_owned(),
+        name: APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG.to_owned(),
+        payload: serde_json::Value::Null,
+    }
+}
+
+/// Open the native OpenFX bundle picker from the Graphics menu.
+pub fn app_shell_install_openfx_bundle_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG)
+}
+
 /// Build an app-shell request for importing media files into a target folder.
 pub fn app_shell_import_media_dialog_action_with_target(
     payload: ImportMediaDialogPayload,
@@ -1364,6 +1449,21 @@ pub fn app_shell_confirm_interpret_asset_dialog_action() -> Action {
 /// Build an app-shell request for saving the current project to a chosen path.
 pub fn app_shell_save_project_as_dialog_action() -> Action {
     custom_app_shell_action(APP_SHELL_SAVE_PROJECT_AS_DIALOG)
+}
+
+/// Ask the shell to choose a portable Project package destination.
+pub fn app_shell_export_portable_package_dialog_action() -> Action {
+    custom_app_shell_action(APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG)
+}
+
+/// Start portable Project export at the selected destination.
+pub fn app_shell_export_portable_package_action(target: PathBuf) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_EXPORT_PORTABLE_PACKAGE, target)
+}
+
+/// Cancel the current portable Project export.
+pub fn app_shell_cancel_portable_package_export_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT)
 }
 
 /// Build an app-shell request for choosing an export output file.
@@ -1425,6 +1525,14 @@ pub fn app_shell_preferences_theme_changed_action(preference: ThemePreference) -
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_THEME_CHANGED,
         PreferencesThemePayload { preference },
+    )
+}
+
+/// Build an app-shell request for switching the UI language preference.
+pub fn app_shell_preferences_locale_changed_action(preference: AppUiLocalePreference) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_LOCALE_CHANGED,
+        PreferencesLocalePayload { preference },
     )
 }
 

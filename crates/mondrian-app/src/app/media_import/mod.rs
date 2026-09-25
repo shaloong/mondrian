@@ -23,6 +23,7 @@ use super::AppState;
 mod asset_adapter;
 mod execution;
 
+pub(super) use asset_adapter::MediaImportPreparedCandidate;
 pub(super) use execution::MediaImportExecution;
 use execution::{MediaImportPublication, MediaImportPublicationOutcome};
 
@@ -202,7 +203,11 @@ impl AppState {
         let mut changed = self.media_import.poll_model_changed();
         for result in results {
             changed = true;
-            self.apply_media_import_result(result);
+            if let Some(drop) = self.pending_timeline_file_drops.remove(&result.batch_id) {
+                self.apply_timeline_file_drop_result(drop, result);
+            } else {
+                self.apply_media_import_result(result);
+            }
         }
         if changed {
             let _ = self.refresh_internal_execution_resource_decision();
@@ -229,6 +234,7 @@ impl AppState {
         let canceled = self.media_import.cancel_batch(batch_id);
         if canceled {
             self.media_import_batches.remove(&batch_id.get());
+            self.pending_timeline_file_drops.remove(&batch_id.get());
             let _ = self.refresh_internal_execution_resource_decision();
             self.set_status_hint("媒体导入已取消".to_owned(), false);
         }
@@ -254,6 +260,9 @@ impl AppState {
                 }
                 self.event_bus.publish(AppEvent::AssetImported { asset_id });
             }
+            MediaImportPublicationOutcome::Prepared(_) => {
+                batch.failures.push("媒体探测结果没有对应的轨道放置目标".to_owned());
+            }
             MediaImportPublicationOutcome::Failed(error) => {
                 batch.failures.push(format!("{}: {error}", result.path.display()));
             }
@@ -270,10 +279,58 @@ impl AppState {
             self.media_import_batches.insert(result.batch_id, batch);
             return;
         }
-        self.finish_media_import_batch(batch);
+        self.finish_media_import_batch(result.batch_id, batch);
     }
 
-    fn configure_imported_asset(&mut self, asset_id: AssetId) -> bool {
+    fn apply_timeline_file_drop_result(
+        &mut self,
+        drop: super::product_action::TimelineDropFilePayload,
+        result: MediaImportPublication,
+    ) {
+        if result.evidence.disposition == ExecutionTerminalDisposition::Superseded {
+            return;
+        }
+        match result.outcome {
+            MediaImportPublicationOutcome::Prepared(candidate) => {
+                let placement = if result.path == drop.path {
+                    self.commit_staged_file_drop(drop, *candidate)
+                } else {
+                    Err(MondrianError::WorkflowStepFailed {
+                        step_id: "timeline_place_file".to_owned(),
+                        reason: "媒体探测结果与拖放文件不匹配".to_owned(),
+                    })
+                };
+                self.media_import.finalize_deferred_file(result.batch_id, placement.is_ok());
+                if let Err(error) = placement {
+                    self.report_timeline_drop_failure(result.batch_id, error.to_string());
+                }
+            }
+            MediaImportPublicationOutcome::Failed(error) => {
+                self.report_timeline_drop_failure(result.batch_id, error.to_string());
+            }
+            MediaImportPublicationOutcome::Canceled => {
+                self.set_status_hint("文件放置已取消".to_owned(), false);
+            }
+            MediaImportPublicationOutcome::Imported(_) => {
+                self.report_timeline_drop_failure(result.batch_id, "媒体已提前导入");
+            }
+        }
+    }
+
+    fn report_timeline_drop_failure(&mut self, batch_id: u64, reason: impl Into<String>) {
+        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+
+        let reason = reason.into();
+        self.set_status_hint(format!("文件放置失败：{reason}"), true);
+        self.notifications.publish(
+            format!("timeline_drop:{batch_id}"),
+            AppNotificationSeverity::Error,
+            AppNotificationMessage::new("notification-timeline-drop-failed")
+                .with_text("reason", reason),
+        );
+    }
+
+    pub(super) fn configure_imported_asset(&mut self, asset_id: AssetId) -> bool {
         let Some(library) = self.asset_library() else {
             return false;
         };
@@ -332,7 +389,10 @@ impl AppState {
         }
     }
 
-    fn finish_media_import_batch(&mut self, batch: PendingMediaImportBatch) {
+    fn finish_media_import_batch(&mut self, batch_id: u64, batch: PendingMediaImportBatch) {
+        use super::notifications::{AppNotificationMessage, AppNotificationSeverity};
+
+        let notification_key = format!("media_import:{batch_id}");
         if batch.imported > 0 {
             let mut message = format!("已导入 {} 个媒体文件", batch.imported);
             if batch.proxy_started > 0 {
@@ -347,6 +407,26 @@ impl AppState {
                 );
             }
             self.set_status_hint(message, !batch.failures.is_empty());
+            let imported = i64::try_from(batch.imported).unwrap_or(i64::MAX);
+            if batch.failures.is_empty() {
+                self.notifications.publish(
+                    notification_key,
+                    AppNotificationSeverity::Success,
+                    AppNotificationMessage::new("notification-import-complete")
+                        .with_number("count", imported),
+                );
+            } else {
+                self.notifications.publish(
+                    notification_key,
+                    AppNotificationSeverity::Warning,
+                    AppNotificationMessage::new("notification-import-partial")
+                        .with_number("imported", imported)
+                        .with_number(
+                            "failed",
+                            i64::try_from(batch.failures.len()).unwrap_or(i64::MAX),
+                        ),
+                );
+            }
             return;
         }
 
@@ -356,5 +436,10 @@ impl AppState {
             .cloned()
             .unwrap_or_else(|| "未导入任何媒体文件".to_string());
         self.set_status_hint(format!("导入失败：{reason}"), true);
+        self.notifications.publish(
+            notification_key,
+            AppNotificationSeverity::Error,
+            AppNotificationMessage::new("notification-import-failed").with_text("reason", reason),
+        );
     }
 }

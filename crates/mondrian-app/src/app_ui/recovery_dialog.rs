@@ -5,6 +5,7 @@
 //! candidate, which the Recovery Module revalidates before acquiring a lease.
 
 use chrono::{Local, TimeZone};
+use fluent_bundle::FluentArgs;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
@@ -15,6 +16,7 @@ use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_recovery_dialog_action,
 };
 use crate::app::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 
 const CARD_MIN_WIDTH: f32 = 520.0;
 const CARD_WIDTH: f32 = 700.0;
@@ -23,24 +25,17 @@ const CARD_HEIGHT: f32 = 440.0;
 const CONTENT_PADDING: f32 = 24.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const DETAIL_FONT_SIZE: f32 = 12.0;
-const BUTTON_WIDTH: f32 = 124.0;
+const BUTTON_WIDTH: f32 = 156.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_GAP: f32 = 10.0;
 const BUTTON_BOTTOM_INSET: f32 = 22.0;
 
-/// Immutable product projection of one exact recovery candidate.
+/// Immutable recovery candidate and the time at which the user inspected it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryConfirmationModel {
     /// Candidate passed unchanged to deep recovery admission after confirmation.
     pub candidate: CrashRecoveryCandidate,
-    /// Exact and relative capture time.
-    pub saved_at: String,
-    /// Autosave archive that will be copied and verified.
-    pub source: String,
-    /// Canonical publication target retained by the Recovery Manifest.
-    pub target: String,
-    /// Human-readable projection of typed canonical-target evidence.
-    pub target_state: String,
+    observed_at_unix_ms: u64,
 }
 
 impl RecoveryConfirmationModel {
@@ -51,15 +46,7 @@ impl RecoveryConfirmationModel {
     }
 
     fn from_candidate_at(candidate: CrashRecoveryCandidate, now_ms: u64) -> Self {
-        let saved_at = format!(
-            "{}（{}）",
-            recovery_exact_time_label(candidate.saved_at_unix_ms),
-            recovery_age_label_at(candidate.saved_at_unix_ms, now_ms)
-        );
-        let source = candidate.autosave_file.display().to_string();
-        let target = candidate.project_file.display().to_string();
-        let target_state = recovery_target_state_label(&candidate);
-        Self { candidate, saved_at, source, target, target_state }
+        Self { candidate, observed_at_unix_ms: now_ms }
     }
 }
 
@@ -84,13 +71,31 @@ pub struct RecoveryConfirmationDialog {
 
 impl RecoveryConfirmationDialog {
     /// Build a dialog for one immutable recovery choice.
-    pub fn new(model: RecoveryConfirmationModel) -> Self {
-        let summary = format!(
-            "恢复点包含作者版本 {}、项目文档版本 {}，当前清单共有 {} 个可验证恢复点。",
-            model.candidate.author_generation,
-            model.candidate.document_revision,
-            model.candidate.total_snapshots
+    pub fn new(model: RecoveryConfirmationModel, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        let candidate = &model.candidate;
+        let mut summary_args = FluentArgs::new();
+        summary_args.set("generation", candidate.author_generation.to_string());
+        summary_args.set("revision", candidate.document_revision.to_string());
+        summary_args.set("count", candidate.total_snapshots.to_string());
+        let summary = localizer.format("recovery-summary", Some(&summary_args));
+        let mut time_args = FluentArgs::new();
+        time_args.set(
+            "exact",
+            recovery_exact_time_label(candidate.saved_at_unix_ms),
         );
+        time_args.set(
+            "relative",
+            recovery_age_label_at(
+                &localizer,
+                candidate.saved_at_unix_ms,
+                model.observed_at_unix_ms,
+            ),
+        );
+        let saved_at = localizer.format("recovery-time", Some(&time_args));
+        let source = candidate.autosave_file.display().to_string();
+        let target = candidate.project_file.display().to_string();
+        let target_state = recovery_target_state_label(&localizer, candidate);
         Self {
             id: WidgetId::new(),
             model: model.clone(),
@@ -101,21 +106,30 @@ impl RecoveryConfirmationDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
-            title_label: Label::new("确认恢复项目")
+            title_label: Label::new(localizer.text("recovery-title"))
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
             summary_label: detail_label(summary),
-            time_label: detail_label(format!("保存时间：{}", model.saved_at)),
-            source_label: detail_label(format!("恢复来源：{}", model.source)),
-            target_label: detail_label(format!("保存目标：{}", model.target)),
-            target_state_label: detail_label(format!("目标状态：{}", model.target_state)),
-            safety_label: detail_label(
-                "确认后只会验证并打开恢复点为未保存项目，不会立即覆盖目标文件。若目标、清单或恢复文件已变化，操作会安全停止。",
-            ),
-            recover_button: Button::new("恢复此版本")
+            time_label: detail_label(format_text(
+                &localizer,
+                "recovery-saved-at",
+                "time",
+                saved_at,
+            )),
+            source_label: detail_label(format_text(&localizer, "recovery-source", "path", source)),
+            target_label: detail_label(format_text(&localizer, "recovery-target", "path", target)),
+            target_state_label: detail_label(format_text(
+                &localizer,
+                "recovery-target-state",
+                "state",
+                target_state,
+            )),
+            safety_label: detail_label(localizer.text("recovery-safety")),
+            recover_button: Button::new(localizer.text("recovery-confirm"))
                 .on_click(app_shell_confirm_recovery_dialog_action()),
-            cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
+            cancel_button: Button::new(localizer.text("recovery-cancel"))
+                .on_click(app_shell_close_modal_action()),
         }
     }
 
@@ -133,7 +147,13 @@ fn detail_label(text: impl Into<String>) -> Label {
         .wrapped()
 }
 
-fn unix_now_ms() -> Option<u64> {
+fn format_text(localizer: &Localizer, id: &str, key: &'static str, value: String) -> String {
+    let mut args = FluentArgs::new();
+    args.set(key, value);
+    localizer.format(id, Some(&args))
+}
+
+pub(crate) fn unix_now_ms() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -148,37 +168,53 @@ fn recovery_exact_time_label(saved_at_unix_ms: u64) -> String {
         .unwrap_or_else(|| format!("Unix {saved_at_unix_ms} ms"))
 }
 
-pub(crate) fn recovery_age_label(saved_at_unix_ms: u64) -> String {
-    recovery_age_label_at(saved_at_unix_ms, unix_now_ms().unwrap_or(saved_at_unix_ms))
-}
-
-fn recovery_age_label_at(saved_at_unix_ms: u64, now_ms: u64) -> String {
+pub(crate) fn recovery_age_label_at(
+    localizer: &Localizer,
+    saved_at_unix_ms: u64,
+    now_ms: u64,
+) -> String {
     let age_secs = now_ms.saturating_sub(saved_at_unix_ms) / 1000;
-    if age_secs < 60 {
-        format!("{age_secs} 秒前")
+    let (id, count) = if age_secs < 60 {
+        ("recovery-age-seconds", age_secs)
     } else if age_secs < 3600 {
-        format!("{} 分钟前", age_secs / 60)
+        ("recovery-age-minutes", age_secs / 60)
     } else if age_secs < 86_400 {
-        format!("{} 小时前", age_secs / 3600)
+        ("recovery-age-hours", age_secs / 3600)
     } else {
-        format!("{} 天前", age_secs / 86_400)
-    }
+        ("recovery-age-days", age_secs / 86_400)
+    };
+    let mut args = FluentArgs::new();
+    args.set("count", i64::try_from(count).unwrap_or(i64::MAX));
+    localizer.format(id, Some(&args))
 }
 
-fn recovery_target_state_label(candidate: &CrashRecoveryCandidate) -> String {
+fn recovery_target_state_label(
+    localizer: &Localizer,
+    candidate: &CrashRecoveryCandidate,
+) -> String {
     match candidate.canonical_target {
-        RecoveryCanonicalTargetEvidence::Missing => {
-            "目标文件当前不存在；恢复后的首次保存会在该路径创建项目".to_owned()
-        }
+        RecoveryCanonicalTargetEvidence::Missing => localizer.text("recovery-target-missing"),
         RecoveryCanonicalTargetEvidence::Present { document_revision }
             if document_revision == candidate.document_revision =>
         {
-            format!("同一项目的文档版本 {document_revision} 已存在；恢复点包含其后的未保存编辑")
+            format_text(
+                localizer,
+                "recovery-target-same",
+                "revision",
+                document_revision.to_string(),
+            )
         }
-        RecoveryCanonicalTargetEvidence::Present { document_revision } => format!(
-            "同一项目的较早文档版本 {document_revision} 已存在；恢复点文档版本为 {}",
-            candidate.document_revision
-        ),
+        RecoveryCanonicalTargetEvidence::Present { document_revision } => {
+            let mut args = FluentArgs::new();
+            args.set("revision", document_revision.to_string());
+            args.set("snapshot", candidate.document_revision.to_string());
+            let id = if document_revision < candidate.document_revision {
+                "recovery-target-older"
+            } else {
+                "recovery-target-newer"
+            };
+            localizer.format(id, Some(&args))
+        }
     }
 }
 
@@ -307,6 +343,10 @@ mod tests {
     use mondrian_core::ProjectId;
     use std::path::PathBuf;
 
+    fn readable(text: &str) -> String {
+        text.replace(['\u{2068}', '\u{2069}'], "")
+    }
+
     fn candidate(target: RecoveryCanonicalTargetEvidence) -> CrashRecoveryCandidate {
         CrashRecoveryCandidate {
             project_id: ProjectId::new(),
@@ -324,30 +364,55 @@ mod tests {
     }
 
     #[test]
-    fn model_exposes_exact_source_target_time_and_missing_target_state() {
+    fn dialog_projects_the_same_recovery_evidence_in_both_languages() {
         let model = RecoveryConfirmationModel::from_candidate_at(
             candidate(RecoveryCanonicalTargetEvidence::Missing),
             1_700_000_060_000,
         );
-
-        assert!(model.saved_at.contains("1 分钟前"));
-        assert!(model.source.contains("edit.autosave.mdp"));
-        assert!(model.target.contains("edit.mdp"));
-        assert!(model.target_state.contains("目标文件当前不存在"));
+        let zh = RecoveryConfirmationDialog::new(model.clone(), AppUiLocale::ZhCn);
+        let en = RecoveryConfirmationDialog::new(model.clone(), AppUiLocale::EnUs);
+        assert_eq!(zh.candidate(), &model.candidate);
+        assert_eq!(en.candidate(), &model.candidate);
+        assert!(readable(zh.time_label.text()).contains("1 分钟前"));
+        assert!(readable(en.time_label.text()).contains("One minute ago"));
+        assert!(zh.source_label.text().contains("edit.autosave.mdp"));
+        assert!(en.source_label.text().contains("edit.autosave.mdp"));
+        assert!(zh.target_label.text().contains("edit.mdp"));
+        assert!(en.target_label.text().contains("edit.mdp"));
+        assert!(zh.target_state_label.text().contains("目标文件当前不存在"));
+        assert!(en.target_state_label.text().contains("does not exist"));
+        assert_eq!(zh.recover_button.on_click, en.recover_button.on_click);
+        assert_eq!(zh.cancel_button.on_click, en.cancel_button.on_click);
     }
 
     #[test]
-    fn model_distinguishes_present_same_and_older_canonical_revisions() {
-        let same = RecoveryConfirmationModel::from_candidate_at(
-            candidate(RecoveryCanonicalTargetEvidence::Present { document_revision: 5 }),
-            1_700_000_060_000,
-        );
-        let older = RecoveryConfirmationModel::from_candidate_at(
-            candidate(RecoveryCanonicalTargetEvidence::Present { document_revision: 4 }),
-            1_700_000_060_000,
-        );
+    fn target_state_distinguishes_same_older_and_newer_disk_revisions() {
+        let zh = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let same = candidate(RecoveryCanonicalTargetEvidence::Present { document_revision: 5 });
+        let older = candidate(RecoveryCanonicalTargetEvidence::Present { document_revision: 4 });
+        let newer = candidate(RecoveryCanonicalTargetEvidence::Present { document_revision: 6 });
+        assert!(readable(&recovery_target_state_label(&zh, &same)).contains("版本 5 已存在"));
+        assert!(readable(&recovery_target_state_label(&zh, &older)).contains("较早文档版本 4"));
+        assert!(readable(&recovery_target_state_label(&zh, &newer)).contains("比恢复点版本 5 更新"));
+        assert!(readable(&recovery_target_state_label(&en, &newer))
+            .contains("newer than recovery revision 5"));
+    }
 
-        assert!(same.target_state.contains("版本 5 已存在"));
-        assert!(older.target_state.contains("较早文档版本 4"));
+    #[test]
+    fn relative_age_uses_locale_plural_rules_and_saturates_future_time() {
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        assert_eq!(recovery_age_label_at(&en, 0, 1_000), "One second ago");
+        assert_eq!(recovery_age_label_at(&en, 0, 60_000), "One minute ago");
+        assert_eq!(recovery_age_label_at(&en, 0, 3_600_000), "One hour ago");
+        assert_eq!(recovery_age_label_at(&en, 0, 86_400_000), "One day ago");
+        assert_eq!(
+            readable(&recovery_age_label_at(&en, 0, 120_000)),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            readable(&recovery_age_label_at(&en, 10_000, 9_000)),
+            "0 seconds ago"
+        );
     }
 }

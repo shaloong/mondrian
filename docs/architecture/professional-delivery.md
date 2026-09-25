@@ -17,6 +17,17 @@ from the independent artifact re-open/content verification required by
 commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+Frozen Export Snapshots retain any authored CLAP or VST3 binary SHA-256. The audio
+resolver rejects an installed revision mismatch before worker admission;
+Export never silently uses a newer same-ID processor in place of authored sound.
+An ignored reference acceptance test prepares the ordinary offline audio
+delivery with a pinned installed CLAP gain or VST3 reference Gain bundle,
+decodes a nonzero stereo Float32 WAV, and checks the resulting samples against
+the authored gain value. Both render `+0.125/-0.125` from `+0.25/-0.25` at
+gain `0.5` over the first 64 frames. This
+exercises the Export resolver and worker instead of proving only that a
+processor identity can be represented in a frozen snapshot.
+
 The job-scoped Audio Source Cache now returns schema-6 raw closure, including
 its independent native-startup worker and producer leases. Queue consumers do
 not reinterpret audio construction or introduce a separate startup scheduler.

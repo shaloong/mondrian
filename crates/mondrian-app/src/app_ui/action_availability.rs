@@ -9,6 +9,7 @@ use mondrian_editor_state::Action;
 
 use crate::app::product_action::ProductAction;
 use crate::app::ui_actions::{
+    APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT, APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG,
     APP_SHELL_GALLERY_CAPTURE_CURRENT, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_QUIT, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
     APP_SHELL_SEQUENCE_SETTINGS,
@@ -25,7 +26,13 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
                 action,
                 Action::Custom { namespace, name, .. }
                     if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_QUIT
-            );
+            )
+            || matches!(
+                action,
+                Action::Custom { namespace, name, .. }
+                    if namespace == APP_SHELL_NAMESPACE
+                        && name == APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT
+            ) && state.portable_project_export_active();
     }
     match ProductAction::decode_external(action) {
         Ok(Some(action)) => {
@@ -101,6 +108,18 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
         {
             state.active_sequence().is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG =>
+        {
+            state.has_open_project() && !state.portable_project_export_active()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT =>
+        {
+            state.portable_project_export_active()
         }
         _ => true,
     }

@@ -5,13 +5,16 @@
 //! persistence. UI and execution Adapters receive read-only or immutable snapshots.
 
 use crate::history::{
-    AuthoringHistory, AuthoringHistoryRecordOutcome, PreparedAuthoringHistoryRestore,
+    AuthoringHistory, AuthoringHistoryRecordOutcome, PreparedAuthoringHistoryRecord,
+    PreparedAuthoringHistoryRestore,
 };
 use mondrian_assets::AssetLibrary;
 use mondrian_core::{
     AssetId, MondrianError, ProjectId, ProjectMeta, Result, SequenceId, SequenceRevision,
 };
-use mondrian_project::{ProjectAuthoringValidationCertificate, ProjectDocument};
+use mondrian_project::{
+    PreparedProjectSequenceReplacement, ProjectAuthoringValidationCertificate, ProjectDocument,
+};
 use mondrian_timeline::Sequence;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -83,6 +86,22 @@ pub struct AuthoringCommit {
     pub project_wide: bool,
     /// Whether the transaction was retained by the bounded Undo history.
     pub undo_retained: bool,
+}
+
+/// Fully validated Sequence edit awaiting an external publication boundary.
+///
+/// The owning Session must retain exclusive authoring authority between
+/// preparation and installation. This lets a dependent SQLite transaction
+/// commit after all authoring failures have been resolved but before the new
+/// author state becomes visible.
+pub struct PreparedSequenceEdit {
+    session_id: AuthoringSessionId,
+    expected_generation: AuthorGeneration,
+    sequence_id: SequenceId,
+    installed_revision: SequenceRevision,
+    next_generation: AuthorGeneration,
+    replacement: PreparedProjectSequenceReplacement,
+    history: PreparedAuthoringHistoryRecord,
 }
 
 /// Explicit editor navigation operation for a Sequence target.
@@ -407,8 +426,18 @@ impl AuthoringSession {
         &mut self,
         description: impl Into<String>,
         before: Sequence,
-        mut after: Sequence,
+        after: Sequence,
     ) -> Result<Option<AuthoringCommit>> {
+        self.prepare_sequence_candidate(description, before, after)
+            .map(|prepared| prepared.map(|prepared| self.install_prepared_sequence_edit(prepared)))
+    }
+
+    fn prepare_sequence_candidate(
+        &mut self,
+        description: impl Into<String>,
+        before: Sequence,
+        mut after: Sequence,
+    ) -> Result<Option<PreparedSequenceEdit>> {
         self.refresh_test_fixture_authoring_validation()?;
         if before.id != after.id {
             return Err(session_error(
@@ -422,7 +451,7 @@ impl AuthoringSession {
         let current = self.document.sequences.sequence(before.id).ok_or_else(|| {
             session_error(
                 "commit_sequence_edit",
-                format!("target Sequence does not exist: {}", before.id),
+                format!("Sequence {} changed outside the transaction", before.id),
             )
         })?;
         if current.revision != before.revision
@@ -433,15 +462,12 @@ impl AuthoringSession {
                 format!("Sequence {} changed outside the transaction", before.id),
             ));
         }
-
-        // Sequence revision is Session authority. A closure that happens to
-        // write the public persistence field cannot smuggle a revision into the
-        // canonical document or turn that write into authored content.
+        // Sequence revision is Session authority. A closure cannot smuggle a
+        // revision into canonical authored content.
         after.revision = before.revision;
         if before.author_state_eq_ignoring_revision(&after) {
             return Ok(None);
         }
-
         let next_generation = self.author_generation.next()?;
         after.revision = next_session_sequence_revision(
             &self.sequence_revision_high_water,
@@ -458,17 +484,52 @@ impl AuthoringSession {
             &before,
             prepared_replacement.replacement(),
         )?;
-        let outcome = self.history.commit_prepared_record(prepared_history)?;
-        let (document, authoring_validation) = prepared_replacement.into_installation();
+        Ok(Some(PreparedSequenceEdit {
+            session_id: self.session_id,
+            expected_generation: self.author_generation,
+            sequence_id: before.id,
+            installed_revision,
+            next_generation,
+            replacement: prepared_replacement,
+            history: prepared_history,
+        }))
+    }
+
+    /// Install a previously prepared edit after its dependent publication has
+    /// committed. No validation, allocation, or other fallible work remains.
+    pub fn install_prepared_sequence_edit(
+        &mut self,
+        prepared: PreparedSequenceEdit,
+    ) -> AuthoringCommit {
+        debug_assert_eq!(self.session_id, prepared.session_id);
+        debug_assert_eq!(self.author_generation, prepared.expected_generation);
+        let outcome = self.history.commit_prepared_record_exclusive(prepared.history);
+        let (document, authoring_validation) = prepared.replacement.into_installation();
         self.document = document;
         self.authoring_validation = authoring_validation;
-        self.sequence_revision_high_water.insert(before.id, installed_revision);
-        self.author_generation = next_generation;
-        Ok(Some(sequence_commit(
-            self.author_generation,
-            before.id,
-            outcome,
-        )))
+        self.sequence_revision_high_water
+            .insert(prepared.sequence_id, prepared.installed_revision);
+        self.author_generation = prepared.next_generation;
+        sequence_commit(self.author_generation, prepared.sequence_id, outcome)
+    }
+
+    /// Prepare a Sequence mutation without publishing its authoring effects.
+    pub fn prepare_sequence_edit<T>(
+        &mut self,
+        sequence_id: SequenceId,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> Result<T>,
+    ) -> Result<(T, Option<PreparedSequenceEdit>)> {
+        let before = self.sequence(sequence_id).cloned().ok_or_else(|| {
+            session_error(
+                "prepare_sequence_edit",
+                format!("target Sequence does not exist: {sequence_id}"),
+            )
+        })?;
+        let mut after = before.clone();
+        let value = edit(&mut after)?;
+        let prepared = self.prepare_sequence_candidate(description, before, after)?;
+        Ok((value, prepared))
     }
 
     /// Record a complete project-level before/after transaction atomically.
@@ -1072,6 +1133,36 @@ mod tests {
             AuthoringSession::new_unsaved(document, project_file, root, library)
                 .expect("unsaved session")
         }
+    }
+
+    #[test]
+    fn prepared_sequence_edit_is_invisible_until_install_and_discardable() {
+        let mut session = session_with_two_sequences(true);
+        let sequence_id = session.active_sequence().expect("active").id;
+        let generation = session.author_generation();
+        let (_, discarded) = session
+            .prepare_sequence_edit(sequence_id, "rename", |sequence| {
+                sequence.name = "Prepared".to_owned();
+                Ok(())
+            })
+            .expect("prepare");
+        assert!(discarded.is_some());
+        assert_eq!(session.active_sequence().expect("active").name, "Primary");
+        assert_eq!(session.author_generation(), generation);
+        assert!(!session.history().can_undo());
+        drop(discarded);
+        assert_eq!(session.active_sequence().expect("active").name, "Primary");
+
+        let (_, prepared) = session
+            .prepare_sequence_edit(sequence_id, "rename", |sequence| {
+                sequence.name = "Prepared".to_owned();
+                Ok(())
+            })
+            .expect("prepare again");
+        let commit = session.install_prepared_sequence_edit(prepared.expect("changed edit"));
+        assert_eq!(commit.changed_sequence_ids, vec![sequence_id]);
+        assert_eq!(session.active_sequence().expect("active").name, "Prepared");
+        assert!(session.history().can_undo());
     }
 
     fn session_with_nested_audio_binding(

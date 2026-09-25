@@ -53,6 +53,7 @@ enum PersistenceCompletionDisposition {
 enum ProjectArchiveInstallPolicy {
     CanonicalProduct,
     RecoveredProduct,
+    PortableImport,
     #[cfg(any(test, feature = "validation"))]
     #[cfg_attr(
         not(windows),
@@ -142,7 +143,7 @@ impl PreparedEnduranceProjectFixture {
 
 impl ProjectArchiveInstallPolicy {
     const fn opens_canonical_project(self) -> bool {
-        !matches!(self, Self::RecoveredProduct)
+        !matches!(self, Self::RecoveredProduct | Self::PortableImport)
     }
 
     const fn repairs_minimum_tracks(self) -> bool {
@@ -172,6 +173,8 @@ pub(crate) enum ProjectClosePoll {
     Pending,
     /// The exact Session was quiesced, retired, and removed from AppState.
     Closed,
+    /// The Project was closed but Reference Output release was not proven.
+    ClosedWithTeardownFailure(String),
     /// A required manual save was not durable, so admission was resumed and
     /// the still-open Project may be corrected or retried.
     SaveRejected(String),
@@ -185,6 +188,24 @@ fn autosave_archive_leaf(saved_at_unix_ms: u64, generation: u64) -> String {
         generation,
         uuid::Uuid::new_v4()
     )
+}
+
+fn available_package_import_destination(package_root: &Path) -> anyhow::Result<PathBuf> {
+    let stem = package_root.file_stem().context("portable package has no name")?;
+    let parent = package_root.parent().context("portable package has no parent")?;
+    for index in 0..1000 {
+        let candidate = if index == 0 {
+            package_root.with_extension("mdp")
+        } else {
+            parent.join(format!("{}-imported-{index}.mdp", stem.to_string_lossy()))
+        };
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("no available sibling Project filename for portable package")
 }
 
 impl AppState {
@@ -508,8 +529,8 @@ impl AppState {
             anyhow::bail!(reason);
         }
         self.retain_current_project_library_generation();
-        self.finalize_project_close_state();
-        Ok(())
+        self.finalize_project_close_state()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
     fn retain_project_close_fault(&mut self, session_id: AuthoringSessionId, reason: String) {
@@ -569,8 +590,10 @@ impl AppState {
                     return ProjectClosePoll::Faulted(reason);
                 }
                 self.retain_current_project_library_generation();
-                self.finalize_project_close_state();
-                ProjectClosePoll::Closed
+                match self.finalize_project_close_state() {
+                    Ok(()) => ProjectClosePoll::Closed,
+                    Err(error) => ProjectClosePoll::ClosedWithTeardownFailure(error.to_string()),
+                }
             }
             Err(reason) => {
                 self.retain_project_close_fault(pending.session_id, reason.clone());
@@ -648,6 +671,7 @@ impl AppState {
             candidate.project_file,
             prepared,
             ProjectArchiveInstallPolicy::RecoveredProduct,
+            None,
             runtime_lease,
             handoff,
         )?;
@@ -681,6 +705,7 @@ impl AppState {
             project_file,
             &mut archive_handle,
             ProjectArchiveInstallPolicy::CanonicalProduct,
+            None,
             handoff,
         )
     }
@@ -690,6 +715,7 @@ impl AppState {
         project_file: PathBuf,
         archive_handle: &mut fs::File,
         install_policy: ProjectArchiveInstallPolicy,
+        package_bindings: Option<&std::collections::BTreeMap<PathBuf, PathBuf>>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
         let prepared = PreparedProjectArchive::from_open_file(
@@ -716,6 +742,7 @@ impl AppState {
             project_file,
             prepared,
             install_policy,
+            package_bindings,
             runtime_lease,
             handoff,
         )
@@ -726,6 +753,7 @@ impl AppState {
         project_file: PathBuf,
         prepared: PreparedProjectArchive<'_>,
         install_policy: ProjectArchiveInstallPolicy,
+        package_bindings: Option<&std::collections::BTreeMap<PathBuf, PathBuf>>,
         runtime_lease: Arc<ProjectRuntimeLease>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
@@ -737,7 +765,7 @@ impl AppState {
         let runtime_root = runtime_lease.runtime_root().to_path_buf();
         let mut library_generation =
             self.prepare_project_library_generation(Arc::clone(&runtime_lease))?;
-        let loaded = prepared.load_into(library_generation.root())?;
+        let mut loaded = prepared.load_into(library_generation.root())?;
         if loaded.document.project_id != prepared_project_id {
             anyhow::bail!("项目归属在打开期间发生变化，拒绝安装新的素材库代际与项目会话");
         }
@@ -755,6 +783,19 @@ impl AppState {
             validate_exact_endurance_project(&loaded, expected_sequence_id)?;
         }
         let asset_library = library_generation.open()?;
+        if let Some(bindings) = package_bindings {
+            super::project_packaging::rebind_document_resources(&mut loaded.document, bindings)?;
+            asset_library.rebind_verified_package_sources(
+                &bindings
+                    .iter()
+                    .map(|(source, target)| (source.clone(), target.clone()))
+                    .collect::<Vec<_>>(),
+            )?;
+            super::project_packaging::ensure_package_asset_sources_rebound(
+                &asset_library,
+                bindings,
+            )?;
+        }
         let session = if install_policy.opens_canonical_project() {
             AuthoringSession::open_saved(
                 loaded.document,
@@ -771,6 +812,18 @@ impl AppState {
             )
         }
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let portable_destination =
+            if matches!(install_policy, ProjectArchiveInstallPolicy::PortableImport) {
+                Some(
+                    ManualProjectFileDestination::initial_create(
+                        session.session_id(),
+                        project_file.clone(),
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                )
+            } else {
+                None
+            };
         let project_id = session.project_id();
         self.retire_project_session_handoff(handoff).map_err(anyhow::Error::msg)?;
         self.retain_current_project_library_generation();
@@ -785,13 +838,14 @@ impl AppState {
         self.audio_monitoring.reset();
         self.synchronize_audio_idle_warmup_binding();
         self.project_runtime_lease = Some(runtime_lease);
-        self.manual_project_file_destination = None;
+        self.manual_project_file_destination = portable_destination;
         self.manual_project_file_applied_request = None;
         self.autosave_in_flight_request = None;
         self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         self.dragging_asset = None;
@@ -885,6 +939,7 @@ impl AppState {
                     canonical,
                     &mut archive_handle,
                     ProjectArchiveInstallPolicy::ExactEnduranceFixture { expected_sequence_id },
+                    None,
                     &mut handoff,
                 )
             })();
@@ -899,6 +954,31 @@ impl AppState {
         let mut handoff = self.begin_project_session_handoff()?;
         let result =
             self.open_project_archive(project_file.clone(), project_file.as_path(), &mut handoff);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
+        }
+    }
+
+    /// Open a verified portable package as an unsaved editable Project.
+    ///
+    /// The first Save creates a sibling `.mdp` and never overwrites the package.
+    pub fn open_portable_project_package(&mut self, package_root: PathBuf) -> anyhow::Result<()> {
+        let manifest = super::project_packaging::verify_portable_project_package(&package_root)?;
+        let package_root = mondrian_assets::canonical_native_path(&package_root)?;
+        let bindings = super::project_packaging::package_source_bindings(&package_root, &manifest)?;
+        let project_file = available_package_import_destination(&package_root)?;
+        let mut handoff = self.begin_project_session_handoff()?;
+        let result = (|| {
+            let mut archive = fs::File::open(package_root.join("project.mdp"))?;
+            self.open_project_archive_from_open_file(
+                project_file,
+                &mut archive,
+                ProjectArchiveInstallPolicy::PortableImport,
+                Some(&bindings),
+                &mut handoff,
+            )
+        })();
         match result {
             Ok(()) => Ok(()),
             Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
@@ -1034,6 +1114,8 @@ impl AppState {
         let mut changed = self.retired_project_libraries.len() != retired_before;
         for completion in completions {
             changed = true;
+            let notification_key = format!("manual_save:{}", completion.request_id.get());
+            let autosave_notification_key = format!("autosave:{}", completion.request_id.get());
             let purpose = completion.purpose.clone();
             let result = self.apply_persistence_completion(completion);
             match (purpose, result) {
@@ -1042,6 +1124,13 @@ impl AppState {
                     Ok(PersistenceCompletionDisposition::Applied),
                 ) => {
                     self.set_status_hint("项目已耐久保存", false);
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Success,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-complete",
+                        ),
+                    );
                 }
                 (
                     ProjectPersistencePurpose::Manual { .. },
@@ -1050,6 +1139,14 @@ impl AppState {
                     self.set_status_hint(
                         format!("项目已耐久保存，但恢复点清理失败：{reason}"),
                         true,
+                    );
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Warning,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-warning",
+                        )
+                        .with_text("reason", reason),
                     );
                 }
                 (
@@ -1067,12 +1164,36 @@ impl AppState {
                         format!("自动保存完成，但恢复点清理状态异常：{reason}"),
                         true,
                     );
+                    self.notifications.publish(
+                        autosave_notification_key,
+                        super::notifications::AppNotificationSeverity::Warning,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-autosave-warning",
+                        )
+                        .with_text("reason", reason),
+                    );
                 }
                 (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
                     self.set_status_hint(format!("保存项目失败：{error}"), true);
+                    self.notifications.publish(
+                        notification_key,
+                        super::notifications::AppNotificationSeverity::Error,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-save-failed",
+                        )
+                        .with_text("reason", error.to_string()),
+                    );
                 }
                 (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
                     self.set_status_hint(format!("自动保存失败：{error}"), true);
+                    self.notifications.publish(
+                        autosave_notification_key,
+                        super::notifications::AppNotificationSeverity::Error,
+                        super::notifications::AppNotificationMessage::new(
+                            "notification-autosave-failed",
+                        )
+                        .with_text("reason", error.to_string()),
+                    );
                 }
             }
         }
@@ -1594,6 +1715,7 @@ impl AppState {
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         Ok(())
@@ -2928,6 +3050,10 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(!state.authoring.as_ref().expect("session").is_current_autosaved());
+        assert!(state.notifications.iter().any(|notification| {
+            notification.message.id == "notification-autosave-failed"
+                && notification.severity == super::notifications::AppNotificationSeverity::Error
+        }));
 
         fs::remove_file(runtime_root.join("autosave")).expect("remove blocker");
         state.submit_autosave(2, 7).expect("retry autosave");
@@ -2938,6 +3064,42 @@ mod persistence_lifecycle_tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(state.authoring.as_ref().expect("session").is_current_autosaved());
+        state.close_project().expect("close project");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn polled_manual_save_emits_one_terminal_notification() {
+        let root = unique_root("manual-notification");
+        let mut state = test_state(&root);
+        state.request_project_save().expect("submit manual save");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state
+            .notifications
+            .iter()
+            .all(|notification| notification.message.id != "notification-save-complete")
+        {
+            state.poll_project_persistence();
+            assert!(Instant::now() < deadline, "manual save did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            state
+                .notifications
+                .iter()
+                .filter(|notification| notification.message.id == "notification-save-complete")
+                .count(),
+            1
+        );
+        state.poll_project_persistence();
+        assert_eq!(
+            state
+                .notifications
+                .iter()
+                .filter(|notification| notification.message.id == "notification-save-complete")
+                .count(),
+            1
+        );
         state.close_project().expect("close project");
         let _ = fs::remove_dir_all(root);
     }

@@ -10,6 +10,7 @@ use mondrian_ui_core::{EventResult, Widget};
 
 use crate::app_ui::about_dialog::AboutDialog;
 use crate::app_ui::interpret_asset_dialog::{AppUiInterpretAssetDraft, InterpretAssetDialog};
+use crate::app_ui::localization::AppUiLocale;
 use crate::app_ui::new_project_dialog::{AppUiNewProjectDraft, NewProjectDialog};
 use crate::app_ui::pending_close_dialog::{PendingCloseDialog, PendingCloseDialogAction};
 use crate::app_ui::preferences_dialog::{
@@ -33,13 +34,13 @@ pub enum ShellModal {
 
 impl ShellModal {
     /// Build the product about modal.
-    pub fn about() -> Self {
-        Self::About(Box::default())
+    pub fn about(locale: AppUiLocale) -> Self {
+        Self::About(Box::new(AboutDialog::new(locale)))
     }
 
     /// Build the Interpret Footage modal from an initial draft.
-    pub fn interpret_asset(draft: AppUiInterpretAssetDraft) -> Self {
-        Self::InterpretAsset(Box::new(InterpretAssetDialog::new(draft)))
+    pub fn interpret_asset(draft: AppUiInterpretAssetDraft, locale: AppUiLocale) -> Self {
+        Self::InterpretAsset(Box::new(InterpretAssetDialog::new(draft, locale)))
     }
 
     /// Build the new-project modal from an initial draft.
@@ -47,9 +48,14 @@ impl ShellModal {
         Self::NewProject(Box::new(NewProjectDialog::new(draft)))
     }
 
+    /// Build the new-project modal in the selected machine-local UI language.
+    pub fn new_project_with_locale(draft: AppUiNewProjectDraft, locale: AppUiLocale) -> Self {
+        Self::NewProject(Box::new(NewProjectDialog::with_locale(draft, locale)))
+    }
+
     /// Build the pending-close confirmation modal.
-    pub fn pending_close(action: PendingCloseDialogAction) -> Self {
-        Self::PendingClose(Box::new(PendingCloseDialog::new(action)))
+    pub fn pending_close(action: PendingCloseDialogAction, locale: AppUiLocale) -> Self {
+        Self::PendingClose(Box::new(PendingCloseDialog::new(action, locale)))
     }
 
     /// Build the product preferences modal.
@@ -67,14 +73,30 @@ impl ShellModal {
         Self::ProjectSettings(Box::new(ProjectSettingsDialog::new(draft)))
     }
 
+    /// Build project color settings in the selected machine-local UI language.
+    pub fn project_settings_with_locale(
+        draft: AppUiProjectSettingsDraft,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::ProjectSettings(Box::new(ProjectSettingsDialog::with_locale(draft, locale)))
+    }
+
     /// Build the startup recovery inspection modal.
-    pub fn recovery(model: RecoveryConfirmationModel) -> Self {
-        Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model)))
+    pub fn recovery(model: RecoveryConfirmationModel, locale: AppUiLocale) -> Self {
+        Self::Recovery(Box::new(RecoveryConfirmationDialog::new(model, locale)))
     }
 
     /// Build the active-sequence settings modal.
     pub fn sequence_settings(draft: AppUiSequenceSettingsDraft) -> Self {
         Self::SequenceSettings(Box::new(SequenceSettingsDialog::new(draft)))
+    }
+
+    /// Build the sequence-settings modal in the selected machine-local UI language.
+    pub fn sequence_settings_with_locale(
+        draft: AppUiSequenceSettingsDraft,
+        locale: AppUiLocale,
+    ) -> Self {
+        Self::SequenceSettings(Box::new(SequenceSettingsDialog::with_locale(draft, locale)))
     }
 
     /// Access the product about modal when it is active.

@@ -6,88 +6,169 @@
 //! `String` or `&'static str`.
 
 use crate::timeline_data::{AlphaInterpretation, FieldOrder, PixelAspectRatio};
-use crate::types::{ColorSpace, Rational};
+use crate::types::{BlendMode, ColorSpace, Rational};
 
 /// Options for the blend-mode dropdown.
 #[derive(Debug, Clone, Copy)]
 pub struct BlendModeOption {
+    /// Chinese fallback label for the UI catalog.
     pub label: &'static str,
+    /// Stable authoring value used by the Clip property schema.
     pub value: &'static str,
-}
-
-impl BlendModeOption {
-    // Helpers removed — struct literals are const-compatible in array expressions.
+    /// Typed Clip override; `None` inherits the owning Track's mode.
+    pub mode: Option<BlendMode>,
 }
 
 /// All blend mode options in a canonical display order.
 pub fn blend_mode_options() -> &'static [BlendModeOption] {
     &[
-        BlendModeOption { label: "继承轨道", value: "inherit" },
-        BlendModeOption { label: "正常", value: "Normal" },
-        BlendModeOption { label: "溶解", value: "Dissolve" },
-        BlendModeOption { label: "变暗", value: "Darken" },
-        BlendModeOption { label: "正片叠底", value: "Multiply" },
-        BlendModeOption { label: "颜色加深", value: "ColorBurn" },
-        BlendModeOption { label: "线性加深", value: "LinearBurn" },
-        BlendModeOption { label: "深色", value: "DarkerColor" },
-        BlendModeOption { label: "变亮", value: "Lighten" },
-        BlendModeOption { label: "滤色", value: "Screen" },
-        BlendModeOption { label: "颜色减淡", value: "ColorDodge" },
         BlendModeOption {
-            label: "线性减淡(添加)", value: "LinearDodge"
+            label: "继承轨道", value: "inherit", mode: None
         },
-        BlendModeOption { label: "浅色", value: "LighterColor" },
-        BlendModeOption { label: "叠加", value: "Overlay" },
-        BlendModeOption { label: "柔光", value: "SoftLight" },
-        BlendModeOption { label: "强光", value: "HardLight" },
-        BlendModeOption { label: "亮光", value: "VividLight" },
-        BlendModeOption { label: "线性光", value: "LinearLight" },
-        BlendModeOption { label: "点光", value: "PinLight" },
-        BlendModeOption { label: "强混合", value: "HardMix" },
-        BlendModeOption { label: "差值", value: "Difference" },
-        BlendModeOption { label: "排除", value: "Exclusion" },
-        BlendModeOption { label: "相减", value: "Subtract" },
-        BlendModeOption { label: "相除", value: "Divide" },
-        BlendModeOption { label: "色相", value: "Hue" },
-        BlendModeOption { label: "饱和度", value: "Saturation" },
-        BlendModeOption { label: "颜色", value: "Color" },
-        BlendModeOption { label: "发光度", value: "Luminosity" },
+        BlendModeOption {
+            label: "正常",
+            value: "Normal",
+            mode: Some(BlendMode::Normal),
+        },
+        BlendModeOption {
+            label: "溶解",
+            value: "Dissolve",
+            mode: Some(BlendMode::Dissolve),
+        },
+        BlendModeOption {
+            label: "变暗",
+            value: "Darken",
+            mode: Some(BlendMode::Darken),
+        },
+        BlendModeOption {
+            label: "正片叠底",
+            value: "Multiply",
+            mode: Some(BlendMode::Multiply),
+        },
+        BlendModeOption {
+            label: "颜色加深",
+            value: "ColorBurn",
+            mode: Some(BlendMode::ColorBurn),
+        },
+        BlendModeOption {
+            label: "线性加深",
+            value: "LinearBurn",
+            mode: Some(BlendMode::LinearBurn),
+        },
+        BlendModeOption {
+            label: "深色",
+            value: "DarkerColor",
+            mode: Some(BlendMode::DarkerColor),
+        },
+        BlendModeOption {
+            label: "变亮",
+            value: "Lighten",
+            mode: Some(BlendMode::Lighten),
+        },
+        BlendModeOption {
+            label: "滤色",
+            value: "Screen",
+            mode: Some(BlendMode::Screen),
+        },
+        BlendModeOption {
+            label: "颜色减淡",
+            value: "ColorDodge",
+            mode: Some(BlendMode::ColorDodge),
+        },
+        BlendModeOption {
+            label: "线性减淡(添加)",
+            value: "LinearDodge",
+            mode: Some(BlendMode::LinearDodge),
+        },
+        BlendModeOption {
+            label: "浅色",
+            value: "LighterColor",
+            mode: Some(BlendMode::LighterColor),
+        },
+        BlendModeOption {
+            label: "叠加",
+            value: "Overlay",
+            mode: Some(BlendMode::Overlay),
+        },
+        BlendModeOption {
+            label: "柔光",
+            value: "SoftLight",
+            mode: Some(BlendMode::SoftLight),
+        },
+        BlendModeOption {
+            label: "强光",
+            value: "HardLight",
+            mode: Some(BlendMode::HardLight),
+        },
+        BlendModeOption {
+            label: "亮光",
+            value: "VividLight",
+            mode: Some(BlendMode::VividLight),
+        },
+        BlendModeOption {
+            label: "线性光",
+            value: "LinearLight",
+            mode: Some(BlendMode::LinearLight),
+        },
+        BlendModeOption {
+            label: "点光",
+            value: "PinLight",
+            mode: Some(BlendMode::PinLight),
+        },
+        BlendModeOption {
+            label: "强混合",
+            value: "HardMix",
+            mode: Some(BlendMode::HardMix),
+        },
+        BlendModeOption {
+            label: "差值",
+            value: "Difference",
+            mode: Some(BlendMode::Difference),
+        },
+        BlendModeOption {
+            label: "排除",
+            value: "Exclusion",
+            mode: Some(BlendMode::Exclusion),
+        },
+        BlendModeOption {
+            label: "相减",
+            value: "Subtract",
+            mode: Some(BlendMode::Subtract),
+        },
+        BlendModeOption {
+            label: "相除",
+            value: "Divide",
+            mode: Some(BlendMode::Divide),
+        },
+        BlendModeOption {
+            label: "色相",
+            value: "Hue",
+            mode: Some(BlendMode::Hue),
+        },
+        BlendModeOption {
+            label: "饱和度",
+            value: "Saturation",
+            mode: Some(BlendMode::Saturation),
+        },
+        BlendModeOption {
+            label: "颜色",
+            value: "Color",
+            mode: Some(BlendMode::Color),
+        },
+        BlendModeOption {
+            label: "发光度",
+            value: "Luminosity",
+            mode: Some(BlendMode::Luminosity),
+        },
     ]
 }
 
 /// Human-readable label for a blend mode value (including "inherit").
 pub fn blend_mode_display_label(value: &str) -> String {
-    match value {
-        "inherit" => "继承轨道".to_string(),
-        "Normal" => "正常".to_string(),
-        "Dissolve" => "溶解".to_string(),
-        "Multiply" => "正片叠底".to_string(),
-        "Screen" => "滤色".to_string(),
-        "Overlay" => "叠加".to_string(),
-        "Darken" => "变暗".to_string(),
-        "Lighten" => "变亮".to_string(),
-        "ColorDodge" => "颜色减淡".to_string(),
-        "ColorBurn" => "颜色加深".to_string(),
-        "HardLight" => "强光".to_string(),
-        "SoftLight" => "柔光".to_string(),
-        "Difference" => "差值".to_string(),
-        "Exclusion" => "排除".to_string(),
-        "Subtract" => "相减".to_string(),
-        "DarkerColor" => "深色".to_string(),
-        "LighterColor" => "浅色".to_string(),
-        "LinearBurn" => "线性加深".to_string(),
-        "LinearDodge" => "线性减淡(添加)".to_string(),
-        "VividLight" => "亮光".to_string(),
-        "LinearLight" => "线性光".to_string(),
-        "PinLight" => "点光".to_string(),
-        "HardMix" => "强混合".to_string(),
-        "Divide" => "相除".to_string(),
-        "Hue" => "色相".to_string(),
-        "Saturation" => "饱和度".to_string(),
-        "Color" => "颜色".to_string(),
-        "Luminosity" => "发光度".to_string(),
-        other => other.to_string(),
-    }
+    blend_mode_options()
+        .iter()
+        .find(|option| option.value == value)
+        .map_or_else(|| value.to_owned(), |option| option.label.to_owned())
 }
 
 /// Mask operation dropdown options.
@@ -220,6 +301,24 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(values.len(), unique.len(), "duplicate blend mode values");
+    }
+
+    #[test]
+    fn blend_mode_options_bind_unique_typed_modes_to_stable_values() {
+        let options = blend_mode_options();
+        let unique = options
+            .iter()
+            .map(|option| option.mode)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), options.len());
+        assert_eq!(options[0].mode, None);
+        for option in options.iter().skip(1) {
+            let mode = option.mode.expect("explicit mode");
+            assert_eq!(
+                serde_json::to_value(mode).expect("serialize mode"),
+                option.value
+            );
+        }
     }
 
     #[test]

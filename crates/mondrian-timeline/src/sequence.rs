@@ -3693,6 +3693,7 @@ mod tests {
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
             vendor: Some("Example Audio".to_owned()),
             schema_version: 4,
+            binary_sha256: Some([9; 32]),
         };
         vst3.opaque_state = Some(AuthoringList::from(vec![0x5a; 4096]));
         let audio_track_id = sequence.audio_tracks[0].id;
@@ -3710,6 +3711,7 @@ mod tests {
         clap.definition = AudioProcessorDefinitionRef::Clap {
             plugin_id: "com.example.clap.saturator".to_owned(),
             schema_version: 2,
+            binary_sha256: None,
         };
         sequence
             .audio_program

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
@@ -282,6 +283,7 @@ pub struct FolderRecord {
 pub struct AssetLibrary {
     root: PathBuf,
     db: Arc<Mutex<Connection>>,
+    coupled_revision_high_water: AtomicU64,
 }
 
 /// Identity-bound online SQLite backup owned by one persistence request.
@@ -372,6 +374,103 @@ fn validate_folder_reparent(
 }
 
 impl AssetLibrary {
+    /// Rebind byte-identical file sources while opening a verified portable package.
+    ///
+    /// The caller must first verify each bundled file against the package
+    /// manifest. This transaction preserves Asset IDs, probe facts, and logical
+    /// audio components while refreshing only filesystem revision evidence.
+    /// It is intended for a private, not-yet-installed Library generation.
+    pub fn rebind_verified_package_sources(&self, bindings: &[(PathBuf, PathBuf)]) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        let mut replacements = Vec::with_capacity(bindings.len());
+        for (source, bundled) in bindings {
+            let source_text =
+                persisted_path_text(source).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid package source path: {error}"),
+                })?;
+            if !seen.insert(source_text.clone()) {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("duplicate package source path: {}", source.display()),
+                });
+            }
+            let target =
+                ordinary_canonical_path(bundled).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid packaged file {}: {error}", bundled.display()),
+                })?;
+            let target_text =
+                persisted_path_text(&target).map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid packaged file path: {error}"),
+                })?;
+            let fingerprint = MediaFileFingerprint::capture(&target);
+            replacements.push((source_text, target_text, fingerprint));
+        }
+        let mut db = self.db.lock();
+        let transaction = db
+            .transaction()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        for (source, target, fingerprint) in replacements {
+            let rows = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT id, metadata, source_fingerprint, audio_components FROM assets \
+                     WHERE path = ?1 AND asset_type IN ('video', 'still_image', 'audio')",
+                    )
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+                let rows = statement
+                    .query_map([&source], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?
+            };
+            for (id, metadata_raw, old_fingerprint, catalog_raw) in rows {
+                let mut catalog: AssetAudioComponentCatalog = serde_json::from_str(&catalog_raw)?;
+                let new_fingerprint = if let Some(old_fingerprint) = old_fingerprint {
+                    let probe: MediaInfo = serde_json::from_str(&metadata_raw)?;
+                    let admitted: MediaFileFingerprint = serde_json::from_str(&old_fingerprint)?;
+                    if !admitted.authorizes_reuse()
+                        || admitted.len != Some(probe.file_size)
+                        || catalog.source_fingerprint != admitted
+                    {
+                        None
+                    } else if !fingerprint.authorizes_reuse()
+                        || fingerprint.len != Some(probe.file_size)
+                    {
+                        return Err(MondrianError::AssetDbError {
+                            reason: format!(
+                                "packaged Asset {id} cannot retain verified probe evidence"
+                            ),
+                        });
+                    } else {
+                        catalog.source_fingerprint = fingerprint;
+                        Some(serde_json::to_string(&fingerprint)?)
+                    }
+                } else {
+                    None
+                };
+                transaction.execute(
+                    "UPDATE assets SET path = ?1, source_fingerprint = ?2, audio_components = ?3 WHERE id = ?4",
+                    rusqlite::params![target, new_fingerprint, serde_json::to_string(&catalog)?, id],
+                ).map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+            }
+            if MediaFileFingerprint::capture(Path::new(&target)) != fingerprint {
+                return Err(MondrianError::AssetDbError {
+                    reason: format!("packaged source changed during Library rebinding: {target}"),
+                });
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        Ok(())
+    }
+
     /// 打开或创建素材库（root 为库根目录）
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
         let root = ordinary_absolute_path(&root).map_err(|error| MondrianError::AssetDbError {
@@ -392,7 +491,11 @@ impl AssetLibrary {
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: format!("{e:#}") })?;
 
         info!("Asset library opened at {:?}", root);
-        Ok(Arc::new(Self { root, db: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            root,
+            db: Arc::new(Mutex::new(conn)),
+            coupled_revision_high_water: AtomicU64::new(0),
+        }))
     }
 
     /// Path of the live project-library database.
@@ -434,6 +537,14 @@ impl AssetLibrary {
         }
         let source = self.db.lock();
         let actual_revision = connection_revision(&source)?;
+        let coupled_revision = self.coupled_revision_high_water.load(Ordering::Acquire);
+        if expected_revision < coupled_revision {
+            return Err(MondrianError::AssetDbError {
+                reason: format!(
+                    "author snapshot predates coupled Asset/Timeline publication: captured {expected_revision}, coupled revision {coupled_revision}"
+                ),
+            });
+        }
         if actual_revision < expected_revision {
             return Err(MondrianError::AssetDbError {
                 reason: format!(
@@ -441,10 +552,9 @@ impl AssetLibrary {
                 ),
             });
         }
-        // Forward drift is safe and must not fail the save: imports only add
-        // assets and retirement is membership-only, so a newer snapshot remains
-        // a superset of the revision the author snapshot observed. Rejecting
-        // forward drift made every save race an in-flight import batch.
+        // Ordinary Asset Library forward drift remains safe. A coupled
+        // Asset/Timeline publication is fenced above because the older author
+        // snapshot would omit the Clip while including its new Asset.
         let _ = expected_revision;
         let staging =
             OwnedPublicationFile::create_sibling(&sibling_anchor, "asset-library-snapshot")
@@ -549,6 +659,62 @@ impl AssetLibrary {
         candidate: AssetMediaProbeCandidate,
         folder_id: Option<&str>,
     ) -> Result<AssetId> {
+        self.commit_media_probe_transaction(
+            candidate,
+            folder_id,
+            false,
+            false,
+            |_| Ok(()),
+            std::convert::identity,
+        )
+        .map(|(asset_id, ())| asset_id)
+    }
+
+    /// Keep a probed Asset unpublished until a dependent operation succeeds.
+    ///
+    /// The callback receives the Asset record inside the SQLite transaction.
+    /// It must not call this library again, since the database lock is held.
+    /// A callback error rolls back both a new row and any changes to an
+    /// existing row at the same canonical path.
+    pub fn commit_media_probe_with<T>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+    ) -> Result<(AssetId, T)> {
+        self.commit_media_probe_transaction(
+            candidate,
+            folder_id,
+            true,
+            true,
+            operation,
+            std::convert::identity,
+        )
+    }
+
+    /// Commit a coupled Asset mutation and install an already prepared author
+    /// edit before releasing the Library lock. `install` must be infallible and
+    /// must not re-enter this Library. Other readers and save snapshots then
+    /// cannot observe a committed Asset before its author edit is installed.
+    pub fn commit_media_probe_with_install<T, U>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+        install: impl FnOnce(T) -> U,
+    ) -> Result<(AssetId, U)> {
+        self.commit_media_probe_transaction(candidate, folder_id, true, true, operation, install)
+    }
+
+    fn commit_media_probe_transaction<T, U>(
+        &self,
+        candidate: AssetMediaProbeCandidate,
+        folder_id: Option<&str>,
+        coupled: bool,
+        preserve_existing_folder: bool,
+        operation: impl FnOnce(&AssetRecord) -> Result<T>,
+        install: impl FnOnce(T) -> U,
+    ) -> Result<(AssetId, U)> {
         let AssetMediaProbeCandidate {
             path: canonical_path,
             path_text,
@@ -629,7 +795,8 @@ impl AssetLibrary {
              ON CONFLICT(path) DO UPDATE SET \
                 name = excluded.name, \
                 asset_type = excluded.asset_type, \
-                folder_id = excluded.folder_id, \
+                folder_id = CASE WHEN ?12 AND excluded.folder_id IS NULL \
+                    THEN assets.folder_id ELSE excluded.folder_id END, \
                 metadata = excluded.metadata, \
                 source_fingerprint = excluded.source_fingerprint, \
                 audio_components = excluded.audio_components, \
@@ -646,15 +813,34 @@ impl AssetLibrary {
                     source_fingerprint_json,
                     interpretation_json,
                     audio_components_json,
-                    now
+                    now,
+                    preserve_existing_folder,
                 ],
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let asset = transaction
+            .query_row(
+                "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
+                 , interpretation, audio_components, source_fingerprint, retired_at \
+                 FROM assets WHERE id = ?1 LIMIT 1",
+                rusqlite::params![id.0.to_string()],
+                parse_asset_row,
+            )
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let value = operation(&asset)?;
+        let coupled_revision = if coupled {
+            Some(connection_revision(&transaction)?)
+        } else {
+            None
+        };
         transaction
             .commit()
             .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        if let Some(revision) = coupled_revision {
+            self.coupled_revision_high_water.store(revision, Ordering::Release);
+        }
 
-        Ok(id)
+        Ok((id, install(value)))
     }
 
     pub fn create_adjustment_layer_asset(&self, name: Option<&str>) -> Result<AssetId> {
@@ -1733,6 +1919,34 @@ mod tests {
         lib.commit_media_probe(probe_candidate(path, info), None).expect("commit probe")
     }
 
+    #[test]
+    fn packaged_source_rebind_preserves_admitted_probe_and_asset_identity() {
+        let library = open_test_library();
+        let root = tempfile::tempdir().expect("media root");
+        let original = root.path().join("original.mp4");
+        let packaged = root.path().join("packaged.mp4");
+        std::fs::write(&original, [0u8]).expect("original media");
+        std::fs::copy(&original, &packaged).expect("packaged media");
+        let asset_id = commit_info(&library, &original, lightweight_video_info(&original));
+        let before = library.get_asset(asset_id).expect("lookup").expect("Asset");
+        assert!(before.media_probe().is_some());
+
+        library
+            .rebind_verified_package_sources(&[(
+                before.file_path().expect("source path").to_path_buf(),
+                packaged.clone(),
+            )])
+            .expect("rebind package source");
+
+        let after = library.get_asset(asset_id).expect("lookup").expect("Asset");
+        assert_eq!(
+            after.file_path(),
+            Some(ordinary_canonical_path(&packaged).expect("canonical").as_path())
+        );
+        assert!(after.media_probe().is_some());
+        assert!(after.source_fingerprint().is_some());
+    }
+
     fn lightweight_video_info(_path: &Path) -> MediaInfo {
         MediaInfo {
             duration: Duration::from_secs(1),
@@ -2215,6 +2429,107 @@ mod tests {
             AssetLibraryMembership::Visible
         );
         assert_eq!(lib.list_assets().expect("visible list").len(), 1);
+    }
+
+    #[test]
+    fn dependent_probe_failure_rolls_back_new_asset() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("not-placed.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let observed = std::cell::Cell::new(None);
+
+        let result = lib.commit_media_probe_with(
+            probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+            None,
+            |asset| {
+                observed.set(Some(asset.id));
+                Err::<(), _>(MondrianError::Cancelled)
+            },
+        );
+
+        assert!(matches!(result, Err(MondrianError::Cancelled)));
+        assert!(lib.list_assets().expect("asset list after rollback").is_empty());
+        assert!(lib
+            .get_asset(observed.get().expect("staged identity"))
+            .expect("query")
+            .is_none());
+    }
+
+    #[test]
+    fn dependent_probe_failure_preserves_existing_asset_folder_and_membership() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("existing.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let original_id = commit_info(&lib, &media_path, lightweight_audio_info(&media_path));
+        let folder_id = lib.create_folder("Destination", None).expect("folder");
+        lib.retire_assets(&[original_id]).expect("retire");
+        let before = lib.get_asset(original_id).expect("query").expect("original");
+
+        let result = lib.commit_media_probe_with(
+            probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+            Some(&folder_id),
+            |asset| {
+                assert_eq!(asset.id, original_id);
+                assert_eq!(asset.folder_id.as_deref(), Some(folder_id.as_str()));
+                assert_eq!(asset.membership, AssetLibraryMembership::Visible);
+                Err::<(), _>(MondrianError::Cancelled)
+            },
+        );
+
+        assert!(matches!(result, Err(MondrianError::Cancelled)));
+        let after = lib.get_asset(original_id).expect("query").expect("original");
+        assert_eq!(after.folder_id, before.folder_id);
+        assert_eq!(after.membership, before.membership);
+        assert!(lib.list_assets().expect("hidden list").is_empty());
+    }
+
+    #[test]
+    fn coupled_probe_rejects_a_save_snapshot_captured_before_timeline_placement() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("placed.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let before = lib.database_revision().expect("old revision");
+        let (asset_id, ()) = lib
+            .commit_media_probe_with(
+                probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+                None,
+                |_| Ok(()),
+            )
+            .expect("coupled publication");
+        let snapshot_anchor = media_dir.path().join("snapshot.db");
+        assert!(lib.snapshot_database(before, &snapshot_anchor).is_err());
+        let current = lib.database_revision().expect("current revision");
+        assert!(current > before);
+        assert!(lib.snapshot_database(current, &snapshot_anchor).is_ok());
+        assert!(lib.get_asset(asset_id).expect("query").is_some());
+    }
+
+    #[test]
+    fn coupled_reimport_keeps_existing_folder_when_drop_has_no_folder_target() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("already-organized.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let original_id = commit_info(&lib, &media_path, lightweight_audio_info(&media_path));
+        let folder_id = lib.create_folder("Organized", None).expect("folder");
+        lib.move_asset_to_folder(original_id, Some(&folder_id)).expect("move");
+
+        let (placed_id, ()) = lib
+            .commit_media_probe_with(
+                probe_candidate(&media_path, lightweight_audio_info(&media_path)),
+                None,
+                |_| Ok(()),
+            )
+            .expect("coupled reimport");
+
+        assert_eq!(placed_id, original_id);
+        assert_eq!(
+            lib.get_asset(original_id).expect("query").expect("asset").folder_id.as_deref(),
+            Some(folder_id.as_str())
+        );
     }
 
     #[test]

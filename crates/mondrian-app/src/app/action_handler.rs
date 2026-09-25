@@ -41,7 +41,7 @@ use mondrian_timeline::audio::AudioComponentSource;
 #[cfg(test)]
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 enum AssetLibrarySubject {
@@ -58,7 +58,13 @@ impl AppState {
     pub fn dispatch_action(&mut self, action: mondrian_editor_state::Action) -> Result<()> {
         use mondrian_editor_state::Action;
 
-        if self.project_close_blocks_actions() {
+        let is_portable_cancel = matches!(
+            &action,
+            Action::Custom { namespace, name, .. }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT
+        );
+        if self.project_close_blocks_actions() && !is_portable_cancel {
             return Err(MondrianError::ActionNotExecuted {
                 action: "project_lifecycle_handoff".to_owned(),
                 reason: "项目正在安全关闭，或持久化所有权未能证明；作者操作保持冻结".to_owned(),
@@ -204,6 +210,29 @@ impl AppState {
             }
             Action::ImportMedia(paths) => self.import_media_from_action(paths),
 
+            Action::Custom { namespace, name, payload }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_EXPORT_PORTABLE_PACKAGE =>
+            {
+                let target: PathBuf = serde_json::from_value(payload).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "export_portable_package".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                self.request_portable_project_export(target).map_err(MondrianError::Other)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
+                    && name == crate::app::ui_actions::APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT =>
+            {
+                require_action_executed(
+                    self.cancel_portable_project_export(),
+                    "cancel_portable_package_export",
+                    "当前没有正在运行的项目打包",
+                )
+            }
+
             Action::Custom { namespace, name, .. } => {
                 if let Some(error) = ProductAction::unknown_external_action_error(&namespace, &name)
                 {
@@ -254,7 +283,24 @@ impl AppState {
         if path.as_os_str().is_empty() {
             return Err(action_not_executed("open_project", "项目路径不能为空"));
         }
-        self.open_project_file(path).map_err(|err| {
+        let package_root = if path.is_dir()
+            && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
+        {
+            Some(path.clone())
+        } else if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("project.mdp")) {
+            path.parent()
+                .filter(|parent| {
+                    parent.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
+                })
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
+        let result = match package_root {
+            Some(root) => self.open_portable_project_package(root),
+            None => self.open_project_file(path),
+        };
+        result.map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(format!("打开项目失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
@@ -1220,6 +1266,7 @@ impl AppState {
                 self.create_basic_title_at_playhead().map(|_| ())
             }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
+            TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {
                 self.insert_asset_from_ui(*payload).map(|_| ())
             }
@@ -1297,6 +1344,9 @@ impl AppState {
         action: VisualEffectProductAction,
     ) -> Result<()> {
         match action {
+            VisualEffectProductAction::InstallOpenFxBundle(payload) => {
+                self.install_openfx_bundle(payload.path)
+            }
             VisualEffectProductAction::AddToClip(payload) => {
                 let effect_id = self.add_effect_to_clip(payload.clip_id, payload.effect_type)?;
                 self.select_effect_for_action(
@@ -1344,6 +1394,46 @@ impl AppState {
                 self.set_effect_parameter_value(*payload)?,
                 "visual_effect_set_parameter_value",
                 "Effect parameter already has the requested value at the current author time",
+            ),
+            VisualEffectProductAction::EditNumericCurve(payload) => {
+                let edit = super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)?;
+                let clip_id = payload.clip_id;
+                let property = payload.parameter.clone();
+                let removing = matches!(&payload.edit, ClipCurveEditPayload::Remove { .. });
+                let outcome = self.edit_effect_numeric_curve(
+                    payload.clip_id,
+                    payload.effect_id,
+                    payload.parameter,
+                    edit,
+                )?;
+                require_action_executed(
+                    outcome.changed,
+                    "visual_effect_edit_numeric_curve",
+                    "Effect curve already contains the requested key state",
+                )?;
+                let key_selection = crate::app::AnimationKeyframeSelection {
+                    property: crate::app::AnimationPropertySelection {
+                        clip_id,
+                        property: property.clone(),
+                    },
+                    keyframe_id: outcome.keyframe_id,
+                };
+                if removing {
+                    self.animation_selection.selected_keyframes.remove(&key_selection);
+                    self.set_active_animation_property(clip_id, property);
+                } else {
+                    self.select_animation_keyframe_only(key_selection);
+                }
+                Ok(())
+            }
+            VisualEffectProductAction::ToggleCurrentKey(payload) => require_action_executed(
+                self.toggle_effect_current_key(
+                    payload.clip_id,
+                    payload.effect_id,
+                    payload.parameter,
+                )?,
+                "visual_effect_toggle_current_key",
+                "Effect parameter key was not changed",
             ),
         }
     }
@@ -1436,6 +1526,11 @@ impl AppState {
                 self.set_clip_solid_color_by_id(payload.clip_id, payload.color)?,
                 "clip_set_solid_color",
                 "Solid Color Clip already has the requested source color",
+            ),
+            ClipProductAction::SetBlendMode(payload) => require_action_executed(
+                self.set_clip_blend_mode_by_id(payload.clip_id, payload.blend_mode)?,
+                "clip_set_blend_mode",
+                "Video Clip already has the requested blend mode",
             ),
             ClipProductAction::SetRate(payload) => require_action_executed(
                 self.set_clip_rate_from_action(
@@ -1816,9 +1911,11 @@ fn write_minimal_wav(path: &std::path::Path) {
 #[cfg(test)]
 fn poll_media_imports_until_idle(state: &mut AppState) {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while state.pending_media_import_batches() > 0 {
+    while state.pending_media_import_batches() > 0 || !state.pending_timeline_file_drops.is_empty()
+    {
         state.poll_media_imports();
-        if state.pending_media_import_batches() == 0 {
+        if state.pending_media_import_batches() == 0 && state.pending_timeline_file_drops.is_empty()
+        {
             return;
         }
         assert!(
@@ -1922,19 +2019,20 @@ mod tests {
         assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action,
-        audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_enabled_action,
-        clip_set_solid_color_action, clip_write_parameter_values_action, export_cancel_action,
-        export_clear_terminal_history_action, export_edit_draft_action, export_enqueue_action,
-        project_create_with_settings_action, project_recover_from_autosave_action,
-        project_update_color_environment_action, project_update_new_sequence_defaults_action,
-        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-        sequence_return_to_parent_action, sequence_set_active_default_action,
-        sequence_switch_active_action, sequence_update_settings_action,
-        timeline_clear_in_out_points_action, timeline_create_basic_title_action,
-        timeline_drop_asset_action, timeline_insert_asset_action,
-        timeline_link_selected_clips_action, timeline_move_clip_action,
-        timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
-        timeline_seek_action, timeline_seek_with_source_action, timeline_select_clip_action,
+        audio_component_edit_action, clip_edit_numeric_curve_action, clip_set_blend_mode_action,
+        clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
+        export_cancel_action, export_clear_terminal_history_action, export_edit_draft_action,
+        export_enqueue_action, project_create_with_settings_action,
+        project_recover_from_autosave_action, project_update_color_environment_action,
+        project_update_new_sequence_defaults_action, sequence_delete_action,
+        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
+        sequence_set_active_default_action, sequence_switch_active_action,
+        sequence_update_settings_action, timeline_clear_in_out_points_action,
+        timeline_create_basic_title_action, timeline_drop_asset_action, timeline_drop_file_action,
+        timeline_insert_asset_action, timeline_link_selected_clips_action,
+        timeline_move_clip_action, timeline_open_nested_sequence_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+        timeline_seek_with_source_action, timeline_select_clip_action,
         timeline_set_in_out_point_action, timeline_set_selected_clips_enabled_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
         timeline_unlink_selected_clips_action, track_add_action, track_move_action,
@@ -1949,17 +2047,17 @@ mod tests {
         AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
         AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
         ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-        ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-        ClipWriteParameterValuesPayload, ExportDraftEdit, ProjectCreateWithSettingsPayload,
-        ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
-        ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineDropAssetPayload, TimelineExportRequest,
-        TimelineInOutPointKind, TimelineInsertAssetPayload, TimelineSeekSource,
-        TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TrackAddKind, TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl,
-        TrackMovePayload, TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
-        ViewerSetPreviewResolutionScalePayload, VisualEffectAddToClipPayload,
-        VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
+        ClipParameterValueWrite, ClipSetBlendModePayload, ClipSetEnabledPayload,
+        ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineDropAssetPayload,
+        TimelineDropFilePayload, TimelineExportRequest, TimelineInOutPointKind,
+        TimelineInsertAssetPayload, TimelineSeekSource, TimelineSetInOutPointPayload,
+        TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind, TrackAddPayload,
+        TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload, TrackSetAuthorControlPayload,
+        TrackSetEditPolicyPayload, ViewerSetPreviewResolutionScalePayload,
+        VisualEffectAddToClipPayload, VisualEffectReorderPayload, VisualEffectSetEnabledPayload,
         VisualEffectSetParameterValuePayload, VisualEffectTargetPayload,
     };
     use mondrian_assets::AssetLibrary;
@@ -1971,7 +2069,7 @@ mod tests {
         AssetId, AudioComponentEditId, AudioSourceComponentId, ClipLinkGroupId, EffectId,
         FramePosition, MaskId, TrackId,
     };
-    use mondrian_core::{Color, ColorSpace, NormalizedCurve, NormalizedCurvePoint};
+    use mondrian_core::{BlendMode, Color, ColorSpace, NormalizedCurve, NormalizedCurvePoint};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
     use mondrian_effects::EffectType;
     use mondrian_media::info::{AudioCodec, ChannelLayout};
@@ -3246,6 +3344,56 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_external_wav_drop_imports_and_places_after_background_probe() {
+        let media_root = unique_temp_path("timeline-external-wav-media");
+        std::fs::create_dir_all(&media_root).expect("media root");
+        let media_path = media_root.join("tone.wav");
+        write_minimal_wav(&media_path);
+        let library_root = unique_temp_path("timeline-external-wav-library");
+        let library = AssetLibrary::open(library_root.clone()).expect("library");
+        let mut sequence = Sequence::new("external audio");
+        let target_track_id = sequence.add_audio_track();
+        let time_base = sequence.time_base();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library.clone()));
+        state.media_import =
+            crate::app::media_import::MediaImportExecution::with_in_process_test_backend();
+        state.media_import.bind_project(state.project_id());
+
+        state
+            .dispatch_action(timeline_drop_file_action(TimelineDropFilePayload {
+                path: media_path.clone(),
+                target_track_id,
+                position: FramePosition::new(20, time_base),
+            }))
+            .expect("queue external drop");
+        assert!(library.list_assets().expect("before probe").is_empty());
+        poll_media_imports_until_idle(&mut state);
+
+        let assets = library.list_assets().expect("assets after drop");
+        assert_eq!(
+            assets.len(),
+            1,
+            "status: {:?}; import: {:?}",
+            state.status_hint,
+            state.media_import_diagnostics()
+        );
+        let sequence = state.active_sequence().expect("sequence");
+        let target = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == target_track_id)
+            .expect("target audio track");
+        assert_eq!(target.clips.len(), 1);
+        assert_eq!(target.clips[0].library_asset_id(), Some(assets[0].id));
+        assert!(state.can_undo_action());
+
+        remove_temp_path(&media_root);
+        remove_temp_path(&library_root);
+    }
+
+    #[test]
     fn dispatch_timeline_ui_performs_atomic_professional_insert() {
         let (mut state, target_track_id, original_clip_id) = state_with_two_video_tracks();
         let secondary_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
@@ -4003,6 +4151,11 @@ mod tests {
             .status_hint
             .as_ref()
             .is_some_and(|(message, is_error)| !*is_error && message.contains("已导入 1")));
+        assert!(state.notifications.iter().any(|notification| {
+            notification.message.id == "notification-import-complete"
+                && notification.severity
+                    == crate::app::notifications::AppNotificationSeverity::Success
+        }));
 
         remove_temp_path(&library_root);
         remove_temp_path(&media_root);
@@ -4412,11 +4565,17 @@ mod tests {
             ..AssetMediaInterpretation::default()
         };
 
-        state
-            .dispatch_action(assets_set_interpretation_action(
-                AssetsSetInterpretationPayload { asset_id, interpretation },
-            ))
-            .expect("set interpretation");
+        let product = ProductAction::Asset(AssetProductAction::SetInterpretation(
+            crate::app::product_action::AssetSetInterpretationPayload { asset_id, interpretation },
+        ));
+        let external = product.clone().into_external_action();
+        assert_eq!(
+            ProductAction::decode_external(&external)
+                .expect("decode external interpretation action")
+                .expect("recognized asset action"),
+            product
+        );
+        state.dispatch_action(external).expect("set interpretation");
 
         let asset = state
             .asset_library()
@@ -4431,6 +4590,35 @@ mod tests {
             })
         );
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
+
+        let invalid = AssetMediaInterpretation {
+            camera_raw: mondrian_core::CameraRawInterpretation {
+                exposure_millistops: 5_001,
+                ..mondrian_core::CameraRawInterpretation::default()
+            },
+            ..interpretation
+        };
+        state
+            .dispatch_action(
+                ProductAction::Asset(AssetProductAction::SetInterpretation(
+                    crate::app::product_action::AssetSetInterpretationPayload {
+                        asset_id,
+                        interpretation: invalid,
+                    },
+                ))
+                .into_external_action(),
+            )
+            .expect_err("invalid RAW bounds must fail closed");
+        assert_eq!(
+            state
+                .asset_library()
+                .expect("library")
+                .get_asset(asset_id)
+                .expect("get asset")
+                .expect("asset")
+                .interpretation,
+            interpretation
+        );
 
         remove_temp_path(&library_root);
     }
@@ -6596,6 +6784,76 @@ mod tests {
     }
 
     #[test]
+    fn clip_blend_override_is_atomic_reversible_and_rejects_noop() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let set_multiply = clip_set_blend_mode_action(ClipSetBlendModePayload {
+            clip_id,
+            blend_mode: Some(BlendMode::Multiply),
+        });
+        assert!(
+            state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: Some(BlendMode::Multiply),
+                })
+            ))
+        );
+        state.dispatch_action(set_multiply.clone()).expect("set Multiply");
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            Some(BlendMode::Multiply)
+        );
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: Some(BlendMode::Multiply),
+                })
+            ))
+        );
+        assert_action_not_executed(
+            state.dispatch_action(set_multiply).expect_err("same mode is a no-op"),
+            "clip_set_blend_mode",
+        );
+        assert!(state.undo_timeline().expect("undo blend mode"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            None
+        );
+        assert!(state.redo_timeline().expect("redo blend mode"));
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            Some(BlendMode::Multiply)
+        );
+        state
+            .dispatch_action(clip_set_blend_mode_action(ClipSetBlendModePayload {
+                clip_id,
+                blend_mode: None,
+            }))
+            .expect("inherit Track mode");
+        assert_eq!(
+            state.active_sequence().expect("sequence").video_tracks[0].clips[0].blend_mode,
+            None
+        );
+        let author_generation = state.project_author_generation();
+        let stale_clip_id = ClipId::new();
+        let stale_action = ClipSetBlendModePayload {
+            clip_id: stale_clip_id,
+            blend_mode: Some(BlendMode::Screen),
+        };
+        assert!(
+            !state.product_action_availability().allows(&ProductAction::Clip(
+                ClipProductAction::SetBlendMode(stale_action)
+            ))
+        );
+        assert!(matches!(
+            state.dispatch_action(clip_set_blend_mode_action(stale_action)),
+            Err(MondrianError::ClipNotFound { .. })
+        ));
+        assert_eq!(state.project_author_generation(), author_generation);
+    }
+
+    #[test]
     fn dispatch_clip_parameter_action_sets_transform_atomically() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
@@ -6652,6 +6910,49 @@ mod tests {
             glam::Vec2::ZERO
         );
         assert_eq!(clip.transform.get_scale(sequence.playhead), glam::Vec2::ONE);
+    }
+
+    #[test]
+    fn compensated_anchor_write_preserves_picture_and_undoes_as_one_action() {
+        let (mut state, _, clip_id) = state_with_two_video_tracks();
+        let anchor = clip_parameter_address(&state, clip_id, Transform2D::ANCHOR_POINT_PATH);
+        let position = clip_parameter_address(&state, clip_id, Transform2D::POSITION_PATH);
+        let before = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .transform
+            .evaluate_matrix(TimelineTime::ZERO);
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![
+                        ClipParameterValueWrite {
+                            parameter: anchor,
+                            value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
+                        },
+                        ClipParameterValueWrite {
+                            parameter: position,
+                            value: PropertyValue::Vec2(glam::Vec2::new(20.0, 10.0)),
+                        },
+                    ],
+                },
+            ))
+            .expect("commit compensated anchor");
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(clip.transform.evaluate_matrix(TimelineTime::ZERO), before);
+        assert_eq!(
+            clip.transform.get_anchor_point(TimelineTime::ZERO),
+            glam::Vec2::new(20.0, 10.0)
+        );
+        assert!(state.undo_timeline().expect("undo anchor gesture"));
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(
+            clip.transform.get_anchor_point(TimelineTime::ZERO),
+            glam::Vec2::ZERO
+        );
+        assert_eq!(
+            clip.transform.get_position(TimelineTime::ZERO),
+            glam::Vec2::ZERO
+        );
     }
 
     #[test]
@@ -6772,6 +7073,10 @@ mod tests {
 
         for action in [
             clip_set_enabled_action(ClipSetEnabledPayload { clip_id, enabled: false }),
+            clip_set_blend_mode_action(ClipSetBlendModePayload {
+                clip_id,
+                blend_mode: Some(BlendMode::Screen),
+            }),
             clip_parameter_action(
                 clip_id,
                 opacity_property.clone(),

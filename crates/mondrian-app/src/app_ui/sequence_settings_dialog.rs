@@ -3,6 +3,7 @@
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
 
+use fluent_bundle::FluentArgs;
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::{
     ColorSpace, DisplayToneMapPolicy, Rational, Resolution, SmpteCountingMode,
@@ -19,6 +20,7 @@ use mondrian_timeline::{
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, Widget};
+use mondrian_ui_widgets::label::LabelColor;
 use mondrian_ui_widgets::menu::{Dropdown, MenuItem};
 use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, NumberInput, Slider, TextInput};
 
@@ -28,8 +30,9 @@ use crate::app::ui_actions::{
     app_shell_sequence_settings_tab_changed_action, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
 };
-use crate::app_ui::color_management_controls::color_engine_label;
+use crate::app_ui::color_management_controls::color_engine_label_in_locale;
 use crate::app_ui::icons::AppIcon;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::preview_scale::preview_scale_percent_label;
 
 /// Shell-local sequence settings form state.
@@ -304,30 +307,46 @@ const DELIVERY_BIT_DEPTH_OPTIONS: [DeliveryBitDepth; 3] = [
 impl SequenceSettingsTabPayload {
     const ALL: [Self; 3] = [Self::Format, Self::Color, Self::Preview];
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Format => "格式",
-            Self::Color => "色彩",
-            Self::Preview => "预览",
-        }
+    fn label(self, localizer: Option<&Localizer>) -> String {
+        let (id, fallback) = match self {
+            Self::Format => ("sequence-tab-format", "格式"),
+            Self::Color => ("sequence-tab-color", "色彩"),
+            Self::Preview => ("sequence-tab-preview", "预览"),
+        };
+        sequence_text(localizer, id, fallback)
     }
 }
 
-fn editing_mode_label(value: EditingMode) -> &'static str {
-    match value {
+fn sequence_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+}
+
+fn editing_mode_label(value: EditingMode, localizer: Option<&Localizer>) -> String {
+    let fallback = match value {
         EditingMode::Custom => "自定义",
         EditingMode::Dslr1080p => "DSLR 1080p",
         EditingMode::Dslr720p => "DSLR 720p",
         EditingMode::Avchd1080p => "AVCHD 1080p",
         EditingMode::DigitalCinema4k => "Digital Cinema 4K",
         EditingMode::SocialVertical1080p => "Social Vertical 1080p",
+    };
+    if value == EditingMode::Custom {
+        sequence_text(localizer, "sequence-edit-custom", fallback)
+    } else {
+        fallback.to_owned()
     }
 }
 
-fn resolution_label(resolution: Resolution) -> String {
+fn resolution_label(resolution: Resolution, localizer: Option<&Localizer>) -> String {
     RESOLUTION_PRESETS
         .iter()
-        .find_map(|(label, preset)| (*preset == resolution).then_some((*label).to_owned()))
+        .find_map(|(label, preset)| {
+            (*preset == resolution).then(|| match resolution {
+                Resolution::HD => sequence_text(localizer, "sequence-resolution-hd", label),
+                Resolution::FHD => sequence_text(localizer, "sequence-resolution-fhd", label),
+                _ => (*label).to_owned(),
+            })
+        })
         .unwrap_or_else(|| resolution.to_string())
 }
 
@@ -345,50 +364,71 @@ fn audio_sample_rate_label(sample_rate: u32) -> String {
         .unwrap_or_else(|| format!("{sample_rate} Hz"))
 }
 
-fn pixel_aspect_ratio_label(value: PixelAspectRatio) -> &'static str {
+fn pixel_aspect_ratio_label(value: PixelAspectRatio, localizer: Option<&Localizer>) -> String {
     match value {
-        PixelAspectRatio::Square => "方形像素 (1.0)",
-        PixelAspectRatio::D1DvNtsc => "D1/DV NTSC",
-        PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 16:9",
-        PixelAspectRatio::D1DvPal => "D1/DV PAL",
-        PixelAspectRatio::D1DvPalWidescreen => "D1/DV PAL 16:9",
-        PixelAspectRatio::Anamorphic2x => "Anamorphic 2:1",
-        PixelAspectRatio::HdAnamorphic1080 => "HD Anamorphic 1080",
-        PixelAspectRatio::DvcproHd => "DVCPRO HD",
-        PixelAspectRatio::Unknown => "未知像素长宽比",
+        PixelAspectRatio::Square => {
+            sequence_text(localizer, "sequence-pixel-square", "方形像素 (1.0)")
+        }
+        PixelAspectRatio::D1DvNtsc => "D1/DV NTSC".to_owned(),
+        PixelAspectRatio::D1DvNtscWidescreen => "D1/DV NTSC 16:9".to_owned(),
+        PixelAspectRatio::D1DvPal => "D1/DV PAL".to_owned(),
+        PixelAspectRatio::D1DvPalWidescreen => "D1/DV PAL 16:9".to_owned(),
+        PixelAspectRatio::Anamorphic2x => "Anamorphic 2:1".to_owned(),
+        PixelAspectRatio::HdAnamorphic1080 => "HD Anamorphic 1080".to_owned(),
+        PixelAspectRatio::DvcproHd => "DVCPRO HD".to_owned(),
+        PixelAspectRatio::Unknown => {
+            sequence_text(localizer, "sequence-pixel-unknown", "未知像素长宽比")
+        }
     }
 }
 
-fn field_order_label(value: FieldOrder) -> &'static str {
+fn field_order_label(value: FieldOrder, localizer: Option<&Localizer>) -> String {
     match value {
-        FieldOrder::Progressive => "逐行",
-        FieldOrder::UpperFirst => "上场优先",
-        FieldOrder::LowerFirst => "下场优先",
+        FieldOrder::Progressive => sequence_text(localizer, "sequence-field-progressive", "逐行"),
+        FieldOrder::UpperFirst => sequence_text(localizer, "sequence-field-upper", "上场优先"),
+        FieldOrder::LowerFirst => sequence_text(localizer, "sequence-field-lower", "下场优先"),
     }
 }
 
-fn timeline_display_format_label(value: TimelineDisplayFormat) -> &'static str {
+fn timeline_display_format_label(
+    value: TimelineDisplayFormat,
+    localizer: Option<&Localizer>,
+) -> String {
     match value {
-        TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame) => "SMPTE drop-frame",
-        TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame) => "SMPTE non-drop-frame",
-        TimelineDisplayFormat::Frames => "序列帧",
+        TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame) => {
+            "SMPTE drop-frame".to_owned()
+        }
+        TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame) => {
+            "SMPTE non-drop-frame".to_owned()
+        }
+        TimelineDisplayFormat::Frames => {
+            sequence_text(localizer, "sequence-display-frames", "序列帧")
+        }
     }
 }
 
-fn audio_channel_layout_label(value: AudioChannelLayout) -> &'static str {
+fn audio_channel_layout_label(value: AudioChannelLayout, localizer: Option<&Localizer>) -> String {
     match value {
-        AudioChannelLayout::Mono => "单声道",
-        AudioChannelLayout::Stereo => "立体声",
-        AudioChannelLayout::Surround51Side => "5.1 Surround (Side)",
-        AudioChannelLayout::Speakers(_) => "自定义扬声器布局",
-        AudioChannelLayout::Discrete(_) => "离散通道",
+        AudioChannelLayout::Mono => sequence_text(localizer, "sequence-audio-mono", "单声道"),
+        AudioChannelLayout::Stereo => sequence_text(localizer, "sequence-audio-stereo", "立体声"),
+        AudioChannelLayout::Surround51Side => "5.1 Surround (Side)".to_owned(),
+        AudioChannelLayout::Speakers(_) => {
+            sequence_text(localizer, "sequence-audio-speakers", "自定义扬声器布局")
+        }
+        AudioChannelLayout::Discrete(_) => {
+            sequence_text(localizer, "sequence-audio-discrete", "离散通道")
+        }
     }
 }
 
-fn audio_display_format_label(value: AudioDisplayFormat) -> &'static str {
+fn audio_display_format_label(value: AudioDisplayFormat, localizer: Option<&Localizer>) -> String {
     match value {
-        AudioDisplayFormat::AudioSamples => "音频采样",
-        AudioDisplayFormat::Milliseconds => "毫秒",
+        AudioDisplayFormat::AudioSamples => {
+            sequence_text(localizer, "sequence-audio-samples", "音频采样")
+        }
+        AudioDisplayFormat::Milliseconds => {
+            sequence_text(localizer, "sequence-audio-milliseconds", "毫秒")
+        }
     }
 }
 
@@ -410,24 +450,35 @@ fn working_color_space_label(value: WorkingColorSpace) -> &'static str {
     }
 }
 
-fn color_workflow_label(value: ColorWorkflow) -> &'static str {
+fn color_workflow_label(value: ColorWorkflow, localizer: Option<&Localizer>) -> String {
     match value {
-        ColorWorkflow::DisplayReferred => "显示参考",
-        ColorWorkflow::SceneReferred => "场景参考",
+        ColorWorkflow::DisplayReferred => {
+            sequence_text(localizer, "sequence-color-display-referred", "显示参考")
+        }
+        ColorWorkflow::SceneReferred => {
+            sequence_text(localizer, "sequence-color-scene-referred", "场景参考")
+        }
     }
 }
 
-fn missing_color_metadata_policy_label(value: MissingColorMetadataPolicy) -> &'static str {
+fn missing_color_metadata_policy_label(
+    value: MissingColorMetadataPolicy,
+    localizer: Option<&Localizer>,
+) -> String {
     match value {
-        MissingColorMetadataPolicy::AssumeRec709 => "假定 Rec. 709",
-        MissingColorMetadataPolicy::RejectMedia => "拒绝媒体",
+        MissingColorMetadataPolicy::AssumeRec709 => {
+            sequence_text(localizer, "sequence-metadata-assume-709", "假定 Rec. 709")
+        }
+        MissingColorMetadataPolicy::RejectMedia => {
+            sequence_text(localizer, "sequence-metadata-reject", "拒绝媒体")
+        }
     }
 }
 
-fn video_range_label(value: VideoRange) -> &'static str {
+fn video_range_label(value: VideoRange, localizer: Option<&Localizer>) -> String {
     match value {
-        VideoRange::Full => "全范围",
-        VideoRange::Legal => "合法范围",
+        VideoRange::Full => sequence_text(localizer, "sequence-range-full", "全范围"),
+        VideoRange::Legal => sequence_text(localizer, "sequence-range-legal", "合法范围"),
     }
 }
 
@@ -443,12 +494,22 @@ fn preview_scale_label(scale: f32) -> String {
     preview_scale_percent_label(scale)
 }
 
-fn resolution_items() -> Vec<MenuItem> {
+fn preview_scale_description(scale: f32, localizer: Option<&Localizer>) -> String {
+    let percent = preview_scale_label(scale);
+    let mut args = FluentArgs::new();
+    args.set("percent", percent.clone());
+    localizer.map_or_else(
+        || format!("预览分辨率 {percent}"),
+        |localizer| localizer.format("sequence-preview-resolution", Some(&args)),
+    )
+}
+
+fn resolution_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     RESOLUTION_PRESETS
         .into_iter()
-        .map(|(label, resolution)| {
+        .map(|(_, resolution)| {
             MenuItem::new(
-                label,
+                resolution_label(resolution, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::Resolution(resolution),
                 ),
@@ -457,12 +518,12 @@ fn resolution_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn editing_mode_items() -> Vec<MenuItem> {
+fn editing_mode_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     EDITING_MODE_OPTIONS
         .into_iter()
         .map(|mode| {
             MenuItem::new(
-                editing_mode_label(mode),
+                editing_mode_label(mode, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::EditingMode(mode),
                 ),
@@ -485,12 +546,12 @@ fn frame_rate_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn pixel_aspect_ratio_items() -> Vec<MenuItem> {
+fn pixel_aspect_ratio_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     PIXEL_ASPECT_RATIO_OPTIONS
         .into_iter()
         .map(|pixel_aspect_ratio| {
             MenuItem::new(
-                pixel_aspect_ratio_label(pixel_aspect_ratio),
+                pixel_aspect_ratio_label(pixel_aspect_ratio, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::PixelAspectRatio(pixel_aspect_ratio),
                 ),
@@ -499,12 +560,12 @@ fn pixel_aspect_ratio_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn field_order_items() -> Vec<MenuItem> {
+fn field_order_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     FIELD_ORDER_OPTIONS
         .into_iter()
         .map(|field_order| {
             MenuItem::new(
-                field_order_label(field_order),
+                field_order_label(field_order, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::FieldOrder(field_order),
                 ),
@@ -513,7 +574,10 @@ fn field_order_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn timeline_display_format_items(frame_rate: Rational) -> Vec<MenuItem> {
+fn timeline_display_format_items(
+    frame_rate: Rational,
+    localizer: Option<&Localizer>,
+) -> Vec<MenuItem> {
     TIMELINE_DISPLAY_FORMAT_OPTIONS
         .into_iter()
         .filter(|format| {
@@ -524,7 +588,7 @@ fn timeline_display_format_items(frame_rate: Rational) -> Vec<MenuItem> {
         })
         .map(|display_format| {
             MenuItem::new(
-                timeline_display_format_label(display_format),
+                timeline_display_format_label(display_format, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::TimelineDisplayFormat(display_format),
                 ),
@@ -547,12 +611,12 @@ fn audio_sample_rate_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn audio_channel_layout_items() -> Vec<MenuItem> {
+fn audio_channel_layout_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     AUDIO_CHANNEL_LAYOUT_OPTIONS
         .into_iter()
         .map(|layout| {
             MenuItem::new(
-                audio_channel_layout_label(layout),
+                audio_channel_layout_label(layout, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::AudioChannelLayout(layout),
                 ),
@@ -561,12 +625,12 @@ fn audio_channel_layout_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn audio_display_format_items() -> Vec<MenuItem> {
+fn audio_display_format_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     AUDIO_DISPLAY_FORMAT_OPTIONS
         .into_iter()
         .map(|display_format| {
             MenuItem::new(
-                audio_display_format_label(display_format),
+                audio_display_format_label(display_format, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::AudioDisplayFormat(display_format),
                 ),
@@ -617,12 +681,12 @@ fn working_color_space_items(
         .collect()
 }
 
-fn color_workflow_items() -> Vec<MenuItem> {
+fn color_workflow_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     COLOR_WORKFLOW_OPTIONS
         .into_iter()
         .map(|workflow| {
             MenuItem::new(
-                color_workflow_label(workflow),
+                color_workflow_label(workflow, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::ColorWorkflow(workflow),
                 ),
@@ -631,12 +695,12 @@ fn color_workflow_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn missing_color_metadata_items() -> Vec<MenuItem> {
+fn missing_color_metadata_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     MISSING_COLOR_METADATA_OPTIONS
         .into_iter()
         .map(|policy| {
             MenuItem::new(
-                missing_color_metadata_policy_label(policy),
+                missing_color_metadata_policy_label(policy, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(policy),
                 ),
@@ -645,12 +709,12 @@ fn missing_color_metadata_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn video_range_items() -> Vec<MenuItem> {
+fn video_range_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     VIDEO_RANGE_OPTIONS
         .into_iter()
         .map(|range| {
             MenuItem::new(
-                video_range_label(range),
+                video_range_label(range, localizer),
                 app_shell_sequence_settings_draft_changed_action(
                     SequenceSettingsDraftUpdatePayload::VideoRange(range),
                 ),
@@ -673,15 +737,24 @@ fn delivery_bit_depth_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn output_tone_map_policy_label(policy: DisplayToneMapPolicy) -> &'static str {
+fn output_tone_map_policy_label(
+    policy: DisplayToneMapPolicy,
+    localizer: Option<&Localizer>,
+) -> String {
     match policy {
-        DisplayToneMapPolicy::Automatic => "输出映射：自动",
-        DisplayToneMapPolicy::Always => "输出映射：始终应用",
-        DisplayToneMapPolicy::Never => "输出映射：技术旁路",
+        DisplayToneMapPolicy::Automatic => {
+            sequence_text(localizer, "sequence-tone-map-auto", "输出映射：自动")
+        }
+        DisplayToneMapPolicy::Always => {
+            sequence_text(localizer, "sequence-tone-map-always", "输出映射：始终应用")
+        }
+        DisplayToneMapPolicy::Never => {
+            sequence_text(localizer, "sequence-tone-map-never", "输出映射：技术旁路")
+        }
     }
 }
 
-fn output_tone_map_policy_items() -> Vec<MenuItem> {
+fn output_tone_map_policy_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     [
         DisplayToneMapPolicy::Automatic,
         DisplayToneMapPolicy::Always,
@@ -690,7 +763,7 @@ fn output_tone_map_policy_items() -> Vec<MenuItem> {
     .into_iter()
     .map(|policy| {
         MenuItem::new(
-            output_tone_map_policy_label(policy),
+            output_tone_map_policy_label(policy, localizer),
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::OutputToneMapPolicy(policy),
             ),
@@ -699,29 +772,38 @@ fn output_tone_map_policy_items() -> Vec<MenuItem> {
     .collect()
 }
 
-fn editing_mode_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn editing_mode_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        editing_mode_label(draft.settings.editing_mode),
-        editing_mode_items(),
+        editing_mode_label(draft.settings.editing_mode, localizer),
+        editing_mode_items(localizer),
     )
     .with_max_visible_items(6)
 }
 
-fn resolution_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn resolution_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        resolution_label(draft.settings.resolution),
-        resolution_items(),
+        resolution_label(draft.settings.resolution, localizer),
+        resolution_items(localizer),
     )
     .with_max_visible_items(4)
 }
 
-fn resolution_width_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
+fn resolution_width_input_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> NumberInput {
     NumberInput::new(
         draft.settings.resolution.width as f64,
         SequenceSettings::MIN_WIDTH as f64,
         SequenceSettings::MAX_WIDTH as f64,
     )
-    .with_placeholder("宽度")
+    .with_placeholder(sequence_text(localizer, "sequence-width", "宽度"))
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -730,13 +812,16 @@ fn resolution_width_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput
     })
 }
 
-fn resolution_height_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
+fn resolution_height_input_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> NumberInput {
     NumberInput::new(
         draft.settings.resolution.height as f64,
         SequenceSettings::MIN_HEIGHT as f64,
         SequenceSettings::MAX_HEIGHT as f64,
     )
-    .with_placeholder("高度")
+    .with_placeholder(sequence_text(localizer, "sequence-height", "高度"))
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -753,13 +838,16 @@ fn frame_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     .with_max_visible_items(7)
 }
 
-fn start_timecode_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
+fn start_timecode_input_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> NumberInput {
     NumberInput::new(
         draft.settings.timeline_display.timecode_start_frame as f64,
         -(24 * 60 * 60 * 240) as f64,
         (24 * 60 * 60 * 240) as f64,
     )
-    .with_placeholder("起始帧")
+    .with_placeholder(sequence_text(localizer, "sequence-start-frame", "起始帧"))
     .with_step(1.0)
     .on_change(|value| {
         app_shell_sequence_settings_draft_changed_action(
@@ -768,26 +856,35 @@ fn start_timecode_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
     })
 }
 
-fn pixel_aspect_ratio_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn pixel_aspect_ratio_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        pixel_aspect_ratio_label(draft.settings.pixel_aspect_ratio),
-        pixel_aspect_ratio_items(),
+        pixel_aspect_ratio_label(draft.settings.pixel_aspect_ratio, localizer),
+        pixel_aspect_ratio_items(localizer),
     )
     .with_max_visible_items(6)
 }
 
-fn field_order_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn field_order_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        field_order_label(draft.settings.field_order),
-        field_order_items(),
+        field_order_label(draft.settings.field_order, localizer),
+        field_order_items(localizer),
     )
     .with_max_visible_items(3)
 }
 
-fn timeline_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn timeline_display_format_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        timeline_display_format_label(draft.settings.timeline_display.format),
-        timeline_display_format_items(draft.settings.frame_rate),
+        timeline_display_format_label(draft.settings.timeline_display.format, localizer),
+        timeline_display_format_items(draft.settings.frame_rate, localizer),
     )
     .with_max_visible_items(5)
 }
@@ -811,20 +908,32 @@ fn maybe_disable_dropdown(dropdown: Dropdown, disabled: bool) -> Dropdown {
     }
 }
 
-fn project_color_engine_label_for(draft: &AppUiSequenceSettingsDraft) -> Label {
-    Label::new(format!(
-        "项目色彩引擎：{}",
-        color_engine_label(draft.project_color_environment.engine())
+fn project_color_engine_label_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Label {
+    let engine = color_engine_label_in_locale(draft.project_color_environment.engine(), localizer);
+    let mut args = FluentArgs::new();
+    args.set("engine", engine.clone());
+    Label::new(localizer.map_or_else(
+        || format!("项目色彩引擎：{engine}"),
+        |localizer| localizer.format("sequence-project-color-engine", Some(&args)),
     ))
     .muted()
     .with_font_size(LABEL_FONT_SIZE)
     .with_padding(0.0, 0.0)
 }
 
-fn output_tone_map_policy_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn output_tone_map_policy_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        output_tone_map_policy_label(draft.settings.color.program_output.tone_map_policy),
-        output_tone_map_policy_items(),
+        output_tone_map_policy_label(
+            draft.settings.color.program_output.tone_map_policy,
+            localizer,
+        ),
+        output_tone_map_policy_items(localizer),
     )
     .with_max_visible_items(3)
 }
@@ -837,26 +946,38 @@ fn output_color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdo
     .with_max_visible_items(6)
 }
 
-fn color_workflow_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn color_workflow_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        color_workflow_label(draft.settings.color.program_output.workflow),
-        color_workflow_items(),
+        color_workflow_label(draft.settings.color.program_output.workflow, localizer),
+        color_workflow_items(localizer),
     )
     .with_max_visible_items(3)
 }
 
-fn missing_color_metadata_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn missing_color_metadata_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        missing_color_metadata_policy_label(draft.settings.color.input.missing_metadata_policy),
-        missing_color_metadata_items(),
+        missing_color_metadata_policy_label(
+            draft.settings.color.input.missing_metadata_policy,
+            localizer,
+        ),
+        missing_color_metadata_items(localizer),
     )
     .with_max_visible_items(3)
 }
 
-fn video_range_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn video_range_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        video_range_label(draft.settings.delivery.video_range),
-        video_range_items(),
+        video_range_label(draft.settings.delivery.video_range, localizer),
+        video_range_items(localizer),
     )
     .with_max_visible_items(2)
 }
@@ -877,18 +998,24 @@ fn audio_sample_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdow
     .with_max_visible_items(5)
 }
 
-fn audio_channel_layout_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn audio_channel_layout_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        audio_channel_layout_label(draft.settings.audio_channel_layout),
-        audio_channel_layout_items(),
+        audio_channel_layout_label(draft.settings.audio_channel_layout, localizer),
+        audio_channel_layout_items(localizer),
     )
     .with_max_visible_items(3)
 }
 
-fn audio_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn audio_display_format_dropdown_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        audio_display_format_label(draft.settings.audio_display_format),
-        audio_display_format_items(),
+        audio_display_format_label(draft.settings.audio_display_format, localizer),
+        audio_display_format_items(localizer),
     )
     .with_max_visible_items(2)
 }
@@ -911,17 +1038,27 @@ fn preview_scale_slider_for(draft: &AppUiSequenceSettingsDraft) -> Slider {
         })
 }
 
-fn preview_cache_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
-    Checkbox::new("预览缓存", draft.settings.preview.cache_enabled).on_change(|enabled| {
+fn preview_cache_checkbox_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Checkbox {
+    Checkbox::new(
+        sequence_text(localizer, "sequence-preview-cache", "预览缓存"),
+        draft.settings.preview.cache_enabled,
+    )
+    .on_change(|enabled| {
         app_shell_sequence_settings_draft_changed_action(
             SequenceSettingsDraftUpdatePayload::PreviewCacheEnabled(enabled),
         )
     })
 }
 
-fn auto_tone_map_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
+fn auto_tone_map_checkbox_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Checkbox {
     Checkbox::new(
-        "自动色调映射媒体",
+        sequence_text(localizer, "sequence-auto-tone-map", "自动色调映射媒体"),
         draft.settings.color.input.auto_tone_map_media,
     )
     .on_change(|enabled| {
@@ -931,9 +1068,12 @@ fn auto_tone_map_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     })
 }
 
-fn static_hdr_metadata_policy_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
+fn static_hdr_metadata_policy_checkbox_for(
+    draft: &AppUiSequenceSettingsDraft,
+    localizer: Option<&Localizer>,
+) -> Checkbox {
     Checkbox::new(
-        "写入静态 HDR 元数据",
+        sequence_text(localizer, "sequence-static-hdr", "写入静态 HDR 元数据"),
         draft.settings.delivery.static_hdr_metadata_policy.writes_authored_metadata(),
     )
     .on_change(|enabled| {
@@ -981,6 +1121,7 @@ const NAME_LABEL_BASELINE_Y: f32 = 132.0;
 pub struct SequenceSettingsDialog {
     id: WidgetId,
     draft: AppUiSequenceSettingsDraft,
+    localizer: Option<Localizer>,
     active_tab: SequenceSettingsTabPayload,
     surface: DialogSurface,
     bounds: Rect,
@@ -1022,6 +1163,7 @@ pub struct SequenceSettingsDialog {
     preview_render_format_dropdown: Dropdown,
     preview_scale_slider: Slider,
     preview_cache_checkbox: Checkbox,
+    error_label: Label,
     cancel_button: Button,
     apply_button: Button,
 }
@@ -1029,90 +1171,113 @@ pub struct SequenceSettingsDialog {
 impl SequenceSettingsDialog {
     /// Build the sequence settings dialog from an explicit draft.
     pub fn new(draft: AppUiSequenceSettingsDraft) -> Self {
-        let title_label = Label::new("序列设置")
+        Self::with_locale(draft, AppUiLocale::ZhCn)
+    }
+
+    /// Build a sequence-settings dialog in the selected machine-local language.
+    pub fn with_locale(draft: AppUiSequenceSettingsDraft, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).ok();
+        let text = |id, fallback| sequence_text(localizer.as_ref(), id, fallback);
+        let title_label = Label::new(text("sequence-settings-title", "序列设置"))
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let description_label = Label::new("调整活动序列的时间线格式和预览设置。")
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped();
+        let description_label = Label::new(text(
+            "sequence-settings-description",
+            "调整活动序列的时间线格式和预览设置。",
+        ))
+        .muted()
+        .with_font_size(LABEL_FONT_SIZE)
+        .with_padding(0.0, 0.0)
+        .wrapped();
         let tab_buttons = SequenceSettingsTabPayload::ALL
             .into_iter()
             .map(|tab| {
-                Button::new(tab.label())
+                Button::new(tab.label(localizer.as_ref()))
                     .on_click(app_shell_sequence_settings_tab_changed_action(tab))
             })
             .collect();
-        let name_label = Label::new("名称")
+        let name_label = Label::new(text("sequence-name", "名称"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let format_label = Label::new("格式")
+        let format_label = Label::new(text("sequence-format", "格式"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let frame_size_label = Label::new("自定义画面尺寸")
+        let frame_size_label = Label::new(text("sequence-custom-frame-size", "自定义画面尺寸"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let start_timecode_label = Label::new("时间码起点（实际帧）")
+        let start_timecode_label =
+            Label::new(text("sequence-timecode-start", "时间码起点（实际帧）"))
+                .muted()
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0);
+        let audio_label = Label::new(text("sequence-audio", "音频"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let audio_label = Label::new("音频")
+        let preview_label = Label::new(text("sequence-preview", "预览"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let preview_label = Label::new("预览")
+        let color_label = Label::new(text("sequence-color-management", "色彩管理"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let color_label = Label::new("色彩管理")
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0);
-        let preview_scale_label = Label::new(format!(
-            "预览分辨率 {}",
-            preview_scale_label(draft.settings.preview.resolution_scale)
+        let preview_scale_label = Label::new(preview_scale_description(
+            draft.settings.preview.resolution_scale,
+            localizer.as_ref(),
         ))
         .muted()
         .with_font_size(LABEL_FONT_SIZE)
         .with_padding(0.0, 0.0);
-        let name_input = TextInput::new("序列名称").with_text(&draft.name).on_change(|name| {
-            app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::Name(name.into()),
-            )
-        });
-        let editing_mode_dropdown = editing_mode_dropdown_for(&draft);
-        let resolution_dropdown = resolution_dropdown_for(&draft);
-        let resolution_width_input = resolution_width_input_for(&draft);
-        let resolution_height_input = resolution_height_input_for(&draft);
+        let name_input = TextInput::new(text("sequence-name-placeholder", "序列名称"))
+            .with_text(&draft.name)
+            .on_change(|name| {
+                app_shell_sequence_settings_draft_changed_action(
+                    SequenceSettingsDraftUpdatePayload::Name(name.into()),
+                )
+            });
+        let editing_mode_dropdown = editing_mode_dropdown_for(&draft, localizer.as_ref());
+        let resolution_dropdown = resolution_dropdown_for(&draft, localizer.as_ref());
+        let resolution_width_input = resolution_width_input_for(&draft, localizer.as_ref());
+        let resolution_height_input = resolution_height_input_for(&draft, localizer.as_ref());
         let frame_rate_dropdown = frame_rate_dropdown_for(&draft);
-        let pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&draft);
-        let field_order_dropdown = field_order_dropdown_for(&draft);
-        let timeline_display_format_dropdown = timeline_display_format_dropdown_for(&draft);
-        let start_timecode_input = start_timecode_input_for(&draft);
+        let pixel_aspect_ratio_dropdown =
+            pixel_aspect_ratio_dropdown_for(&draft, localizer.as_ref());
+        let field_order_dropdown = field_order_dropdown_for(&draft, localizer.as_ref());
+        let timeline_display_format_dropdown =
+            timeline_display_format_dropdown_for(&draft, localizer.as_ref());
+        let start_timecode_input = start_timecode_input_for(&draft, localizer.as_ref());
         let color_space_dropdown = color_space_dropdown_for(&draft);
         let output_color_space_dropdown = output_color_space_dropdown_for(&draft);
-        let project_color_engine_label = project_color_engine_label_for(&draft);
-        let output_tone_map_policy_dropdown = output_tone_map_policy_dropdown_for(&draft);
-        let color_workflow_dropdown = color_workflow_dropdown_for(&draft);
-        let missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&draft);
-        let video_range_dropdown = video_range_dropdown_for(&draft);
+        let project_color_engine_label = project_color_engine_label_for(&draft, localizer.as_ref());
+        let output_tone_map_policy_dropdown =
+            output_tone_map_policy_dropdown_for(&draft, localizer.as_ref());
+        let color_workflow_dropdown = color_workflow_dropdown_for(&draft, localizer.as_ref());
+        let missing_color_metadata_dropdown =
+            missing_color_metadata_dropdown_for(&draft, localizer.as_ref());
+        let video_range_dropdown = video_range_dropdown_for(&draft, localizer.as_ref());
         let delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&draft);
-        let auto_tone_map_checkbox = auto_tone_map_checkbox_for(&draft);
-        let static_hdr_metadata_policy_checkbox = static_hdr_metadata_policy_checkbox_for(&draft);
+        let auto_tone_map_checkbox = auto_tone_map_checkbox_for(&draft, localizer.as_ref());
+        let static_hdr_metadata_policy_checkbox =
+            static_hdr_metadata_policy_checkbox_for(&draft, localizer.as_ref());
         let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
-        let audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&draft);
-        let audio_display_format_dropdown = audio_display_format_dropdown_for(&draft);
+        let audio_channel_layout_dropdown =
+            audio_channel_layout_dropdown_for(&draft, localizer.as_ref());
+        let audio_display_format_dropdown =
+            audio_display_format_dropdown_for(&draft, localizer.as_ref());
         let preview_render_format_dropdown = preview_render_format_dropdown_for(&draft);
         let preview_scale_slider = preview_scale_slider_for(&draft);
-        let preview_cache_checkbox = preview_cache_checkbox_for(&draft);
+        let preview_cache_checkbox = preview_cache_checkbox_for(&draft, localizer.as_ref());
+        let cancel_text = text("sequence-cancel", "取消");
+        let apply_text = text("sequence-apply", "应用");
         Self {
             id: WidgetId::new(),
             draft,
+            localizer,
             active_tab: SequenceSettingsTabPayload::Format,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
@@ -1158,9 +1323,14 @@ impl SequenceSettingsDialog {
             preview_render_format_dropdown,
             preview_scale_slider,
             preview_cache_checkbox,
-            cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
+            error_label: Label::new("")
+                .with_semantic_color(LabelColor::Destructive)
+                .with_font_size(LABEL_FONT_SIZE)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
+            cancel_button: Button::new(cancel_text).on_click(app_shell_close_modal_action()),
             apply_button: AppIcon::Save
-                .text_button_or_label("应用")
+                .text_button_or_label(&apply_text)
                 .on_click(app_shell_confirm_sequence_settings_action()),
         }
     }
@@ -1169,41 +1339,58 @@ impl SequenceSettingsDialog {
     pub fn apply_update(&mut self, update: SequenceSettingsDraftUpdatePayload) {
         let rebuild_controls = !matches!(update, SequenceSettingsDraftUpdatePayload::Name(_));
         self.draft.apply_update(update);
+        self.error_label.set_text(String::new());
         if rebuild_controls {
-            self.editing_mode_dropdown = editing_mode_dropdown_for(&self.draft);
-            self.resolution_dropdown = resolution_dropdown_for(&self.draft);
-            self.resolution_width_input = resolution_width_input_for(&self.draft);
-            self.resolution_height_input = resolution_height_input_for(&self.draft);
+            self.editing_mode_dropdown =
+                editing_mode_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.resolution_dropdown =
+                resolution_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.resolution_width_input =
+                resolution_width_input_for(&self.draft, self.localizer.as_ref());
+            self.resolution_height_input =
+                resolution_height_input_for(&self.draft, self.localizer.as_ref());
             self.frame_rate_dropdown = frame_rate_dropdown_for(&self.draft);
-            self.pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&self.draft);
-            self.field_order_dropdown = field_order_dropdown_for(&self.draft);
+            self.pixel_aspect_ratio_dropdown =
+                pixel_aspect_ratio_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.field_order_dropdown =
+                field_order_dropdown_for(&self.draft, self.localizer.as_ref());
             self.timeline_display_format_dropdown =
-                timeline_display_format_dropdown_for(&self.draft);
-            self.start_timecode_input = start_timecode_input_for(&self.draft);
+                timeline_display_format_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.start_timecode_input =
+                start_timecode_input_for(&self.draft, self.localizer.as_ref());
             self.color_space_dropdown = color_space_dropdown_for(&self.draft);
             self.output_color_space_dropdown = output_color_space_dropdown_for(&self.draft);
-            self.project_color_engine_label = project_color_engine_label_for(&self.draft);
-            self.output_tone_map_policy_dropdown = output_tone_map_policy_dropdown_for(&self.draft);
-            self.color_workflow_dropdown = color_workflow_dropdown_for(&self.draft);
-            self.missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&self.draft);
-            self.video_range_dropdown = video_range_dropdown_for(&self.draft);
+            self.project_color_engine_label =
+                project_color_engine_label_for(&self.draft, self.localizer.as_ref());
+            self.output_tone_map_policy_dropdown =
+                output_tone_map_policy_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.color_workflow_dropdown =
+                color_workflow_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.missing_color_metadata_dropdown =
+                missing_color_metadata_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.video_range_dropdown =
+                video_range_dropdown_for(&self.draft, self.localizer.as_ref());
             self.delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&self.draft);
-            self.auto_tone_map_checkbox = auto_tone_map_checkbox_for(&self.draft);
+            self.auto_tone_map_checkbox =
+                auto_tone_map_checkbox_for(&self.draft, self.localizer.as_ref());
             self.static_hdr_metadata_policy_checkbox =
-                static_hdr_metadata_policy_checkbox_for(&self.draft);
+                static_hdr_metadata_policy_checkbox_for(&self.draft, self.localizer.as_ref());
             self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
-            self.audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&self.draft);
-            self.audio_display_format_dropdown = audio_display_format_dropdown_for(&self.draft);
+            self.audio_channel_layout_dropdown =
+                audio_channel_layout_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.audio_display_format_dropdown =
+                audio_display_format_dropdown_for(&self.draft, self.localizer.as_ref());
             self.preview_render_format_dropdown = preview_render_format_dropdown_for(&self.draft);
             self.preview_scale_slider = preview_scale_slider_for(&self.draft);
-            self.preview_scale_label = Label::new(format!(
-                "预览分辨率 {}",
-                preview_scale_label(self.draft.settings.preview.resolution_scale)
+            self.preview_scale_label = Label::new(preview_scale_description(
+                self.draft.settings.preview.resolution_scale,
+                self.localizer.as_ref(),
             ))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-            self.preview_cache_checkbox = preview_cache_checkbox_for(&self.draft);
+            self.preview_cache_checkbox =
+                preview_cache_checkbox_for(&self.draft, self.localizer.as_ref());
             if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                 self.layout(self.bounds);
             }
@@ -1221,6 +1408,28 @@ impl SequenceSettingsDialog {
     /// Current shell-local draft.
     pub fn draft(&self) -> &AppUiSequenceSettingsDraft {
         &self.draft
+    }
+
+    /// Show a failed validation while retaining the uncommitted draft.
+    pub fn set_validation_error(&mut self, error: &mondrian_core::MondrianError) {
+        let message = match error {
+            mondrian_core::MondrianError::WorkflowStepFailed { step_id, .. }
+                if step_id == "sequence_settings_draft_validate" =>
+            {
+                sequence_text(
+                    self.localizer.as_ref(),
+                    "sequence-name-required",
+                    "序列名称不能为空",
+                )
+            }
+            _ => error.to_string(),
+        };
+        self.error_label.set_text(message);
+    }
+
+    #[cfg(test)]
+    pub fn error_text(&self) -> &str {
+        self.error_label.text()
     }
 }
 
@@ -1480,6 +1689,8 @@ impl Widget for SequenceSettingsDialog {
         }
 
         let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
+        self.error_label
+            .layout(Rect::new(content.x, button_y - 42.0, content.width, 36.0));
         self.cancel_button.layout(Rect::new(
             self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH * 2.0 - BUTTON_GAP,
             button_y,
@@ -1620,6 +1831,7 @@ impl Widget for SequenceSettingsDialog {
                 self.preview_scale_slider.paint(ctx);
             }
         }
+        self.error_label.paint(ctx);
         self.cancel_button.paint(ctx);
         self.apply_button.paint(ctx);
     }
@@ -1629,7 +1841,7 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn child_count(&self) -> usize {
-        41
+        42
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -1673,6 +1885,7 @@ impl Widget for SequenceSettingsDialog {
             38 => Some(&self.cancel_button),
             39 => Some(&self.apply_button),
             40 => Some(&self.output_tone_map_policy_dropdown),
+            41 => Some(&self.error_label),
             _ => None,
         }
     }
@@ -1718,6 +1931,7 @@ impl Widget for SequenceSettingsDialog {
             38 => Some(&mut self.cancel_button),
             39 => Some(&mut self.apply_button),
             40 => Some(&mut self.output_tone_map_policy_dropdown),
+            41 => Some(&mut self.error_label),
             _ => None,
         }
     }
@@ -1728,6 +1942,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn english_sequence_settings_reprojects_values_and_keeps_draft() {
+        let sequence = Sequence::new("Travel film");
+        let draft = AppUiSequenceSettingsDraft::from_sequence(&sequence);
+        let mut dialog = SequenceSettingsDialog::with_locale(draft, AppUiLocale::EnUs);
+        assert_eq!(dialog.title_label.text(), "Sequence settings");
+        assert_eq!(dialog.name_label.text(), "Name");
+        assert_eq!(dialog.field_order_dropdown.label(), "Progressive");
+        assert_eq!(
+            dialog.field_order_dropdown.items()[1].label,
+            "Upper field first"
+        );
+        assert_eq!(dialog.audio_channel_layout_dropdown.label(), "Stereo");
+        assert_eq!(
+            dialog.audio_channel_layout_dropdown.items()[0].label,
+            "Mono"
+        );
+        assert_eq!(dialog.color_workflow_dropdown.label(), "Scene-referred");
+        assert!(dialog.preview_scale_label.text().starts_with("Preview resolution "));
+        assert!(dialog.preview_scale_label.text().contains("50%"));
+
+        dialog.set_active_tab(SequenceSettingsTabPayload::Color);
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::ColorWorkflow(
+            ColorWorkflow::DisplayReferred,
+        ));
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::VideoRange(
+            VideoRange::Legal,
+        ));
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::PreviewResolutionScale(
+            0.25,
+        ));
+        assert_eq!(dialog.active_tab, SequenceSettingsTabPayload::Color);
+        assert_eq!(
+            dialog.draft().settings.color.program_output.workflow,
+            ColorWorkflow::DisplayReferred
+        );
+        assert_eq!(dialog.color_workflow_dropdown.label(), "Display-referred");
+        assert_eq!(
+            dialog.color_workflow_dropdown.items()[0].label,
+            "Scene-referred"
+        );
+        assert_eq!(dialog.video_range_dropdown.label(), "Legal range");
+        assert!(dialog.preview_scale_label.text().starts_with("Preview resolution "));
+        assert!(dialog.preview_scale_label.text().contains("25%"));
+
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::Name(String::new()));
+        let error = dialog.draft().validate().expect_err("empty name must be rejected");
+        dialog.set_validation_error(&error);
+        assert_eq!(dialog.error_text(), "Sequence name cannot be empty");
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::Name(
+            "Travel film".to_owned(),
+        ));
+        assert_eq!(dialog.error_text(), "");
+        assert_eq!(dialog.draft().name, "Travel film");
+    }
+
+    #[test]
     fn workflow_picker_exposes_rendering_domain_without_duplicating_project_color_modes() {
         assert_eq!(ColorWorkflow::default(), ColorWorkflow::SceneReferred);
         assert_eq!(
@@ -1736,7 +2006,7 @@ mod tests {
         );
         assert!(COLOR_WORKFLOW_OPTIONS
             .iter()
-            .map(|workflow| color_workflow_label(*workflow))
+            .map(|workflow| color_workflow_label(*workflow, None))
             .all(|label| !label.contains("ACES") && !label.contains("OpenColorIO")));
     }
 
@@ -1799,12 +2069,12 @@ mod tests {
             &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert!(output_color_space_dropdown_for(&draft).is_enabled());
-        assert!(color_workflow_dropdown_for(&draft).is_enabled());
-        assert!(missing_color_metadata_dropdown_for(&draft).is_enabled());
-        assert!(video_range_dropdown_for(&draft).is_enabled());
+        assert!(color_workflow_dropdown_for(&draft, None).is_enabled());
+        assert!(missing_color_metadata_dropdown_for(&draft, None).is_enabled());
+        assert!(video_range_dropdown_for(&draft, None).is_enabled());
         assert!(delivery_bit_depth_dropdown_for(&draft).is_enabled());
-        assert!(auto_tone_map_checkbox_for(&draft).is_enabled());
-        assert!(static_hdr_metadata_policy_checkbox_for(&draft).is_enabled());
+        assert!(auto_tone_map_checkbox_for(&draft, None).is_enabled());
+        assert!(static_hdr_metadata_policy_checkbox_for(&draft, None).is_enabled());
     }
 
     #[test]
@@ -1841,7 +2111,7 @@ mod tests {
     #[test]
     fn drop_frame_menu_is_available_only_for_exact_supported_rates() {
         let has_drop_frame = |rate| {
-            timeline_display_format_items(rate)
+            timeline_display_format_items(rate, None)
                 .iter()
                 .any(|item| item.label == "SMPTE drop-frame")
         };

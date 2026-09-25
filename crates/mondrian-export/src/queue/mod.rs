@@ -42,8 +42,8 @@ use crate::{
 use chrono::Utc;
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
-    AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
+    AudioMediaResolver, AudioProcessingMode, AudioProcessorResolver, AudioProgramDeliveryRuntime,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
     AudioRuntimeResourceGrant, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
@@ -5546,6 +5546,7 @@ fn prepare_timeline_audio_delivery(
     channel_layout: AudioChannelLayout,
     cache: &Arc<AudioSourceCache>,
     resource_grant: AudioRuntimeResourceGrant,
+    processor_resolver: &dyn AudioProcessorResolver,
 ) -> Result<AudioProgramDeliveryRuntime, String> {
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(cache) };
     let contract = AudioRenderContract {
@@ -5562,10 +5563,11 @@ fn prepare_timeline_audio_delivery(
     };
     let public_time_range = range.time_range()?;
     let runtime =
-        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
+        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
             &timeline.sequence,
             &timeline.sequences,
             &resolver,
+            processor_resolver,
             contract,
             Some(prepared_audio.root_program().output_id()),
             public_time_range,
@@ -5682,6 +5684,7 @@ fn render_audio_stems_to_pcm_f32(
             channel_layout,
             &cache,
             resource_grant,
+            execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
         aggregate_footprint =
@@ -5729,6 +5732,7 @@ fn render_audio_stems_to_pcm_f32(
             channel_layout,
             &cache,
             resource_grant,
+            execution_gate.audio_processor_resolver(),
         )
         .map_err(JobExecutionResult::Failed)?;
         if delivery.requires_state_entry() {
@@ -5875,6 +5879,7 @@ fn render_timeline_audio_to_pcm_f32(
             channel_layout,
             &cache,
             execution_gate.resource_policy().audio_runtime_grant,
+            execution_gate.audio_processor_resolver(),
         ) {
             Ok(delivery) => delivery,
             Err(error) => return JobExecutionResult::Failed(error),
@@ -16513,6 +16518,7 @@ mod tests {
             definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
                 plugin_id: "test.mondrian.generator-capable".to_owned(),
                 schema_version: 1,
+                binary_sha256: None,
             },
             bypassed: false,
             parameters: Default::default(),
@@ -16572,6 +16578,250 @@ mod tests {
 
         assert!(resolver.resolve(asset_id, component_id, 48_000,).is_ok());
         assert!(resolver.resolve(asset_id, AudioSourceComponentId::new(), 48_000,).is_err());
+    }
+
+    #[test]
+    fn export_audio_prepare_uses_the_queue_selected_processor_resolver() {
+        struct RejectingProcessorResolver;
+
+        impl AudioProcessorResolver for RejectingProcessorResolver {
+            fn prepare(
+                &self,
+                _request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                Err(mondrian_audio::AudioProcessorHostError::Unavailable(
+                    "selected export resolver reached".to_owned(),
+                ))
+            }
+        }
+
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 };
+        timeline.sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::AudioProcessorInstance {
+                id: mondrian_core::AudioProcessorInstanceId::new(),
+                definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "org.example.export-test".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: false,
+                parameters: Default::default(),
+                opaque_state: None,
+            },
+        );
+        refresh_test_execution_snapshot(&mut timeline, true);
+        let prepared = timeline
+            .prepared_execution()
+            .and_then(|snapshot| snapshot.audio())
+            .and_then(|audio| audio.outputs().next())
+            .expect("frozen audio output");
+        let range = compute_timeline_render_range(&timeline).expect("selected range");
+        let result = prepare_timeline_audio_delivery(
+            &timeline,
+            prepared,
+            range,
+            48_000,
+            AudioChannelLayout::Stereo,
+            &Arc::new(AudioSourceCache::new(48_000)),
+            service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
+            &RejectingProcessorResolver,
+        );
+        assert!(
+            matches!(result, Err(detail) if detail.contains("selected export resolver reached"))
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_CLAP_TEST_HELPER, MONDRIAN_CLAP_TEST_PLUGIN, and FFmpeg"]
+    fn export_audio_delivery_executes_installed_clap_on_nonzero_pcm() {
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        assert!(
+            ffmpeg_is_available_for_test(),
+            "FFmpeg is required for real CLAP export qualification"
+        );
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("installed Clack gain plugin");
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover installed CLAP");
+        let plugin_id = installed.descriptors()[0].plugin_id.clone();
+        let instance = installed
+            .create_instance(
+                &plugin_id,
+                reference_plugin_export_contract(),
+                Some(0.5_f32.to_le_bytes().to_vec()),
+            )
+            .expect("capture pinned installed instance");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_export_gain(instance, &resolver);
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER, MONDRIAN_VST3_TEST_PLUGIN, and FFmpeg"]
+    fn export_audio_delivery_executes_installed_vst3_on_nonzero_pcm() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        assert!(
+            ffmpeg_is_available_for_test(),
+            "FFmpeg is required for real VST3 export"
+        );
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("VST3 Gain reference file or bundle");
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover VST3 Gain");
+        let class_id = installed.descriptors()[0].class_id.clone();
+        let mut instance = installed
+            .create_instance(&class_id, reference_plugin_export_contract(), None)
+            .expect("capture pinned VST3 instance");
+        let id = instance.parameters.keys().next().cloned().expect("Gain parameter ID");
+        instance
+            .parameters
+            .get_mut(&id)
+            .expect("Gain parameter")
+            .set_automation(mondrian_core::ExactAutomationCurve::new(id, 0.5).expect("Gain curve"))
+            .expect("set Gain curve");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_export_gain(instance, &resolver);
+    }
+
+    fn reference_plugin_export_contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 16_384,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        }
+    }
+
+    fn assert_reference_export_gain(
+        instance: mondrian_timeline::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary source directory");
+        let source_path = directory.path().join("constant-stereo.wav");
+        let sample_rate = 48_000_u32;
+        let frames = sample_rate as usize;
+        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
+        let mut wave = BufWriter::new(std::fs::File::create(&source_path).expect("create WAV"));
+        wave.write_all(b"RIFF").expect("RIFF");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("WAVE format");
+        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
+        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
+        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("block align");
+        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
+        wave.write_all(b"data").expect("data");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
+        for _ in 0..frames {
+            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
+            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        }
+        wave.flush().expect("complete WAV source");
+        drop(wave);
+
+        let asset_id = AssetId::new();
+        let component_id = AudioSourceComponentId::primary();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.audio_sample_rate = sample_rate;
+        timeline.sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+        timeline.range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 };
+        let track_id = timeline.sequence.audio_tracks[0].id;
+        timeline
+            .sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(asset_id, TimelineTime::ZERO, TimelineTime::ONE).expect("source Clip"),
+                component_id,
+            )
+            .expect("add source Clip");
+        timeline.sequence.audio_program.outputs[0]
+            .strip
+            .pre_fader
+            .processors
+            .push(instance);
+        let mut dependency = test_media_dependency(
+            source_path.clone(),
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.audio_components.insert(
+            component_id,
+            mondrian_media::AudioSourceSelection::new(
+                0,
+                mondrian_media::info::ChannelLayout::Stereo,
+                MediaFileFingerprint::capture(&source_path),
+            ),
+        );
+        timeline.media.insert(asset_id, dependency);
+        refresh_test_execution_snapshot(&mut timeline, true);
+        let prepared = timeline
+            .prepared_execution()
+            .and_then(|snapshot| snapshot.audio())
+            .and_then(|audio| audio.outputs().next())
+            .expect("prepared audio output");
+        let range = compute_timeline_render_range(&timeline).expect("export range");
+        let mut delivery = prepare_timeline_audio_delivery(
+            &timeline,
+            prepared,
+            range,
+            sample_rate,
+            AudioChannelLayout::Stereo,
+            &Arc::new(AudioSourceCache::new(sample_rate)),
+            service::ExportExecutionResourcePolicy::default().audio_runtime_grant,
+            resolver,
+        )
+        .expect("prepare offline export delivery with real plugin");
+        if delivery.requires_state_entry() {
+            delivery
+                .enter_state(AudioContinuityEpoch::new(1), 0)
+                .expect("enter export continuity");
+        }
+        let mut output = [0.0_f32; 128];
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest { start_sample: 0, frames: 64 },
+                &mut output,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("execute installed plugin through export queue delivery");
+        for (frame, pair) in output.chunks_exact(2).enumerate() {
+            assert!(
+                (pair[0] - 0.125).abs() <= 1e-6,
+                "left frame {frame}: {}",
+                pair[0]
+            );
+            assert!(
+                (pair[1] + 0.125).abs() <= 1e-6,
+                "right frame {frame}: {}",
+                pair[1]
+            );
+        }
     }
 
     #[test]

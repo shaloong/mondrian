@@ -1,5 +1,10 @@
 # Effect System
 
+Built-in Effect definitions project their category path from the canonical
+`EffectType::category_path` contract. The registry supplies that same path to
+the Effect Browser; it does not maintain a second built-in category table.
+Plugin definitions declare their own category paths.
+
 Timeline text generation is not an Effect capability. Basic Title is closed
 Clip content whose generated working-linear frame enters this effect system at
 the ordinary Clip source boundary. The former disconnected renderer-only
@@ -13,6 +18,21 @@ task already owns that residency; Export instead owns one job-local rasterizer
 and no second result cache.
 
 Effects are timeline-instance operations that transform image data through a compiled render graph.
+
+The public definition-registration error remains typed across the application
+adapter boundary; native effect admission reports that error directly rather
+than flattening it into a string.
+
+Clip effect preparation binds an exact `EffectFrameContext`: sequence frame rate,
+sample aspect ratio, and the Clip's half-open source-time interval. The context
+travels through zero-time graph compilation and subsequent parameter evaluation.
+Frame-based external ABIs lower `TimelineTime` to a floating frame coordinate
+only at their boundary; the renderer's frame seed is a cache/execution key and
+cannot substitute for effect time. Inclusive available-frame bounds cover
+subframe source intervals by flooring the start and ceiling the exclusive end.
+Standalone effect preparation has no sequence frame context and an adapter that
+requires one must reject that invocation. A change to any bound frame fact
+invalidates cross-revision Clip-program reuse.
 
 This document describes visual effects. Audio processing uses the distinct
 Sequence-owned Audio Processor model in [Audio Pipeline](audio-pipeline.md).
@@ -221,8 +241,9 @@ stateless or ordered-session state; exact past/future temporal input; ROI
 propagation; resource lifetime; and the maximum linear-chain or general-DAG
 topology the definition may emit. Modes are not inferred as a Cartesian
 product: admitting CPU-U8 and GPU-F32 does not admit CPU-F32 or GPU-U8. An
-encoded RGBA8 Custom processor therefore admits only CPU-U8, while the current
-production linear built-ins admit CPU-F32. These facts are definition
+encoded RGBA8 Custom processor admits only CPU-U8; a Float32 Custom processor
+admits only CPU-F32. The current production linear built-ins admit CPU-F32.
+These facts are definition
 semantics, not renderer guesses. Spatial contracts call the same finite-support
 calculation as the production kernel. In particular, the three-pass
 fractional-box Gaussian may require a halo larger than `ceil(author_radius)`
@@ -677,9 +698,10 @@ cannot change the meaning of an author/program revision. No compile-time or
 per-frame global Custom implementation lookup exists.
 
 Disabled instances are the only implicit identity operation. An enabled
-modeled-only effect, missing plugin definition, unbound/invalid LUT, or failed
-builder never becomes an unchanged frame. The shared timeline render-plan
-compiler maps these failures into `MondrianError::EffectGraphEvaluationFailed`,
+effect without an executable evaluator, missing plugin definition,
+unbound/invalid LUT, or failed builder never becomes an unchanged frame. The
+shared timeline render-plan compiler maps these failures into
+`MondrianError::EffectGraphEvaluationFailed`,
 so preview and export both stop before publishing a misleading result. Any
 future operator-approved plugin bypass must be an explicit, diagnosable policy
 above this compiler seam rather than a warning followed by identity output.
@@ -783,6 +805,31 @@ identity. CPU execution uses two bounded scalar scratch planes; GPU execution
 uses one, two, or four explicit passes according to the admitted refinement.
 No UI-private key color, hidden matte allocation, or Preview-only algorithm is
 allowed.
+
+`builtin.luma_key` reuses this graph contract. Its threshold and softness
+select bright pixels from tone-mapped positive working-space luminance; the
+"Keep dark" switch inverts only the matte. The Mask node multiplies the
+selected coverage by the source's existing alpha. HSL qualification carries no
+dummy color samples; only 3D qualification requires an authored sample set.
+The keyer remains a pixel-local CPU/GPU Float32 operation and never quantizes
+the source through RGBA8.
+
+`builtin.hue_saturation_lightness` is an explicitly CPU Float32 point effect.
+Hue rotates the RGB chroma sector in the current working primaries, saturation
+scales channel distance from the HSL midpoint, and lightness adds a linear
+offset. The operation leaves alpha unchanged and does not clamp negative or
+extended-range RGB. Its neutral controls omit the graph node; invalid or
+non-finite authored controls fail preparation. GPU execution is not declared
+until a kernel with matching semantics exists.
+
+`builtin.chroma_key` selects a user-chosen color by positive RGB chromaticity,
+so a bright and shadowed screen with the same channel proportions produce the
+same matte. Similarity and edge softness bound a smooth transition in
+chromaticity distance; black has no chromaticity and fails author preparation
+with a Luma Key suggestion. The graph's Mask inverts the selection by default
+to remove the key color, or retains it when requested, while preserving source
+alpha and extended-range RGB. The scalar operation admits CPU Float32 only;
+GPU support requires an explicitly equivalent kernel.
 
 ## Ordering
 
@@ -1002,13 +1049,17 @@ legal RGB transitions through
 `apply_compiled_effect_graph_rgba_f32_with_domain_processor(...)`; transition
 failures and domain blockers are fail-closed and never authorize RGBA8
 execution. The encoded executor returns `EffectExecutionError` for any domain
-plan because it has no typed OCIO runtime. Custom/plugin processors remain
-unsupported until their ABI declares a float implementation. CPU float support
-does not imply GPU execution support.
+plan because it has no typed OCIO runtime. Custom/plugin processors bind an
+explicit RGBA8 or Float32 callback to the compiled graph. The graph derives
+exact admission from that binding; it never converts a Float32 frame through
+RGBA8 to invoke an encoded processor. Float32 callbacks preserve extended and
+negative RGB, stage one full-frame scratch image, and report processor failure
+without publishing mutated pixels. CPU float support does not imply GPU
+execution support.
 
-The encoded custom-processor fallback is also fail-closed. Missing processors,
-processor errors and processor panics return `EffectExecutionError`; staged
-pixels are discarded. `timeline_composite` wraps encoded, float and unresolved
+Both custom-processor paths are fail-closed. Missing processors, processor
+errors and processor panics return typed execution errors; staged pixels are
+discarded. `timeline_composite` wraps encoded, float and unresolved
 domain failures in `TimelineCompositeError`, and production preview/export
 propagate that error instead of substituting black or unchanged pixels.
 

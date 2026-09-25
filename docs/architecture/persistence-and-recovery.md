@@ -22,7 +22,7 @@ decodes them under a 256 MiB per-still allocation cap and validates canonical
 RGBA8 structure and declared dimensions before admitting the Project.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v25, and library v6.
+version axes. The current values are archive v1, document v27, and library v6.
 Library v5 canonicalized persisted native audio layout evidence as exact,
 unspecified, or unsupported; its v4 migration was a field-scoped transactional
 JSON rewrite and never interpreted asset names or stream labels. Library v6
@@ -33,6 +33,70 @@ RAW settings. An archive is
 accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.
+
+## Portable package dependency preflight
+
+The ordinary `.mdp` remains a lightweight authoring archive. The App's
+`portable_project_dependency_inventory` scans the complete Project document
+and one stable Asset Library revision before package publication. It includes
+visible Library Assets, Assets still referenced by Clips, external resource
+parameters on Clips and every saved Grade Version (including inactive ones),
+and explicit Custom OCIO config paths and the external FileTransform resources
+reachable from the pinned processor routes. Canonical regular-file paths are
+deduplicated while retaining every stable author owner and an observed byte
+count. Missing files, dangling Asset IDs, remote resources, environment-selected
+OCIO, and Custom OCIO resources that cannot be safely relocated together
+produce explicit issues; an inventory with issues cannot authorize a complete package. This is
+read-only preflight: source files must be revalidated as retained objects while
+copying, and no portable artifact is published by the inventory itself.
+
+`export_portable_project_package` stages a new `.mdpkg` directory containing a
+validated `project.mdp`, deduplicated copied files, and a versioned manifest
+with exact original path spellings, file lengths, and SHA-256 digests. The copy
+checks every source again through its retained handle before an atomic,
+create-only directory publication. SQLite is captured through its online
+snapshot API; its temporary backup is discarded before publication. The
+Custom OCIO config and its resources retain their relative layout from their
+nearest common source directory under `files/ocio/`. Before publication, a
+temporary rebound document loads that config and proves every FileTransform
+resolves to a copied manifest file. Absolute or environment-expanded search
+paths, context variables, and resources that still resolve outside the package
+fail the package as a whole. On import, the
+pinned config and dependency digests remain unchanged while the source locator
+is rebound to the verified package path, then the same resource containment
+check runs before the new Session is installed. This admits ordinary relative
+LUT search paths, including sibling directories reached through `../`,
+without copying unrelated studio directories.
+The Custom OCIO relocation regression uses a nonidentity 3D LUT and compares
+Float32 display-transform pixels and alpha before export and after moving the
+package and removing both original files. A sibling search path outside the
+config directory is also moved and compared pixel for pixel after import.
+The product command performs preflight and publication on a dedicated cancellable
+worker. Cancellation is checked during file copy and hashing and immediately
+before final publication; dropping staging removes incomplete output. The
+package verifier checks paths against traversal and symlinks, all file hashes,
+the nested archive, and Project identity. Package open validates the manifest
+before interrupting the current Session, extracts the nested archive into a new
+runtime Library generation, and rewrites both typed Project resource values
+and SQLite file-source paths before installing the imported Session. Byte-
+identical media keeps its authored Asset identity, probe facts, and logical
+audio component bindings while filesystem revision evidence is refreshed.
+Before the imported Session is installed, every SQLite file Asset must point
+to one verified bundled source and no remote Asset may remain. A manifest that
+omits a Library file row is rejected even when its remaining hashes are valid;
+the previous Session is restored after a failed import.
+The moved-package regression uses a valid nonidentity `.cube` and compares its
+prepared LUT sample before packaging and after removing the original source.
+It also executes the Viewer CPU composite and Export composite/output boundary
+for the same solid-color frame, requiring byte-identical pixels both between
+paths and before/after relocation. A byte-valid manifest that omits the LUT
+binding is rejected before Session installation. This qualifies the in-process
+CPU rendering paths; encoded-file, GPU, and other-machine parity still require
+separate qualification.
+The import is unsaved and its first Save has create-only intent for a sibling
+`.mdp`; it never rewrites the portable package. Choosing `project.mdp` inside a
+`.mdpkg` directory in the ordinary Open dialog routes through this package
+path rather than directly opening the nested archive.
 
 ## Author Snapshot and Request Identity
 

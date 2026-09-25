@@ -3,6 +3,7 @@
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
+pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
 pub mod effect;
@@ -15,6 +16,7 @@ pub mod gpu_plan;
 pub mod graph;
 pub mod hdr_grading;
 pub mod heterogeneous_execution;
+pub mod hsl;
 pub mod lut;
 pub mod mask;
 pub mod mask_raster;
@@ -30,6 +32,7 @@ pub mod transition;
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
 };
+pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{
     ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,
     COLOR_CURVE_SAMPLE_ROWS,
@@ -40,11 +43,11 @@ pub use effect::{
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
     register_effect_definition, CustomEffectProcessorBinding, EffectCacheKeyBuilder,
     EffectCachePolicy, EffectCategoryNode, EffectColorDomain, EffectColorDomainContract,
-    EffectDefinition, EffectEvalContext, EffectGraphBuildError, EffectGraphBuilder,
-    EffectGraphPreparer, EffectInstantiationError, EffectNode, EffectNodeExt,
-    EffectPreparationContext, EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan,
-    EffectResourceDependency, EffectResourceRecovery, EffectType, PreparedEffectEvaluator,
-    PreparedLut3D,
+    EffectDefinition, EffectDefinitionError, EffectEvalContext, EffectFrameContext,
+    EffectFrameContextError, EffectGraphBuildError, EffectGraphBuilder, EffectGraphPreparer,
+    EffectInstantiationError, EffectNode, EffectNodeExt, EffectPreparationContext, EffectRenderOp,
+    EffectRenderParamsBuilder, EffectRenderPlan, EffectResourceDependency, EffectResourceRecovery,
+    EffectType, PreparedEffectEvaluator, PreparedLut3D,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
@@ -54,9 +57,9 @@ pub use execution::{
     apply_compiled_effect_graph_rgba_f32_with_domain_processor,
     compiled_effect_graph_has_resolvable_rgba_f32_domain,
     compiled_effect_graph_has_rgba_f32_execution_shape, compiled_effect_graph_supports_rgba_f32,
-    compiled_effect_graph_supports_rgba_f32_with_domain_processor, CustomEffectRenderProcessor,
-    EffectDomainProcessorCacheKey, EffectExecutionError, EffectFloatExecutionError,
-    EffectFloatUnsupportedReason,
+    compiled_effect_graph_supports_rgba_f32_with_domain_processor,
+    CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor, EffectDomainProcessorCacheKey,
+    EffectExecutionError, EffectFloatExecutionError, EffectFloatUnsupportedReason,
 };
 pub use execution_contract::{
     EffectDeterminism, EffectExecutionAdmissionError, EffectExecutionContract,
@@ -106,6 +109,7 @@ pub use heterogeneous_execution::{
     PreparedHeterogeneousEffectWorkError, PreparedHeterogeneousGpuDispatch,
     PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
 };
+pub use hsl::{HslGrade, HslGradeError};
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
     LutPreparationCacheDiagnostics,

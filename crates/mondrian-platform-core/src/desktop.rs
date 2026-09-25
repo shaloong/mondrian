@@ -125,6 +125,14 @@ pub trait PlatformService: Send + Sync {
         filters: &[FileFilter],
     ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError>;
 
+    /// Open a native folder picker for directory-backed assets and plugins.
+    fn open_folder_dialog(
+        &self,
+        _title: &str,
+    ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+        Err(FileDialogError::Unavailable)
+    }
+
     /// Open a native save-file dialog.
     fn save_file_dialog(
         &self,
@@ -198,6 +206,10 @@ mod tests {
         );
         assert_eq!(
             service.open_file_dialog("Open", &[]),
+            Err(FileDialogError::Unavailable)
+        );
+        assert_eq!(
+            service.open_folder_dialog("Folder"),
             Err(FileDialogError::Unavailable)
         );
         assert_eq!(

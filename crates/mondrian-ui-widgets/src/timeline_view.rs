@@ -9,6 +9,8 @@ mod model;
 mod paint;
 mod transition;
 
+use std::path::PathBuf;
+
 use mondrian_core::types::AssetId;
 #[cfg(test)]
 use mondrian_core::types::Rational;
@@ -142,6 +144,9 @@ pub struct TimelineSeek {
 /// Action factory for dropping an asset onto a timeline track.
 pub type TimelineAssetDropAction = dyn Fn(TimelineAssetDrop, &TimelineTrack) -> Option<Action>;
 
+/// Action factory for dropping one external file onto a timeline track.
+pub type TimelineFileDropAction = dyn Fn(TimelineFileDrop, &TimelineTrack) -> Option<Action>;
+
 /// Action factory for clip move commits.
 pub type TimelineClipMoveAction = dyn Fn(TimelineClipMove, &TimelineClip) -> Option<Action>;
 
@@ -238,6 +243,17 @@ pub struct TimelineTrackMove {
 pub struct TimelineAssetDrop {
     pub asset_id: AssetId,
     pub track_ref: TimelineTrackRef,
+    pub frame: i64,
+}
+
+/// Domain-light external file drop proposal emitted only for a track body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineFileDrop {
+    /// Native path delivered by the operating system.
+    pub path: PathBuf,
+    /// Track body under the release point.
+    pub track_ref: TimelineTrackRef,
+    /// Release point on the Timeline evaluation grid.
     pub frame: i64,
 }
 
@@ -830,6 +846,7 @@ pub struct TimelineView {
     on_edit_command_shortcut: Option<Box<TimelineEditCommandShortcut>>,
     on_seek: Option<Box<TimelineSeekAction>>,
     on_asset_drop: Option<Box<TimelineAssetDropAction>>,
+    on_file_drop: Option<Box<TimelineFileDropAction>>,
     on_clip_move: Option<Box<TimelineClipMoveAction>>,
     on_clip_trim: Option<Box<TimelineClipTrimAction>>,
     on_transition_select: Option<Box<TimelineTransitionAction>>,
@@ -845,7 +862,7 @@ pub struct TimelineView {
 
 #[derive(Debug, Clone, Copy)]
 struct TimelineAssetDropHover {
-    asset_id: AssetId,
+    asset_id: Option<AssetId>,
     track_index: usize,
     frame: i64,
 }
@@ -988,6 +1005,7 @@ impl TimelineView {
             on_edit_command_shortcut: None,
             on_seek: None,
             on_asset_drop: None,
+            on_file_drop: None,
             on_clip_move: None,
             on_clip_trim: None,
             on_transition_select: None,
@@ -1265,6 +1283,16 @@ impl TimelineView {
         R: Into<Option<Action>>,
     {
         self.on_asset_drop = Some(Box::new(move |drop, track| action(drop, track).into()));
+        self
+    }
+
+    /// Set a dynamic action factory for external file drops on track bodies.
+    pub fn on_file_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(TimelineFileDrop, &TimelineTrack) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_file_drop = Some(Box::new(move |drop, track| action(drop, track).into()));
         self
     }
 
@@ -2759,7 +2787,12 @@ impl TimelineView {
         Some((target.track_index, target.frame))
     }
 
-    fn hover_asset_drop(&mut self, asset_id: AssetId, position: Point, ctx: &mut EventContext) {
+    fn hover_asset_drop(
+        &mut self,
+        asset_id: Option<AssetId>,
+        position: Point,
+        ctx: &mut EventContext,
+    ) {
         let next = self
             .asset_drop_target_at(position)
             .map(|(track_index, frame)| TimelineAssetDropHover { asset_id, track_index, frame });
@@ -2771,6 +2804,31 @@ impl TimelineView {
             self.asset_drop_hover = next;
             ctx.request_repaint();
         }
+    }
+
+    fn finish_file_drop(
+        &mut self,
+        path: PathBuf,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        self.asset_drop_hover = None;
+        if let Some((track_index, frame)) = self.asset_drop_target_at(position)
+            && let Some(track) = self.tracks.get(track_index)
+            && let Some(factory) = &self.on_file_drop
+            && let Some(action) = factory(
+                TimelineFileDrop {
+                    path,
+                    track_ref: TimelineTrackRef { track_index },
+                    frame,
+                },
+                track,
+            )
+        {
+            (ctx.dispatch)(action);
+        }
+        ctx.request_repaint();
+        EventResult::Handled
     }
 
     fn finish_asset_drop(
@@ -4761,7 +4819,13 @@ impl Widget for TimelineView {
 
         match event {
             UiEvent::DragEnter { payload: DragPayload::Asset(asset_id), position } => {
-                self.hover_asset_drop(*asset_id, *position, ctx);
+                self.hover_asset_drop(Some(*asset_id), *position, ctx);
+                return EventResult::Handled;
+            }
+            UiEvent::DragEnter { payload: DragPayload::File(paths), position }
+                if paths.len() == 1 =>
+            {
+                self.hover_asset_drop(None, *position, ctx);
                 return EventResult::Handled;
             }
             UiEvent::DragOver { position } if self.asset_drop_hover.is_some() => {
@@ -4777,6 +4841,9 @@ impl Widget for TimelineView {
             }
             UiEvent::Drop { payload: DragPayload::Asset(asset_id), position } => {
                 return self.finish_asset_drop(*asset_id, *position, ctx);
+            }
+            UiEvent::Drop { payload: DragPayload::File(paths), position } if paths.len() == 1 => {
+                return self.finish_file_drop(paths[0].clone(), *position, ctx);
             }
             UiEvent::MouseDown { position, button: MouseButton::Right, .. } => {
                 if !self.bounds.contains(*position) {
@@ -5898,6 +5965,87 @@ mod tests {
         );
 
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn external_file_drop_dispatches_only_for_a_track_body() {
+        let actions = RefCell::new(Vec::new());
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let drop_log = Rc::clone(&drops);
+        let path = PathBuf::from("E:/media/external.mov");
+        let mut view = TimelineView::new(vec![TimelineTrack::video("V1", vec![])])
+            .with_header_width(128.0)
+            .on_file_drop(move |drop, _| {
+                drop_log.borrow_mut().push(drop);
+                Action::Paste
+            });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 140.0));
+        let body = Point::new(
+            view.body_rect.x + 10.0 * view.pixels_per_frame,
+            view.body_rect.y + view.track_height * 0.5,
+        );
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        assert_eq!(
+            view.event(
+                &UiEvent::DragEnter {
+                    payload: DragPayload::File(vec![path.clone()]),
+                    position: body,
+                },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(view.asset_drop_hover.is_some());
+        assert_eq!(
+            view.event(&UiEvent::DragLeave, &mut ctx),
+            EventResult::Handled
+        );
+        assert!(view.asset_drop_hover.is_none());
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            view.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::File(vec![path.clone()]),
+                    position: old_timeline_point(64.0, 48.0),
+                },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            view.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::File(vec![path.clone()]),
+                    position: body,
+                },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::Paste]);
+        assert_eq!(
+            drops.borrow().as_slice(),
+            &[TimelineFileDrop {
+                path,
+                track_ref: TimelineTrackRef { track_index: 0 },
+                frame: 10,
+            }]
+        );
     }
 
     #[test]

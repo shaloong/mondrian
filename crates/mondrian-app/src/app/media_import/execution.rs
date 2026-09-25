@@ -35,7 +35,7 @@ const MEDIA_IMPORT_MAX_WORKERS: usize = 2;
 const MEDIA_IMPORT_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MediaImportAdmissionError {
+pub(in crate::app) enum MediaImportAdmissionError {
     ProjectUnavailable,
     WorkerUnavailable,
     EmptyBatch,
@@ -68,10 +68,10 @@ impl std::fmt::Display for MediaImportAdmissionError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct MediaImportAdmission {
-    pub(super) batch_id: u64,
-    pub(super) generation: u64,
-    pub(super) total: usize,
+pub(in crate::app) struct MediaImportAdmission {
+    pub(in crate::app) batch_id: u64,
+    pub(in crate::app) generation: u64,
+    pub(in crate::app) total: usize,
 }
 
 #[derive(Debug)]
@@ -87,6 +87,7 @@ pub(super) enum MediaImportWorkerOutcome {
 #[derive(Debug)]
 pub(super) enum MediaImportPublicationOutcome {
     Imported(AssetId),
+    Prepared(Box<MediaImportPreparedCandidate>),
     Failed(String),
     Canceled,
 }
@@ -98,6 +99,7 @@ struct MediaImportWorkerResult {
     path: PathBuf,
     elapsed: Duration,
     outcome: MediaImportWorkerOutcome,
+    defer_commit: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +118,7 @@ struct MediaImportJob {
     folder_id: Option<String>,
     path: PathBuf,
     cancellation: ExecutionCancellationToken,
+    defer_commit: bool,
 }
 
 struct MediaImportBatchRuntime {
@@ -217,6 +220,64 @@ trait MediaImportBackend: MediaImportPreparationBackend + MediaImportCommitBacke
 
 impl<T> MediaImportBackend for T where T: MediaImportPreparationBackend + MediaImportCommitBackend {}
 
+#[cfg(test)]
+struct InProcessTestBackend;
+
+#[cfg(test)]
+impl MediaImportPreparationBackend for InProcessTestBackend {
+    fn prepare(
+        &self,
+        path: &Path,
+        folder_id: Option<&str>,
+        cancellation: &ExecutionCancellationToken,
+    ) -> MediaImportWorkerOutcome {
+        if cancellation.is_canceled() {
+            return MediaImportWorkerOutcome::Canceled;
+        }
+        let prepared =
+            path.canonicalize()
+                .map_err(|error| error.to_string())
+                .and_then(|canonical_path| {
+                    let info = mondrian_media::probe_media_info(&canonical_path)
+                        .map_err(|error| error.to_string())?;
+                    let source_fingerprint =
+                        mondrian_core::MediaFileFingerprint::capture(&canonical_path);
+                    Ok(MediaImportPreparedCandidate {
+                        canonical_path,
+                        source_fingerprint,
+                        info,
+                        folder_id: folder_id.map(str::to_owned),
+                    })
+                });
+        match prepared {
+            Ok(_) if cancellation.is_canceled() => MediaImportWorkerOutcome::Canceled,
+            Ok(candidate) => MediaImportWorkerOutcome::Prepared(Box::new(candidate)),
+            Err(detail) => MediaImportWorkerOutcome::Failed {
+                detail,
+                failure: MediaImportFailureReason::ProbeFailed,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+impl MediaImportCommitBackend for InProcessTestBackend {
+    fn commit(
+        &self,
+        library: &AssetLibrary,
+        candidate: MediaImportPreparedCandidate,
+    ) -> MediaImportPublicationOutcome {
+        let folder_id = candidate.folder_id.clone();
+        match candidate
+            .into_probe_candidate()
+            .and_then(|candidate| library.commit_media_probe(candidate, folder_id.as_deref()))
+        {
+            Ok(asset_id) => MediaImportPublicationOutcome::Imported(asset_id),
+            Err(error) => MediaImportPublicationOutcome::Failed(error.to_string()),
+        }
+    }
+}
+
 pub(in super::super) struct MediaImportExecution {
     inner: Arc<MediaImportExecutionInner>,
     committer: Arc<dyn MediaImportCommitBackend>,
@@ -236,6 +297,11 @@ impl MediaImportExecution {
             media_import_worker_count(),
             Arc::new(AssetLibraryMediaImportBackend::new()),
         )
+    }
+
+    #[cfg(test)]
+    pub(in crate::app) fn with_in_process_test_backend() -> Self {
+        Self::with_backend(1, Arc::new(InProcessTestBackend))
     }
 
     fn with_backend<B>(worker_count: usize, backend: Arc<B>) -> Self
@@ -340,6 +406,24 @@ impl MediaImportExecution {
         paths: Vec<PathBuf>,
         folder_id: Option<String>,
     ) -> std::result::Result<MediaImportAdmission, MediaImportAdmissionError> {
+        self.admit_batch_with_mode(paths, folder_id, false)
+    }
+
+    /// Admit a single file whose prepared probe will be committed together
+    /// with a dependent authoring operation by the App adapter.
+    pub(in crate::app) fn admit_deferred_file(
+        &self,
+        path: PathBuf,
+    ) -> std::result::Result<MediaImportAdmission, MediaImportAdmissionError> {
+        self.admit_batch_with_mode(vec![path], None, true)
+    }
+
+    fn admit_batch_with_mode(
+        &self,
+        paths: Vec<PathBuf>,
+        folder_id: Option<String>,
+        defer_commit: bool,
+    ) -> std::result::Result<MediaImportAdmission, MediaImportAdmissionError> {
         let mut state = self.inner.state.lock();
         if state.project_id.is_none() {
             return Err(reject_import_admission(
@@ -410,6 +494,7 @@ impl MediaImportExecution {
                 folder_id: folder_id.clone(),
                 path,
                 cancellation: cancellation.clone(),
+                defer_commit,
             });
         }
         state.outstanding_files = state.outstanding_files.saturating_add(total);
@@ -503,11 +588,15 @@ impl MediaImportExecution {
                 match result.outcome {
                     MediaImportWorkerOutcome::Prepared(candidate) => {
                         drop(state);
-                        let committed = match library {
-                            Some(library) => self.committer.commit(library, *candidate),
-                            None => MediaImportPublicationOutcome::Failed(
-                                "素材库在导入提交前已断开".to_owned(),
-                            ),
+                        let committed = if result.defer_commit {
+                            MediaImportPublicationOutcome::Prepared(candidate)
+                        } else {
+                            match library {
+                                Some(library) => self.committer.commit(library, *candidate),
+                                None => MediaImportPublicationOutcome::Failed(
+                                    "素材库在导入提交前已断开".to_owned(),
+                                ),
+                            }
                         };
                         state = self.inner.state.lock();
                         match committed {
@@ -520,6 +609,11 @@ impl MediaImportExecution {
                                     None,
                                 )
                             }
+                            MediaImportPublicationOutcome::Prepared(candidate) => (
+                                MediaImportPublicationOutcome::Prepared(candidate),
+                                ExecutionTerminalDisposition::Completed,
+                                None,
+                            ),
                             MediaImportPublicationOutcome::Failed(error) => {
                                 state.counters.failed_files =
                                     state.counters.failed_files.saturating_add(1);
@@ -599,6 +693,32 @@ impl MediaImportExecution {
     pub(super) fn poll_model_changed(&self) -> bool {
         let revision = self.inner.model_revision.load(Ordering::Acquire);
         self.observed_model_revision.swap(revision, Ordering::AcqRel) != revision
+    }
+
+    /// Complete the App-owned publication phase of a deferred Timeline drop.
+    pub(super) fn finalize_deferred_file(&self, batch_id: u64, success: bool) {
+        let mut state = self.inner.state.lock();
+        if success {
+            state.counters.imported_files = state.counters.imported_files.saturating_add(1);
+        } else {
+            state.counters.failed_files = state.counters.failed_files.saturating_add(1);
+            state.counters.publication_failures =
+                state.counters.publication_failures.saturating_add(1);
+        }
+        if let Some(record) = state
+            .terminal_records
+            .iter_mut()
+            .rev()
+            .find(|record| record.batch_id == batch_id)
+        {
+            record.evidence.disposition = if success {
+                ExecutionTerminalDisposition::Completed
+            } else {
+                ExecutionTerminalDisposition::Failed
+            };
+            record.failure = (!success).then_some(MediaImportFailureReason::ImportFailed);
+        }
+        self.inner.mark_model_changed();
     }
 
     pub(in super::super) fn diagnostics(&self) -> MediaImportDiagnostics {
@@ -770,6 +890,7 @@ fn media_import_worker(inner: Arc<MediaImportExecutionInner>) {
             path: job.path,
             elapsed: started.elapsed(),
             outcome,
+            defer_commit: job.defer_commit,
         };
         {
             let mut state = inner.state.lock();

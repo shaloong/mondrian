@@ -174,6 +174,11 @@ thiserror = { workspace = true }
 # 序列化
 serde     = { workspace = true }
 serde_json = { workspace = true }
+libloading = { workspace = true }
+tempfile = { workspace = true }
+fluent-bundle = { workspace = true }
+unic-langid = { workspace = true }
+sys-locale = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
@@ -187,10 +192,13 @@ pollster = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { workspace = true, features = ["Win32_Security"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[build-dependencies]
+cc = "1"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
@@ -199,4 +207,3 @@ winres = "0.1"
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
 mondrian-export = { workspace = true, features = ["validation"] }
 mondrian-renderer = { workspace = true, features = ["validation"] }
-tempfile = { workspace = true }

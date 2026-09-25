@@ -9,7 +9,8 @@ mod program;
 mod schedule;
 
 use crate::adjustment::{
-    apply_render_op_f32_region_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
+    apply_custom_render_op_f32, apply_render_op_f32_region_controlled,
+    render_op_f32_scratch_frames, EffectRasterRegion,
 };
 use crate::execution::{
     apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled,
@@ -609,6 +610,9 @@ pub enum EffectTemporalExecutionError {
     /// Demand planning could not represent the exact request.
     #[error(transparent)]
     Demand(#[from] EffectExecutionDemandError),
+    /// A bound custom Float32 processor failed without publishing staged pixels.
+    #[error(transparent)]
+    CustomProcessor(#[from] crate::EffectExecutionError),
     /// One definition stage does not admit CPU Float32.
     #[error("effect stage {stage_index} does not admit CPU Float32 temporal execution")]
     ExecutionModeNotAdmitted {
@@ -1638,13 +1642,31 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     )?;
                                 self.working.ensure_transient(scratch_bytes)?;
                                 let cancellation = self.request.cancellation.clone();
-                                let execution = apply_render_op_f32_region_controlled(
-                                    &mut output,
-                                    self.raster_region,
-                                    &op,
-                                    frame_seed,
-                                    &mut || temporal_cancellation_checkpoint(&cancellation),
-                                );
+                                let execution =
+                                    if matches!(op, crate::EffectRenderOp::Custom { .. }) {
+                                        if !self.raster_region.is_full_frame() {
+                                            Ok(false)
+                                        } else {
+                                            temporal_cancellation_checkpoint(&cancellation)?;
+                                            apply_custom_render_op_f32(
+                                                &mut output,
+                                                self.raster_region.frame_width(),
+                                                self.raster_region.frame_height(),
+                                                &op,
+                                                frame_seed,
+                                            )?;
+                                            temporal_cancellation_checkpoint(&cancellation)?;
+                                            Ok(true)
+                                        }
+                                    } else {
+                                        apply_render_op_f32_region_controlled(
+                                            &mut output,
+                                            self.raster_region,
+                                            &op,
+                                            frame_seed,
+                                            &mut || temporal_cancellation_checkpoint(&cancellation),
+                                        )
+                                    };
                                 match execution {
                                     Ok(true) => {}
                                     Ok(false) => {
@@ -2269,6 +2291,8 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         crate::EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
         crate::EffectRenderOp::ColorCurves { .. } => "color_curves",
+        crate::EffectRenderOp::HueSaturationLightness { .. } => "hue_saturation_lightness",
+        crate::EffectRenderOp::ChromaKey { .. } => "chroma_key",
         crate::EffectRenderOp::Qualifier { .. } => "qualifier",
         crate::EffectRenderOp::MattePreview { .. } => "matte_preview",
         crate::EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",

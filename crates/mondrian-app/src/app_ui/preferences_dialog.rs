@@ -25,6 +25,7 @@ use std::path::Path;
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_audio_output_device_changed_action,
     app_shell_preferences_display_management_changed_action,
+    app_shell_preferences_locale_changed_action,
     app_shell_preferences_refresh_audio_output_devices_action,
     app_shell_preferences_select_display_icc_profile_action,
     app_shell_preferences_shortcut_disabled_action, app_shell_preferences_shortcut_rebound_action,
@@ -38,6 +39,7 @@ use crate::app::AppState;
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::background_runtime::APP_UI_BACKGROUND_WORKERS;
 use crate::app_ui::commands::{command_by_id, AppUiCommandCategory};
+use crate::app_ui::localization::{AppUiLocale, AppUiLocalePreference, Localizer};
 use crate::app_ui::product_logging::DEFAULT_APP_UI_LOG_FILTER;
 use crate::app_ui::shortcuts::{
     active_shortcuts, default_shortcuts, AppUiShortcutBinding, AppUiShortcutKey,
@@ -72,7 +74,7 @@ const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
 const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
 const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
 const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
-const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 11;
+const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 12;
 
 const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
@@ -80,6 +82,10 @@ const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4
 /// Read-only settings/status snapshot shown by the app UI preferences UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppUiPreferencesModel {
+    /// Persisted machine-local language preference.
+    pub locale_preference: AppUiLocalePreference,
+    /// Resolved locale used to project text for this UI snapshot.
+    pub locale: AppUiLocale,
     pub theme_preference: ThemePreference,
     pub resolved_theme_preset: ThemePreset,
     pub theme_label: String,
@@ -130,6 +136,16 @@ pub struct ShortcutPreferenceRow {
 }
 
 impl AppUiPreferencesModel {
+    /// Resolve the chosen locale against the captured desktop language.
+    pub fn set_locale_preference(
+        &mut self,
+        preference: AppUiLocalePreference,
+        system_tag: Option<&str>,
+    ) {
+        self.locale_preference = preference;
+        self.locale = preference.resolve(system_tag);
+    }
+
     /// Replace only the low-frequency physical-device observation.
     pub fn set_audio_output_device_catalog(&mut self, catalog: AudioOutputDeviceCatalogState) {
         self.audio_output_device_label =
@@ -218,6 +234,8 @@ impl AppUiPreferencesModel {
         let display_management = state.viewer_display_management().clone();
         let engine = state.project_color_environment().engine();
         Self {
+            locale_preference: AppUiLocalePreference::System,
+            locale: AppUiLocale::ZhCn,
             theme_preference,
             resolved_theme_preset,
             theme_label: theme_preference.display_name().to_owned(),
@@ -261,6 +279,8 @@ impl AppUiPreferencesModel {
 impl Default for AppUiPreferencesModel {
     fn default() -> Self {
         Self {
+            locale_preference: AppUiLocalePreference::System,
+            locale: AppUiLocale::ZhCn,
             theme_preference: ThemePreference::System,
             resolved_theme_preset: ThemePreset::Dark,
             theme_label: ThemePreference::System.display_name().to_owned(),
@@ -366,6 +386,7 @@ pub struct PreferencesDialog {
     expanded_chevron: Option<VectorIcon>,
     nav_buttons: Vec<Button>,
     theme_group: SegmentedButtonGroup,
+    locale_dropdown: Dropdown,
     waveform_group: SegmentedButtonGroup,
     viewer_background_group: SegmentedButtonGroup,
     audio_output_device_dropdown: Dropdown,
@@ -456,6 +477,7 @@ impl PreferencesDialog {
                 .collect(),
             theme_selected,
         );
+        let locale_dropdown = locale_dropdown(&model);
         let waveform_selected = match model.waveform_display {
             WaveformDisplay::BottomAligned => 0,
             WaveformDisplay::Centered => 1,
@@ -527,6 +549,7 @@ impl PreferencesDialog {
             expanded_chevron: VectorIcon::from_svg_str(CHEVRON_DOWN_SVG).ok(),
             nav_buttons,
             theme_group,
+            locale_dropdown,
             waveform_group,
             viewer_background_group,
             audio_output_device_dropdown,
@@ -564,6 +587,8 @@ impl PreferencesDialog {
             .position(|preference| *preference == self.model.theme_preference)
             .unwrap_or(0);
         self.theme_group.set_selected_index(theme_selected);
+        self.locale_dropdown
+            .set_model(locale_label(&self.model), locale_items(&self.model));
         self.waveform_group.set_selected_index(
             if self.model.waveform_display == WaveformDisplay::BottomAligned {
                 0
@@ -933,15 +958,21 @@ impl Widget for PreferencesDialog {
                 238.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
+            self.locale_dropdown.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 2.0 * ROW_HEIGHT,
+                238.0,
+                ROW_HEIGHT,
+            ));
             self.waveform_group.layout(Rect::new(
                 content_x + 126.0,
-                body_top + 2.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
                 160.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.viewer_background_group.layout(Rect::new(
                 content_x + 126.0,
-                body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                body_top + 4.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
                 160.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
@@ -953,6 +984,7 @@ impl Widget for PreferencesDialog {
             self.select_icc_profile_button.layout(Rect::ZERO);
         } else if self.active_tab == PreferencesDialogTab::Media {
             self.theme_group.layout(Rect::ZERO);
+            self.locale_dropdown.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
             self.viewer_background_group.layout(Rect::ZERO);
             self.audio_output_device_dropdown.layout(Rect::new(
@@ -968,6 +1000,7 @@ impl Widget for PreferencesDialog {
             self.select_icc_profile_button.layout(Rect::ZERO);
         } else if self.active_tab == PreferencesDialogTab::Display {
             self.theme_group.layout(Rect::ZERO);
+            self.locale_dropdown.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
             self.viewer_background_group.layout(Rect::ZERO);
             self.audio_output_device_dropdown.layout(Rect::ZERO);
@@ -1003,6 +1036,7 @@ impl Widget for PreferencesDialog {
             ));
         } else {
             self.theme_group.layout(Rect::ZERO);
+            self.locale_dropdown.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
             self.viewer_background_group.layout(Rect::ZERO);
             self.audio_output_device_dropdown.layout(Rect::ZERO);
@@ -1097,6 +1131,9 @@ impl Widget for PreferencesDialog {
         }
         if self.active_tab == PreferencesDialogTab::General {
             if self.theme_group.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
+            }
+            if self.locale_dropdown.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
             if self.waveform_group.event(event, ctx) == EventResult::Handled {
@@ -1257,6 +1294,7 @@ impl Widget for PreferencesDialog {
         }
         if self.active_tab == PreferencesDialogTab::General {
             self.theme_group.paint(ctx);
+            self.locale_dropdown.paint(ctx);
             self.waveform_group.paint(ctx);
             self.viewer_background_group.paint(ctx);
         }
@@ -1365,6 +1403,11 @@ impl Widget for PreferencesDialog {
         let waveform_index = theme_index + 1;
         if index == waveform_index {
             return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&self.locale_dropdown as &dyn Widget);
+        }
+        let waveform_index = waveform_index + 1;
+        if index == waveform_index {
+            return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&self.waveform_group as &dyn Widget);
         }
         let viewer_background_index = waveform_index + 1;
@@ -1425,6 +1468,11 @@ impl Widget for PreferencesDialog {
                 .then_some(&mut self.theme_group as &mut dyn Widget);
         }
         let waveform_index = theme_index + 1;
+        if index == waveform_index {
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&mut self.locale_dropdown as &mut dyn Widget);
+        }
+        let waveform_index = waveform_index + 1;
         if index == waveform_index {
             return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&mut self.waveform_group as &mut dyn Widget);
@@ -1865,6 +1913,11 @@ fn content_rows_for_tab(
         PreferencesDialogTab::General => vec![
             heading("外观"),
             detail(format!("主题：{}", model.theme_label)),
+            detail(locale_message(
+                model.locale,
+                "preferences-language",
+                "界面语言",
+            )),
             detail(format!("波形显示：{}", model.waveform_display_label)),
             detail(format!(
                 "透明画布：{}",
@@ -2184,6 +2237,66 @@ fn audio_output_device_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
     .with_max_visible_items(10)
 }
 
+fn locale_message(locale: AppUiLocale, id: &str, fallback: &str) -> String {
+    Localizer::new(locale)
+        .map(|localizer| localizer.text(id))
+        .unwrap_or_else(|_| fallback.to_owned())
+}
+
+fn locale_label(model: &AppUiPreferencesModel) -> String {
+    let (id, fallback) = match model.locale_preference {
+        AppUiLocalePreference::System | AppUiLocalePreference::Unknown => {
+            ("preferences-language-system", "跟随系统")
+        }
+        AppUiLocalePreference::ZhCn => ("preferences-language-zh-cn", "简体中文"),
+        AppUiLocalePreference::EnUs => ("preferences-language-en-us", "English"),
+        AppUiLocalePreference::Pseudo => ("preferences-language-pseudo", "伪语言（布局检查）"),
+    };
+    locale_message(model.locale, id, fallback)
+}
+
+fn locale_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
+    [
+        (
+            AppUiLocalePreference::System,
+            "preferences-language-system",
+            "跟随系统",
+        ),
+        (
+            AppUiLocalePreference::ZhCn,
+            "preferences-language-zh-cn",
+            "简体中文",
+        ),
+        (
+            AppUiLocalePreference::EnUs,
+            "preferences-language-en-us",
+            "English",
+        ),
+        (
+            AppUiLocalePreference::Pseudo,
+            "preferences-language-pseudo",
+            "伪语言（布局检查）",
+        ),
+    ]
+    .into_iter()
+    .map(|(preference, id, fallback)| {
+        MenuItem::new(
+            locale_message(model.locale, id, fallback),
+            app_shell_preferences_locale_changed_action(preference),
+        )
+        .checked(
+            preference == model.locale_preference
+                || preference == AppUiLocalePreference::System
+                    && model.locale_preference == AppUiLocalePreference::Unknown,
+        )
+    })
+    .collect()
+}
+
+fn locale_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
+    Dropdown::new(locale_label(model), locale_items(model))
+}
+
 fn audio_output_device_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
     let default_choices = [
         (
@@ -2414,7 +2527,8 @@ mod tests {
         dialog.layout(Rect::new(0.0, 0.0, 1000.0, 700.0));
 
         let theme_index = PreferencesDialogTab::ALL.len();
-        let waveform_index = theme_index + 1;
+        let locale_index = theme_index + 1;
+        let waveform_index = locale_index + 1;
         let viewer_background_index = waveform_index + 1;
         let audio_output_device_index = viewer_background_index + 1;
         let monitor_output_index = audio_output_device_index + 1;
@@ -2428,6 +2542,7 @@ mod tests {
 
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
         assert!(dialog.child(theme_index).is_some());
+        assert!(dialog.child(locale_index).is_some());
         assert!(dialog.child(waveform_index).is_some());
         assert!(dialog.child(viewer_background_index).is_some());
         assert!(dialog.child(audio_output_device_index).is_none());
@@ -2448,6 +2563,7 @@ mod tests {
         dialog.set_active_tab(PreferencesDialogTab::Media);
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
         assert!(dialog.child(theme_index).is_none());
+        assert!(dialog.child(locale_index).is_none());
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(viewer_background_index).is_none());
         assert!(dialog.child(audio_output_device_index).is_some());
@@ -2489,6 +2605,25 @@ mod tests {
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
+    }
+
+    #[test]
+    fn language_selection_reprojects_dropdown_without_replacing_widget_identity() {
+        let mut dialog = PreferencesDialog::new();
+        let dropdown_id = dialog.locale_dropdown.id();
+        let english_action =
+            app_shell_preferences_locale_changed_action(AppUiLocalePreference::EnUs);
+        let mut model = dialog.model().clone();
+        model.set_locale_preference(AppUiLocalePreference::EnUs, Some("zh-CN"));
+        dialog.set_model(model);
+
+        assert_eq!(dialog.locale_dropdown.id(), dropdown_id);
+        assert_eq!(
+            dialog.locale_dropdown.checked_for_action(&english_action),
+            Some(true)
+        );
+        assert_eq!(locale_label(dialog.model()), "English");
+        assert!(dialog.content_labels.iter().any(|label| label.text() == "Interface language"));
     }
 
     #[test]

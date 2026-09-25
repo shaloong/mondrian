@@ -1,0 +1,538 @@
+app-name = Mondrian
+about-version = Version: { $version }
+about-renderer = Renderer: { $renderer }
+about-rust = Rust: { $version }
+about-os = OS: { $description }
+about-gpu = GPU: { $name }
+about-copy = Copy
+about-close = Close
+startup-heading = Get started
+startup-new-project = New project
+startup-open-project = Open project
+startup-recoverable-projects = Recoverable projects
+startup-recent-projects = Recent projects
+startup-no-recent-projects = No recent projects
+new-project-title = New project
+new-project-untitled = Untitled
+new-project-description = Choose production settings and create a timeline.
+new-project-name = Name
+new-project-name-placeholder = Project name
+new-project-frame-size = Frame size
+new-project-frame-rate = Frame rate
+new-project-audio = Audio
+new-project-color-mode = Project color mode
+new-project-resolution-hd = HD 720p
+new-project-resolution-fhd = Full HD 1080p
+color-custom-ocio = Custom OpenColorIO
+color-select-custom-ocio = Choose custom OpenColorIO…
+new-project-create-proxies = Create proxies
+new-project-preview-cache = Preview cache
+new-project-cancel = Cancel
+new-project-create = Create...
+color-choose-ocio-config = Choose OpenColorIO configuration
+color-ocio-config-filter = OpenColorIO configuration
+project-settings-title = Project color engine
+project-settings-description = Applies to every sequence. Incompatible existing sequences or new-sequence defaults reject the whole change; no sequence is rewritten.
+project-settings-builtin-detail = Built-in package: { $package } · Current working spaces: { $workingSpaces }
+project-settings-aces-detail = Built-in OCIO configuration: { $preset } · Current working spaces: { $workingSpaces }
+project-settings-custom-detail =
+    { $source }
+    Output bindings: { $outputs }
+    Configuration SHA-256: { $sha256 }
+project-settings-cancel = Cancel
+project-settings-apply = Apply
+sequence-settings-title = Sequence settings
+sequence-settings-description = Adjust the active sequence's timeline format and preview settings.
+sequence-tab-format = Format
+sequence-tab-color = Color
+sequence-tab-preview = Preview
+sequence-name = Name
+sequence-name-placeholder = Sequence name
+sequence-format = Format
+sequence-custom-frame-size = Custom frame size
+sequence-timecode-start = Timecode start (actual frames)
+sequence-audio = Audio
+sequence-preview = Preview
+sequence-color-management = Color management
+sequence-width = Width
+sequence-height = Height
+sequence-start-frame = Start frame
+sequence-edit-custom = Custom
+sequence-resolution-hd = HD 720p
+sequence-resolution-fhd = Full HD 1080p
+sequence-pixel-square = Square pixels (1.0)
+sequence-pixel-unknown = Unknown pixel aspect ratio
+sequence-field-progressive = Progressive
+sequence-field-upper = Upper field first
+sequence-field-lower = Lower field first
+sequence-display-frames = Sequence frames
+sequence-audio-mono = Mono
+sequence-audio-stereo = Stereo
+sequence-audio-speakers = Custom speaker layout
+sequence-audio-discrete = Discrete channels
+sequence-audio-samples = Audio samples
+sequence-audio-milliseconds = Milliseconds
+sequence-color-display-referred = Display-referred
+sequence-color-scene-referred = Scene-referred
+sequence-metadata-assume-709 = Assume Rec. 709
+sequence-metadata-reject = Reject media
+sequence-range-full = Full range
+sequence-range-legal = Legal range
+sequence-tone-map-auto = Output mapping: Automatic
+sequence-tone-map-always = Output mapping: Always
+sequence-tone-map-never = Output mapping: Technical bypass
+sequence-project-color-engine = Project color engine: { $engine }
+sequence-preview-resolution = Preview resolution { $percent }
+sequence-preview-cache = Preview cache
+sequence-auto-tone-map = Automatically tone map media
+sequence-static-hdr = Write static HDR metadata
+sequence-cancel = Cancel
+sequence-apply = Apply
+sequence-name-required = Sequence name cannot be empty
+menu-file = File
+menu-edit = Edit
+menu-view = View
+menu-graphics = Graphics
+menu-window = Window
+menu-help = Help
+menu-import = Import
+menu-import-folder = Folder...
+menu-install-openfx-filter = Install OpenFX Filter…
+menu-export = Export
+menu-export-settings = Export Settings...
+menu-workspace = Workspace
+command-file-new_project = New Project...
+command-file-open_project = Open Project...
+command-file-import_media = Media...
+command-file-save_project = Save
+command-file-save_project_as = Save As...
+command-file-export_portable_package = Package Project...
+command-file-cancel_portable_package_export = Cancel Project Packaging
+command-file-project_settings = Project Settings...
+command-file-close_project = Close Project
+command-edit-undo = Undo
+command-edit-redo = Redo
+command-edit-cut = Cut
+command-edit-copy = Copy
+command-edit-paste = Paste
+command-edit-duplicate = Duplicate
+command-edit-delete_selection = Delete Selection
+command-edit-select_all = Select All
+command-edit-deselect_all = Deselect All
+command-app-preferences = Preferences...
+command-viewer-capture_gallery_still = Capture Gallery Still
+command-view-toggle_fullscreen = Toggle Fullscreen
+command-timeline-create_basic_title = Basic Title
+command-workspace-editing = Editing
+command-workspace-color = Color
+command-workspace-audio = Audio
+command-workspace-compositing = Compositing
+command-workspace-export = Export
+command-app-about = About Mondrian
+panel-assets = Assets
+asset-library = Project library
+asset-search = Search assets
+asset-empty-title = Drop media here to start editing
+asset-empty-description = Video, audio, images and sequences are supported
+asset-no-results-title = No matching assets
+asset-no-results-description = Try another search or clear the filter
+asset-library-disconnected = No project library
+asset-library-unavailable = Library unavailable
+asset-delete-selected = Delete selected
+asset-back = Back
+asset-parent = Parent
+asset-all = All assets
+asset-all-badge = All
+asset-item-count = { $count ->
+    [one] 1 item
+   *[other] { $count } items
+}
+asset-kind-video = Video
+asset-kind-still = Still image
+asset-kind-audio = Audio
+asset-kind-adjustment = Adjustment layer
+asset-kind-solid = Solid color
+asset-offline = Offline
+asset-proxy = Proxy
+asset-interpret = Interpret asset...
+asset-reveal = Show in File Explorer
+asset-relink = Relink media...
+asset-disable-proxy = Disable proxy mode
+asset-enable-proxy = Enable proxy mode
+asset-delete = Delete asset
+asset-delete-folder = Delete folder
+asset-import = Import media...
+asset-new = New
+asset-new-adjustment = Adjustment layer
+asset-new-solid = Solid color
+asset-new-folder = Folder
+panel-viewer = Viewer
+viewer-no-sequence = No sequence
+viewer-no-signal = No signal
+viewer-fit = Fit
+viewer-no-sequence-loaded = No sequence loaded
+viewer-frame-count = { $count ->
+    [one] 1 frame
+   *[other] { $count } frames
+}
+viewer-loading = Preparing preview
+viewer-color-rejected = Color interpretation rejected
+viewer-blocked = Preview blocked
+viewer-failed = Preview failed
+viewer-playing = Playing
+viewer-ready = Ready
+viewer-color-rejection-detail =
+    Color interpretation rejected
+    Asset: { $asset }
+    Policy: { $policy } / { $source }
+    Detection: { $method } / { $confidence } / warnings { $warnings }
+    Issues: { $issues }
+    { $detail }
+panel-scopes = Scopes
+panel-timeline = Timeline
+panel-inspector = Inspector
+panel-mixer = Mixer
+panel-effects = Effects
+effect-search = Search effects
+effect-empty = No effects available
+effect-category-color = Color
+effect-category-grading = Grading
+effect-category-blur-sharpen = Blur and Sharpen
+effect-category-stylize = Stylize
+effect-category-transform = Transform
+effect-category-keying = Keying
+effect-category-plugins = Plugins
+effect-basic-correction = Basic Correction
+effect-white-balance = White Balance
+effect-lut-3d = 3D LUT
+effect-color-wheel = Primaries
+effect-hdr-grading = HDR Grading
+effect-asc-cdl = ASC CDL
+effect-curves = Curves
+effect-gamut-compression = Gamut Compression
+effect-highlight-recovery = Highlight Recovery
+effect-qualifier = Qualifier
+effect-hue-saturation-lightness = Hue, Saturation and Lightness
+effect-crop = Crop
+effect-gaussian-blur = Gaussian Blur
+effect-sharpen = Sharpen
+effect-vignette = Vignette
+effect-chromatic-aberration = Chromatic Aberration
+effect-grain = Grain
+effect-chroma-key = Chroma Key
+effect-luma-key = Luma Key
+panel-node-graph = Node Graph
+panel-export = Export
+preferences-language = Interface language
+preferences-language-system = Follow system
+preferences-language-zh-cn = 简体中文
+preferences-language-en-us = English
+preferences-language-pseudo = Pseudo locale (layout check)
+notification-import-complete =
+    { $count ->
+        [one] Imported one media file
+       *[other] Imported { $count } media files
+    }
+notification-import-partial =
+    { $imported ->
+        [one] Imported one media file
+       *[other] Imported { $imported } media files
+    }; { $failed ->
+        [one] one failed
+       *[other] { $failed } failed
+    }
+notification-import-failed = Import failed: { $reason }
+notification-timeline-drop-failed = Could not place file on the timeline: { $reason }
+notification-save-complete = Project saved
+notification-save-warning = Project saved, but recovery cleanup failed: { $reason }
+notification-save-failed = Could not save project: { $reason }
+notification-autosave-warning = Autosave completed, but recovery cleanup failed: { $reason }
+notification-autosave-failed = Autosave failed: { $reason }
+notification-export-complete = Export complete: { $path }
+notification-export-failed = Export failed: { $reason }
+notification-package-complete = Portable project package ready: { $path }
+notification-package-failed = Could not package project: { $reason }
+notification-action-failed = Action failed: { $reason }
+pending-close-title = Save project changes?
+pending-close-body-close = Save your changes before you close the project?
+pending-close-body-quit = Save your changes before you quit Mondrian?
+pending-close-save-close = Save and Close
+pending-close-save-quit = Save and Quit
+pending-close-discard = Don't Save
+pending-close-cancel = Cancel
+recovery-title = Confirm project recovery
+recovery-summary = This recovery point contains author generation { $generation } and document revision { $revision }. The manifest has { $count } verifiable recovery points.
+recovery-time = { $exact } ({ $relative })
+recovery-saved-at = Saved: { $time }
+recovery-source = Recovery source: { $path }
+recovery-target = Save destination: { $path }
+recovery-target-state = Destination status: { $state }
+recovery-target-missing = The destination file does not exist. The first save after recovery will create it at this path.
+recovery-target-same = Document revision { $revision } exists at the destination. The recovery point contains later unsaved edits.
+recovery-target-older = Earlier document revision { $revision } exists at the destination. The recovery point is revision { $snapshot }.
+recovery-target-newer = Destination revision { $revision } is newer than recovery revision { $snapshot }. Recovery will not immediately overwrite the destination.
+recovery-safety = Confirming verifies and opens this recovery point as an unsaved project. It does not immediately overwrite the destination. If the destination, manifest, or recovery file changed, recovery stops safely.
+recovery-confirm = Recover this version
+recovery-cancel = Cancel
+recovery-age-seconds =
+    { $count ->
+        [one] One second ago
+       *[other] { $count } seconds ago
+    }
+recovery-age-minutes =
+    { $count ->
+        [one] One minute ago
+       *[other] { $count } minutes ago
+    }
+recovery-age-hours =
+    { $count ->
+        [one] One hour ago
+       *[other] { $count } hours ago
+    }
+recovery-age-days =
+    { $count ->
+        [one] One day ago
+       *[other] { $count } days ago
+    }
+recovery-row-single = { $age } · { $location }
+recovery-row-multiple = { $age } · { $count } recovery points · { $location }
+startup-recent-now = Just now
+startup-recent-unknown-time = Unknown modification time
+startup-recent-unknown-size = Unknown size
+startup-recent-file-unavailable = File unavailable
+startup-recent-detail = { $age } · { $size }
+file-dialog-create-project = Create Mondrian project
+file-dialog-open-project = Open Mondrian project
+file-dialog-import-media = Import media
+file-dialog-install-clap = Install CLAP plugin
+file-dialog-install-vst3 = Install VST3 plugin
+file-dialog-install-vst3-bundle = Select VST3 bundle folder
+file-dialog-install-openfx-bundle = Select OpenFX .ofx.bundle
+file-dialog-relink-media = Relink media
+file-dialog-save-as-project = Save Mondrian project as
+file-dialog-package-project = Package Mondrian project
+file-dialog-export-output = Choose export destination
+file-dialog-import-ancillary = Import ANC / broadcast captions
+file-dialog-import-pse = Import regulatory PSE configuration
+file-default-untitled = Untitled
+file-default-untitled-project = Untitled Project
+file-filter-project = Mondrian project
+file-filter-package = Mondrian portable project package
+file-filter-video = Video
+file-filter-image = Image / Camera RAW
+file-filter-audio = Audio
+file-filter-clap = CLAP plugin
+file-filter-vst3 = VST3 plugin
+file-filter-media = Media
+file-filter-export = Export
+file-filter-ancillary = ANC JSON / SCC V1.0 / raw CDP
+file-filter-pse = Regulatory PSE JSON
+file-dialog-select-icc = Choose display ICC profile
+file-filter-icc = ICC display profile
+inspector-blend-mode = Blend Mode
+blend-mode-inherit = Inherit Track
+blend-mode-normal = Normal
+blend-mode-dissolve = Dissolve
+blend-mode-darken = Darken
+blend-mode-multiply = Multiply
+blend-mode-colorburn = Color Burn
+blend-mode-linearburn = Linear Burn
+blend-mode-darkercolor = Darker Color
+blend-mode-lighten = Lighten
+blend-mode-screen = Screen
+blend-mode-colordodge = Color Dodge
+blend-mode-lineardodge = Linear Dodge (Add)
+blend-mode-lightercolor = Lighter Color
+blend-mode-overlay = Overlay
+blend-mode-softlight = Soft Light
+blend-mode-hardlight = Hard Light
+blend-mode-vividlight = Vivid Light
+blend-mode-linearlight = Linear Light
+blend-mode-pinlight = Pin Light
+blend-mode-hardmix = Hard Mix
+blend-mode-difference = Difference
+blend-mode-exclusion = Exclusion
+blend-mode-subtract = Subtract
+blend-mode-divide = Divide
+blend-mode-hue = Hue
+blend-mode-saturation = Saturation
+blend-mode-color = Color
+blend-mode-luminosity = Luminosity
+audio-rack-scope-title = Audio Processor Rack
+audio-rack-prefader-title = Pre-Fader Processor Rack
+audio-rack-postfader-title = Post-Fader Processor Rack
+audio-rack-scope-unbound = Unbound Processing Scope
+audio-rack-scope-single = Used by one component
+audio-rack-scope-shared = Shared Processing Scope · { $count } components
+audio-rack-scope-identity = Processing Scope · { $identity }
+audio-rack-track-identity = Audio Track · { $identity }
+audio-rack-locked-track = Track { $identity } is locked; unlock it to edit processors
+audio-rack-locked-scope-track = Shared scope is bound to locked track { $identity }; unlock it to edit processors
+audio-rack-invalid-state = Cannot inspect this processor rack: { $error }
+audio-processor-gain = Gain
+audio-processor-lookahead-limiter = Lookahead Limiter (Sample Peak)
+audio-processor-sample-delay = Sample Delay
+audio-parameter-gain = Gain
+audio-parameter-ceiling = Ceiling
+audio-parameter-lookahead = Lookahead
+audio-parameter-release = Release
+audio-parameter-delay-samples = Delay Samples
+audio-mixer-empty = No active sequence. Open or create a sequence to mix tracks, buses, and program outputs.
+audio-mixer-invalid-strip = Cannot inspect this channel strip: { $error }
+audio-mixer-invalid-route = Cannot inspect this route: { $error }
+audio-mixer-output = Program Output · { $identity }
+audio-mixer-port-prefader = Pre-Fader
+audio-mixer-port-postfader-premute = Post-Fader / Pre-Mute
+audio-mixer-port-postmute = Post-Mute
+audio-mixer-port-postfader = Post-Fader
+audio-mixer-missing-bus = Missing Bus · { $identity }
+audio-mixer-missing-output = Missing Program Output · { $identity }
+audio-mixer-locked-strip = Track { $identity } is locked; processors, input trim, and fader are read-only
+audio-mixer-locked-route = Track { $identity } is locked; its routes are read-only
+interpret-title = Interpret Footage
+interpret-current = Current interpretation
+interpret-input-color-space = Input color space
+interpret-signal-range = Signal range
+interpret-raw-exposure = RAW exposure
+interpret-raw-white-balance = RAW white balance
+interpret-debayer = Demosaic quality
+interpret-apply = Apply
+interpret-cancel = Cancel
+interpret-range-full = Full range
+interpret-range-limited = Limited (video) range
+interpret-range-auto = Auto — { $range }
+interpret-raw-as-shot = As Shot (camera metadata)
+interpret-debayer-bilinear = Bilinear (fast)
+interpret-debayer-edge-aware = Edge Aware (high quality)
+interpret-auto-unmarked = Auto — untagged
+interpret-auto-identified = Auto — identified as { $space }
+interpret-auto-suggested = Auto — suggested { $space } (diagnostic only)
+interpret-manual-color-space = Manual — { $space }
+interpret-auto-details = { $base } ({ $details })
+interpret-detail-separator = ,
+interpret-warning-count = { $count ->
+    [one] { $count } warning
+   *[other] { $count } warnings
+}
+interpret-confidence-none = No confidence
+interpret-confidence-low = Low confidence
+interpret-confidence-medium = Medium confidence
+interpret-confidence-high = High confidence
+interpret-method-metadata-hint = Metadata hint
+interpret-method-icc-profile = ICC profile
+interpret-method-cicp-tags = CICP tags
+interpret-method-missing-metadata = No metadata
+interpret-method-unsupported-cicp = Unsupported CICP tags
+interpret-method-decoder-unavailable = Decoder unavailable
+interpret-diagnostics-no-context = Input diagnostics: project color context unavailable
+interpret-decision-explicit = Explicit user override
+interpret-inference-declared = Declared/high confidence
+interpret-inference-suggested = Suggestion only; not applied
+interpret-inference-unknown = Unknown
+interpret-decision-auto = Auto · { $method } · { $confidence } · { $inference }
+interpret-decision-unprobed = Auto · not probed
+interpret-none = None
+interpret-processor-unresolved = Unavailable: input color space unresolved; Unknown is handled by the project missing-metadata policy
+interpret-processor-error = Unavailable: { $error }
+interpret-diagnostics = Detection: { $decision }
+    { $signal }
+    Evidence: { $evidence }
+    Warnings: { $warnings }
+    Path: { $path } → { $working } ({ $engine })
+    OCIO processor cache ID: { $processor }
+interpret-signal-missing = Range/Primaries/Transfer/Matrix: no video signal
+interpret-camera-untagged = Untagged camera
+interpret-signal-camera-raw = Camera RAW: { $adapter } · { $width }x{ $height } · { $bits }-bit · CFA { $cfa } · compression { $compression } · { $camera } · ColorMatrix={ $matrix } · AsShotNeutral={ $neutral }
+interpret-signal-range-auto = { $detected } (auto/detected)
+interpret-signal-range-full = Full (user override; detected { $detected })
+interpret-signal-range-limited = Limited (user override; detected { $detected })
+interpret-signal-no-metadata = Range: { $range } · Primaries/Transfer/Matrix: unavailable
+interpret-signal-metadata = Range: { $range } · Primaries: { $primaries } · Transfer: { $transfer } · Matrix: { $matrix }
+interpret-evidence-metadata-hint = { $scope } { $authority } metadata { $key }={ $value } → { $space }
+interpret-evidence-exact-cicp = Exact CICP { $tags } → { $space }
+interpret-evidence-partial-cicp = Partial CICP { $tags } → { $space }
+interpret-evidence-unsupported-cicp = Unsupported CICP { $tags }
+interpret-evidence-icc = ICC { $profile } → { $space }
+interpret-unnamed = Unnamed
+interpret-unmapped = Unmapped
+interpret-warning-conflicting-hints = Conflicting metadata hints
+interpret-warning-hint-overrides-cicp = Metadata hint overrides conflicting CICP tags
+interpret-warning-descriptive-hint = Inferred from descriptive metadata only
+interpret-warning-lower-priority-hints = Conflicting lower-priority hints ignored
+interpret-warning-partial-cicp = Partial CICP tags only
+interpret-warning-missing-cicp = Missing CICP tags
+interpret-warning-unsupported-cicp = Unsupported or conflicting CICP tags
+interpret-warning-icc-unmapped = ICC profile could not be mapped
+interpret-warning-icc-cicp-mismatch = ICC and CICP conflict
+interpret-more-items = { $count ->
+    [one] { $count } more item
+   *[other] { $count } more items
+}
+interpret-entry-separator = ;{ " " }
+audio-mapping-standard-unavailable = Standard mapping unavailable: { $error }; playback and export will not guess
+audio-mapping-source-unproven = Exact source layout cannot be proven from current dependencies; playback and export will not guess
+audio-mapping-layout-mismatch = Explicit matrix requires { $required }, but current dependencies provide { $observed }; playback and export reject mismatched signals
+audio-mapping-explicit-source-unproven = Explicit matrix retained, but the source layout cannot be proven; execution remains fail-closed
+audio-mapping-mode-standard = Standard (automatic)
+audio-mapping-mode-explicit = Custom (explicit matrix)
+audio-mapping-standard-option = Standard (automatic; fail-closed at execution)
+audio-mapping-snapshot-option = Custom: snapshot the current standard matrix
+audio-mapping-blank-option = Custom: empty matrix
+audio-mapping-channel-row = Channel mapping
+audio-mapping-layout-row = Signal layout
+audio-mapping-unknown-source = Unknown → { $destination }
+audio-mapping-diagnostic-row = Mapping diagnostics
+audio-mapping-add-to = Add to { $destination }
+audio-mapping-choose-source = Choose source channel…
+mixer-title = Audio Mixer
+mixer-create-bus = Create Bus
+mixer-create-named-bus = Create { $name }
+mixer-routing-graph = Routing Graph
+mixer-track = Track
+mixer-bus = Bus
+mixer-program-output = Program Output
+mixer-mute = Mute
+mixer-solo = Solo
+mixer-level = Level
+mixer-input-trim = Input Trim
+mixer-fader = Fader
+mixer-fader-curve = Fader Curve
+mixer-automation-keyframes = Automated · { $count } keyframes
+mixer-read-only = Read Only
+mixer-incoming-routes = Incoming Routes
+mixer-route-count = { $count } routes
+mixer-name = Name
+mixer-bus-name = Bus name
+mixer-add-route = Add Route
+mixer-choose-route = Choose tap and destination…
+mixer-remove-bus = Remove Bus
+mixer-remove-bus-routes = Remove Bus and { $count } routes
+mixer-remove-blocked = Removal Blocked
+mixer-enabled = Enabled
+mixer-pass-signal = Pass signal
+mixer-level-curve = Level Curve
+mixer-controls = Controls
+mixer-remove-route = Remove Route
+mixer-remove-route-tooltip = Remove this Route or Send
+mixer-rewire = Rewire
+mixer-choose-new-route = Choose new tap and destination…
+mixer-meter-not-running = Not running
+mixer-meter-invalid = { " " }· Non-finite { $count }
+audio-rack-install-clap = Install CLAP plugin…
+audio-rack-install-vst3-bundle = Install VST3 bundle…
+audio-rack-install-vst3-file = Install VST3 plugin file…
+audio-rack-scope-row = Scope
+audio-rack-add-row = Add
+audio-rack-add-processor = Add processor…
+audio-rack-scope-input-curve = Scope Input Curve
+audio-rack-bypass = Bypass
+audio-rack-plugin-binding = Plugin Binding
+audio-rack-rebind-installed = Rebind installed version
+audio-rack-nonnumeric-parameter = This parameter has no numeric editing contract
+audio-rack-parameter-curve = { $name } Curve
+audio-rack-move-up = Up
+audio-rack-move-up-tooltip = Move processor up
+audio-rack-move-down = Down
+audio-rack-move-down-tooltip = Move processor down
+audio-rack-remove = Remove
+audio-rack-remove-tooltip = Remove processor

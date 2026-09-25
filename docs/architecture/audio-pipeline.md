@@ -1,5 +1,119 @@
 # Audio pipeline
 
+The VST3 adapter uses a selected-plugin catalog, a deadline-bound metadata
+child, and a distinct supervised audio-worker mode. Its authoring schema keeps
+continuous parameter values normalized to `0..=1`; stepped parameters use
+integer indices `0..=step_count` and hold interpolation, then normalize at the
+ABI boundary. Discovery and worker both reject unsupported auxiliary/multiple
+main buses, mode changes, metadata drift, and latency/tail drift. Worker
+continuity entry releases the previous class and reloads the exact class from
+the saved opaque state, while sample-offset points enter the VST3 process queue.
+A reference Gain DLL built from the permissively licensed `vst3-rs` example
+passed isolated realtime and offline stereo signal tests with gain `0.5`, plus
+a fresh continuity entry with gain `0.25`. The same installed bundle passed
+the App Preview and Export offline delivery paths on nonzero stereo Float32
+PCM: both produced `+0.125/-0.125` from `+0.25/-0.25` with gain `0.5` over
+the first 64 frames (absolute tolerance `1e-6`).
+A separate stateful Gain fixture under
+`crates/mondrian-audio/tests/fixtures/vst3-stateful-gain` verifies the current
+host state envelope across component and controller state. Its ignored
+integration test restores a nondefault gain, captures identical state, and
+renders through an isolated worker without parameter events after two
+continuity entries. Broader vendor Preview/Export parity remains a qualification
+gate.
+The current control frame limits serialized VST3 state to 128 KiB; larger state
+is rejected explicitly. Third-party host/license notices are in `LICENSES/`.
+The App routes selected VST3 classes through the same resolver used for
+Preview, Export, and idle warmup; Inspector and Mixer use one shared Rack
+projection. Explicit format/path selections are machine-local UI preferences
+restored in one background catalog job, while `.mdp` retains only the VST3
+class, vendor, exact binary fingerprint, parameter curves, and opaque state.
+Selected `.vst3` directories resolve exactly one regular native binary under
+the current architecture's `Contents` directory. The catalog fingerprints
+that binary and rejects missing or ambiguous bundle layouts. Preferences keep
+the selected directory, so startup resolution follows the same rule; an
+individual native file remains a valid explicit selection.
+VST3 worker startup is bounded to 15 seconds and continuity entry to 10
+seconds; the realtime block deadline stays at 100 milliseconds. Those bounds
+are separate because plugin construction and state restoration can be much
+slower than block processing.
+
+The isolated CLAP adapter has a child-side implementation in
+`mondrian-audio::processor_isolation::clap_worker`. It runs only through the
+application's hidden audio-worker entrypoint. The parent supplies an exact
+installed-definition registration and schedules through the existing isolated
+processor transport. The child revalidates CLAP descriptor, main audio ports,
+latency, and tail, restores supplied opaque state before activation, resets
+processor history at continuity entry, and interleaves Float32
+blocks at the ABI boundary. The probe captures bounded CLAP parameter metadata;
+the parent requires each authored schema to match the selected binary and the
+worker checks the same metadata after state restoration. Stable definition-local
+IDs map author curves to CLAP IDs. The worker converts exact sample-offset
+events to CLAP value events in a preallocated, time-sorted buffer and rejects
+out-of-range or fractional stepped values. It stops and deactivates the native
+instance when the worker closes; a restart request fails the current instance.
+New insertions retain the validated plugin parameter name and hidden flag as
+display-only author metadata. Hidden parameters remain in the definition and
+execution lane but ordinary Inspector controls omit them. Reopening without
+the binary keeps the last captured names; parameters with no captured display
+name show their stable IDs.
+Selected-plugin instance creation captures the current values after restoring
+the same opaque state, so a first-block parameter event does not reset a saved
+setting to the plugin factory default. When no state is supplied, insertion
+also saves the plugin's factory state in the discovery child, bounded to 64 KiB,
+and persists those bytes on the author instance. A plugin without the CLAP
+state extension remains parameter-only; a failed or oversized save rejects the
+insertion. Auxiliary buses and subsequent plugin UI state edits remain pending
+format work;
+unsupported requests return typed errors, not silent bypasses.
+
+CLAP descriptor discovery and execution-contract probing use a separate hidden child mode. The editor
+process writes a bounded request into a private temporary directory, starts
+the child with a five-second deadline, and reads at most 512 KiB of validated
+metadata and optional captured state after successful exit. Plugin code is
+loaded only in the child.
+The probe restores the same author state, validates a Mono/Stereo main port,
+and measures latency/tail for the requested rate and block extent. The
+subsequent audio worker rechecks those facts. Explicit library selection is
+available through the App's native file picker and session catalog. Inspector
+and Mixer offer installed definitions; insertion probes the processor in the
+child before the existing Rack author transaction.
+An `InstalledClapAudioProcessorSpecResolver` supplies an App-shareable,
+mutable backend catalog. Library scans happen before the write lock and commit
+all descriptors from one selected path together; failed scans and cross-path
+plugin ID collisions preserve the previous snapshot. Preview/Export preparation
+copies one snapshot and retains the existing binary-revision checks. Selected
+paths are persisted in bounded machine-local UI preferences. The Host starts
+background restoration after its startup ownership checkpoints; each library
+is re-discovered independently, so an unavailable binary cannot prevent
+subsequent libraries from restoring. The App refreshes an active audio Program
+when a restored definition becomes available.
+The selected binary is fingerprinted with bounded SHA-256 reads before and
+after descriptor discovery and contract probing, then verified again in the
+processing child before native loading. A replaced binary fails admission.
+Insertion captures the installed binary SHA-256 in the authored CLAP definition.
+The shared resolver requires that exact revision for both Preview and Export;
+explicitly unbound definitions (`binary_sha256: null`) remain editable but do
+not execute until the user explicitly rebinds them. The alpha format requires
+the revision field in every native plugin definition.
+
+The public Runtime builders for an audition compile request and for a frozen
+selected-range dependency closure accept an explicit processor resolver. Each
+builder passes it to every nested Sequence occurrence. The App binds one
+shared resolver to Preview, idle audio warmup, and its Export queue. Export
+uses that queue resolver for normal audio and each stem, including the initial
+aggregate resource admission pass. Default construction still uses built-ins
+and rejects unresolved external definitions. An explicit rebind preserves
+instance author state after probing the selected binary and comparing parameter
+schemas; installed-plugin management remains product work.
+The ignored installed-reference tests render a nonzero constant Float32 stereo
+WAV through the App Preview adapter and Export's offline delivery adapter.
+Both must return left/right samples of `+0.125/-0.125` for the saved 0.5 gain
+state, within `1e-6`. A shared Runtime test also compares realtime two-block
+and offline one-block output sample by sample. This qualifies that reference
+gain contract and catches bypass, channel inversion, mode or block-boundary
+drift; other plugin algorithms still require their own signal corpus.
+
 Mondrian has one Sequence-owned author model and one author-to-PCM execution
 pipeline. Playback, export, audition, analysis, and nesting may use different
 schedulers and downstream consumers, but they cannot reinterpret placement,
@@ -341,16 +455,26 @@ soft ranges, allowed interpolation modes, edit admission, and its explicit
 `AuthoringTimeDomain` (`Sequence`, `AudioComponentEdit`, or
 `AudioProcessingScope`) from one immutable Sequence snapshot.
 
-`AudioAutomationEditRequest` performs stable-ID key upsert, key removal, or
-explicit clear-to-default. It admits Track and shared-Scope locks before
+`AudioAutomationEditRequest` performs stable-ID key upsert, key removal,
+interpolation-mode change, or explicit clear-to-default. It admits Track and shared-Scope locks before
 copy-on-write detachment, mutates a complete candidate, validates the complete
 Audio Program, and publishes atomically. Moving a key preserves its ID,
-interpolation, and Bezier handles; collisions at the same exact owner time fail
+interpolation, and manual Bezier handles; constrained handles are recalculated.
+Collisions at the same exact owner time fail
 closed. Optional semantic curves canonicalize to their static value after the
 last key is removed, while Processor parameters retain their intrinsic empty
 curve because that curve also owns the unkeyed definition value. Channel Strip,
 Routing, and Rack Modules retain only their static/topology operations, so no
 second keyed write path can drift from this contract.
+The underlying `ExactAutomationCurve::set_keyframe` also validates a detached
+candidate before replacing the curve. Invalid handle spans or duplicate stable
+IDs therefore cannot leave even an in-memory curve in an invalid state.
+Exact numeric keys persist a manual, auto, or continuous tangent constraint;
+older projects default to manual. Auto uses monotone neighboring slopes and
+flattens local extrema, while continuous keeps both sides at one slope. Key
+insertions, moves, removals, and exact-time edits recompute constrained handles
+before validation. The UI exposes the modes on keyed audio curve points, and
+the same curve is evaluated by realtime playback and offline export.
 
 ### Processors and plugins
 
@@ -1464,3 +1588,7 @@ generation enters at the exact first frame's rational sample position and all
 later windows must continue at the prior terminal sample. The Runtime shares
 the App's sole `AudioSourceCache`; it does not create a qualification-only
 decoder authority or borrow Monitor Path state.
+An explicit CLAP rebind probes the currently installed definition and checks
+its complete saved parameter schema against the authored snapshot before a
+single Rack transaction updates the binary revision. Curves, opaque state,
+bypass, and processor identity survive the edit and Undo/Redo.

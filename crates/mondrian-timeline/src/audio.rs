@@ -177,11 +177,17 @@ pub enum AudioProcessorDefinitionRef {
         class_id: String,
         vendor: Option<String>,
         schema_version: u32,
+        /// Exact installed binary revision captured when the author inserted it.
+        /// An unbound definition uses an explicit `null` until rebind.
+        binary_sha256: Option<[u8; 32]>,
     },
     /// A CLAP audio-effect definition.
     Clap {
         plugin_id: String,
         schema_version: u32,
+        /// Exact installed binary revision captured when the author inserted it.
+        /// An unbound definition uses an explicit `null` until rebind.
+        binary_sha256: Option<[u8; 32]>,
     },
 }
 
@@ -196,6 +202,28 @@ pub struct AudioProcessorParameter {
     pub schema: ParameterSchema,
     /// Exact owner-local parameter curve, including its unkeyed value.
     pub automation: ExactAutomationCurve,
+    /// Captured plugin UI facts, separate from stable parameter identity and schema.
+    pub ui: AudioProcessorParameterUiMetadata,
+}
+
+/// Display facts captured from a native plugin for offline project inspection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioProcessorParameterUiMetadata {
+    /// Plugin-supplied default label, kept separate from stable message IDs.
+    pub display_name: Option<String>,
+    /// A hidden parameter remains authored and executable but leaves ordinary controls.
+    pub hidden: bool,
+}
+
+impl AudioProcessorParameterUiMetadata {
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        if self.display_name.as_ref().is_some_and(|name| {
+            name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
+        }) {
+            return Err(AudioAuthoringError::InvalidProcessorParameterDisplayName);
+        }
+        Ok(())
+    }
 }
 
 impl AudioProcessorParameter {
@@ -206,9 +234,23 @@ impl AudioProcessorParameter {
             .map_err(|error| AudioAuthoringError::InvalidAutomation {
                 reason: error.to_string(),
             })?;
-        let parameter = Self { schema, automation };
+        let parameter = Self {
+            schema,
+            automation,
+            ui: AudioProcessorParameterUiMetadata::default(),
+        };
         parameter.validate()?;
         Ok(parameter)
+    }
+
+    /// Attach validated display facts without changing numeric or automation identity.
+    pub fn with_ui_metadata(
+        mut self,
+        ui: AudioProcessorParameterUiMetadata,
+    ) -> Result<Self, AudioAuthoringError> {
+        ui.validate()?;
+        self.ui = ui;
+        Ok(self)
     }
 
     /// Replace the complete exact-time curve after validating it against the schema.
@@ -216,13 +258,18 @@ impl AudioProcessorParameter {
         &mut self,
         automation: ExactAutomationCurve,
     ) -> Result<(), AudioAuthoringError> {
-        let candidate = Self { schema: self.schema.clone(), automation };
+        let candidate = Self {
+            schema: self.schema.clone(),
+            automation,
+            ui: self.ui.clone(),
+        };
         candidate.validate()?;
         self.automation = candidate.automation;
         Ok(())
     }
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
+        self.ui.validate()?;
         self.schema
             .validate()
             .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
@@ -300,7 +347,14 @@ impl AudioProcessorInstance {
                 default_value: 0.0,
                 keyframes: AuthoringList::new(),
             };
-            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+            parameters.insert(
+                parameter_id,
+                AudioProcessorParameter {
+                    schema,
+                    automation,
+                    ui: AudioProcessorParameterUiMetadata::default(),
+                },
+            );
         } else if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID && schema_version == 1 {
             let schema = sample_delay_frames_parameter_schema();
             let parameter_id = schema.parameter_id.clone();
@@ -309,7 +363,14 @@ impl AudioProcessorInstance {
                 default_value: 0.0,
                 keyframes: AuthoringList::new(),
             };
-            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+            parameters.insert(
+                parameter_id,
+                AudioProcessorParameter {
+                    schema,
+                    automation,
+                    ui: AudioProcessorParameterUiMetadata::default(),
+                },
+            );
         } else if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID && schema_version == 1 {
             for (schema, default_value) in [
                 (
@@ -331,7 +392,14 @@ impl AudioProcessorInstance {
                     default_value,
                     keyframes: AuthoringList::new(),
                 };
-                parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+                parameters.insert(
+                    parameter_id,
+                    AudioProcessorParameter {
+                        schema,
+                        automation,
+                        ui: AudioProcessorParameterUiMetadata::default(),
+                    },
+                );
             }
         }
         Self {
@@ -356,6 +424,14 @@ impl AudioProcessorInstance {
     }
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
+        if matches!(
+            &self.definition,
+            AudioProcessorDefinitionRef::Vst3 { binary_sha256: Some(hash), .. }
+                | AudioProcessorDefinitionRef::Clap { binary_sha256: Some(hash), .. }
+                if *hash == [0; 32]
+        ) {
+            return Err(AudioAuthoringError::InvalidPluginBinaryRevision);
+        }
         for (parameter_id, parameter) in &self.parameters {
             if parameter_id != &parameter.schema.parameter_id
                 || parameter_id != &parameter.automation.parameter_id
@@ -872,11 +948,11 @@ impl AuthoringFootprint for AudioProcessorDefinitionRef {
     ) -> Result<(), AuthoringFootprintError> {
         match self {
             Self::BuiltIn { definition_id, schema_version: _ } => collector.collect(definition_id),
-            Self::Vst3 { class_id, vendor, schema_version: _ } => {
+            Self::Vst3 { class_id, vendor, .. } => {
                 collector.collect(class_id)?;
                 collector.collect(vendor)
             }
-            Self::Clap { plugin_id, schema_version: _ } => collector.collect(plugin_id),
+            Self::Clap { plugin_id, .. } => collector.collect(plugin_id),
         }
     }
 }
@@ -886,9 +962,10 @@ impl AuthoringFootprint for AudioProcessorParameter {
         &self,
         collector: &mut AuthoringFootprintCollector,
     ) -> Result<(), AuthoringFootprintError> {
-        let Self { schema, automation } = self;
+        let Self { schema, automation, ui } = self;
         collector.collect(schema)?;
-        collector.collect(automation)
+        collector.collect(automation)?;
+        collector.collect(&ui.display_name)
     }
 }
 
@@ -1800,6 +1877,9 @@ pub enum AudioAuthoringError {
     /// A captured processor parameter schema is malformed.
     #[error("invalid audio processor parameter schema: {reason}")]
     InvalidParameterSchema { reason: String },
+    /// A persisted plugin label is not safe to show in a single-line control.
+    #[error("invalid audio processor parameter display name")]
+    InvalidProcessorParameterDisplayName,
     /// Processor parameters use doubles or exactly representable integer host values.
     #[error("audio processor parameters require a double or exactly representable integer schema")]
     UnsupportedProcessorParameterType,
@@ -1815,6 +1895,9 @@ pub enum AudioAuthoringError {
     /// Default, keyframe, or Bezier control values violate the schema's hard range.
     #[error("audio processor parameter value violates its schema")]
     InvalidProcessorParameterValue,
+    /// A claimed native binary revision cannot be the all-zero sentinel.
+    #[error("audio processor plugin binary revision is invalid")]
+    InvalidPluginBinaryRevision,
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
@@ -1912,12 +1995,126 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plugin_parameter_ui_snapshot_round_trips_without_changing_schema() {
+        let original =
+            AudioProcessorParameter::from_schema(gain_parameter_schema()).expect("gain parameter");
+        let json = serde_json::to_value(&original).expect("serialize parameter");
+        assert_eq!(json["ui"]["display_name"], serde_json::Value::Null);
+        assert_eq!(json["ui"]["hidden"], false);
+        let restored: AudioProcessorParameter =
+            serde_json::from_value(json).expect("restore parameter");
+
+        let ui = AudioProcessorParameterUiMetadata {
+            display_name: Some("Output Gain".to_owned()),
+            hidden: true,
+        };
+        let authored = restored.with_ui_metadata(ui.clone()).expect("plugin display facts");
+        assert_eq!(authored.schema, original.schema);
+        let reopened: AudioProcessorParameter = serde_json::from_slice(
+            &serde_json::to_vec(&authored).expect("serialize plugin parameter"),
+        )
+        .expect("restore plugin parameter");
+        assert_eq!(reopened.ui, ui);
+        assert_eq!(reopened.automation, original.automation);
+        assert!(matches!(
+            original.with_ui_metadata(AudioProcessorParameterUiMetadata {
+                display_name: Some("unsafe\nlabel".to_owned()),
+                hidden: false,
+            }),
+            Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
+        ));
+        let mut forged = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        forged.parameters.values_mut().next().expect("gain parameter").ui.display_name =
+            Some("unsafe\nlabel".to_owned());
+        assert_eq!(
+            forged.validate(),
+            Err(AudioAuthoringError::InvalidProcessorParameterDisplayName)
+        );
+    }
+
+    #[test]
+    fn clap_binary_revision_round_trips_and_requires_an_explicit_unbound_state() {
+        let pinned = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        let json = serde_json::to_value(&pinned).expect("serialize pinned definition");
+        assert_eq!(
+            serde_json::from_value::<AudioProcessorDefinitionRef>(json)
+                .expect("restore pinned definition"),
+            pinned
+        );
+        let unbound_json = serde_json::json!({
+            "Clap": { "plugin_id": "org.example.gain", "schema_version": 1, "binary_sha256": null }
+        });
+        let unbound: AudioProcessorDefinitionRef =
+            serde_json::from_value(unbound_json).expect("load unbound definition");
+        assert!(matches!(
+            unbound,
+            AudioProcessorDefinitionRef::Clap { binary_sha256: None, .. }
+        ));
+        let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        invalid.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "org.example.gain".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([0; 32]),
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(AudioAuthoringError::InvalidPluginBinaryRevision)
+        ));
+    }
+
+    #[test]
+    fn vst3_binary_revision_round_trips_and_requires_an_explicit_unbound_state() {
+        let pinned = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: Some("Test Vendor".to_owned()),
+            schema_version: 7,
+            binary_sha256: Some([9; 32]),
+        };
+        let json = serde_json::to_value(&pinned).expect("serialize pinned VST3 definition");
+        assert_eq!(
+            serde_json::from_value::<AudioProcessorDefinitionRef>(json)
+                .expect("restore pinned VST3 definition"),
+            pinned
+        );
+        let unbound_json = serde_json::json!({
+            "Vst3": {
+                "class_id": "00112233445566778899aabbccddeeff",
+                "vendor": "Test Vendor",
+                "schema_version": 7,
+                "binary_sha256": null
+            }
+        });
+        let unbound: AudioProcessorDefinitionRef =
+            serde_json::from_value(unbound_json).expect("load unbound VST3 definition");
+        assert!(matches!(
+            unbound,
+            AudioProcessorDefinitionRef::Vst3 { binary_sha256: None, .. }
+        ));
+        let mut invalid = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        invalid.definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899aabbccddeeff".to_owned(),
+            vendor: None,
+            schema_version: 1,
+            binary_sha256: Some([0; 32]),
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(AudioAuthoringError::InvalidPluginBinaryRevision)
+        ));
+    }
+
+    #[test]
     fn audio_cow_containers_preserve_json_and_detach_only_on_mutation() {
         let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
         processor.definition = AudioProcessorDefinitionRef::Vst3 {
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
             vendor: Some("Test Vendor".to_owned()),
             schema_version: 7,
+            binary_sha256: Some([9; 32]),
         };
         processor.opaque_state = Some(AuthoringList::from(vec![1, 2, 3, 4]));
         let parameter_allocation = processor.parameters.allocation_id();

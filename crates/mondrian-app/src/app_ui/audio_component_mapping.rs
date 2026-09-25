@@ -14,6 +14,7 @@ use mondrian_ui_widgets::{Dropdown, Label, MenuItem, NumberInput, PropertyRow, P
 
 use crate::app::ui_actions::audio_component_edit_action;
 use crate::app::SelectedClipRef;
+use crate::app_ui::localization::Localizer;
 
 /// Exact author policy, dependency evidence, and reviewable matrix projection.
 #[derive(Debug, Clone)]
@@ -31,6 +32,7 @@ pub(crate) fn project_audio_channel_mapping(
     mapping: &AudioComponentChannelMapping,
     observed_source_layout: Option<AudioChannelLayout>,
     destination_layout: AudioChannelLayout,
+    localizer: &Localizer,
 ) -> AudioChannelMappingModel {
     let (review_matrix, matrix_is_explicit, diagnostic) = match mapping {
         AudioComponentChannelMapping::Standard => match observed_source_layout {
@@ -40,27 +42,29 @@ pub(crate) fn project_audio_channel_mapping(
                     Err(error) => (
                         None,
                         false,
-                        Some(format!("标准映射不可用：{error}；播放和导出会拒绝猜测")),
+                        Some(localizer.format_text(
+                            "audio-mapping-standard-unavailable",
+                            "error",
+                            &error.to_string(),
+                        )),
                     ),
                 }
             }
             None => (
                 None,
                 false,
-                Some("当前依赖没有可证明的精确源布局；播放和导出会拒绝猜测".to_owned()),
+                Some(localizer.text("audio-mapping-source-unproven")),
             ),
         },
         AudioComponentChannelMapping::Explicit(matrix) => {
             let diagnostic = match observed_source_layout {
-                Some(observed) if observed != matrix.source_layout() => Some(format!(
-                    "显式矩阵要求 {}，当前依赖为 {}；播放和导出会拒绝不匹配的信号",
-                    matrix.source_layout(),
-                    observed
-                )),
-                None => Some(
-                    "显式矩阵已保留，但当前依赖没有可证明的源布局；执行会保持 fail-closed"
-                        .to_owned(),
-                ),
+                Some(observed) if observed != matrix.source_layout() => {
+                    let mut args = fluent_bundle::FluentArgs::new();
+                    args.set("required", matrix.source_layout().to_string());
+                    args.set("observed", observed.to_string());
+                    Some(localizer.format("audio-mapping-layout-mismatch", Some(&args)))
+                }
+                None => Some(localizer.text("audio-mapping-explicit-source-unproven")),
                 Some(_) => None,
             };
             (Some(matrix.clone()), true, diagnostic)
@@ -83,13 +87,14 @@ pub(crate) fn with_audio_channel_mapping_rows(
     edit_id: AudioComponentEditId,
     model: &AudioChannelMappingModel,
     can_edit: bool,
+    localizer: &Localizer,
 ) -> PropertySection {
     let mode_label = match model.mapping {
-        AudioComponentChannelMapping::Standard => "标准（自动）",
-        AudioComponentChannelMapping::Explicit(_) => "自定义（显式矩阵）",
+        AudioComponentChannelMapping::Standard => localizer.text("audio-mapping-mode-standard"),
+        AudioComponentChannelMapping::Explicit(_) => localizer.text("audio-mapping-mode-explicit"),
     };
     let mut mode_items = vec![MenuItem::new(
-        "标准（自动，执行时 fail-closed）",
+        localizer.text("audio-mapping-standard-option"),
         audio_component_mutation_action(
             selection,
             edit_id,
@@ -111,7 +116,7 @@ pub(crate) fn with_audio_channel_mapping_rows(
             );
             mode_items.push(
                 MenuItem::new(
-                    "自定义：从当前标准矩阵建立快照",
+                    localizer.text("audio-mapping-snapshot-option"),
                     audio_component_mutation_action(
                         selection,
                         edit_id,
@@ -126,7 +131,7 @@ pub(crate) fn with_audio_channel_mapping_rows(
         if let Ok(matrix) = AudioChannelMixMatrix::new(source_layout, model.destination_layout, [])
         {
             mode_items.push(MenuItem::new(
-                "自定义：空白矩阵",
+                localizer.text("audio-mapping-blank-option"),
                 audio_component_mutation_action(
                     selection,
                     edit_id,
@@ -138,7 +143,7 @@ pub(crate) fn with_audio_channel_mapping_rows(
         }
     }
     section = section.with_row(PropertyRow::new(
-        "通道映射",
+        localizer.text("audio-mapping-channel-row"),
         Box::new(
             Dropdown::new(mode_label, mode_items)
                 .with_max_visible_items(8)
@@ -151,10 +156,16 @@ pub(crate) fn with_audio_channel_mapping_rows(
         AudioComponentChannelMapping::Standard => model.observed_source_layout,
     };
     section = section.with_row(PropertyRow::new(
-        "信号布局",
+        localizer.text("audio-mapping-layout-row"),
         Box::new(
             Label::new(authored_source.map_or_else(
-                || format!("未知 → {}", model.destination_layout),
+                || {
+                    localizer.format_text(
+                        "audio-mapping-unknown-source",
+                        "destination",
+                        &model.destination_layout.to_string(),
+                    )
+                },
                 |source| format!("{} → {}", source, model.destination_layout),
             ))
             .muted(),
@@ -162,7 +173,7 @@ pub(crate) fn with_audio_channel_mapping_rows(
     ));
     if let Some(diagnostic) = &model.diagnostic {
         section = section.with_row(PropertyRow::new(
-            "映射诊断",
+            localizer.text("audio-mapping-diagnostic-row"),
             Box::new(Label::new(diagnostic.clone()).muted()),
         ));
     }
@@ -239,12 +250,13 @@ pub(crate) fn with_audio_channel_mapping_rows(
                 .collect::<Vec<_>>();
             if !options.is_empty() {
                 section = section.with_row(PropertyRow::new(
-                    format!(
-                        "添加至 {}",
-                        channel_label(matrix.destination_layout(), destination)
+                    localizer.format_text(
+                        "audio-mapping-add-to",
+                        "destination",
+                        &channel_label(matrix.destination_layout(), destination),
                     ),
                     Box::new(
-                        Dropdown::new("选择源通道…", options)
+                        Dropdown::new(localizer.text("audio-mapping-choose-source"), options)
                             .with_max_visible_items(12)
                             .enabled(can_edit),
                     ),
@@ -308,14 +320,17 @@ fn channel_label(layout: AudioChannelLayout, channel: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_ui::localization::AppUiLocale;
     use mondrian_core::{ClipId, TrackId};
 
     #[test]
     fn projection_preserves_fail_closed_layout_evidence() {
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let unsupported = project_audio_channel_mapping(
             &AudioComponentChannelMapping::Standard,
             Some(AudioChannelLayout::Surround51Back),
             AudioChannelLayout::Stereo,
+            &localizer,
         );
         assert!(unsupported.review_matrix.is_none());
         assert!(unsupported
@@ -328,6 +343,7 @@ mod tests {
             &AudioComponentChannelMapping::Explicit(explicit.clone()),
             Some(AudioChannelLayout::Stereo),
             AudioChannelLayout::Mono,
+            &localizer,
         );
         assert_eq!(mismatch.review_matrix, Some(explicit));
         assert!(mismatch.matrix_is_explicit);
@@ -335,6 +351,20 @@ mod tests {
             .diagnostic
             .as_deref()
             .is_some_and(|message| message.contains("拒绝不匹配")));
+
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let english_mismatch = project_audio_channel_mapping(
+            &AudioComponentChannelMapping::Explicit(AudioChannelMixMatrix::identity(
+                AudioChannelLayout::Mono,
+            )),
+            Some(AudioChannelLayout::Stereo),
+            AudioChannelLayout::Mono,
+            &english,
+        );
+        assert!(english_mismatch
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("Explicit matrix requires")));
     }
 
     #[test]

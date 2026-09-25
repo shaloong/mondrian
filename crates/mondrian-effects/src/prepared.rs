@@ -1,8 +1,8 @@
 use crate::{
     effect::{
         effect_definition, effect_registry_revision, EffectDefinition, EffectEvalContext,
-        EffectGraphBuildError, EffectPreparationContext, EffectResourceDependency,
-        PreparedEffectEvaluator, PreparedLut3D,
+        EffectFrameContext, EffectGraphBuildError, EffectPreparationContext,
+        EffectResourceDependency, PreparedEffectEvaluator, PreparedLut3D,
     },
     graph::{
         identity_compiled_effect_graph, prepare_effect_graph_topology, CompiledEffectGraph,
@@ -40,6 +40,7 @@ struct PreparedEffectInstance {
 pub struct PreparedEffectStack {
     instances: Arc<[PreparedEffectInstance]>,
     working_color_space: WorkingColorSpace,
+    frame_context: Option<EffectFrameContext>,
     execution_envelope: EffectExecutionEnvelope,
     dependencies: Arc<[EffectResourceDependency]>,
     definition_registry_revision: u64,
@@ -59,6 +60,7 @@ impl std::fmt::Debug for PreparedEffectStack {
             .debug_struct("PreparedEffectStack")
             .field("instance_count", &self.instances.len())
             .field("working_color_space", &self.working_color_space)
+            .field("frame_context", &self.frame_context)
             .field("execution_envelope", &self.execution_envelope)
             .field("dependencies", &self.dependencies)
             .field(
@@ -87,9 +89,18 @@ impl PreparedEffectStack {
         working_color_space: WorkingColorSpace,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_with_optional_frame_context(effects, working_color_space, None, lut_cache)
+    }
+
+    fn prepare_with_optional_frame_context(
+        effects: &[EffectNode],
+        working_color_space: WorkingColorSpace,
+        frame_context: Option<EffectFrameContext>,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
         let mut concurrent_change = None;
         for _ in 0..MAX_DEFINITION_BIND_RETRIES {
-            match Self::prepare_once(effects, working_color_space, lut_cache) {
+            match Self::prepare_once(effects, working_color_space, frame_context, lut_cache) {
                 Err(error @ EffectGraphBuildError::DefinitionRegistryChanged { .. }) => {
                     concurrent_change = Some(error);
                 }
@@ -105,6 +116,7 @@ impl PreparedEffectStack {
     fn prepare_once(
         effects: &[EffectNode],
         working_color_space: WorkingColorSpace,
+        frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
         let definition_registry_revision = effect_registry_revision();
@@ -183,8 +195,12 @@ impl PreparedEffectStack {
             });
         }
         let instances: Arc<[PreparedEffectInstance]> = instances.into();
-        let zero_evaluation =
-            evaluate_instances(&instances, working_color_space, TimelineTime::ZERO)?;
+        let zero_evaluation = evaluate_instances(
+            &instances,
+            working_color_space,
+            frame_context,
+            TimelineTime::ZERO,
+        )?;
         // Preparation proves both acyclicity and the declared topology at one
         // canonical instant. Every later evaluation repeats the per-instance
         // topology check before a new shape can enter its execution Session.
@@ -201,6 +217,7 @@ impl PreparedEffectStack {
         Ok(Self {
             instances,
             working_color_space,
+            frame_context,
             execution_envelope: EffectExecutionEnvelope::new(
                 execution_contract,
                 Arc::<[EffectExecutionContract]>::from(stage_contracts),
@@ -220,7 +237,13 @@ impl PreparedEffectStack {
         if time == TimelineTime::ZERO {
             return Ok((*self.zero_graph).clone());
         }
-        Ok(evaluate_instances(&self.instances, self.working_color_space, time)?.graph)
+        Ok(evaluate_instances(
+            &self.instances,
+            self.working_color_space,
+            self.frame_context,
+            time,
+        )?
+        .graph)
     }
 
     fn evaluate_with_stage_bindings(
@@ -233,7 +256,12 @@ impl PreparedEffectStack {
                 stage_bindings: Arc::clone(&self.zero_stage_bindings),
             });
         }
-        evaluate_instances(&self.instances, self.working_color_space, time)
+        evaluate_instances(
+            &self.instances,
+            self.working_color_space,
+            self.frame_context,
+            time,
+        )
     }
 
     /// Aggregated execution contract for the complete stack.
@@ -390,6 +418,7 @@ fn validate_effect_schema(
 fn evaluate_instances(
     instances: &[PreparedEffectInstance],
     working_color_space: WorkingColorSpace,
+    frame_context: Option<EffectFrameContext>,
     time: TimelineTime,
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
@@ -399,6 +428,7 @@ fn evaluate_instances(
             instance,
             stage_index,
             working_color_space,
+            frame_context,
             time,
             &mut builder,
         )?);
@@ -413,6 +443,7 @@ fn evaluate_instance_into_builder(
     instance: &PreparedEffectInstance,
     stage_index: usize,
     working_color_space: WorkingColorSpace,
+    frame_context: Option<EffectFrameContext>,
     time: TimelineTime,
     builder: &mut EffectGraphBuilderState,
 ) -> Result<CompiledEffectStageBinding, EffectGraphBuildError> {
@@ -421,7 +452,7 @@ fn evaluate_instance_into_builder(
     let mut staged = builder.clone();
     let checkpoint = staged.checkpoint();
     staged.set_active_domain_contract(instance.definition.color_domain_contract());
-    let context = EffectEvalContext { time, working_color_space };
+    let context = EffectEvalContext { time, working_color_space, frame_context };
     match catch_unwind(AssertUnwindSafe(|| {
         (instance.evaluator.evaluator())(&instance.effect, context, &mut staged)
     })) {
@@ -670,6 +701,7 @@ fn evaluate_grade_node(
                 &stack.instances[instance_index],
                 bindings.len(),
                 working_color_space,
+                stack.frame_context,
                 time,
                 builder,
             )?;
@@ -839,8 +871,53 @@ impl PreparedEffectProgram {
         working_color_space: WorkingColorSpace,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
-        let stack =
-            PreparedEffectStack::prepare_with_lut_cache(effects, working_color_space, lut_cache)?;
+        Self::prepare_hierarchical_with_optional_frame_context(
+            effects,
+            masks,
+            grade_before,
+            grade_after,
+            working_color_space,
+            None,
+            lut_cache,
+        )
+    }
+
+    /// Prepare a Clip-owned hierarchy with its exact sequence frame contract.
+    pub fn prepare_hierarchical_with_frame_context(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        grade_before: &[PreparedGradeGraph],
+        grade_after: &[PreparedGradeGraph],
+        working_color_space: WorkingColorSpace,
+        frame_context: EffectFrameContext,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_hierarchical_with_optional_frame_context(
+            effects,
+            masks,
+            grade_before,
+            grade_after,
+            working_color_space,
+            Some(frame_context),
+            lut_cache,
+        )
+    }
+
+    fn prepare_hierarchical_with_optional_frame_context(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        grade_before: &[PreparedGradeGraph],
+        grade_after: &[PreparedGradeGraph],
+        working_color_space: WorkingColorSpace,
+        frame_context: Option<EffectFrameContext>,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
+        let stack = PreparedEffectStack::prepare_with_optional_frame_context(
+            effects,
+            working_color_space,
+            frame_context,
+            lut_cache,
+        )?;
         let masks = masks.iter().filter(|mask| mask.enabled).cloned().collect::<Vec<_>>();
         let grade_before: Arc<[PreparedGradeGraph]> = grade_before.to_vec().into();
         let grade_after: Arc<[PreparedGradeGraph]> = grade_after.to_vec().into();
@@ -1007,6 +1084,11 @@ impl PreparedEffectProgram {
     /// Aggregated execution contract for the effect stack and masks.
     pub fn execution_contract(&self) -> EffectExecutionContract {
         self.inner.execution_envelope.aggregate()
+    }
+
+    /// Exact sequence frame contract bound during preparation, if any.
+    pub fn frame_context(&self) -> Option<EffectFrameContext> {
+        self.inner.stack.frame_context
     }
 
     /// Ordered per-stage contracts and homogeneous-backend evidence.

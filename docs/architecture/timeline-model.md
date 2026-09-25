@@ -1,5 +1,32 @@
 # Timeline Model
 
+Audio Rack `RebindNative` is one format-neutral author mutation for CLAP and
+VST3. The App probes the selected binary and compares parameter schemas first;
+Timeline then requires the same stable plugin identity, vendor where the format
+defines one, schema version, and a nonzero new binary fingerprint. It replaces
+only the definition binding, preserving automation, opaque state, and Undo/Redo.
+The generic Rack action is blocked at the App product boundary so a caller
+cannot bypass the format-specific probe.
+
+Clip blend-mode options pair each persisted `BlendMode` with its stable key in
+Core's canonical display order. The optional Clip override is a typed Clip
+field, not an intrinsic parameter-bag entry. A blend-mode action validates the
+selected video Clip and its Track lock, rejects no-ops, then changes the field
+through one Authoring Session transaction with Undo/Redo. `None` inherits the
+Track mode. UI-only ordering and separator rows never alter persisted values,
+authoring identity, or composite semantics.
+
+Core numeric automation persists exact key times, incoming/outgoing handles,
+and temporal constraint flags. `AutoBezier` recomputes tangent handles from
+neighbors; `ContinuousBezier` keeps the two handles collinear while allowing
+different time lengths. Dragging one continuous handle updates the opposite
+side to the dragged slope and preserves that side's prior time length. These
+constraints run during author mutation, so Preview and Export evaluate the
+same persisted curve. Inspector interpolation commands resolve the current
+key by stable ID before committing one property mutation.
+Manual Bezier presets initialize the incoming handle toward earlier time and
+the outgoing handle toward later time.
+
 Color-context construction delegates target-qualified output View lookup to the
 owning Project's exact `ColorEngine`. Sequence preview and export planning never read an
 unqualified process-global OCIO default, so a failed ACES or Custom config
@@ -299,6 +326,12 @@ replacement. History commit is followed by infallible ticket consumption and
 installation. Thus validation failure cannot change History descriptor state,
 and no validation, JSON conversion, allocation, or footprint discovery occurs
 between History commit and installing the paired document/certificate.
+When a Timeline edit depends on an Asset Library transaction, the Session may
+prepare the same validated Sequence replacement and History record without
+installing them. The Asset transaction receives the staged `AssetId`, and an
+edit failure rolls it back. After SQLite commit, the prepared Session edit is
+installed without fallible work while the Library lock remains held. A
+discarded preparation changes neither canonical author state nor Undo/Redo.
 Sequence snapshot commits compare the complete canonical `before` content as
 well as its revision, so a caller cannot forge same-revision History that would
 later Undo to a state that never existed.
@@ -1378,6 +1411,23 @@ milliseconds but marks it non-animatable and topology-affecting; audio plan
 preparation rounds it upward once to the concrete sample grid. A parameter that
 changes storage, latency, or continuity topology forces plan re-preparation
 rather than a live callback event.
+CLAP and VST3 processor definitions may store the selected binary's SHA-256
+revision; an all-zero revision is invalid. Processor parameters may also carry
+bounded plugin display metadata:
+the native default name and hidden-control flag. The `ui` snapshot is required
+in the alpha Project format; built-ins use an empty display name and visible
+control. The display snapshot
+does not alter `ParameterSchema`, automation identity, saved opaque state, or
+binary revision binding; malformed control text is rejected during validation.
+An explicit CLAP rebind Rack edit
+compares the old definition before replacing only that revision. It rejects a
+different plugin ID, schema version, or stale instance and commits only after
+complete Audio Program validation. The installed path remains machine-local.
+An explicitly unbound definition (`binary_sha256: null`) stays editable but
+fails native preparation until explicitly rebound. The alpha format requires
+this field in every plugin definition. VST3 discovery, rebind, and native
+preparation remain unimplemented; the persisted revision is only the necessary
+authoring identity contract for a future adapter.
 
 Automation authoring uses `AnimationParameterAddress { animation_track_id,
 parameter_id }` as the stable property-instance address and `KeyframeId` as the
@@ -1402,6 +1452,15 @@ whose evaluator reuses the same Hold/Linear/Bezier mathematics as direct curve
 evaluation. Execution Modules may lower those segments onto their Evaluation
 Grid and advance span cursors; they may not copy the interpolation formulas or
 reinterpret the persisted author curve.
+Direct key upserts validate a detached curve before publication as well. A
+rejected key with an invalid Bezier time span or duplicate `KeyframeId` leaves
+the prior curve and its evaluation unchanged.
+Exact audio automation also stores a per-key tangent constraint independent of
+the execution segment kind. The stable-ID `SetInterpolation` author edit maps
+hold, linear, manual Bezier, auto Bezier, and continuous Bezier to canonical
+exact handles. Neighbor changes regenerate constrained handles on a detached
+curve; absent legacy mode data means manual. Stale IDs and schema-disallowed
+interpolation families reject before Sequence publication.
 
 Mask scalar properties are part of the persisted Property Bag, not runtime
 defaults. Every complete shape key owns a stable `KeyframeId`, exact Clip-local

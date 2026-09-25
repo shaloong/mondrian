@@ -12,9 +12,11 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::menu::{Dropdown, DropdownTriggerStyle, MenuItem, MenuItemKind};
 
+use crate::app::ui_actions::app_shell_install_openfx_bundle_dialog_action;
 use crate::app::AppState;
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::commands::command_by_id;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::shortcuts::{
     shortcut_label_for_action, shortcut_label_for_action_with_overrides, AppUiShortcutOverride,
 };
@@ -24,6 +26,14 @@ use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 pub const MENU_BAR_HEIGHT: f32 = 24.0;
 
 const MENU_BAR_TRIGGER_GAP: f32 = 2.0;
+const MENU_BAR_LABEL_IDS: [&str; 6] = [
+    "menu-file",
+    "menu-edit",
+    "menu-view",
+    "menu-graphics",
+    "menu-window",
+    "menu-help",
+];
 
 /// Default Mondrian menu structure for app UI shells.
 pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
@@ -42,10 +52,20 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     "导入",
                     vec![
                         command_menu_item("file.import_media"),
-                        MenuItem::inert("文件夹..."),
+                        MenuItem::inert("文件夹...").with_message_id("menu-import-folder"),
                     ],
-                ),
-                MenuItem::submenu("导出", vec![MenuItem::inert("导出设置...")]),
+                )
+                .with_message_id("menu-import"),
+                MenuItem::submenu(
+                    "导出",
+                    vec![
+                        MenuItem::inert("导出设置...").with_message_id("menu-export-settings"),
+                        MenuItem::separator(),
+                        command_menu_item("file.export_portable_package"),
+                        command_menu_item("file.cancel_portable_package_export"),
+                    ],
+                )
+                .with_message_id("menu-export"),
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
                 MenuItem::separator(),
@@ -83,7 +103,15 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
         // ── Graphics ────────────────────────────────────────────────────
         (
             "图形",
-            vec![command_menu_item("timeline.create_basic_title")],
+            vec![
+                command_menu_item("timeline.create_basic_title"),
+                MenuItem::separator(),
+                MenuItem::new(
+                    "安装 OpenFX Filter…",
+                    app_shell_install_openfx_bundle_dialog_action(),
+                )
+                .with_message_id("menu-install-openfx-filter"),
+            ],
         ),
         // ── Window ──────────────────────────────────────────────────────
         (
@@ -92,39 +120,48 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Assets.display_name(),
                     Action::TogglePanel(PanelKind::Assets),
-                )),
+                ))
+                .with_message_id("panel-assets"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Viewer.display_name(),
                     Action::TogglePanel(PanelKind::Viewer),
-                )),
+                ))
+                .with_message_id("panel-viewer"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Scopes.display_name(),
                     Action::TogglePanel(PanelKind::Scopes),
-                )),
+                ))
+                .with_message_id("panel-scopes"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Timeline.display_name(),
                     Action::TogglePanel(PanelKind::Timeline),
-                )),
+                ))
+                .with_message_id("panel-timeline"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Inspector.display_name(),
                     Action::TogglePanel(PanelKind::Inspector),
-                )),
+                ))
+                .with_message_id("panel-inspector"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Mixer.display_name(),
                     Action::TogglePanel(PanelKind::Mixer),
-                )),
+                ))
+                .with_message_id("panel-mixer"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Effects.display_name(),
                     Action::TogglePanel(PanelKind::Effects),
-                )),
+                ))
+                .with_message_id("panel-effects"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::NodeGraph.display_name(),
                     Action::TogglePanel(PanelKind::NodeGraph),
-                )),
+                ))
+                .with_message_id("panel-node-graph"),
                 menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Export.display_name(),
                     Action::TogglePanel(PanelKind::Export),
-                )),
+                ))
+                .with_message_id("panel-export"),
                 MenuItem::separator(),
                 MenuItem::submenu(
                     "工作区",
@@ -135,7 +172,8 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                         command_menu_item("workspace.compositing"),
                         command_menu_item("workspace.export"),
                     ],
-                ),
+                )
+                .with_message_id("menu-workspace"),
             ],
         ),
         // ── Help ────────────────────────────────────────────────────────
@@ -256,6 +294,7 @@ fn menu_item_with_shortcut(item: MenuItem) -> MenuItem {
 fn command_menu_item(id: &str) -> MenuItem {
     let command = command_by_id(id).unwrap_or_else(|| panic!("unknown app UI command id {id}"));
     menu_item_with_shortcut(MenuItem::new(command.menu_title, command.action()))
+        .with_message_id(format!("command-{}", id.replace('.', "-")))
 }
 
 fn apply_shortcut_overrides_to_menu_items(
@@ -299,6 +338,7 @@ pub struct MenuBar {
     menus: Vec<Dropdown>,
     bounds: Rect,
     content_right: f32,
+    locale: AppUiLocale,
 }
 
 impl Default for MenuBar {
@@ -321,6 +361,24 @@ impl MenuBar {
             menus,
             bounds: Rect::ZERO,
             content_right: 0.0,
+            locale: AppUiLocale::ZhCn,
+        }
+    }
+
+    /// Change menu language while retaining every Dropdown's open and focus state.
+    pub fn set_locale(&mut self, locale: AppUiLocale) {
+        self.locale = locale;
+        self.apply_locale_labels();
+        self.layout(self.bounds);
+    }
+
+    fn apply_locale_labels(&mut self) {
+        let Ok(localizer) = Localizer::new(self.locale) else {
+            return;
+        };
+        for (menu, message_id) in self.menus.iter_mut().zip(MENU_BAR_LABEL_IDS) {
+            menu.set_label(localizer.text(message_id));
+            menu.localize_item_labels(|message_id| localizer.text(message_id));
         }
     }
 
@@ -354,12 +412,15 @@ impl MenuBar {
                     Dropdown::new(label, items).with_trigger_style(DropdownTriggerStyle::MenuBar)
                 })
                 .collect();
+            self.apply_locale_labels();
             self.layout(self.bounds);
             return;
         }
         for (menu, (label, items)) in self.menus.iter_mut().zip(definitions) {
             menu.set_model(label, items);
         }
+        self.apply_locale_labels();
+        self.layout(self.bounds);
     }
 
     /// Refresh shell-local checked state without rebuilding menu availability
@@ -541,6 +602,40 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locale_switch_updates_retained_menu_triggers_and_layout() {
+        let mut menu = MenuBar::default();
+        menu.layout(Rect::new(0.0, 0.0, 900.0, MENU_BAR_HEIGHT));
+        let identities = menu.menus.iter().map(Widget::id).collect::<Vec<_>>();
+        assert_eq!(menu.menus[0].label(), "文件");
+
+        menu.set_locale(AppUiLocale::EnUs);
+        assert_eq!(
+            menu.menus.iter().map(Dropdown::label).collect::<Vec<_>>(),
+            ["File", "Edit", "View", "Graphics", "Window", "Help"]
+        );
+        assert_eq!(menu.menus[0].items()[0].label, "New Project...");
+        let MenuItemKind::Submenu { children } = &menu.menus[0].items()[6].kind else {
+            panic!("expected Import submenu");
+        };
+        assert_eq!(menu.menus[0].items()[6].label, "Import");
+        assert_eq!(children[0].label, "Media...");
+        assert_eq!(children[1].label, "Folder...");
+        assert_eq!(menu.menus[4].items()[0].label, "Assets");
+        assert_eq!(
+            menu.menus.iter().map(Widget::id).collect::<Vec<_>>(),
+            identities
+        );
+        assert!(menu.trigger_index_at(trigger_point(&menu, 5)).is_some());
+
+        menu.refresh_for_app_state_with_shortcut_overrides(&AppState::new(), &[]);
+        assert_eq!(menu.menus[0].label(), "File");
+        assert_eq!(menu.menus[0].items()[0].label, "New Project...");
+        menu.set_locale(AppUiLocale::Pseudo);
+        assert!(menu.menus[0].label().starts_with('⟦'));
+        assert!(menu.menus[0].items()[0].label.starts_with('⟦'));
+    }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -1080,6 +1175,8 @@ mod tests {
         assert!(!menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(!menu_item(&menu_items, "文件", "保存").enabled);
         assert!(!menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "打包项目...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "取消项目打包").enabled);
         assert!(!menu_item(&menu_items, "文件", "关闭项目").enabled);
         assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
         assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
@@ -1102,6 +1199,8 @@ mod tests {
         assert!(menu_item_deep(&menu_items, "文件", "媒体...").enabled);
         assert!(menu_item(&menu_items, "文件", "保存").enabled);
         assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
+        assert!(menu_item_deep(&menu_items, "文件", "打包项目...").enabled);
+        assert!(!menu_item_deep(&menu_items, "文件", "取消项目打包").enabled);
         assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);
     }
 

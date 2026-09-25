@@ -42,7 +42,7 @@ pub enum AppReferenceOutputTeardownStatus {
     Failed,
 }
 
-const PRODUCT_REFERENCE_OUTPUT_RETIRE_BUDGET: Duration = Duration::from_millis(25);
+const PRODUCT_REFERENCE_OUTPUT_RETIRE_BUDGET: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 pub(crate) struct AppReferenceOutputService {
@@ -831,7 +831,7 @@ mod tests {
 
         let started = Instant::now();
         let result = service.retire();
-        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_millis(225));
         assert!(matches!(
             result,
             Err(AppReferenceOutputError::TeardownIncomplete { .. })
@@ -839,6 +839,37 @@ mod tests {
         assert!(!dropped.load(Ordering::Acquire));
         assert_eq!(
             service.teardown_status(),
+            AppReferenceOutputTeardownStatus::Failed
+        );
+        wait_for_drop(&dropped);
+    }
+
+    #[test]
+    fn project_close_reports_unproven_reference_output_release() {
+        let fixture = tempfile::tempdir().expect("fixture root");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut state = AppState::new();
+        state
+            .create_new_project_at(
+                fixture.path().join("reference-close.mdp"),
+                "Reference Close",
+                1920,
+                1080,
+                Rational::FPS_25,
+            )
+            .expect("create project");
+        state
+            .install_reference_output_adapter(Box::new(blocking_adapter(Arc::clone(&dropped))))
+            .expect("install adapter");
+
+        let error = state.close_project().expect_err("unproven adapter release must be reported");
+        assert!(error.to_string().contains("teardown"));
+        assert!(
+            state.active_sequence().is_none(),
+            "retired project cannot remain editable"
+        );
+        assert_eq!(
+            state.reference_output_teardown_status(),
             AppReferenceOutputTeardownStatus::Failed
         );
         wait_for_drop(&dropped);

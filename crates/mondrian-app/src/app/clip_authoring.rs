@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use mondrian_core::automation::{AnimationParameterAddress, PropertyHost, PropertyMutation};
-use mondrian_core::{ClipId, Color, MondrianError, Result};
+use mondrian_core::{BlendMode, ClipId, Color, MondrianError, Result};
 
 use super::animation_authoring::{ClipNumericCurveEdit, NormalizedCurvePoint};
 use super::product_action::{
@@ -87,6 +87,36 @@ impl AppState {
                     "Solid Color Clip already has the requested source color",
                 ));
             }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    pub(super) fn clip_blend_mode_write_would_change(
+        &self,
+        clip_id: ClipId,
+        blend_mode: Option<BlendMode>,
+    ) -> Result<bool> {
+        let (_, clip) = authorable_clip(self, clip_id, true, "clip_set_blend_mode")?;
+        Ok(clip.blend_mode != blend_mode)
+    }
+
+    pub(super) fn set_clip_blend_mode_by_id(
+        &mut self,
+        clip_id: ClipId,
+        blend_mode: Option<BlendMode>,
+    ) -> Result<bool> {
+        if !self.clip_blend_mode_write_would_change(clip_id, blend_mode)? {
+            return Ok(false);
+        }
+        let sequence_id = self
+            .active_sequence_id()
+            .ok_or_else(|| clip_authoring_error("clip_set_blend_mode", "no active Sequence"))?;
+        self.commit_sequence_edit(sequence_id, "切换片段混合模式", |sequence| {
+            let clip = sequence
+                .find_clip_mut(clip_id)
+                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+            clip.blend_mode = blend_mode;
             Ok(())
         })?;
         Ok(true)
@@ -215,7 +245,9 @@ fn authorable_clip<'a>(
     Ok((sequence, clip))
 }
 
-fn numeric_curve_edit_from_payload(edit: &ClipCurveEditPayload) -> Result<ClipNumericCurveEdit> {
+pub(super) fn numeric_curve_edit_from_payload(
+    edit: &ClipCurveEditPayload,
+) -> Result<ClipNumericCurveEdit> {
     match edit {
         ClipCurveEditPayload::Upsert { keyframe_id, point } => Ok(ClipNumericCurveEdit::Upsert {
             keyframe_id: *keyframe_id,
@@ -223,6 +255,12 @@ fn numeric_curve_edit_from_payload(edit: &ClipCurveEditPayload) -> Result<ClipNu
         }),
         ClipCurveEditPayload::Remove { keyframe_id } => {
             Ok(ClipNumericCurveEdit::Remove { keyframe_id: *keyframe_id })
+        }
+        ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation } => {
+            Ok(ClipNumericCurveEdit::SetInterpolation {
+                keyframe_id: *keyframe_id,
+                interpolation: *interpolation,
+            })
         }
     }
 }

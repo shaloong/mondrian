@@ -3,6 +3,31 @@ use crate::app::preview_unavailability::PreviewOutputStage;
 use crate::app::product_action::TimelineSelectionEdit;
 use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
+fn chinese_localizer() -> Localizer {
+    Localizer::new(AppUiLocale::ZhCn).expect("bundled Chinese catalog")
+}
+
+#[test]
+fn mixer_automation_and_meter_status_follow_locale() {
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        visible(mixer_automation_label(&chinese, 3)),
+        "自动化 · 3 个关键帧"
+    );
+    assert_eq!(
+        visible(mixer_automation_label(&english, 3)),
+        "Automated · 3 keyframes"
+    );
+    assert_eq!(chinese.text("mixer-meter-not-running"), "未执行");
+    assert_eq!(english.text("mixer-meter-not-running"), "Not running");
+    assert_eq!(
+        visible(english.format_text("mixer-route-count", "count", "2")),
+        "2 routes"
+    );
+}
+
 #[test]
 fn empty_timeline_projection_does_not_construct_an_app_owner() {
     let before = crate::app::test_app_state_construction_count();
@@ -242,7 +267,7 @@ fn inspector_model_projects_asset_components_and_physical_binding_separately() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
 
     assert_eq!(model.audio_components.len(), 1);
     let component = &model.audio_components[0];
@@ -316,7 +341,7 @@ fn inspector_model_uses_child_sequence_layout_for_nested_output_mapping() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     let mapping = &model.audio_components[0].channel_mapping;
     assert_eq!(
         mapping.observed_source_layout,
@@ -356,7 +381,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
     state.seek(4).expect("seek");
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     let source_timing = model.source_timing.expect("source-timing model");
     assert_eq!(
         source_timing.mode,
@@ -372,7 +397,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
     state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
         .set_constant_source_time_map(tt(6, time_base), TimeScale::new(0, 1).expect("exact hold"))
         .expect("set hold");
-    let held_model = InspectorPanelModel::from_app_state(&state);
+    let held_model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     let held_timing = held_model.source_timing.expect("held source-timing model");
     assert_eq!(held_timing.mode, InspectorSourceTimingMode::Hold);
     assert!(held_timing.can_set_rate);
@@ -384,7 +409,7 @@ fn inspector_model_projects_exact_forward_rate_and_playhead_hold_target() {
     state.active_sequence_mut_uncommitted().expect("active Sequence").video_tracks[0].clips[0]
         .set_constant_source_time_map(tt(12, time_base), TimeScale::NEGATIVE_ONE)
         .expect("set reverse map fixture");
-    let reverse_model = InspectorPanelModel::from_app_state(&state);
+    let reverse_model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     let reverse_timing = reverse_model.source_timing.expect("reverse source-timing model");
     assert_eq!(
         reverse_timing.mode,
@@ -423,7 +448,7 @@ fn inspector_model_does_not_offer_retime_for_known_still_images() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
 
     assert_eq!(model.source_timing, None);
     drop(state);
@@ -500,7 +525,7 @@ fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
     state.selection.selected_clips =
         vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
 
     assert_eq!(
         model.clip_properties.len(),
@@ -529,6 +554,99 @@ fn asset_browser_tabs_expose_effect_browser() {
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[0], PanelKind::Assets);
     assert_eq!(tabs[1], PanelKind::Effects);
+}
+
+#[test]
+fn dock_tabs_project_locale_without_changing_panel_identity() {
+    let state = AppState::new();
+    let english =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("English catalog");
+    let chinese =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("Chinese catalog");
+    let models_for = |localizer: &Localizer| {
+        AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            &state,
+            None,
+            None,
+            None,
+            Some(localizer),
+        )
+    };
+    let english_models = models_for(&english);
+    let chinese_models = models_for(&chinese);
+    assert_eq!(english_models.panel_title(PanelKind::Viewer), "Viewer");
+    assert_eq!(
+        english_models.panel_title(PanelKind::Inspector),
+        "Inspector"
+    );
+    assert_eq!(english_models.panel_title(PanelKind::Mixer), "Mixer");
+    assert_eq!(chinese_models.panel_title(PanelKind::Viewer), "预览");
+    assert_eq!(chinese_models.panel_title(PanelKind::Inspector), "检查器");
+    assert_eq!(english_models.panel_titles.len(), PanelKind::ALL.len());
+    assert_eq!(chinese_models.panel_titles.len(), PanelKind::ALL.len());
+    let dock = build_dock_tree(english_models);
+    let assets = dock_panel_for_kind(&dock, PanelKind::Assets).expect("assets panel");
+    assert_eq!(
+        assets.tab_kinds(),
+        vec![PanelKind::Assets, PanelKind::Effects]
+    );
+}
+
+#[test]
+fn inspector_blend_menu_keeps_typed_order_groups_and_locale() {
+    let english =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("English catalog");
+    let chinese =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn).expect("Chinese catalog");
+    let english_model = inspector_blend_mode_model(None, &english);
+    let chinese_model = inspector_blend_mode_model(None, &chinese);
+    assert_eq!(english_model.row_label, "Blend Mode");
+    assert_eq!(english_model.selected_label, "Inherit Track");
+    assert_eq!(chinese_model.row_label, "混合模式");
+    assert_eq!(chinese_model.selected_label, "继承轨道");
+    assert_eq!(english_model.options.len(), chinese_model.options.len());
+    assert_eq!(
+        english_model.options.iter().map(|option| option.mode).collect::<Vec<_>>(),
+        chinese_model.options.iter().map(|option| option.mode).collect::<Vec<_>>()
+    );
+    let clip_id = ClipId::new();
+    let dropdown = inspector_blend_mode_dropdown(&english_model, clip_id, true);
+    assert_eq!(dropdown.label(), "Inherit Track");
+    assert_eq!(
+        dropdown.items().iter().filter(|item| item.is_separator()).count(),
+        6
+    );
+    let inherit = dropdown
+        .items()
+        .iter()
+        .find(|item| item.label == "Inherit Track")
+        .expect("inherit row");
+    assert!(inherit.checked);
+    assert!(!inherit.enabled);
+    let multiply = dropdown
+        .items()
+        .iter()
+        .find(|item| item.label == "Multiply")
+        .expect("Multiply row");
+    let mondrian_ui_widgets::menu::MenuItemCommand::Action(action) = &multiply.command else {
+        panic!("Multiply must dispatch a typed product action");
+    };
+    let decoded = crate::app::product_action::ProductAction::decode_external(action)
+        .expect("decode blend action")
+        .expect("product action");
+    assert!(matches!(
+        decoded,
+        crate::app::product_action::ProductAction::Clip(
+            crate::app::product_action::ClipProductAction::SetBlendMode(payload)
+        ) if payload.clip_id == clip_id && payload.blend_mode == Some(BlendMode::Multiply)
+    ));
+    assert!(!inspector_blend_mode_dropdown(&english_model, clip_id, false).is_enabled());
+    let state = demo_app_state();
+    let inspector = InspectorPanelModel::from_app_state(&state, &english);
+    assert!(
+        inspector.blend_mode.is_some(),
+        "selected video Clip exposes Blend Mode"
+    );
 }
 
 fn dock_panel_for_kind(widget: &dyn Widget, kind: PanelKind) -> Option<&DockPanel> {
@@ -737,7 +855,7 @@ fn sequence_backed_empty_timeline_keeps_add_track_entrypoints_enabled() {
 #[test]
 fn empty_inspector_panel_shows_status_only_and_does_not_dispatch_clip_controls() {
     let model = InspectorPanelModel::empty();
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     assert_eq!(
@@ -1677,7 +1795,7 @@ fn assets_panel_card_drop_moves_asset_selection_into_folder_card() {
 
 #[test]
 fn assets_panel_context_menu_uses_shell_and_asset_actions() {
-    let items = asset_grid_context_menu_items(None);
+    let items = asset_grid_context_menu_items(None, None);
 
     assert_eq!(items.len(), 3);
     assert_shell_action(items[0].action(), APP_SHELL_IMPORT_MEDIA_DIALOG);
@@ -1697,7 +1815,7 @@ fn assets_panel_context_menu_uses_shell_and_asset_actions() {
 
 #[test]
 fn assets_panel_context_menu_creates_folders_inside_current_folder() {
-    let items = asset_grid_context_menu_items(Some("rushes"));
+    let items = asset_grid_context_menu_items(Some("rushes"), None);
 
     let Action::Custom { namespace, name, payload } =
         items[0].action().expect("import dialog action")
@@ -1851,7 +1969,7 @@ fn assets_panel_file_card_context_menu_dispatches_interpret_first() {
     std::fs::write(&path, b"fixture").expect("write media");
     let asset = test_video_asset(path.clone());
     let asset_id = asset.id;
-    let item = asset_grid_item_from_asset(asset, None, false, None);
+    let item = asset_grid_item_from_asset(asset, None, false, None, None);
     let model = AssetGridModel::new("Assets", vec![item]);
     let mut grid = asset_grid(&model);
     grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -1983,7 +2101,7 @@ fn assets_panel_offline_file_card_context_menu_includes_relink() {
         engine: mondrian_core::ColorEngine::mondrian_standard(),
         working_color_space: WorkingColorSpace::LinearP3D65,
     };
-    let item = asset_grid_item_from_asset(asset, None, false, Some(&input_pipeline));
+    let item = asset_grid_item_from_asset(asset, None, false, Some(&input_pipeline), None);
 
     assert_eq!(badge_labels(&item), ["视频", "离线"]);
     assert_eq!(item.badges[1].tone, AssetGridBadgeTone::Warning);
@@ -2036,7 +2154,7 @@ fn assets_panel_online_video_card_context_menu_toggles_proxy_mode() {
     std::fs::write(&media_path, b"not decoded in this view-model test").expect("write media");
     let asset = test_video_asset(media_path.clone());
     let asset_id = asset.id;
-    let item = asset_grid_item_from_asset(asset.clone(), None, false, None);
+    let item = asset_grid_item_from_asset(asset.clone(), None, false, None, None);
 
     assert_eq!(badge_labels(&item), ["视频"]);
     assert_eq!(item.context_menu_items.len(), 5);
@@ -2056,7 +2174,7 @@ fn assets_panel_online_video_card_context_menu_toggles_proxy_mode() {
     assert_eq!(payload.asset_id, asset_id);
     assert!(payload.enabled);
 
-    let proxied = asset_grid_item_from_asset(asset, None, true, None);
+    let proxied = asset_grid_item_from_asset(asset, None, true, None, None);
     assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
     assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
     assert_eq!(proxied.context_menu_items[2].label, "关闭代理模式");
@@ -2660,6 +2778,19 @@ fn timeline_model_maps_asset_drop_payload_to_stable_track_id() {
             frame: 24,
         })
         .is_none());
+
+    let file = PathBuf::from("E:/media/external.wav");
+    let file_payload = model
+        .file_drop_payload(TimelineFileDrop {
+            path: file.clone(),
+            track_ref: first_audio_ref,
+            frame: 18,
+        })
+        .expect("file drop payload");
+    assert_eq!(file_payload.path, file);
+    assert_eq!(file_payload.target_track_id, target_track_id);
+    assert_eq!(file_payload.position.frame, 18);
+    assert_eq!(file_payload.position.time_base, sequence.time_base());
 }
 
 #[test]
@@ -3850,6 +3981,70 @@ fn app_state_models_surface_viewer_color_rejection() {
     assert!(empty.contains("检测：MissingMetadata / None / warnings 1"));
     assert!(empty.contains("问题：missing-cicp 1"));
     assert!(empty.contains("missing_cicp"));
+
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let localized =
+        AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+            &state,
+            None,
+            None,
+            Some(&RejectedPreview),
+            Some(&english),
+        );
+    assert_eq!(localized.viewer.status, "Color interpretation rejected");
+    assert_eq!(localized.viewer.fit_label, "Fit");
+    let detail = localized.viewer.empty_message.as_deref().expect("localized detail");
+    assert!(detail.contains("Asset:"));
+    assert!(detail.contains("missing-color-tags.mov"));
+    assert!(detail.contains("Detection:"));
+    assert!(detail.contains("Issues:"));
+}
+
+#[test]
+fn viewer_localized_status_and_frame_count_cover_playback_and_failure_states() {
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    assert_eq!(
+        viewer_status(false, true, false, None, Some(&english)).0,
+        "Preparing preview"
+    );
+    assert_eq!(
+        viewer_status(
+            false,
+            false,
+            false,
+            Some(PreviewUnavailabilityDisposition::Blocked),
+            Some(&english)
+        )
+        .0,
+        "Preview blocked"
+    );
+    assert_eq!(
+        viewer_status(
+            false,
+            false,
+            false,
+            Some(PreviewUnavailabilityDisposition::Failed),
+            Some(&english)
+        )
+        .0,
+        "Preview failed"
+    );
+    assert_eq!(
+        viewer_status(true, false, false, None, Some(&english)).0,
+        "Playing"
+    );
+    assert_eq!(
+        viewer_status(false, false, false, None, Some(&english)).0,
+        "Ready"
+    );
+    assert_eq!(viewer_frame_count(1, Some(&english)), "1 frame");
+    let two_frames = viewer_frame_count(2, Some(&english));
+    assert!(two_frames.contains('2'));
+    assert!(two_frames.ends_with(" frames"));
 }
 
 #[test]
@@ -4281,6 +4476,116 @@ fn asset_panel_model_shows_top_level_folders_before_root_assets() {
 }
 
 #[test]
+fn asset_browser_locale_changes_copy_without_changing_folder_or_asset_actions() {
+    let root = unique_temp_dir("asset-panel-localization");
+    let library = AssetLibrary::open(root.clone()).expect("open asset library");
+    let folder_id = library.create_folder("Rushes", None).expect("create folder");
+    let asset_id = library.create_solid_color_asset(Some("Slate")).expect("create solid color");
+    library
+        .move_asset_to_folder(asset_id, Some(&folder_id))
+        .expect("move into folder");
+    let english =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let chinese =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("Chinese catalog");
+    let english_root = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        None,
+        None,
+        None,
+        None,
+        Some(&english),
+    );
+    let chinese_root = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        None,
+        None,
+        None,
+        None,
+        Some(&chinese),
+    );
+    assert_eq!(english_root.subtitle, "Project library");
+    assert_eq!(
+        english_root.empty_state_copy[0],
+        "Drop media here to start editing"
+    );
+    assert_eq!(chinese_root.empty_state_copy[2], "没有匹配的素材");
+    assert_eq!(
+        english_root.filter_placeholder.as_deref(),
+        Some("Search assets")
+    );
+    assert_eq!(english_root.items[0].title, "Rushes");
+    assert_eq!(badge_labels(&english_root.items[0]), ["1 item"]);
+    assert!(badge_labels(&chinese_root.items[0])[0].contains('1'));
+    assert!(badge_labels(&chinese_root.items[0])[0].ends_with(" 项"));
+    assert_eq!(
+        english_root.items[0].activate_action,
+        chinese_root.items[0].activate_action
+    );
+    assert_eq!(
+        english_root.items[0].drag_payload,
+        chinese_root.items[0].drag_payload
+    );
+    assert_eq!(
+        english_root.items[0].context_menu_items[0].label,
+        "Delete folder"
+    );
+    assert_eq!(
+        chinese_root.items[0].context_menu_items[0].label,
+        "删除文件夹"
+    );
+    assert_eq!(
+        english_root.items[0].context_menu_items[0].action(),
+        chinese_root.items[0].context_menu_items[0].action()
+    );
+    assert_eq!(english_root.context_menu_items[0].label, "Import media...");
+    assert_eq!(chinese_root.context_menu_items[0].label, "导入媒体...");
+    assert_eq!(
+        english_root.context_menu_items[0].action(),
+        chinese_root.context_menu_items[0].action()
+    );
+
+    let english_folder = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        Some(&folder_id),
+        None,
+        None,
+        None,
+        Some(&english),
+    );
+    let chinese_folder = AssetGridModel::from_asset_library_in_folder_with_thumbnails_and_locale(
+        Some(&library),
+        Some(&folder_id),
+        None,
+        None,
+        None,
+        Some(&chinese),
+    );
+    assert_eq!(english_folder.subtitle, "Project library / Rushes");
+    assert_eq!(english_folder.items[0].title, "All assets");
+    assert_eq!(
+        english_folder.items[0].activate_action,
+        chinese_folder.items[0].activate_action
+    );
+    assert_eq!(english_folder.items[1].title, "Slate");
+    assert_eq!(badge_labels(&english_folder.items[1]), ["Solid color"]);
+    assert_eq!(badge_labels(&chinese_folder.items[1]), ["图片"]);
+    assert_eq!(
+        english_folder.items[1].drag_payload,
+        chinese_folder.items[1].drag_payload
+    );
+    assert_eq!(
+        english_folder.items[1].activate_action,
+        chinese_folder.items[1].activate_action
+    );
+
+    drop(library);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn asset_panel_model_can_show_one_folder_with_parent_navigation() {
     let root = unique_temp_dir("asset-panel-folder-view");
     let library = AssetLibrary::open(root.clone()).expect("open asset library");
@@ -4405,6 +4710,59 @@ fn effect_panel_model_keeps_catalog_browsable_without_apply_target() {
 }
 
 #[test]
+fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
+    let state = AppState::new();
+    let localizer =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs)
+            .expect("English catalog");
+    let model = PanelListModel::from_app_effect_registry_with_localizer(&state, Some(&localizer));
+    assert_eq!(model.title, "Effects");
+    assert_eq!(model.filter_placeholder.as_deref(), Some("Search effects"));
+    let root_categories: Vec<&str> = model
+        .items
+        .iter()
+        .filter(|item| item.tree_depth == 0 && item.tree_expanded.is_some())
+        .map(|item| item.title.as_str())
+        .collect();
+    assert!(
+        root_categories.starts_with(&["Color", "Transform", "Keying"]),
+        "built-in roots must retain their order when plugin tests register extra roots: {root_categories:?}"
+    );
+    let color = model
+        .items
+        .iter()
+        .find(|item| item.title == "Color")
+        .expect("translated Color category");
+    assert_eq!(color.tree_id.as_deref(), Some("颜色"));
+    assert!(model.items.iter().any(|item| item.title == "Gaussian Blur"));
+    assert!(model.items.iter().all(|item| item.activate_action.is_none()));
+
+    let target = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let english = PanelListModel::effect_registry_model(Some(target), None, Some(&localizer));
+    let chinese_localizer =
+        crate::app_ui::localization::Localizer::new(crate::app_ui::localization::AppUiLocale::ZhCn)
+            .expect("Chinese catalog");
+    let chinese =
+        PanelListModel::effect_registry_model(Some(target), None, Some(&chinese_localizer));
+    let english_blur = english
+        .items
+        .iter()
+        .find(|item| item.title == "Gaussian Blur")
+        .expect("English blur");
+    let chinese_blur = chinese
+        .items
+        .iter()
+        .find(|item| item.title == "高斯模糊")
+        .expect("Chinese blur");
+    assert_eq!(english_blur.activate_action, chinese_blur.activate_action);
+    assert!(english_blur.activate_action.is_some());
+}
+
+#[test]
 fn effect_panel_model_adds_effect_actions_for_selected_video_clip() {
     let mut sequence = Sequence::new("edit");
     let tb = sequence.time_base();
@@ -4513,6 +4871,57 @@ fn effects_add_refreshes_inspector_and_node_graph_selection_models() {
     assert!(models.node_graph.node_targets.iter().any(|target| {
         target.target == NodeGraphTarget::Effect(selected.effect_id)
             && target.node_id == format!("effect:{}", selected.effect_id)
+    }));
+
+    let scalar = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.numeric_curve.is_some())
+        .expect("animatable scalar effect parameter");
+    let address = scalar.address.clone();
+    let curve = scalar.numeric_curve.as_ref().expect("curve");
+    assert!(curve.current_keyframe_id.is_none());
+    assert!(curve.curve.keys.iter().all(|key| key.keyframe_id.is_none()));
+    state
+        .dispatch_action(visual_effect_toggle_current_key_action(
+            VisualEffectParameterTargetPayload {
+                clip_id,
+                effect_id: selected.effect_id,
+                parameter: address.clone(),
+            },
+        ))
+        .expect("add current key");
+    let models = AppUiPanelModels::from_app_state(&state);
+    let scalar = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.address == address)
+        .expect("same stable address");
+    let curve = scalar.numeric_curve.as_ref().expect("curve");
+    let key_id = curve.current_keyframe_id.expect("current key");
+    assert!(curve.curve.keys.iter().any(|key| key.keyframe_id == Some(key_id)));
+    state
+        .dispatch_action(visual_effect_edit_numeric_curve_action(
+            VisualEffectEditNumericCurvePayload {
+                clip_id,
+                effect_id: selected.effect_id,
+                parameter: address.clone(),
+                edit: ClipCurveEditPayload::SetInterpolation {
+                    keyframe_id: key_id,
+                    interpolation: InterpolationType::AutoBezier,
+                },
+            },
+        ))
+        .expect("set effect key interpolation");
+    let models = AppUiPanelModels::from_app_state(&state);
+    let curve = models.inspector.effects[0]
+        .properties
+        .iter()
+        .find(|property| property.address == address)
+        .and_then(|property| property.numeric_curve.as_ref())
+        .expect("same effect curve");
+    assert!(curve.curve.keys.iter().any(|key| {
+        key.keyframe_id == Some(key_id) && key.interpolation == Some(InterpolationType::AutoBezier)
     }));
 }
 
@@ -4907,6 +5316,7 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     assert_eq!(
         effect_property_row_height(&property.value),
@@ -4995,6 +5405,7 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5075,6 +5486,7 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         hard_max: None,
         step: Some(0.01),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5156,6 +5568,7 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         hard_max: None,
         step: Some(0.25),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5242,6 +5655,7 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         hard_max: None,
         step: Some(0.1),
         is_animatable: true,
+        numeric_curve: None,
     };
     let disabled_effect = InspectorEffectModel {
         effect_id,
@@ -5333,6 +5747,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         hard_max: None,
         step: Some(0.25),
         is_animatable: true,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5416,6 +5831,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         hard_max: None,
         step: None,
         is_animatable: false,
+        numeric_curve: None,
     };
     let mut widget = effect_property_value_widget(
         &property,
@@ -5887,14 +6303,17 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         keys: vec![
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(0.0, 0.25),
             },
             InspectorCurveKeyModel {
                 keyframe_id: Some(keyframe_id),
+                interpolation: Some(mondrian_core::automation::InterpolationType::Linear),
                 point: CurvePoint::new(0.5, 0.5),
             },
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(1.0, 0.75),
             },
         ],
@@ -5934,10 +6353,12 @@ fn inspector_curve_edit_action_uses_stable_typed_payload_for_selected_clip() {
         keys: vec![
             InspectorCurveKeyModel {
                 keyframe_id: Some(boundary_keyframe_id),
+                interpolation: Some(mondrian_core::automation::InterpolationType::Linear),
                 point: CurvePoint::new(0.0, 0.25),
             },
             InspectorCurveKeyModel {
                 keyframe_id: None,
+                interpolation: None,
                 point: CurvePoint::new(1.0, 0.75),
             },
         ],
@@ -6156,6 +6577,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         is_editable: false,
         edit_disabled_reason: Some("所选剪辑所在轨道已锁定".to_owned()),
         enabled: true,
+        blend_mode: None,
         opacity: 100.0,
         tint: Color::from_rgba8(64, 128, 192, 255),
         shows_tint: true,
@@ -6181,7 +6603,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
 
     let actions = RefCell::new(Vec::<Action>::new());
@@ -6242,7 +6664,7 @@ fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
     state.test_set_sequence(Some(sequence));
     state.select_clip_by_id(clip_id).expect("select Clip");
 
-    let model = InspectorPanelModel::from_app_state(&state);
+    let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
     assert_eq!(
         model.selected_clip.map(|selection| selection.track_id),
         Some(track_id)
@@ -6361,6 +6783,147 @@ fn viewer_power_window_fails_closed_for_playback_track_lock_and_mask_lock() {
 }
 
 #[test]
+fn viewer_clip_transform_projects_selected_visible_clip_and_respects_lock_and_mask_mode() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Viewer Clip Transform");
+    let tb = sequence.time_base();
+    let clip = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(32, 64, 128, 255),
+        tt(0, tb),
+        tt(24, tb),
+    )
+    .expect("solid Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+
+    let projected = ViewerPanelModel::from_app_state(&state)
+        .clip_transform
+        .expect("selected Clip transform");
+    assert_eq!(projected.clip_id, clip_id);
+    assert!(projected.overlay.editable);
+    assert_eq!(projected.overlay.scale, [1.0, 1.0]);
+    assert_ne!(projected.position, projected.anchor);
+
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+    assert!(
+        !ViewerPanelModel::from_app_state(&state)
+            .clip_transform
+            .expect("locked selection remains visible")
+            .overlay
+            .editable
+    );
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_visible = false;
+    assert!(ViewerPanelModel::from_app_state(&state).clip_transform.is_none());
+}
+
+#[test]
+fn viewer_clip_transform_uses_media_display_extent_instead_of_sequence_extent() {
+    let root = unique_temp_dir("viewer-media-transform-extent");
+    std::fs::create_dir_all(&root).expect("fixture root");
+    let library = AssetLibrary::open(root.join("library")).expect("asset library");
+    let path = root.join("small.mov");
+    std::fs::write(&path, [0u8]).expect("media fixture");
+    let mut info = test_video_media_info(&path);
+    info.video_streams[0].width = 640;
+    info.video_streams[0].height = 360;
+    info.video_streams[0].picture.sample_aspect_ratio =
+        Some(mondrian_core::SampleAspectRatio::new(2, 1).expect("wide pixels"));
+    let asset_id = commit_test_media_asset(&library, path, info);
+    let mut sequence = Sequence::new("Viewer Media Extent");
+    let clip =
+        Clip::new(asset_id, TimelineTime::ZERO, tt(24, sequence.time_base())).expect("media Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.test_set_asset_library(Some(library));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+
+    let overlay = ViewerPanelModel::from_app_state(&state)
+        .clip_transform
+        .expect("selected media transform")
+        .overlay;
+    assert_eq!(overlay.frame_extent, [1280.0, 360.0]);
+}
+
+#[test]
+fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Viewer Anchor Gesture");
+    let tb = sequence.time_base();
+    let clip = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(32, 64, 128, 255),
+        tt(0, tb),
+        tt(24, tb),
+    )
+    .expect("solid Clip");
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    state.test_set_sequence(Some(sequence));
+    state.select_clip_by_id(clip_id).expect("select Clip");
+    let model = ViewerPanelModel::from_app_state(&state);
+    let expected = model.clip_transform.as_ref().expect("transform projection").clone();
+    let mut viewer = viewer_panel(&model);
+    viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+    let canvas = viewer.presentation_geometry().expect("visible canvas").canvas_rect;
+    let anchor = Point::new(canvas.x, canvas.y);
+    let end = Point::new(anchor.x + 20.0, anchor.y + 10.0);
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    assert_eq!(
+        viewer.event(
+            &UiEvent::MouseDown {
+                position: anchor,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    assert!(actions.borrow().is_empty());
+    assert_eq!(
+        viewer.event(
+            &UiEvent::MouseUp {
+                position: end,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+    let recorded = actions.borrow();
+    assert_eq!(recorded.len(), 1);
+    let Action::Custom { namespace, name, payload } = &recorded[0] else {
+        panic!("expected one Clip authoring action");
+    };
+    assert_eq!(namespace, CLIP_NAMESPACE);
+    assert_eq!(name, CLIP_WRITE_PARAMETER_VALUES);
+    let payload: ClipWriteParameterValuesPayload =
+        serde_json::from_value(payload.clone()).expect("transform payload");
+    assert_eq!(payload.clip_id, clip_id);
+    assert_eq!(payload.writes.len(), 2);
+    assert_eq!(payload.writes[0].parameter, expected.anchor);
+    assert_eq!(payload.writes[1].parameter, expected.position);
+}
+
+#[test]
 fn inspector_bezier_power_window_creation_emits_complete_closed_shape() {
     let selection = SelectedClipRef {
         track_id: TrackId::new(),
@@ -6404,6 +6967,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         is_editable: true,
         edit_disabled_reason: None,
         enabled: true,
+        blend_mode: None,
         opacity: 100.0,
         tint: Color::from_rgba8(64, 128, 192, 255),
         shows_tint: true,
@@ -6434,7 +6998,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
-    let mut panel = inspector_panel(&model);
+    let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 340.0, 720.0));
 
     let actions = RefCell::new(Vec::<Action>::new());

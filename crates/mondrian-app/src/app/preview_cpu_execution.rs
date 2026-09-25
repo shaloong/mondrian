@@ -118,6 +118,12 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             reason: EffectFloatExecutionError::ExecutionContract(_),
         } => true,
         TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::CustomProcessor(error),
+        } => matches!(
+            error,
+            EffectExecutionError::CustomProcessorUnavailable { .. }
+        ),
+        TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::MaskRasterFailed { .. },
         } => true,
         TimelineCompositeError::FloatEffect {
@@ -579,6 +585,27 @@ mod tests {
         assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
         assert_eq!(unavailable.code(), "preview.failed.timeline_composite");
         assert!(unavailable.detail().contains("processor panic isolated"));
+    }
+
+    #[test]
+    fn float_custom_processor_failure_keeps_failed_disposition() {
+        let error =
+            PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::CustomProcessor(
+                    EffectExecutionError::CustomProcessorFailed {
+                        key: "vendor.float_effect".to_owned(),
+                        reason: "worker exited".to_owned(),
+                    },
+                ),
+            });
+
+        let unavailable = error.unavailability();
+        assert_eq!(
+            unavailable.disposition(),
+            PreviewUnavailabilityDisposition::Failed
+        );
+        assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+        assert!(unavailable.detail().contains("worker exited"));
     }
 
     #[test]

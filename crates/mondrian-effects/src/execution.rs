@@ -1,6 +1,6 @@
 use crate::adjustment::{
-    apply_render_op, apply_render_op_f32, blend_adjustment_result, blend_rgba_f32_pixel_seeded,
-    blend_rgba_pixel_seeded, unit_to_u8, EffectRasterRegion,
+    apply_custom_render_op_f32, apply_render_op, apply_render_op_f32, blend_adjustment_result,
+    blend_rgba_f32_pixel_seeded, blend_rgba_pixel_seeded, unit_to_u8, EffectRasterRegion,
 };
 #[cfg(test)]
 use crate::{
@@ -19,8 +19,16 @@ use mondrian_core::{types::BlendMode, ExecutionCancellationToken, Result as Mond
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
+/// An RGBA8 custom visual processor, with straight alpha and encoded channels.
 pub type CustomEffectRenderProcessor = Arc<
     dyn Fn(&mut Vec<u8>, u32, u32, &serde_json::Value, i64) -> MondrianResult<()> + Send + Sync,
+>;
+
+/// A Float32 custom visual processor, with straight alpha in the graph's color domain.
+pub type CustomEffectFloatRenderProcessor = Arc<
+    dyn Fn(&mut Vec<[f32; 4]>, u32, u32, &serde_json::Value, i64) -> MondrianResult<()>
+        + Send
+        + Sync,
 >;
 
 type EffectInputContentFingerprint = [u8; 32];
@@ -106,6 +114,8 @@ pub enum EffectExecutionError {
 pub enum EffectFloatExecutionError {
     /// The definition-bound program cannot enter this single-frame executor.
     ExecutionContract(EffectExecutionAdmissionError),
+    /// A bound custom Float32 processor failed without publishing staged pixels.
+    CustomProcessor(EffectExecutionError),
     /// Input pixel count does not match the requested extent.
     InputSizeMismatch {
         /// Expected number of RGBA pixels.
@@ -815,7 +825,14 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     &mut source,
                     &mut processor,
                 )?;
-                if !apply_render_op_f32(&mut source, width, height, op, frame_seed) {
+                let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
+                    apply_custom_render_op_f32(&mut source, width, height, op, frame_seed)
+                        .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                    true
+                } else {
+                    apply_render_op_f32(&mut source, width, height, op, frame_seed)
+                };
+                if !supported {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
                         node_id: node.id,
                         reason: EffectFloatUnsupportedReason::UnsupportedRenderOp {
@@ -1584,10 +1601,13 @@ fn admit_single_frame_execution(
 }
 
 fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
-    !matches!(
-        op,
-        EffectRenderOp::Custom { .. } | EffectRenderOp::TemporalFrameBlend { .. }
-    )
+    match op {
+        EffectRenderOp::Custom { processor, .. } => {
+            processor.as_ref().is_some_and(|binding| binding.float32_processor().is_some())
+        }
+        EffectRenderOp::TemporalFrameBlend { .. } => false,
+        _ => true,
+    }
 }
 
 fn unsupported_float_graph_node(
@@ -1610,6 +1630,8 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
         EffectRenderOp::ColorCurves { .. } => "color_curves",
+        EffectRenderOp::HueSaturationLightness { .. } => "hue_saturation_lightness",
+        EffectRenderOp::ChromaKey { .. } => "chroma_key",
         EffectRenderOp::Qualifier { .. } => "qualifier",
         EffectRenderOp::MattePreview { .. } => "matte_preview",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
@@ -2692,6 +2714,81 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn float_custom_processor_preserves_hdr_pixels_and_uses_float_admission() {
+        let processor = crate::CustomEffectProcessorBinding::new_f32(Arc::new(
+            |pixels, width, height, params, _frame_seed| {
+                assert_eq!((width, height), (1, 1));
+                pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
+                Ok(())
+            },
+        ));
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![EffectRenderOp::Custom {
+                key: "test.custom.float32".to_owned(),
+                params: serde_json::json!({ "gain": 0.75 }),
+                cache_key: None,
+                cache_policy: crate::EffectCachePolicy::Deterministic,
+                processor: Some(processor),
+            }],
+        })
+        .expect("compile float custom graph");
+
+        assert!(compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(
+            apply_compiled_effect_graph_rgba_f32(&[[2.0, -0.25, 0.5, 1.0]], 1, 1, &compiled, 0)
+                .expect("execute float custom graph"),
+            vec![[2.75, -0.25, 0.5, 1.0]]
+        );
+    }
+
+    #[test]
+    fn float_custom_processor_failure_keeps_original_pixels() {
+        let processor =
+            crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _, _, _| {
+                pixels[0][0] = 0.0;
+                Err(mondrian_core::MondrianError::EffectGraphEvaluationFailed {
+                    reason: "processor failed".to_owned(),
+                })
+            }));
+        let op = EffectRenderOp::Custom {
+            key: "test.custom.failure".to_owned(),
+            params: serde_json::json!({}),
+            cache_key: None,
+            cache_policy: crate::EffectCachePolicy::Uncacheable,
+            processor: Some(processor),
+        };
+        let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
+        assert!(matches!(
+            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            Err(EffectExecutionError::CustomProcessorFailed { .. })
+        ));
+        assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 1);
+    }
+
+    #[test]
+    fn float_custom_processor_cannot_change_pixel_count() {
+        let processor =
+            crate::CustomEffectProcessorBinding::new_f32(Arc::new(|pixels, _, _, _, _| {
+                pixels.clear();
+                Ok(())
+            }));
+        let op = EffectRenderOp::Custom {
+            key: "test.custom.resize".to_owned(),
+            params: serde_json::json!({}),
+            cache_key: None,
+            cache_policy: crate::EffectCachePolicy::Uncacheable,
+            processor: Some(processor),
+        };
+        let mut pixels = vec![[2.0, -0.25, 0.5, 1.0]];
+        assert!(matches!(
+            apply_custom_render_op_f32(&mut pixels, 1, 1, &op, 0),
+            Err(EffectExecutionError::CustomProcessorFailed { .. })
+        ));
+        assert_eq!(pixels, vec![[2.0, -0.25, 0.5, 1.0]]);
     }
 
     #[test]

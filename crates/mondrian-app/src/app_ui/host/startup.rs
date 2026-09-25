@@ -523,6 +523,11 @@ impl AppUiHostStartupOwner {
         };
         let recovery_candidates = discover_crash_recovery_candidates();
         let mut startup = AppUiStartupScreen::new();
+        startup.set_locale(
+            preferences_snapshot
+                .locale_preference
+                .resolve(sys_locale::get_locale().as_deref()),
+        );
         startup.set_recent_projects(startup_recent_projects_from_preferences(
             &preferences_snapshot,
         ));
@@ -532,8 +537,11 @@ impl AppUiHostStartupOwner {
         self.checkpoint(AppUiHostStartupStage::RecoveryLoaded);
         self.checkpoint(AppUiHostStartupStage::Ready);
 
-        let app_state = self.app_state.take().expect("App installed");
+        let mut app_state = self.app_state.take().expect("App installed");
         let preferences = self.preferences.take().expect("preferences installed");
+        app_state
+            .schedule_native_audio_catalog_restore(preferences.installed_audio_plugins.clone());
+        app_state.schedule_openfx_catalog_restore(preferences.installed_openfx_bundles.clone());
         let preferences_path = self.preferences_path.take().expect("preferences path installed");
         let asset_thumbnails = self.thumbnail.take().expect("Thumbnail installed");
         let waveform_service = match self.waveform.take().expect("Waveform installed") {

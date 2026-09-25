@@ -4,6 +4,7 @@
 //! launch-time presentation and emits shell actions; project lifecycle work
 //! stays in `AppUiHost` / `AppState`.
 
+use fluent_bundle::FluentArgs;
 #[cfg(test)]
 use mondrian_core::ProjectId;
 use mondrian_core::{Color, MondrianError, Result};
@@ -29,9 +30,12 @@ use crate::app::ui_actions::{
 };
 use crate::app::CrashRecoveryCandidate;
 use crate::app_ui::icons::AppIcon;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
-use crate::app_ui::recovery_dialog::RecoveryConfirmationModel;
+use crate::app_ui::recovery_dialog::{
+    recovery_age_label_at, unix_now_ms, RecoveryConfirmationModel,
+};
 use crate::app_ui::shell::project_file_filters;
 
 /// Startup window logical size used by the app UI product entrypoint.
@@ -71,8 +75,52 @@ pub struct StartupRecentProject {
     pub project_file: PathBuf,
     /// Primary row label.
     pub title: String,
-    /// Secondary row label, typically the parent directory.
-    pub subtitle: String,
+    /// File modification time captured when the recent list was refreshed.
+    pub modified_at_unix_ms: Option<u64>,
+    /// File length captured with the same metadata probe.
+    pub size_bytes: Option<u64>,
+}
+
+fn recent_project_detail_at(
+    project: &StartupRecentProject,
+    localizer: &Localizer,
+    now_ms: u64,
+) -> String {
+    if project.modified_at_unix_ms.is_none() && project.size_bytes.is_none() {
+        return localizer.text("startup-recent-file-unavailable");
+    }
+    let age = match project.modified_at_unix_ms {
+        Some(modified_at) if now_ms.saturating_sub(modified_at) < 60_000 => {
+            localizer.text("startup-recent-now")
+        }
+        Some(modified_at) => recovery_age_label_at(localizer, modified_at, now_ms),
+        None => localizer.text("startup-recent-unknown-time"),
+    };
+    let size = project.size_bytes.map_or_else(
+        || localizer.text("startup-recent-unknown-size"),
+        format_file_size,
+    );
+    let mut args = FluentArgs::new();
+    args.set("age", age);
+    args.set("size", size);
+    localizer.format("startup-recent-detail", Some(&args))
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else if size >= 10.0 {
+        format!("{size:.0} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 /// One autosave recovery row shown on the app UI startup surface.
@@ -82,8 +130,27 @@ pub struct StartupRecoveryProject {
     pub candidate: CrashRecoveryCandidate,
     /// Primary row label.
     pub title: String,
-    /// Secondary row label with age/snapshot metadata.
-    pub detail: String,
+    /// Project location, projected with age and count only at the UI boundary.
+    pub location: String,
+}
+
+fn recovery_row_detail_at(
+    project: &StartupRecoveryProject,
+    localizer: &Localizer,
+    now_ms: u64,
+) -> String {
+    let mut args = FluentArgs::new();
+    args.set(
+        "age",
+        recovery_age_label_at(localizer, project.candidate.saved_at_unix_ms, now_ms),
+    );
+    args.set("location", project.location.clone());
+    if project.candidate.total_snapshots > 1 {
+        args.set("count", project.candidate.total_snapshots.to_string());
+        localizer.format("recovery-row-multiple", Some(&args))
+    } else {
+        localizer.format("recovery-row-single", Some(&args))
+    }
 }
 
 /// Startup screen shown before a project is opened.
@@ -103,6 +170,7 @@ pub struct AppUiStartupScreen {
     close_rect: Rect,
     hover: Option<StartupHit>,
     pressed: Option<StartupHit>,
+    localizer: Localizer,
 }
 
 impl AppUiStartupScreen {
@@ -124,7 +192,18 @@ impl AppUiStartupScreen {
             close_rect: Rect::ZERO,
             hover: None,
             pressed: None,
+            localizer: Localizer::new(AppUiLocale::ZhCn)
+                .expect("bundled UI catalogs must be valid"),
         }
+    }
+
+    /// Set the machine-local language used by startup chrome.
+    pub fn set_locale(&mut self, locale: AppUiLocale) {
+        self.localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+    }
+
+    fn text(&self, id: &str) -> String {
+        self.localizer.text(id)
     }
 
     /// Replace startup autosave recovery rows.
@@ -156,7 +235,10 @@ impl AppUiStartupScreen {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project_with_locale(
+                    AppUiNewProjectDraft::for_locale(self.localizer.locale()),
+                    self.localizer.locale(),
+                ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -191,6 +273,7 @@ impl AppUiStartupScreen {
                     .map_err(|err| startup_shell_action_error(APP_SHELL_RECOVERY_DIALOG, err))?;
                 self.modal = Some(ShellModal::recovery(
                     RecoveryConfirmationModel::from_candidate(payload.candidate),
+                    self.localizer.locale(),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
@@ -220,9 +303,9 @@ impl AppUiStartupScreen {
                 }
                 let Some(path) = platform
                     .save_file_dialog(
-                        "Create Mondrian Project",
-                        &default_project_file_name(&draft.name),
-                        &project_file_filters(),
+                        &self.localizer.text("file-dialog-create-project"),
+                        &default_project_file_name(&draft.display_name()),
+                        &project_file_filters(&self.localizer),
                     )
                     .map_err(|error| MondrianError::WorkflowStepFailed {
                         step_id: "startup.create_project_dialog".to_owned(),
@@ -492,7 +575,7 @@ impl Widget for AppUiStartupScreen {
         let content_y = self.right_rect.y + CONTENT_PAD_Y;
         let content_width = self.right_rect.width - CONTENT_PAD_X * 2.0;
         ctx.encoder.draw_text(
-            "开始工作",
+            &self.text("startup-heading"),
             typography.heading_h2.font_size,
             Point::new(content_x, content_y),
             colors.popover_foreground,
@@ -501,7 +584,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.new_project_rect,
-            "新建项目",
+            &self.text("startup-new-project"),
             true,
             Some(AppIcon::PlusFilled),
             StartupHit::NewProject,
@@ -509,7 +592,7 @@ impl Widget for AppUiStartupScreen {
         self.paint_button(
             ctx,
             self.open_project_rect,
-            "打开项目",
+            &self.text("startup-open-project"),
             false,
             Some(AppIcon::FolderOpenFilled),
             StartupHit::OpenProject,
@@ -518,7 +601,7 @@ impl Widget for AppUiStartupScreen {
         let mut section_y = self.right_rect.y + CONTENT_PAD_Y + 72.0;
         if !self.recovery_projects.is_empty() {
             ctx.encoder.draw_text(
-                "可恢复项目",
+                &self.text("startup-recoverable-projects"),
                 typography.large.font_size,
                 Point::new(content_x, section_y),
                 colors.popover_foreground,
@@ -541,8 +624,13 @@ impl Widget for AppUiStartupScreen {
                         rect.width - 28.0,
                         colors.card_foreground,
                     );
+                    let detail = recovery_row_detail_at(
+                        project,
+                        &self.localizer,
+                        unix_now_ms().unwrap_or(project.candidate.saved_at_unix_ms),
+                    );
                     ctx.encoder.draw_text_box(
-                        &project.detail,
+                        &detail,
                         typography.small.font_size,
                         Point::new(rect.x + 14.0, rect.y + 32.0),
                         rect.width - 28.0,
@@ -559,7 +647,7 @@ impl Widget for AppUiStartupScreen {
 
         let recent_y = section_y;
         ctx.encoder.draw_text(
-            "最近项目",
+            &self.text("startup-recent-projects"),
             typography.large.font_size,
             Point::new(content_x, recent_y),
             colors.popover_foreground,
@@ -573,7 +661,7 @@ impl Widget for AppUiStartupScreen {
             );
             ctx.encoder.draw_rect(recent_rect, colors.card, spacing.radius_md);
             ctx.encoder.draw_text(
-                "暂无最近项目",
+                &self.text("startup-no-recent-projects"),
                 typography.body.font_size,
                 Point::new(recent_rect.x + 14.0, recent_rect.y + 20.0),
                 colors.muted_foreground,
@@ -610,8 +698,15 @@ impl Widget for AppUiStartupScreen {
                         startup_alpha(colors.muted_foreground, 0.92),
                     );
                     let detail_x = icon_rect.x + icon_rect.width + 6.0;
-                    let detail =
-                        startup_ellipsize(&project.subtitle, detail_font, text_right - detail_x);
+                    let detail = startup_ellipsize(
+                        &recent_project_detail_at(
+                            project,
+                            &self.localizer,
+                            unix_now_ms().unwrap_or(project.modified_at_unix_ms.unwrap_or(0)),
+                        ),
+                        detail_font,
+                        text_right - detail_x,
+                    );
                     ctx.encoder.draw_text(
                         &detail,
                         detail_font,
@@ -1060,6 +1155,63 @@ mod tests {
     }
 
     #[test]
+    fn startup_chrome_uses_selected_language_without_changing_project_rows() {
+        let mut screen = AppUiStartupScreen::new();
+        screen.set_locale(AppUiLocale::EnUs);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = StartupPaintRecorder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
+        };
+
+        screen.paint(&mut ctx);
+
+        for label in [
+            "Get started",
+            "New project",
+            "Open project",
+            "Recent projects",
+            "No recent projects",
+        ] {
+            assert!(
+                encoder.texts.iter().any(|text| text == label),
+                "missing startup label: {label}"
+            );
+        }
+        assert!(!encoder.texts.iter().any(|text| text == "开始工作"));
+
+        screen.set_recent_projects(vec![StartupRecentProject {
+            project_file: PathBuf::from("E:/projects/travel.mdp"),
+            title: "旅行片".to_owned(),
+            modified_at_unix_ms: None,
+            size_bytes: None,
+        }]);
+        screen.layout(Rect::new(
+            0.0,
+            0.0,
+            STARTUP_WINDOW_WIDTH,
+            STARTUP_WINDOW_HEIGHT,
+        ));
+        let mut rows_encoder = StartupPaintRecorder::default();
+        let mut rows_ctx = PaintContext {
+            encoder: &mut rows_encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
+        };
+        screen.paint(&mut rows_ctx);
+        assert!(rows_encoder.texts.iter().any(|text| text == "旅行片"));
+        assert!(!rows_encoder.texts.iter().any(|text| text == "No recent projects"));
+    }
+
+    #[test]
     fn startup_screen_dispatches_project_actions() {
         let mut screen = AppUiStartupScreen::new();
         screen.layout(Rect::new(
@@ -1120,7 +1272,8 @@ mod tests {
         screen.set_recent_projects(vec![StartupRecentProject {
             project_file: project_file.clone(),
             title: "recent".to_owned(),
-            subtitle: "E:/projects".to_owned(),
+            modified_at_unix_ms: None,
+            size_bytes: None,
         }]);
         screen.layout(Rect::new(
             0.0,
@@ -1164,7 +1317,7 @@ mod tests {
         screen.set_recovery_projects(vec![StartupRecoveryProject {
             candidate: candidate.clone(),
             title: "recover".to_owned(),
-            detail: "刚刚，共 2 个恢复点".to_owned(),
+            location: "E:/projects".to_owned(),
         }]);
         screen.layout(Rect::new(
             0.0,
@@ -1215,6 +1368,69 @@ mod tests {
     }
 
     #[test]
+    fn recovery_row_reprojects_language_without_changing_candidate_identity() {
+        let candidate = CrashRecoveryCandidate {
+            project_id: ProjectId::new(),
+            runtime_root: PathBuf::from("E:/runtime"),
+            project_file: PathBuf::from("E:/projects/recover.mdp"),
+            canonical_target: crate::app::RecoveryCanonicalTargetEvidence::Missing,
+            autosave_file: PathBuf::from("E:/runtime/autosave/recover.mdp"),
+            author_generation: 5,
+            asset_library_revision: 2,
+            document_revision: 9,
+            archive_sha256: "a".repeat(64),
+            saved_at_unix_ms: 1_700_000_000_000,
+            total_snapshots: 2,
+        };
+        let row = StartupRecoveryProject {
+            candidate: candidate.clone(),
+            title: "recover".to_owned(),
+            location: "E:/projects".to_owned(),
+        };
+        let zh = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let observed_at = candidate.saved_at_unix_ms + 60_000;
+        let zh_detail =
+            recovery_row_detail_at(&row, &zh, observed_at).replace(['\u{2068}', '\u{2069}'], "");
+        let en_detail =
+            recovery_row_detail_at(&row, &en, observed_at).replace(['\u{2068}', '\u{2069}'], "");
+        assert!(zh_detail.contains("1 分钟前，共 2 个恢复点"));
+        assert!(en_detail.contains("One minute ago · 2 recovery points"));
+        assert_eq!(row.candidate, candidate);
+    }
+
+    #[test]
+    fn recent_row_reprojects_metadata_and_reports_unavailable_file() {
+        let path = PathBuf::from("E:/projects/recent.mdp");
+        let row = StartupRecentProject {
+            project_file: path.clone(),
+            title: "recent".to_owned(),
+            modified_at_unix_ms: Some(1_700_000_000_000),
+            size_bytes: Some(2_048),
+        };
+        let zh = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let en = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let zh_detail = recent_project_detail_at(&row, &zh, 1_700_000_060_000)
+            .replace(['\u{2068}', '\u{2069}'], "");
+        let en_detail = recent_project_detail_at(&row, &en, 1_700_000_060_000)
+            .replace(['\u{2068}', '\u{2069}'], "");
+        assert!(zh_detail.contains("1 分钟前"));
+        assert!(en_detail.contains("One minute ago"));
+        assert!(zh_detail.contains("2.0 KB"));
+        assert!(en_detail.contains("2.0 KB"));
+        assert_eq!(row.project_file, path);
+
+        let unavailable =
+            StartupRecentProject { modified_at_unix_ms: None, size_bytes: None, ..row };
+        assert_eq!(recent_project_detail_at(&unavailable, &zh, 0), "文件不可用");
+        assert_eq!(
+            recent_project_detail_at(&unavailable, &en, 0),
+            "File unavailable"
+        );
+        assert_eq!(unavailable.project_file, path);
+    }
+
+    #[test]
     fn startup_screen_handles_new_project_modal_shell_actions() {
         let mut screen = AppUiStartupScreen::new();
         let platform = SaveProjectPlatform {
@@ -1255,6 +1471,40 @@ mod tests {
             payload.project_file,
             PathBuf::from("E:/projects/modal-create.mdp")
         );
+    }
+
+    #[test]
+    fn english_startup_passes_localized_default_name_to_project_creation() {
+        let mut screen = AppUiStartupScreen::new();
+        screen.set_locale(AppUiLocale::EnUs);
+        let platform = SaveProjectPlatform {
+            project_file: PathBuf::from("E:/projects/Untitled.mdp"),
+            open_file: None,
+        };
+        screen
+            .try_handle_shell_action(app_shell_new_project_dialog_action(), &platform)
+            .expect("open English new-project modal");
+        let draft = screen
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_new_project)
+            .expect("modal")
+            .draft();
+        assert_eq!(draft.name, "Untitled");
+
+        let confirmed = screen
+            .try_handle_shell_action(
+                crate::app::ui_actions::app_shell_confirm_new_project_dialog_action(),
+                &platform,
+            )
+            .expect("confirm English new-project modal")
+            .expect("creation action");
+        let Action::Custom { payload, .. } = confirmed else {
+            panic!("expected project create action");
+        };
+        let payload: crate::app::ui_actions::ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project payload");
+        assert_eq!(payload.name, "Untitled");
     }
 
     #[test]

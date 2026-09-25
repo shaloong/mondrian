@@ -1,5 +1,87 @@
 # UI System
 
+Inspector enum dropdowns consume definition-owned stable option keys. The
+Dropdown widget supports non-action separator rows. Video Clip blend modes
+project Core's typed option order into a localized Inspector dropdown, with
+UI-only boundaries between inherit/base, darken, lighten, contrast,
+difference, and component groups. The checked item is the Clip's explicit
+override or Track inheritance; it has no edit action. Choosing another item
+dispatches one typed Clip action, and a locked Track disables the control.
+Neither persisted values nor parameter schemas contain presentation rows.
+`Dropdown::set_model` updates labels and options while preserving widget
+interaction identity.
+
+The shared Curve Editor may attach per-point context commands. Inspector
+opacity keys expose interpolation presets there; virtual Clip-boundary anchors
+have no key identity and no menu. UI actions carry stable key IDs and resolve
+the current author time at dispatch, so a stale menu cannot silently edit a
+different key after the curve changes.
+
+The status bar remains the persistent summary of current work. Its status
+history is available by clicking the bar; the App retains at most 64
+messages and the popover shows eight at a time with wheel navigation. Active
+export progress cannot conceal a newer error status. This gives professional
+users a quiet, recoverable message surface while editing. The App emits
+language-neutral terminal notification facts for completed media imports,
+manual saves, Exports, portable Project packages, and their failures; Autosave failures and failed Timeline
+file placement are also eligible. The UI formats them with the current Fluent
+locale and shows at most two nonblocking toasts. Success, warning, and error
+toasts expire after 5, 8, and 10 seconds; clicking one dismisses it. Stable
+operation identities replace duplicate visible toasts, and an authoring-session switch
+clears stale toasts. The existing bounded status history retains details.
+Do not toast every successful click or progress tick. A notification never
+owns a Project mutation, a worker, or the sole record of a failure. An
+expandable history panel exposes status history to users; the EventBus remains
+a post-commit notification seam, not notification state.
+See [localization](localization.md) for message formatting and locale ownership.
+The Effect Browser builds a locale-specific label projection from the registered
+effect definitions. Its category tree IDs remain canonical across locale
+switches, so expansion state and add-to-clip actions retain their identities;
+the browser does not persist translated names in authoring data.
+The Asset Browser likewise projects translated card badges, folder navigation,
+and context menu labels from a single library snapshot. File and folder names
+remain user-authored text; their stable IDs and menu actions do not vary by
+locale. The model carries prepared menu rows for the current locale, including
+the dynamic selection-delete label.
+The generic `AssetGrid` widget accepts formatted empty-library and no-results
+copy from the App so it never has to resolve the product locale itself.
+The generic Viewer receives a localized Fit option label from the App. Frame
+refresh and pending transport status use the window's retained locale snapshot;
+Viewer gesture actions still carry stable mask and transform parameter IDs.
+
+`File → Export → Package Project` opens a `.mdpkg` destination dialog. The
+App takes an author snapshot, then performs dependency preflight, file copying,
+hashing, and atomic publication on a cancellable background worker. The status
+bar shows bounded copy progress and the menu exposes cancellation while work
+is active. Cancellation and failure clean staging without publishing a partial
+package; completion or failure emits one localized terminal notification.
+
+An external file drop is target-specific. The Asset Library accepts a library
+drop; the Timeline accepts a valid unlocked Track/body position; a canceled
+drag or a drop outside an accepted target performs no import. The Window must
+not reinterpret an ignored `Drop` as a global media-import command. The
+Timeline widget must retain the target Track ID and exact Sequence frame in
+one typed action and only dispatch after release on a valid target.
+
+Timeline file placement uses the bounded media-import worker for isolated
+probing but requests a deferred result: the worker cannot commit an Asset.
+At drop release the Widget maps the track body and frame into a typed action;
+the App rechecks current Track lock, exact frame grid, source fingerprint,
+media kind and complete Clip edit after the probe. The Asset Library stages
+the new or refreshed row in a SQLite transaction and supplies its stable
+`AssetId` to a prepared, validated Authoring Session edit. A failed edit rolls
+back the SQLite row, including an existing Asset's folder and metadata. Once
+  SQLite commits, the prepared author edit installs while the Library lock is
+  still held, without another fallible validation or allocation step; only then do Clip/Asset notifications and
+post-commit proxy scheduling run. Existing Assets keep their folder placement.
+The Library fences saves captured before this coupled publication, so an old
+Project document cannot be archived with the newly placed Asset. A process
+restart opens a fresh Library generation from the last published `.mdp` or
+recovery snapshot, leaving an interrupted unsaved operation behind. The
+Window reads the current native cursor at Windows file-drop delivery because
+OS drag events need not carry winit `CursorMoved` events. Cancellation or a
+missed body dispatches no import at all.
+
 The first native Window/Surface/Renderer candidate uses the existing Host mode,
 through the same role mapping as subsequent window synchronization. A Host with
 an already-open Project therefore starts directly with a Workspace carrier;
@@ -97,6 +179,19 @@ disabled for RAW because the Adapter's output is explicitly scene-linear
 Rec.709 full-range Float32. Non-RAW assets omit the RAW controls from the
 retained Widget tree. The import picker includes DNG, but extension spelling
 alone never grants RAW execution authority.
+The Interpret Footage modal captures the shell's selected locale when opened.
+Its controls, auto-detection status, RAW choices, signal evidence, and OCIO
+diagnostics use the App-owned Fluent catalog; only canonical color-space names,
+technical IDs, file names, and raw decoder values remain untranslated. The
+draft still contains author intent and media evidence only, so changing UI
+language cannot change the asset interpretation committed on Apply.
+The Inspector's audio Component mapping rows use the same panel locale
+snapshot for matrix policy, layout evidence, and fail-closed diagnostics.
+Localization changes only the projected labels; all matrix coefficient edits
+continue to dispatch the typed placement-local Component mutation.
+The product action's external encode/decode and live-library rejection path
+are tested inside the App crate's isolated test runtime; they do not acquire
+production per-user Project leases.
 
 ## Crate Split
 
@@ -238,6 +333,16 @@ explicit interaction policy: virtual Clip-boundary samples are fixed and
 non-deletable, while real author keys remain movable and deletable even when
 their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
+
+Scalar floating-point visual Effect parameters use this same curve editor and
+stable-key Product Action path. The Inspector projects the definition-owned
+numeric range, exact current Clip-local key identity, and evaluated samples;
+the diamond beside a value toggles a key at the exact author time. A curve row
+appears once the parameter has authored keys. Inserts, moves, removals, and
+interpolation presets resolve through the Effect instance's stable parameter
+address and commit one Sequence transaction, preserving Undo/Redo and Track
+lock semantics. Auto and continuous Bezier constraints are evaluated by Core;
+the Widget owns only gesture state and normalized coordinates.
 
 The same `CurveEditor` also edits a static structured effect curve without
 pretending it is timeline automation. The Inspector converts its complete
@@ -408,6 +513,11 @@ Accessibility `focused` must reflect real focus ownership, not `focus_visible`.
 ## Overlay and Menus
 
 Dropdowns, context menus, popovers, and tooltips should render through overlay paint/hit-test so they are not clipped or hidden behind sibling panels. Menubar menus and context menus should share menu primitives.
+`Dropdown::set_label` changes only trigger copy and retains the current open
+submenu and focus path. `set_model` replaces the row model and clears row-index
+interaction state. `localize_item_labels` updates keyed rows recursively without
+clearing that state. The menu bar lays out its retained Dropdowns again after a
+model refresh so translated trigger widths receive correct hit regions.
 
 ## Commands
 
@@ -833,6 +943,11 @@ the normal background tick. Widgets own no worker, decode Session, tracking
 cache, publication logic, or alternate shape-key writer.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
+For native audio plugins, it displays the captured plugin parameter name and omits parameters
+marked hidden, while retaining every parameter in Timeline author state and
+native execution. Parameters without a plugin display name show their stable
+IDs; rebinding preserves the existing display snapshot, while new insertions
+capture current labels.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
 count and lock blocker, preserves unknown plugin definitions and parameter
 schemas, and generates only typed Rack Actions. Inspector and Mixer render the
@@ -841,6 +956,23 @@ reconstruct admission. Numeric controls take hard/soft range, step, unit, value
 type, and animatability from `ParameterSchema`. An already-keyed curve is shown
 as automation and its fallback value is deliberately not exposed as though it
 were the playhead value.
+The insertion dropdown projects built-ins and session-installed CLAP/VST3
+definitions through the same Rack address, then offers CLAP file and VST3 file
+or bundle folder pickers through `PlatformService`. Dialog cancel is a no-op;
+a selection is scanned in its format's isolation helper and atomically
+published to the App catalog. The UI does not load native code. The Host
+persists selected format/path pairs in
+machine-local preferences and retries them on one background worker after
+startup. The UI refreshes Rack menus as discoveries arrive and reports missing
+plugins in the status area. The folder picker resolves only a `.vst3` directory
+with one native binary for the running architecture; the file picker retains
+direct binary selection. Both paths enter the same product action and
+machine-local preference list.
+Rack and Mixer projection require the App's current Fluent locale snapshot.
+Built-in processor, parameter, ownership, route-port, empty-state, and lock
+copy changes with the locale, while plugin-supplied names, typed Rack/Route
+addresses, and authored values stay unchanged. The Inspector and Mixer consume
+the same localized Rack projector; neither persists translated labels.
 
 `app_ui::audio_automation` is the dedicated curve Adapter shared by Inspector,
 Mixer, and Rack sections. Timeline supplies the stable target, exact
@@ -855,6 +987,11 @@ completion. Moving a point reconstructs the exact key with its existing
 interpolation and handles before changing time/value. Static controls are
 disabled while keys are authoritative, but the exact evaluated curve remains
 visible and editable.
+
+Keyed audio point context menus expose Hold, Linear, manual Bezier, Auto Bezier,
+and Continuous Bezier only when the target schema admits that interpolation
+family. Menu actions carry stable key identity into one audio authoring
+transaction; the widget never computes or owns tangent values.
 
 `app_ui::audio_mixer` projects audio Tracks in Timeline order, followed by
 authored Buses and Program Outputs, each with input trim, an honest static-or-
@@ -1096,11 +1233,34 @@ Viewer preview rendering remains an adapter concern. It consumes the current
 playback frame from `AppState`; it must not own playback state or mutate the
 timeline to request frames.
 
-Monitor direct manipulation uses viewer-scoped UI actions with sequence-space
-payloads. The viewer surface may emit absolute clip transform intents for
-position, scale, and rotation, but `AppState` remains the single mutation owner:
-it validates payloads, checks track locks, applies timeline property mutations,
-and records one undoable snapshot for each committed monitor edit.
+Monitor direct manipulation emits `ClipProductAction` parameter writes with
+absolute Sequence pixel or Clip-local values. `AppState` remains the single
+mutation owner: it validates stable addresses and payloads, checks Track locks,
+applies Timeline property mutations, and records one undoable snapshot for each
+committed monitor edit.
+The selected visible video Clip projects its evaluated position, scale, rotation,
+and source-pixel anchor through the same stable intrinsic parameter addresses as
+Inspector. The Viewer draws the transformed source-frame outline, corner scale
+handles, a rotation handle, and an anchor crosshair. File-backed media uses its
+resolved display extent after orientation and placement-local pixel-aspect
+interpretation; generated content uses its owning Sequence extent. The canvas
+still maps positions through the Sequence extent, so mixed-resolution Clips
+retain accurate hit targets and scale geometry. The anchor has hit priority
+when it overlaps a corner. Pointer motion changes only the widget preview;
+pointer-up dispatches one `ClipWriteParameterValues` action. Anchor dragging
+inverts the current rotation and scale to find the new source anchor and writes
+the compensating Sequence position in the same author transaction, preserving
+the displayed image. Escape, capture loss, a locked/hidden Track, playback,
+disabled or non-current Clips, and Mask editing cannot publish a partial Clip
+transform. Viewer zoom and sample aspect ratio only affect screen mapping, not
+the persisted parameter values.
+
+Selected Power Windows expose rectangle, ellipse, and Bezier control handles in
+the same Viewer. Alt+click on a visible Bezier segment inserts one anchor by
+splitting the cubic at the picked parameter: the existing outline is unchanged
+until the user moves that point. The gesture emits one complete Mask shape
+action with no intermediate author mutation or pointer capture. A miss, locked
+Mask, existing anchor hit, or path at the point limit inserts nothing.
 
 ## Viewer Preview Scheduling
 
@@ -2174,6 +2334,16 @@ without implying HDR10+ certification and states that Remake requires a
 qualified/licensed Adapter plus independent validation and human QC. The App
 commits every action through the normal Authoring Session, so availability is a
 read-only early projection and dispatch revalidates the complete Sequence.
+The external codec, atomic authoring, Undo/Redo, and Export UI projection are
+covered in the App crate's isolated test Session so tests never acquire the
+production per-user Project authority namespace.
+
+App-level Gallery, Grade, Reference Output, and timeline-interchange contracts
+likewise run inside the App crate's isolated test runtime. They exercise the
+real Project transaction and device/session APIs, including create/close where
+needed, without claiming the production per-user authority namespace. The
+production lock location remains stable across processes; tests do not redirect
+it with an environment override.
 
 Professional Reference Output routing is a machine-local preference and App
 runtime service, never a ProductAction or `.mdp` author field. Preferences may
@@ -2404,3 +2574,19 @@ Export, Reference Output, media/background workers, Project persistence and cach
 receipts must all report closure; incomplete App closure returns an error from the
 Window entrypoint instead of accepting ordinary `Drop` as success. Validation may
 return the exact App owner to its caller for reuse and later consuming shutdown.
+The shared Inspector/Mixer Audio Processor Rack projection offers an explicit
+rebind control for CLAP and VST3 instances. It submits a typed App action, which probes
+and validates the installed binary before authoring one undoable Rack edit;
+failed or canceled attempts leave the Project unchanged.
+
+The Effect Browser reads category paths from registered executable Definitions,
+including native plugin definitions, instead of reducing every Plugin key to
+the generic core-data category. Built-in categories retain their semantic
+ordering and plugin subcategories retain stable tree IDs across locale changes.
+
+The Mixer and shared Inspector/Mixer Audio Processor Rack widgets format their
+own control labels from the shell's captured Fluent locale. Their projected
+Channel Strip, Route, parameter, and processor identities remain typed and
+locale-independent; rebuilding the widgets after a language change does not
+rewrite audio authoring state. Both bundled catalogs must contain identical
+message IDs so an untranslated new control cannot silently fall back.

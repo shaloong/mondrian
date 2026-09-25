@@ -7,7 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use mondrian_core::ProjectId;
@@ -22,6 +22,7 @@ use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, ExecutionDomainDemand,
     ExternalExecutionResourceDemand, PreviewViewerGpuResourceOwner,
 };
+use crate::app::native_audio_plugin::{NativeAudioPluginFormat, NativeAudioPluginSelection};
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll,
@@ -37,9 +38,10 @@ use crate::app::preview_runtime::{
     PreviewPresentationState, PreviewVisualGpuCompletionDisposition,
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
+use crate::app::product_action::{AudioProductAction, ProductAction};
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload,
-    PreferencesDisplayManagementPayload, PreferencesShortcutPayload,
+    PreferencesDisplayManagementPayload, PreferencesLocalePayload, PreferencesShortcutPayload,
     PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
     PreferencesWaveformDisplayPayload, ScopesSettingsPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -48,7 +50,7 @@ use crate::app::ui_actions::{
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
     APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
-    APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
+    APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED, APP_SHELL_PREFERENCES_LOCALE_CHANGED,
     APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
@@ -67,6 +69,7 @@ use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailAdapter;
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogAdapter;
+use crate::app_ui::localization::Localizer;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
@@ -75,7 +78,6 @@ use crate::app_ui::preferences_store::{
     AppUiPreferences,
 };
 use crate::app_ui::preview::{viewer_frame_content, WindowPreviewAdapter, WindowPreviewSnapshot};
-use crate::app_ui::recovery_dialog::recovery_age_label;
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -1171,6 +1173,24 @@ impl AppUiHost {
         let project_path_before_persistence =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
+        let native_audio_catalog_changed =
+            self.app_state.borrow_mut().poll_native_audio_catalog_restore();
+        let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
+        let installed_openfx_bundles = self.app_state.borrow_mut().take_completed_openfx_installs();
+        if !installed_openfx_bundles.is_empty() {
+            for path in installed_openfx_bundles {
+                let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+                self.preferences.record_openfx_bundle(canonical_path);
+            }
+            if let Err(error) =
+                persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
+            {
+                tracing::warn!(%error, "failed to save selected OpenFX bundle");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
+            }
+        }
         if persistence_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
@@ -1205,6 +1225,7 @@ impl AppUiHost {
             )
         };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
+        let portable_package_changed = self.app_state.borrow_mut().poll_portable_project_export();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let audio_devices_changed = self.audio_device_catalog.poll_finished();
         if audio_devices_changed {
@@ -1221,18 +1242,22 @@ impl AppUiHost {
         if preview_outcome.visible_change {
             self.preview_dirty.set(true);
         }
-        let full_model_changed = persistence_changed
+        let full_model_changed = native_audio_catalog_changed
+            || openfx_catalog_changed
+            || persistence_changed
             || project_close_changed
             || media_imports_changed
             || media_asset_mutations_changed
             || proxy_generation_changed
             || visual_tracking_changed
             || export_queue_changed
+            || portable_package_changed
             || thumbnails_changed
             || waveform_changed;
         let mut outcome =
             AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
         outcome.repaint_required |= audio_devices_changed;
+        outcome.repaint_required |= self.root.expire_notifications(Instant::now());
         outcome.quit_requested = quit_requested;
         if !full_model_changed {
             if preview_outcome.visible_change {
@@ -1267,6 +1292,17 @@ impl AppUiHost {
                     }
                 }
             }
+            ProjectClosePoll::ClosedWithTeardownFailure(reason) => {
+                tracing::error!(%reason, "Project closed without proven Reference Output release");
+                self.quiescing_close_action = None;
+                self.refresh_recovery_candidates();
+                self.app_state.borrow_mut().set_status_hint(
+                    format!("项目已关闭，但参考输出设备未能确认释放：{reason}"),
+                    true,
+                );
+                self.mark_dirty();
+                (true, false)
+            }
             ProjectClosePoll::SaveRejected(reason) => {
                 tracing::warn!(%reason, "save-before-close was rejected; Project remains open");
                 self.quiescing_close_action = None;
@@ -1296,11 +1332,14 @@ impl AppUiHost {
     pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
         let resource_deadline =
             self.app_state.borrow().next_execution_resource_observation_deadline();
-        if self.quiescing_close_action.is_some() {
+        let resource_deadline = if self.quiescing_close_action.is_some() {
             resource_deadline.min(Instant::now() + Duration::from_millis(16))
         } else {
             resource_deadline
-        }
+        };
+        self.root.next_notification_deadline().map_or(resource_deadline, |deadline| {
+            resource_deadline.min(deadline)
+        })
     }
 
     /// Advance active playback and refresh UI models when the visible frame changes.
@@ -1677,7 +1716,10 @@ impl AppUiHost {
             return false;
         }
 
-        match try_resolve_app_shell_action(action.clone(), platform, None) {
+        let locale =
+            self.preferences.locale_preference.resolve(sys_locale::get_locale().as_deref());
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        match try_resolve_app_shell_action(action.clone(), platform, None, &localizer) {
             Ok(Some(resolved)) => {
                 if let Err(err) = self.dispatch_editor_action(resolved) {
                     tracing::warn!("startup action failed: {err}");
@@ -1698,12 +1740,42 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
+        let installed_plugin = match ProductAction::decode_external(&action) {
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallClapLibrary(payload)))) => {
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Clap,
+                    path: payload.path,
+                })
+            }
+            Ok(Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(payload)))) => {
+                Some(NativeAudioPluginSelection {
+                    format: NativeAudioPluginFormat::Vst3,
+                    path: payload.path,
+                })
+            }
+            _ => None,
+        };
         let refresh_recovery_after_failure = is_recovery_project_action(&action);
         let previous_project_path =
             self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
+            let had_installed_plugin = installed_plugin.is_some();
+            if let Some(selection) = installed_plugin {
+                let canonical_path =
+                    std::fs::canonicalize(&selection.path).unwrap_or(selection.path);
+                self.preferences.record_native_audio_plugin(selection.format, canonical_path);
+            }
+            if had_installed_plugin
+                && let Err(error) =
+                    persist_app_ui_preferences_to(&self.preferences_path, &self.preferences)
+            {
+                tracing::warn!(%error, "failed to save selected native plugin");
+                self.app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("插件已安装，但无法保存重启恢复信息：{error}"), true);
+            }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
             if current_project_path.is_some() && current_project_path != previous_project_path {
@@ -1770,6 +1842,12 @@ impl AppUiHost {
                         self.preferences.theme_preference = payload.preference;
                         set_theme_preset(
                             self.preferences.theme_preference.resolve(self.system_theme_preset),
+                        );
+                    }
+                    PreferencesUpdate::Locale(payload) => {
+                        self.preferences.locale_preference = payload.preference;
+                        self.startup.set_locale(
+                            payload.preference.resolve(sys_locale::get_locale().as_deref()),
                         );
                     }
                     PreferencesUpdate::WaveformDisplay(payload) => {
@@ -2044,6 +2122,17 @@ impl AppUiHost {
                     }
                 }
                 Err(err) => {
+                    if !self.app_state.borrow().has_project_close_fault() {
+                        self.pending_close_action = None;
+                        self.root.close_pending_close_dialog();
+                        self.refresh_recovery_candidates();
+                        self.app_state.borrow_mut().set_status_hint(
+                            format!("项目已关闭，但参考输出设备未能确认释放：{err}"),
+                            true,
+                        );
+                        self.mark_dirty();
+                        return;
+                    }
                     self.waveform_service
                         .set_library(self.app_state.borrow().asset_library_handle());
                     self.app_state
@@ -2325,10 +2414,21 @@ fn startup_recent_projects_from_preferences(
     preferences
         .recent_projects
         .iter()
-        .map(|project_file| StartupRecentProject {
-            project_file: project_file.clone(),
-            title: recent_project_title(project_file),
-            subtitle: recent_project_subtitle(project_file),
+        .map(|project_file| {
+            let metadata = std::fs::metadata(project_file).ok();
+            StartupRecentProject {
+                project_file: project_file.clone(),
+                title: recent_project_title(project_file),
+                modified_at_unix_ms: metadata.as_ref().and_then(|metadata| {
+                    metadata
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                }),
+                size_bytes: metadata.map(|metadata| metadata.len()),
+            }
         })
         .collect()
 }
@@ -2338,22 +2438,10 @@ fn startup_recovery_projects_from_candidates(
 ) -> Vec<StartupRecoveryProject> {
     candidates
         .iter()
-        .map(|candidate| {
-            let snapshots = if candidate.total_snapshots > 1 {
-                format!("，共 {} 个恢复点", candidate.total_snapshots)
-            } else {
-                String::new()
-            };
-            StartupRecoveryProject {
-                candidate: candidate.clone(),
-                title: recent_project_title(&candidate.project_file),
-                detail: format!(
-                    "{}{} · {}",
-                    recovery_age_label(candidate.saved_at_unix_ms),
-                    snapshots,
-                    recent_project_subtitle(&candidate.project_file)
-                ),
-            }
+        .map(|candidate| StartupRecoveryProject {
+            candidate: candidate.clone(),
+            title: recent_project_title(&candidate.project_file),
+            location: candidate.project_file.display().to_string(),
         })
         .collect()
 }
@@ -2366,57 +2454,6 @@ fn recent_project_title(project_file: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| project_file.display().to_string())
-}
-
-fn recent_project_subtitle(project_file: &Path) -> String {
-    let metadata = std::fs::metadata(project_file).ok();
-    let modified = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.modified().ok())
-        .map(recent_project_modified_label)
-        .unwrap_or_else(|| "未知时间".to_owned());
-    let size = metadata
-        .as_ref()
-        .map(|metadata| format_file_size(metadata.len()))
-        .unwrap_or_else(|| "--".to_owned());
-    format!("{modified} • {size}")
-}
-
-fn recent_project_modified_label(modified: SystemTime) -> String {
-    let age_secs = SystemTime::now()
-        .duration_since(modified)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    if age_secs < 60 {
-        "刚刚".to_owned()
-    } else if age_secs < 3600 {
-        format!("{} 分钟前", age_secs / 60)
-    } else if age_secs < 86_400 {
-        format!("{} 小时前", age_secs / 3600)
-    } else if age_secs < 172_800 {
-        "昨天".to_owned()
-    } else if age_secs < 604_800 {
-        format!("{} 天前", age_secs / 86_400)
-    } else {
-        format!("{} 周前", age_secs / 604_800)
-    }
-}
-
-fn format_file_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else if size >= 10.0 {
-        format!("{size:.0} {}", UNITS[unit])
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
 }
 
 fn take_shell_window_command(commands: &mut AppUiShellCommands, action: &Action) -> bool {
@@ -2487,6 +2524,7 @@ fn apply_shortcut_rebind(
 
 enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
+    Locale(PreferencesLocalePayload),
     WaveformDisplay(PreferencesWaveformDisplayPayload),
     ViewerBackground(PreferencesViewerBackgroundPayload),
     VideoScopes(ScopesSettingsPayload),
@@ -2506,6 +2544,11 @@ fn parse_preferences_update(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_THEME_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Theme))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PREFERENCES_LOCALE_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::Locale))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -2588,6 +2631,9 @@ pub(crate) enum ViewerGpuPreparation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::product_action::{
+        AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload,
+    };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, ClipId, Color, TrackId};
     use mondrian_core::{FramePosition, TimelineTime};
@@ -2868,6 +2914,198 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("mondrian-host-{name}-{nanos}.json"))
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_CLAP_TEST_HELPER and MONDRIAN_CLAP_TEST_PLUGIN"]
+    fn installed_clap_library_is_saved_and_restored_after_host_restart() {
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built app executable");
+        let library = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("Clack reference library");
+        let preferences_path = temp_preferences_path("clap-restart");
+        let make_state = || {
+            let catalog = Arc::new(
+                mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                    .expect("catalog"),
+            );
+            AppState::with_clap_catalog(catalog)
+        };
+        let mut first = AppUiHost::new_with_preferences_path(
+            make_state(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        first
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                    AudioInstallClapLibraryPayload { path: library.clone() },
+                ))
+                .into_external_action(),
+            )
+            .expect("install library");
+        let saved = load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(
+            saved.installed_audio_plugins,
+            vec![NativeAudioPluginSelection {
+                format: NativeAudioPluginFormat::Clap,
+                path: library.canonicalize().expect("library path")
+            }]
+        );
+        drop(first);
+
+        let mut restarted =
+            AppUiHost::new_with_preferences_path(make_state(), saved, preferences_path.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted.app_state().installed_clap_processors().expect("catalog").is_empty()
+            && Instant::now() < deadline
+        {
+            restarted.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            restarted.app_state().installed_clap_processors().expect("catalog").len(),
+            1
+        );
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
+    fn installed_vst3_bundle_is_saved_and_restored_after_host_restart() {
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(PathBuf::from)
+            .expect("built app executable");
+        let bundle = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(PathBuf::from)
+            .expect("VST3 reference bundle");
+        assert!(
+            bundle.is_dir(),
+            "reference selection must exercise directory bundles"
+        );
+        let preferences_path = temp_preferences_path("vst3-bundle-restart");
+        let make_state = || {
+            let clap = Arc::new(
+                mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                    .expect("CLAP catalog"),
+            );
+            let vst3 = Arc::new(
+                mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper.clone())
+                    .expect("VST3 catalog"),
+            );
+            AppState::with_native_audio_catalogs(clap, vst3)
+        };
+        let mut first = AppUiHost::new_with_preferences_path(
+            make_state(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        first
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path: bundle.clone() },
+                ))
+                .into_external_action(),
+            )
+            .expect("install VST3 bundle");
+        let saved = load_app_ui_preferences_from(&preferences_path);
+        assert_eq!(
+            saved.installed_audio_plugins,
+            vec![NativeAudioPluginSelection {
+                format: NativeAudioPluginFormat::Vst3,
+                path: bundle.canonicalize().expect("bundle path"),
+            }]
+        );
+        drop(first);
+
+        let mut restarted =
+            AppUiHost::new_with_preferences_path(make_state(), saved, preferences_path.clone());
+        let generation = restarted.app_state().project_author_generation();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted.app_state().installed_vst3_processors().expect("catalog").is_empty()
+            && Instant::now() < deadline
+        {
+            restarted.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            restarted.app_state().installed_vst3_processors().expect("catalog").len(),
+            1
+        );
+        assert_eq!(
+            restarted.app_state().project_author_generation(),
+            generation
+        );
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    fn rejected_vst3_folder_does_not_persist_an_installed_selection() {
+        let preferences_path = temp_preferences_path("invalid-vst3-folder");
+        let folder = preferences_path.with_extension("folder");
+        std::fs::create_dir_all(&folder).expect("ordinary folder");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let generation = host.app_state().project_author_generation();
+        assert!(host
+            .dispatch_editor_action(
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path: folder.clone() },
+                ))
+                .into_external_action(),
+            )
+            .is_err());
+        assert!(host.preferences.installed_audio_plugins.is_empty());
+        assert_eq!(host.app_state().project_author_generation(), generation);
+        assert!(load_app_ui_preferences_from(&preferences_path)
+            .installed_audio_plugins
+            .is_empty());
+        drop(host);
+        std::fs::remove_dir_all(folder).expect("remove fixture folder");
+        std::fs::remove_file(preferences_path).ok();
+    }
+
+    #[test]
+    fn failed_background_openfx_install_never_persists_a_selection() {
+        let preferences_path = temp_preferences_path("invalid-openfx-bundle");
+        let missing = preferences_path.with_extension("ofx.bundle");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let generation = host.app_state().project_author_generation();
+        host.dispatch_editor_action(
+            ProductAction::VisualEffect(
+                crate::app::product_action::VisualEffectProductAction::InstallOpenFxBundle(
+                    crate::app::product_action::VisualEffectInstallOpenFxBundlePayload {
+                        path: missing,
+                    },
+                ),
+            )
+            .into_external_action(),
+        )
+        .expect("queue selected bundle");
+        assert!(host.preferences.installed_openfx_bundles.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error)
+            && Instant::now() < deadline
+        {
+            host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(host.app_state().status_hint.as_ref().is_some_and(|(_, error)| *error));
+        assert!(host.preferences.installed_openfx_bundles.is_empty());
+        assert!(load_app_ui_preferences_from(&preferences_path)
+            .installed_openfx_bundles
+            .is_empty());
+        assert_eq!(host.app_state().project_author_generation(), generation);
+        std::fs::remove_file(preferences_path).ok();
     }
 
     fn temp_asset_library_dir(name: &str) -> PathBuf {
@@ -4411,6 +4649,26 @@ mod tests {
     }
 
     #[test]
+    fn recent_projects_capture_file_facts_and_keep_missing_paths() {
+        let directory = tempfile::tempdir().expect("temporary recent-project directory");
+        let project_file = directory.path().join("recent.mdp");
+        std::fs::write(&project_file, b"mdp").expect("write recent-project fixture");
+        let mut preferences = AppUiPreferences::default();
+        preferences.record_recent_project(project_file.clone());
+
+        let present = startup_recent_projects_from_preferences(&preferences);
+        assert_eq!(present[0].project_file, project_file);
+        assert_eq!(present[0].size_bytes, Some(3));
+        assert!(present[0].modified_at_unix_ms.is_some());
+
+        std::fs::remove_file(&project_file).expect("remove recent-project fixture");
+        let missing = startup_recent_projects_from_preferences(&preferences);
+        assert_eq!(missing[0].project_file, project_file);
+        assert_eq!(missing[0].size_bytes, None);
+        assert_eq!(missing[0].modified_at_unix_ms, None);
+    }
+
+    #[test]
     fn recovery_candidates_map_to_startup_rows() {
         let project_file = PathBuf::from("E:/projects/recover.mdp");
         let autosave_file = PathBuf::from("E:/runtime/autosave/project.autosave.mdp");
@@ -4434,7 +4692,7 @@ mod tests {
         assert_eq!(rows[0].candidate.project_file, project_file);
         assert_eq!(rows[0].candidate.autosave_file, autosave_file);
         assert_eq!(rows[0].title, "recover");
-        assert!(rows[0].detail.contains("2 个恢复点"));
+        assert!(rows[0].location.contains("E:/projects"));
     }
 
     #[test]
@@ -4443,10 +4701,13 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Compositing,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -4558,10 +4819,13 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5045,6 +5309,41 @@ mod tests {
     }
 
     #[test]
+    fn host_persists_ui_locale_without_mutating_project_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("locale-preferences");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                crate::app_ui::localization::AppUiLocalePreference::EnUs,
+            ),
+        );
+
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(
+            host.preferences().locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert_eq!(
+            load_app_ui_preferences_from(&path).locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert!(!host.app_state().has_open_project());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_persists_specific_audio_device_intent_without_authoring_state() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let path = temp_preferences_path("audio-output-device-preferences");
@@ -5225,10 +5524,13 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -5330,10 +5632,13 @@ mod tests {
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,

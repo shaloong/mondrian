@@ -22,9 +22,11 @@ use crate::app::ui_actions::{
     ProjectCreateWithSettingsPayload,
 };
 use crate::app_ui::color_management_controls::{
-    choose_custom_ocio_config, color_engine_label, color_engine_menu_items,
+    choose_custom_ocio_config_with_locale, color_engine_label_in_locale,
+    color_engine_menu_items_in_locale,
 };
 use crate::app_ui::icons::AppIcon;
+use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::shell::PROJECT_FILE_EXTENSION;
 
 /// App UI new-project form state.
@@ -38,6 +40,7 @@ pub struct AppUiNewProjectDraft {
     pub sequence_settings: SequenceSettings,
     pub color_environment: ProjectColorEnvironment,
     pub project_settings: ProjectSettings,
+    untitled_name: String,
 }
 
 impl Default for AppUiNewProjectDraft {
@@ -47,11 +50,29 @@ impl Default for AppUiNewProjectDraft {
             sequence_settings: SequenceSettings::default(),
             color_environment: ProjectColorEnvironment::default(),
             project_settings: ProjectSettings::default(),
+            untitled_name: "未命名".into(),
         }
     }
 }
 
 impl AppUiNewProjectDraft {
+    /// Build a new draft with a localized, user-editable default project name.
+    pub fn for_locale(locale: AppUiLocale) -> Self {
+        let author_name_locale = if locale == AppUiLocale::Pseudo {
+            AppUiLocale::ZhCn
+        } else {
+            locale
+        };
+        let untitled_name = Localizer::new(author_name_locale)
+            .map(|localizer| localizer.text("new-project-untitled"))
+            .unwrap_or_else(|_| "未命名".to_owned());
+        Self {
+            name: untitled_name.clone(),
+            untitled_name,
+            ..Self::default()
+        }
+    }
+
     /// Build a draft using the file stem as the initial project name.
     pub fn from_project_path(path: &Path) -> Self {
         Self {
@@ -99,10 +120,10 @@ impl AppUiNewProjectDraft {
         }
     }
 
-    fn display_name(&self) -> String {
+    pub(crate) fn display_name(&self) -> String {
         let name = self.name.trim();
         if name.is_empty() {
-            "未命名".into()
+            self.untitled_name.clone()
         } else {
             name.into()
         }
@@ -171,10 +192,28 @@ fn project_name_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "未命名".to_string())
 }
 
-fn resolution_label(resolution: Resolution) -> String {
+fn dialog_text(localizer: Option<&Localizer>, id: &str, fallback: &str) -> String {
+    localizer.map_or_else(|| fallback.to_owned(), |localizer| localizer.text(id))
+}
+
+fn resolution_message_id(resolution: Resolution) -> Option<&'static str> {
+    match resolution {
+        Resolution::HD => Some("new-project-resolution-hd"),
+        Resolution::FHD => Some("new-project-resolution-fhd"),
+        _ => None,
+    }
+}
+
+fn resolution_label(resolution: Resolution, localizer: Option<&Localizer>) -> String {
     RESOLUTION_PRESETS
         .iter()
-        .find_map(|(label, preset)| (*preset == resolution).then_some((*label).to_string()))
+        .find_map(|(label, preset)| {
+            (*preset == resolution).then(|| {
+                resolution_message_id(resolution)
+                    .map(|id| dialog_text(localizer, id, label))
+                    .unwrap_or_else(|| (*label).to_owned())
+            })
+        })
         .unwrap_or_else(|| resolution.to_string())
 }
 
@@ -192,12 +231,12 @@ fn audio_sample_rate_label(sample_rate: u32) -> String {
         .unwrap_or_else(|| format!("{} Hz", sample_rate))
 }
 
-fn new_project_resolution_items() -> Vec<MenuItem> {
+fn new_project_resolution_items(localizer: Option<&Localizer>) -> Vec<MenuItem> {
     RESOLUTION_PRESETS
         .into_iter()
-        .map(|(label, resolution)| {
+        .map(|(_, resolution)| {
             MenuItem::new(
-                label,
+                resolution_label(resolution, localizer),
                 app_shell_new_project_draft_changed_action(
                     NewProjectDraftUpdatePayload::Resolution(resolution),
                 ),
@@ -234,10 +273,13 @@ fn new_project_audio_sample_rate_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn resolution_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
+fn resolution_dropdown_for(
+    draft: &AppUiNewProjectDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
     Dropdown::new(
-        resolution_label(draft.sequence_settings.resolution),
-        new_project_resolution_items(),
+        resolution_label(draft.sequence_settings.resolution, localizer),
+        new_project_resolution_items(localizer),
     )
     .with_max_visible_items(4)
 }
@@ -258,28 +300,43 @@ fn audio_sample_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     .with_max_visible_items(3)
 }
 
-fn color_engine_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
-    Dropdown::new(
-        color_engine_label(draft.color_environment.engine()),
-        color_engine_menu_items(|engine| {
+fn color_engine_dropdown_for(
+    draft: &AppUiNewProjectDraft,
+    localizer: Option<&Localizer>,
+) -> Dropdown {
+    let items = color_engine_menu_items_in_locale(
+        |engine| {
             app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
                 engine,
             ))
-        }),
-    )
-    .with_max_visible_items(4)
+        },
+        localizer,
+    );
+    let label = color_engine_label_in_locale(draft.color_environment.engine(), localizer);
+    Dropdown::new(label, items).with_max_visible_items(4)
 }
 
-fn proxy_checkbox_for(draft: &AppUiNewProjectDraft) -> Checkbox {
-    Checkbox::new("创建代理", draft.project_settings.proxy_enabled).on_change(|enabled| {
+fn proxy_checkbox_for(draft: &AppUiNewProjectDraft, localizer: Option<&Localizer>) -> Checkbox {
+    Checkbox::new(
+        dialog_text(localizer, "new-project-create-proxies", "创建代理"),
+        draft.project_settings.proxy_enabled,
+    )
+    .on_change(|enabled| {
         app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ProxyEnabled(
             enabled,
         ))
     })
 }
 
-fn preview_cache_checkbox_for(draft: &AppUiNewProjectDraft) -> Checkbox {
-    Checkbox::new("预览缓存", draft.sequence_settings.preview.cache_enabled).on_change(|enabled| {
+fn preview_cache_checkbox_for(
+    draft: &AppUiNewProjectDraft,
+    localizer: Option<&Localizer>,
+) -> Checkbox {
+    Checkbox::new(
+        dialog_text(localizer, "new-project-preview-cache", "预览缓存"),
+        draft.sequence_settings.preview.cache_enabled,
+    )
+    .on_change(|enabled| {
         app_shell_new_project_draft_changed_action(
             NewProjectDraftUpdatePayload::PreviewCacheEnabled(enabled),
         )
@@ -316,6 +373,7 @@ const COLOR_LABEL_BASELINE_Y: f32 = 248.0;
 pub struct NewProjectDialog {
     id: WidgetId,
     draft: AppUiNewProjectDraft,
+    localizer: Option<Localizer>,
     surface: DialogSurface,
     bounds: Rect,
     card: Rect,
@@ -340,32 +398,42 @@ pub struct NewProjectDialog {
 
 impl NewProjectDialog {
     pub fn new(draft: AppUiNewProjectDraft) -> Self {
-        let title_label = Label::new("新建项目")
+        Self::with_locale(draft, AppUiLocale::ZhCn)
+    }
+
+    /// Build the form with the machine-local language while keeping the draft canonical.
+    pub fn with_locale(draft: AppUiNewProjectDraft, locale: AppUiLocale) -> Self {
+        let localizer = Localizer::new(locale).ok();
+        let text = |id, fallback| dialog_text(localizer.as_ref(), id, fallback);
+        let title_label = Label::new(text("new-project-title", "新建项目"))
             .popover_foreground()
             .with_font_size(TITLE_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let description_label = Label::new("选择项目制作设置并初始化时间线。")
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0)
-            .wrapped();
-        let name_label = Label::new("名称")
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0);
-        let frame_size_label = Label::new("画面尺寸")
-            .muted()
-            .with_font_size(LABEL_FONT_SIZE)
-            .with_padding(0.0, 0.0);
-        let frame_rate_label_widget = Label::new("帧率")
+        let description_label = Label::new(text(
+            "new-project-description",
+            "选择项目制作设置并初始化时间线。",
+        ))
+        .muted()
+        .with_font_size(LABEL_FONT_SIZE)
+        .with_padding(0.0, 0.0)
+        .wrapped();
+        let name_label = Label::new(text("new-project-name", "名称"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let audio_label = Label::new("音频")
+        let frame_size_label = Label::new(text("new-project-frame-size", "画面尺寸"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let color_label = Label::new("项目颜色模式")
+        let frame_rate_label_widget = Label::new(text("new-project-frame-rate", "帧率"))
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let audio_label = Label::new(text("new-project-audio", "音频"))
+            .muted()
+            .with_font_size(LABEL_FONT_SIZE)
+            .with_padding(0.0, 0.0);
+        let color_label = Label::new(text("new-project-color-mode", "项目颜色模式"))
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
@@ -374,20 +442,25 @@ impl NewProjectDialog {
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0)
             .wrapped();
-        let name_input = TextInput::new("项目名称").with_text(&draft.name).on_change(|name| {
-            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
-                name.into(),
-            ))
-        });
-        let resolution_dropdown = resolution_dropdown_for(&draft);
+        let name_input = TextInput::new(text("new-project-name-placeholder", "项目名称"))
+            .with_text(&draft.name)
+            .on_change(|name| {
+                app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::Name(
+                    name.into(),
+                ))
+            });
+        let resolution_dropdown = resolution_dropdown_for(&draft, localizer.as_ref());
         let frame_rate_dropdown = frame_rate_dropdown_for(&draft);
         let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
-        let color_engine_dropdown = color_engine_dropdown_for(&draft);
-        let proxy_checkbox = proxy_checkbox_for(&draft);
-        let preview_cache_checkbox = preview_cache_checkbox_for(&draft);
+        let color_engine_dropdown = color_engine_dropdown_for(&draft, localizer.as_ref());
+        let proxy_checkbox = proxy_checkbox_for(&draft, localizer.as_ref());
+        let preview_cache_checkbox = preview_cache_checkbox_for(&draft, localizer.as_ref());
+        let cancel_text = text("new-project-cancel", "取消");
+        let create_text = text("new-project-create", "创建...");
         Self {
             id: WidgetId::new(),
             draft,
+            localizer,
             surface: DialogSurface::new(
                 Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
                 Size::new(CARD_WIDTH, CARD_HEIGHT),
@@ -410,10 +483,10 @@ impl NewProjectDialog {
             color_engine_dropdown,
             proxy_checkbox,
             preview_cache_checkbox,
-            cancel_button: Button::new("取消")
+            cancel_button: Button::new(cancel_text)
                 .on_click(app_shell_cancel_new_project_dialog_action()),
             create_button: AppIcon::PlusFilled
-                .text_button_or_label("创建...")
+                .text_button_or_label(&create_text)
                 .on_click(app_shell_confirm_new_project_dialog_action()),
         }
     }
@@ -423,12 +496,15 @@ impl NewProjectDialog {
         self.draft.apply_update(update);
         self.error_label.set_text(String::new());
         if rebuild_controls {
-            self.resolution_dropdown = resolution_dropdown_for(&self.draft);
+            self.resolution_dropdown =
+                resolution_dropdown_for(&self.draft, self.localizer.as_ref());
             self.frame_rate_dropdown = frame_rate_dropdown_for(&self.draft);
             self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
-            self.color_engine_dropdown = color_engine_dropdown_for(&self.draft);
-            self.proxy_checkbox = proxy_checkbox_for(&self.draft);
-            self.preview_cache_checkbox = preview_cache_checkbox_for(&self.draft);
+            self.color_engine_dropdown =
+                color_engine_dropdown_for(&self.draft, self.localizer.as_ref());
+            self.proxy_checkbox = proxy_checkbox_for(&self.draft, self.localizer.as_ref());
+            self.preview_cache_checkbox =
+                preview_cache_checkbox_for(&self.draft, self.localizer.as_ref());
             if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                 self.layout(self.bounds);
             }
@@ -442,12 +518,13 @@ impl NewProjectDialog {
     /// Run the native Custom OCIO selection flow and update the draft only
     /// after a complete reproducible engine identity has been pinned.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_config(
+        match choose_custom_ocio_config_with_locale(
             platform,
             &[(
                 self.draft.sequence_settings.color.working_color_space,
                 self.draft.sequence_settings.color.program_output.color_space,
             )],
+            self.localizer.as_ref(),
         ) {
             Ok(Some(engine)) => {
                 self.apply_update(NewProjectDraftUpdatePayload::ColorEngine(engine));
@@ -710,5 +787,44 @@ impl Widget for NewProjectDialog {
             16 => Some(&mut self.create_button),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_new_project_dialog_keeps_draft_when_controls_rebuild() {
+        let mut dialog = NewProjectDialog::with_locale(
+            AppUiNewProjectDraft::for_locale(AppUiLocale::EnUs),
+            AppUiLocale::EnUs,
+        );
+        assert_eq!(dialog.title_label.text(), "New project");
+        assert_eq!(dialog.name_label.text(), "Name");
+        assert_eq!(dialog.resolution_dropdown.label(), "Full HD 1080p");
+        assert_eq!(dialog.resolution_dropdown.items()[0].label, "HD 720p");
+        assert_eq!(dialog.draft().name, "Untitled");
+
+        dialog.apply_update(NewProjectDraftUpdatePayload::Name("Travel film".to_owned()));
+        dialog.apply_update(NewProjectDraftUpdatePayload::Resolution(Resolution::HD));
+
+        assert_eq!(dialog.draft().name, "Travel film");
+        assert_eq!(dialog.resolution_dropdown.label(), "HD 720p");
+        assert_eq!(dialog.color_label.text(), "Project color mode");
+
+        dialog.apply_update(NewProjectDraftUpdatePayload::Name(String::new()));
+        assert_eq!(dialog.draft().display_name(), "Untitled");
+        assert_eq!(
+            default_project_file_name(&dialog.draft().display_name()),
+            "Untitled.mdp"
+        );
+    }
+
+    #[test]
+    fn pseudo_locale_does_not_persist_pseudo_markers_as_project_name() {
+        let draft = AppUiNewProjectDraft::for_locale(AppUiLocale::Pseudo);
+        assert_eq!(draft.name, "未命名");
+        assert_eq!(draft.display_name(), "未命名");
     }
 }

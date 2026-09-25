@@ -131,7 +131,11 @@ On Windows, publication uses `MoveFileExW` with
 handle excludes shared writes and remains open through the namespace operation.
 Return codes are not trusted by themselves: old, new, source, and target file
 identities classify the observed postcondition. Cross-volume copy fallback is
-forbidden. Every native file and directory publication uses one
+forbidden. A transient sharing or access denial is retried
+for a bounded 100 ms only when both names still resolve to their admitted
+objects; changed or unprovable namespace state is never retried. A persistent
+denial retains the original pre-namespace error for the caller.
+Every native file and directory publication uses one
 extended-length path encoder, including correct `\\?\UNC\` projection for UNC
 paths. Directory creation uses a unique sibling plus a real
 `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` namespace move. Same-path no-op moves

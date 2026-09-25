@@ -5,10 +5,13 @@
 //! decoding/rendering and pass already-renderable frame references across this
 //! domain-light boundary.
 
+mod clip_transform;
 mod model;
 mod paint;
 mod power_window;
 
+use clip_transform::ClipTransformEditor;
+pub use clip_transform::{ViewerClipTransform, ViewerClipTransformEdit};
 use power_window::PowerWindowEditor;
 pub use power_window::{ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape};
 
@@ -289,6 +292,9 @@ pub type ViewerZoomAction = dyn Fn(Option<f32>) -> Action;
 /// Maps one completed Viewer Power Window gesture to an authoring action.
 pub type ViewerPowerWindowAction = dyn Fn(ViewerPowerWindowShape) -> Action;
 
+/// Maps one completed Clip transform gesture to an App authoring action.
+pub type ViewerClipTransformAction = dyn Fn(ViewerClipTransformEdit) -> Action;
+
 /// One selectable viewer zoom mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerZoomOption {
@@ -324,6 +330,7 @@ pub struct ViewerSurface {
     position_label: String,
     duration_label: String,
     zoom_label: String,
+    fit_label: String,
     zoom_scale: Option<f32>,
     preview_quality_label: String,
     source_width: u32,
@@ -351,6 +358,8 @@ pub struct ViewerSurface {
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
     power_window_editor: Option<PowerWindowEditor>,
     on_power_window_edit: Option<Box<ViewerPowerWindowAction>>,
+    clip_transform_editor: Option<ClipTransformEditor>,
+    on_clip_transform_edit: Option<Box<ViewerClipTransformAction>>,
     overlay_viewport: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
@@ -370,6 +379,7 @@ impl ViewerSurface {
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
             zoom_label: "适合".into(),
+            fit_label: "适合".into(),
             zoom_scale: None,
             preview_quality_label: "1/1".into(),
             source_width: source_width.max(1),
@@ -397,6 +407,8 @@ impl ViewerSurface {
             on_preview_quality: None,
             power_window_editor: None,
             on_power_window_edit: None,
+            clip_transform_editor: None,
+            on_clip_transform_edit: None,
             overlay_viewport: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
@@ -437,6 +449,12 @@ impl ViewerSurface {
     /// Set the displayed canvas zoom mode label.
     pub fn with_zoom_label(mut self, label: impl Into<String>) -> Self {
         self.zoom_label = label.into();
+        self
+    }
+
+    /// Set the localized label for the fit-to-view zoom option.
+    pub fn with_fit_label(mut self, label: impl Into<String>) -> Self {
+        self.fit_label = label.into();
         self
     }
 
@@ -586,6 +604,21 @@ impl ViewerSurface {
         action: impl Fn(ViewerPowerWindowShape) -> Action + 'static,
     ) -> Self {
         self.on_power_window_edit = Some(Box::new(action));
+        self
+    }
+
+    /// Present the selected Clip transform in Sequence pixel coordinates.
+    pub fn with_clip_transform(mut self, transform: ViewerClipTransform) -> Self {
+        self.clip_transform_editor = Some(ClipTransformEditor::new(transform));
+        self
+    }
+
+    /// Map one completed gesture to a single stable-address authoring action.
+    pub fn on_clip_transform_edit(
+        mut self,
+        action: impl Fn(ViewerClipTransformEdit) -> Action + 'static,
+    ) -> Self {
+        self.on_clip_transform_edit = Some(Box::new(action));
         self
     }
 
@@ -775,7 +808,8 @@ impl ViewerSurface {
             || self.pressed_dropdown_index.is_some()
             || self.focused
             || self.focus_visible
-            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel);
+            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
+            || self.clip_transform_editor.as_mut().is_some_and(ClipTransformEditor::cancel);
         self.hovered_control = None;
         self.pressed_control = None;
         self.hovered_zoom = false;
@@ -823,6 +857,17 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                if let Some(editor) = self.clip_transform_editor.as_mut()
+                    && (editor.is_dragging() || canvas.contains(*position))
+                    && editor.pointer_move(
+                        canvas,
+                        [self.source_width as f32, self.source_height as f32],
+                        *position,
+                    )
+                {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let hovered = self.control_at(*position);
                 let hovered_zoom = self.zoom_at(*position);
                 let hovered_preview_quality = self.preview_quality_at(*position);
@@ -850,7 +895,7 @@ impl Widget for ViewerSurface {
                     EventResult::Ignored
                 }
             }
-            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
                 if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
                     self.open_dropdown = Some(dropdown);
                     self.hovered_dropdown_index = Some(index);
@@ -869,8 +914,32 @@ impl Widget for ViewerSurface {
                 }
                 self.focus_from_pointer(ctx);
                 let canvas = self.canvas_rect();
+                if modifiers.alt
+                    && self.on_power_window_edit.is_some()
+                    && let Some(shape) = self
+                        .power_window_editor
+                        .as_mut()
+                        .and_then(|editor| editor.insert_bezier_point(canvas, *position))
+                {
+                    if let Some(mapper) = self.on_power_window_edit.as_ref() {
+                        (ctx.dispatch)(mapper(shape));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(editor) = self.power_window_editor.as_mut()
                     && editor.pointer_down(canvas, *position)
+                {
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(editor) = self.clip_transform_editor.as_mut()
+                    && editor.pointer_down(
+                        canvas,
+                        [self.source_width as f32, self.source_height as f32],
+                        *position,
+                    )
                 {
                     ctx.request_pointer_capture(self.id);
                     ctx.request_repaint();
@@ -932,6 +1001,27 @@ impl Widget for ViewerSurface {
                     ctx.request_repaint();
                     return EventResult::Handled;
                 }
+                if self
+                    .clip_transform_editor
+                    .as_ref()
+                    .is_some_and(ClipTransformEditor::is_dragging)
+                {
+                    let committed = self.clip_transform_editor.as_mut().and_then(|editor| {
+                        editor.pointer_up(
+                            canvas,
+                            [self.source_width as f32, self.source_height as f32],
+                            *position,
+                        )
+                    });
+                    ctx.release_pointer_capture(self.id);
+                    if let (Some(edit), Some(mapper)) =
+                        (committed, self.on_clip_transform_edit.as_ref())
+                    {
+                        (ctx.dispatch)(mapper(edit));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let pressed_dropdown_index = self.pressed_dropdown_index.take();
                 if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position)
                     && pressed_dropdown_index == Some(hovered_index)
@@ -987,7 +1077,12 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
-                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging)
+                    || self
+                        .clip_transform_editor
+                        .as_ref()
+                        .is_some_and(ClipTransformEditor::is_dragging)
+                {
                     ctx.release_pointer_capture(self.id);
                 }
                 if self.clear_interaction_state() {
@@ -996,6 +1091,17 @@ impl Widget for ViewerSurface {
                 EventResult::Handled
             }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if *key == KeyCode::Escape
+                    && (self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
+                        || self
+                            .clip_transform_editor
+                            .as_mut()
+                            .is_some_and(ClipTransformEditor::cancel))
+                {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(control) = self.keyboard_control(*key, *modifiers) {
                     self.dispatch_control(control, ctx);
                     EventResult::Handled
@@ -1160,6 +1266,13 @@ impl Widget for ViewerSurface {
         paint::paint_safe_guides(ctx, canvas, self.enabled);
         if let Some(editor) = &self.power_window_editor {
             editor.paint(ctx, canvas);
+        }
+        if let Some(editor) = &self.clip_transform_editor {
+            editor.paint(
+                ctx,
+                canvas,
+                [self.source_width as f32, self.source_height as f32],
+            );
         }
         ctx.pop_clip();
         ctx.pop_clip();
@@ -1436,7 +1549,11 @@ impl ViewerSurface {
                 ViewerDropdown::Zoom => {
                     let option = VIEWER_ZOOM_OPTIONS[index];
                     (
-                        option.label,
+                        if index == 0 {
+                            self.fit_label.as_str()
+                        } else {
+                            option.label
+                        },
                         viewer_zoom_option_selected(option, self.zoom_scale),
                     )
                 }
@@ -2028,6 +2145,118 @@ mod tests {
     }
 
     #[test]
+    fn alt_click_on_bezier_segment_commits_one_insert_without_pointer_capture() {
+        let point = |x| ViewerPowerWindowBezierPoint {
+            position: [x, 0.5],
+            control_in: [0.0, 0.0],
+            control_out: [0.0, 0.0],
+        };
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_power_window(ViewerPowerWindow {
+                shape: ViewerPowerWindowShape::Bezier {
+                    points: vec![point(0.2), point(0.8)],
+                    closed: false,
+                },
+                editable: true,
+            })
+            .on_power_window_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let insertion = Point::new(
+            canvas.x + canvas.width * 0.5,
+            canvas.y + canvas.height * 0.5,
+        );
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: insertion,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers { alt: true, ..Modifiers::none() },
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+        assert_eq!(ctx.requests.pointer_capture, None);
+    }
+
+    #[test]
+    fn clip_transform_escape_cancels_preview_and_release_commits_once() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_clip_transform(ViewerClipTransform {
+                frame_extent: [1920.0, 1080.0],
+                position: [0.0, 0.0],
+                scale: [1.0, 1.0],
+                rotation_degrees: 0.0,
+                anchor: [0.0, 0.0],
+                editable: true,
+            })
+            .on_clip_transform_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let start = viewer.canvas_rect().center();
+        let end = Point::new(start.x + 20.0, start.y + 10.0);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        let down = UiEvent::MouseDown {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        assert_eq!(viewer.event(&down, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(viewer.id()))
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            viewer.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(viewer.id()))
+        );
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(viewer.event(&down, &mut ctx), EventResult::Handled);
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: end,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+    }
+
+    #[test]
     fn custom_control_mapper_overrides_default_actions() {
         let mut viewer =
             ViewerSurface::new("Scene 01", 1920, 1080).on_control(|control| match control {
@@ -2240,7 +2469,9 @@ mod tests {
 
     #[test]
     fn viewer_dropdown_label_starts_after_reserved_check_lane() {
-        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_label("适合");
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_zoom_label("100%")
+            .with_fit_label("Fit");
         viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
         viewer.open_dropdown = Some(ViewerDropdown::Zoom);
         let theme = ThemePreset::Dark.build();
@@ -2259,7 +2490,7 @@ mod tests {
         let index = encoder
             .texts
             .iter()
-            .position(|text| text == VIEWER_ZOOM_OPTIONS[0].label)
+            .position(|text| text == "Fit")
             .expect("zoom option label should be painted");
         assert!(encoder.text_positions[index].x >= expected_x);
     }

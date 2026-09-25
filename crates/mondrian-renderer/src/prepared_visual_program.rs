@@ -13,13 +13,15 @@ use mondrian_core::timeline_data::{
 };
 use mondrian_core::{
     AssetId, ClipId, FramePosition, FrameRounding, GradeDefinitionId, MondrianError, Rational,
-    Resolution, Result, SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
+    Resolution, Result, SequenceId, SequenceRevision, TimelineTime, TimelineTimeRange,
+    VideoTransitionId,
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
-    EffectExecutionEnvelope, EffectExecutionSession, EffectTemporalExecutionRequest,
-    EffectTemporalSpan, LutPreparationCache, LutPreparationCacheConfig, PreparedEffectProgram,
-    PreparedEffectTemporalExecution, PreparedGradeGraph,
+    EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext,
+    EffectTemporalExecutionRequest, EffectTemporalSpan, LutPreparationCache,
+    LutPreparationCacheConfig, PreparedEffectProgram, PreparedEffectTemporalExecution,
+    PreparedGradeGraph,
 };
 use mondrian_timeline::{Clip, PreparedVisualSchedule, Sequence, VideoTransitionType};
 use sha2::{Digest, Sha256};
@@ -475,6 +477,13 @@ impl PreparedVisualProgram {
         let mut prepared_transitions = 0;
         let mut blocked_transitions = 0;
         let working_color_space = sequence.settings.color.working_color_space;
+        let pixel_aspect_ratio =
+            sequence.settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+                PreparedVisualProgramError::Schedule {
+                    sequence_id: sequence.id,
+                    reason: "sequence pixel aspect ratio is unavailable".to_owned(),
+                }
+            })?;
         let prepared_grades = sequence
             .grade_definitions
             .iter()
@@ -564,6 +573,34 @@ impl PreparedVisualProgram {
                     || clip.masks.iter().any(|mask| mask.enabled)
                     || !grade_before.is_empty()
                     || !grade_after.is_empty();
+                let frame_context = if has_processing {
+                    let context = TimelineTimeRange::new(clip.clip_time_in, clip.duration)
+                        .map_err(|error| error.to_string())
+                        .and_then(|range| {
+                            EffectFrameContext::new(
+                                sequence.settings.frame_rate,
+                                pixel_aspect_ratio,
+                                range,
+                            )
+                            .map_err(|error| error.to_string())
+                        });
+                    match context {
+                        Ok(context) => Some(context),
+                        Err(reason) => {
+                            blocked_clips += 1;
+                            clip_effects.insert(
+                                clip.id,
+                                PreparedClipEffects::Blocked {
+                                    reason: Arc::from(reason),
+                                    retry: PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let author_fingerprint = if has_processing {
                     hierarchical_clip_author_fingerprint(sequence, clip, working_color_space)
                         .map_err(|reason| PreparedVisualProgramError::AuthorFingerprint {
@@ -581,6 +618,7 @@ impl PreparedVisualProgram {
                             program,
                             author_fingerprint: previous_fingerprint,
                         } if *previous_fingerprint == author_fingerprint
+                            && program.frame_context() == frame_context
                             && !program.has_external_dependencies() =>
                         {
                             Some(program.clone())
@@ -592,13 +630,14 @@ impl PreparedVisualProgram {
                 let result = if let Some(program) = reusable {
                     reused_clips += 1;
                     Ok(program)
-                } else if has_processing {
-                    PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+                } else if let Some(frame_context) = frame_context {
+                    PreparedEffectProgram::prepare_hierarchical_with_frame_context(
                         &clip.effects,
                         &clip.masks,
                         &grade_before,
                         &grade_after,
                         working_color_space,
+                        frame_context,
                         lut_cache,
                     )
                 } else {
@@ -2689,19 +2728,37 @@ mod tests {
     }
 
     #[test]
-    fn modeled_keyers_remain_reachable_fail_closed_effects() {
-        for effect_type in [EffectType::ChromaKey, EffectType::LumaKey] {
+    fn keyers_remain_reachable_and_execute_in_export_plan() {
+        for (effect_type, keyed_pixel) in [
+            (EffectType::ChromaKey, [0.0, 1.0, 0.0, 0.5]),
+            (EffectType::LumaKey, [0.0, 0.0, 0.0, 0.5]),
+        ] {
             let sequence =
                 single_solid_sequence(Some(EffectNode::with_defaults(effect_type.clone())));
             let program = prepare_stable(&sequence);
-            let error = evaluate_prepared_visual_program(
+            let plan = evaluate_prepared_visual_program(
                 &program,
                 TimelineEvaluationRequest::export(fp(&sequence, 0)),
             )
-            .expect_err("modeled-only keyer must not produce plausible pixels");
+            .expect("keyer must remain in the export plan");
+            admit_timeline_render_plan_for_cpu_compositor(&plan)
+                .expect("keyer export plan must admit exact Float32 execution");
+            let [TimelineRenderPlanElement::SolidColor(solid)] = plan.elements.as_slice() else {
+                panic!("keyer must remain attached to the solid Clip");
+            };
+            let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                &[keyed_pixel],
+                1,
+                1,
+                &solid.effect_graph,
+                solid.frame_seed,
+            )
+            .expect("keyer must execute in the exported graph");
             assert!(
-                error.to_string().contains(&effect_type.key()),
-                "blocker should identify the unavailable definition: {error}"
+                output[0][3] <= 1.0e-6,
+                "{} must remove its keyed pixel: {:?}",
+                effect_type.key(),
+                output[0]
             );
         }
     }
@@ -2854,6 +2911,48 @@ mod tests {
         let effect_changed = cache.prepare(&sequence).expect("Effect replacement");
         assert_eq!(effect_changed.diagnostics().prepared_clips, 2);
         assert_eq!(effect_changed.diagnostics().reused_clips, 1);
+    }
+
+    #[test]
+    fn changed_frame_grid_reprepares_clip_effect_even_when_author_stack_matches() {
+        let mut sequence =
+            single_solid_sequence(Some(EffectNode::with_defaults(EffectType::GaussianBlur)));
+        let clip_id = sequence.video_tracks[0].clips[0].id;
+        let mut cache = PreparedVisualProgramCache::new(4);
+        let first = cache.prepare(&sequence).expect("initial program");
+        let first_context = match first.clip_effects.get(&clip_id).expect("clip program") {
+            PreparedClipEffects::Ready { program, .. } => {
+                program.frame_context().expect("frame context")
+            }
+            PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
+        };
+        assert_eq!(first_context.frame_rate(), sequence.settings.frame_rate);
+
+        sequence.settings.frame_rate = Rational::FPS_30;
+        sequence.revision = sequence.revision.checked_next().expect("frame rate revision");
+        let changed_rate = cache.prepare(&sequence).expect("new frame rate program");
+        assert_eq!(changed_rate.diagnostics().reused_clips, 0);
+        let rate_context = match changed_rate.clip_effects.get(&clip_id).expect("clip program") {
+            PreparedClipEffects::Ready { program, .. } => {
+                program.frame_context().expect("frame context")
+            }
+            PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
+        };
+        assert_eq!(rate_context.frame_rate(), Rational::FPS_30);
+
+        sequence.settings.pixel_aspect_ratio =
+            mondrian_core::timeline_data::PixelAspectRatio::HdAnamorphic1080;
+        sequence.revision = sequence.revision.checked_next().expect("sample aspect revision");
+        let changed_aspect = cache.prepare(&sequence).expect("new sample aspect program");
+        assert_eq!(changed_aspect.diagnostics().reused_clips, 0);
+        let aspect_context = match changed_aspect.clip_effects.get(&clip_id).expect("clip program")
+        {
+            PreparedClipEffects::Ready { program, .. } => {
+                program.frame_context().expect("frame context")
+            }
+            PreparedClipEffects::Blocked { reason, .. } => panic!("blocked clip: {reason}"),
+        };
+        assert_eq!(aspect_context.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
     }
 
     #[test]

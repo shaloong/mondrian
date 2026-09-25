@@ -5,6 +5,12 @@ use std::time::{Duration, Instant};
 use std::{fs, path::Path, path::PathBuf};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
+use mondrian_audio::{
+    AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorResolver,
+    BuiltInAudioProcessorResolver, InstalledClapAudioProcessorSpecResolver,
+    InstalledVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+    IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorkerSpec,
+};
 use mondrian_core::{
     automation::{
         interpolation_mode_from_keyframe, AnimationParameterAddress, InterpolationType, Keyframe,
@@ -34,6 +40,7 @@ use mondrian_playback::{
     PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackRate, PlaybackSeekKind,
     PlaybackShuttleDirection, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
+use mondrian_timeline::audio::AudioProcessorDefinitionRef;
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, SequenceCollection, SequenceSettings,
@@ -137,6 +144,8 @@ pub mod endurance_reference_output;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_run_request;
 pub(crate) mod endurance_shutdown;
+mod native_audio_catalog_restore;
+mod openfx_catalog;
 pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(feature = "validation")]
 pub use endurance_shutdown::{AppEnduranceShutdownReceipt, AppEnduranceShutdownReceiptError};
@@ -149,9 +158,15 @@ pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
 mod gallery_authoring;
+#[cfg(test)]
+#[path = "gallery_shot_match_contract_tests.rs"]
+mod gallery_shot_match_contract_tests;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
 mod grade_authoring;
+#[cfg(test)]
+#[path = "grade_authoring_contract_tests.rs"]
+mod grade_authoring_contract_tests;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_av_evidence;
 #[cfg(any(test, feature = "validation"))]
@@ -165,11 +180,22 @@ pub(crate) mod headless_viewer_gpu;
 mod interchange;
 pub mod media_asset_mutation;
 mod media_import;
+pub mod native_audio_plugin;
 pub(crate) mod native_video_import;
+pub mod notifications;
 mod packaged_worker;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod perf_process_memory;
 mod playback;
+#[cfg(test)]
+#[path = "reference_output_contract_tests.rs"]
+mod reference_output_contract_tests;
+#[cfg(all(test, feature = "validation"))]
+#[path = "reference_output_pump_tests.rs"]
+mod reference_output_pump_tests;
+#[cfg(test)]
+#[path = "timeline_interchange_tests.rs"]
+mod timeline_interchange_tests;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
 pub(crate) mod viewer_gpu_startup;
@@ -213,9 +239,14 @@ mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+mod project_packaging;
 #[cfg(any(test, feature = "validation"))]
 pub use project_lifecycle::PreparedEnduranceProjectFixture;
 pub(crate) use project_lifecycle::ProjectClosePoll;
+pub use project_packaging::{
+    verify_portable_project_package, PortableDependencyFile, PortableDependencyInventory,
+    PortableDependencyIssue, PortablePackageFile, PortablePackageManifest,
+};
 mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
@@ -405,6 +436,8 @@ pub struct AppState {
     retired_project_libraries: Vec<project_library_generation::RetiredProjectLibraryGeneration>,
     /// UI-independent single-writer durable archive publisher.
     project_persistence: ProjectPersistenceService,
+    /// Independent cancellable portable-package copy worker.
+    portable_package_export: Option<project_packaging::PortablePackageExportTask>,
     /// Non-blocking Project-close handoff owned by the application lifecycle.
     ///
     /// While present, the Authoring Session remains readable for projection,
@@ -473,6 +506,8 @@ pub struct AppState {
     execution_resources: Arc<ExecutionResourceCoordinator>,
     /// Last export job-snapshot revision consumed by the app event-loop Adapter.
     export_jobs_observed_revision: u64,
+    /// Terminal Export jobs already projected into product notifications.
+    export_terminal_notifications_seen: HashSet<(mondrian_core::JobId, u64)>,
     /// UI-stable timeline export draft shared by app UI export panels.
     pub export_draft: TimelineExportDraft,
 
@@ -480,6 +515,8 @@ pub struct AppState {
     pub status_hint: Option<(String, bool)>,
     /// Bounded history of user-visible status messages for diagnostics panels.
     pub status_log: Vec<StatusLogEntry>,
+    /// Bounded, language-neutral facts for nonblocking terminal notifications.
+    pub notifications: notifications::AppNotificationFeed,
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
@@ -504,12 +541,21 @@ pub struct AppState {
     audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger,
     /// Open-Session audition intent and observations from the exact prepared Runtime.
     audio_monitoring: audio_monitoring::AudioMonitoringState,
+    /// Shared processor interpretation for Preview, Export, and idle warmup.
+    audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
+    /// Session-installed CLAP definitions shared by Preview and Export.
+    clap_catalog: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
+    native_audio_restore: Option<native_audio_catalog_restore::NativeAudioCatalogRestore>,
+    openfx_catalog: Option<openfx_catalog::OpenFxCatalog>,
+    completed_openfx_installs: Vec<PathBuf>,
+    vst3_catalog: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     pub audio_source_cache: Arc<AudioSourceCache>,
     audio_idle_warmup: AudioIdleWarmupService,
     audio_idle_warmup_terminal_cursor: u64,
 
     media_import: MediaImportExecution,
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
+    pending_timeline_file_drops: HashMap<u64, product_action::TimelineDropFilePayload>,
     /// Ordered two-phase execution for relink and audio Component mutations.
     media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
     /// Instance-owned, bounded Mask tracking execution and result cache.
@@ -527,8 +573,69 @@ pub(crate) fn test_app_state_construction_count() -> u64 {
     APP_STATE_CONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
+struct NativeAudioProcessorSpecResolver {
+    clap: Arc<InstalledClapAudioProcessorSpecResolver>,
+    vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
+}
+
+impl IsolatedAudioProcessorSpecResolver for NativeAudioProcessorSpecResolver {
+    fn resolve(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> std::result::Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+        match request.definition() {
+            AudioProcessorDefinitionRef::Clap { .. } => self.clap.resolve(request),
+            AudioProcessorDefinitionRef::Vst3 { .. } => self.vst3.resolve(request),
+            AudioProcessorDefinitionRef::BuiltIn { .. } => {
+                Err(AudioProcessorHostError::InvalidContract(
+                    "built-in audio processors do not use the native plugin resolver".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
+        let catalogs = std::env::current_exe().ok().and_then(|helper| {
+            let clap = InstalledClapAudioProcessorSpecResolver::new(helper.clone()).ok()?;
+            let vst3 = InstalledVst3AudioProcessorSpecResolver::new(helper).ok()?;
+            Some((Arc::new(clap), Arc::new(vst3)))
+        });
+        match catalogs {
+            Some((clap, vst3)) => Self::with_native_audio_catalogs(clap, vst3),
+            None => Self::with_audio_processor_resolver(Arc::new(BuiltInAudioProcessorResolver)),
+        }
+    }
+
+    /// Assemble one native audio resolver for explicitly selected CLAP and VST3 classes.
+    pub(crate) fn with_native_audio_catalogs(
+        clap: Arc<InstalledClapAudioProcessorSpecResolver>,
+        vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
+    ) -> Self {
+        let resolver: Arc<dyn AudioProcessorResolver> =
+            Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(
+                NativeAudioProcessorSpecResolver { clap: clap.clone(), vst3: vst3.clone() },
+            )));
+        let mut state = Self::with_audio_processor_resolver(resolver);
+        state.clap_catalog = Some(clap);
+        state.vst3_catalog = Some(vst3);
+        state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_clap_catalog(catalog: Arc<InstalledClapAudioProcessorSpecResolver>) -> Self {
+        let resolver: Arc<dyn AudioProcessorResolver> =
+            Arc::new(IsolatedAudioProcessorResolver::new(catalog.clone()));
+        let mut state = Self::with_audio_processor_resolver(resolver);
+        state.clap_catalog = Some(catalog);
+        state
+    }
+
+    /// Create an editor whose Preview and Export share one processor resolver.
+    pub fn with_audio_processor_resolver(
+        audio_processor_resolver: Arc<dyn AudioProcessorResolver>,
+    ) -> Self {
         #[cfg(test)]
         APP_STATE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         let audio_sample_rate = 48_000;
@@ -541,6 +648,7 @@ impl AppState {
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
             project_persistence: ProjectPersistenceService::new(),
+            portable_package_export: None,
             pending_project_close: None,
             project_close_fault: None,
             manual_project_file_destination: None,
@@ -561,12 +669,16 @@ impl AppState {
             timeline_targeting: timeline_targeting::TimelineTargetingState::default(),
             video_transition_handle_diagnostics:
                 video_transitions::VideoTransitionHandleDiagnosticsCache::default(),
-            render_queue: RenderQueue::new(),
+            render_queue: RenderQueue::new_with_audio_processor_resolver(Arc::clone(
+                &audio_processor_resolver,
+            )),
             execution_resources: ExecutionResourceCoordinator::new(Default::default()),
             export_jobs_observed_revision: 0,
+            export_terminal_notifications_seen: HashSet::new(),
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
             status_log: Vec::new(),
+            notifications: notifications::AppNotificationFeed::default(),
             animation_selection: AnimationSelectionState::default(),
             animation_clipboard: None,
             clip_clipboard: None,
@@ -579,11 +691,20 @@ impl AppState {
             #[cfg(any(test, feature = "validation"))]
             audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger::default(),
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
+            audio_processor_resolver: Arc::clone(&audio_processor_resolver),
+            clap_catalog: None,
+            native_audio_restore: None,
+            openfx_catalog: None,
+            completed_openfx_installs: Vec::new(),
+            vst3_catalog: None,
             audio_source_cache,
-            audio_idle_warmup: AudioIdleWarmupService::new(),
+            audio_idle_warmup: AudioIdleWarmupService::new_with_processor_resolver(
+                audio_processor_resolver,
+            ),
             audio_idle_warmup_terminal_cursor: 0,
             media_import: MediaImportExecution::new(),
             media_import_batches: HashMap::new(),
+            pending_timeline_file_drops: HashMap::new(),
             media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
             visual_tracking: visual_tracking::VisualTrackingService::new(),
         }
@@ -876,6 +997,7 @@ impl AppState {
             self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
+            self.pending_timeline_file_drops.clear();
             self.media_asset_mutations.bind_project(None);
             self.authoring = None;
             self.project_runtime_lease = None;
@@ -988,6 +1110,7 @@ impl AppState {
             self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
+            self.pending_timeline_file_drops.clear();
             self.media_asset_mutations.bind_project(None);
             self.authoring = None;
             self.project_runtime_lease = None;
@@ -1016,6 +1139,7 @@ impl AppState {
         self.synchronize_audio_idle_warmup_binding();
         self.media_import.bind_project(self.project_id());
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(self.project_id());
     }
 

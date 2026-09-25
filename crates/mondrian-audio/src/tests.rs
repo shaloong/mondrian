@@ -409,6 +409,142 @@ impl AudioMediaResolver for StereoRampResolver {
     }
 }
 
+#[test]
+#[ignore = "requires MONDRIAN_CLAP_TEST_HELPER and MONDRIAN_CLAP_TEST_PLUGIN"]
+fn installed_clap_gain_matches_realtime_and_offline_signal_contracts() {
+    struct ConstantStereoSource;
+
+    impl AudioDecodedSource for ConstantStereoSource {
+        fn read_interleaved(
+            &self,
+            _start_frame: i64,
+            frames: usize,
+            destination: &mut [f32],
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<(), String> {
+            if destination.len() != frames.saturating_mul(2) {
+                return Err("invalid constant stereo extent".to_owned());
+            }
+            for pair in destination.chunks_exact_mut(2) {
+                pair.copy_from_slice(&[0.25, -0.25]);
+            }
+            Ok(())
+        }
+    }
+
+    struct ConstantStereoResolver;
+
+    impl AudioMediaResolver for ConstantStereoResolver {
+        fn resolve(
+            &self,
+            _asset_id: AssetId,
+            _component_id: AudioSourceComponentId,
+            sample_rate: u32,
+        ) -> Result<ResolvedAudioSource, String> {
+            if sample_rate != 48_000 {
+                return Err("unexpected CLAP test rate".to_owned());
+            }
+            Ok(ResolvedAudioSource::new(
+                AudioChannelLayout::Stereo,
+                Arc::new(ConstantStereoSource),
+            ))
+        }
+    }
+
+    let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+        .map(std::path::PathBuf::from)
+        .expect("built Mondrian executable");
+    let library = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+        .map(std::path::PathBuf::from)
+        .expect("Clack reference gain plugin");
+    let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [library])
+        .expect("discover installed reference CLAP");
+    let plugin_id = installed.descriptors()[0].plugin_id.clone();
+    let render_contract = |processing_mode| AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 512,
+        processing_mode,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let instance = installed
+        .create_instance(
+            &plugin_id,
+            render_contract(AudioProcessingMode::Realtime),
+            Some(0.5_f32.to_le_bytes().to_vec()),
+        )
+        .expect("capture pinned author instance");
+    let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+    let mut sequence = Sequence::new("CLAP Preview and Export parity");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence.settings.audio_sample_rate = 48_000;
+    let track_id = sequence.audio_tracks[0].id;
+    sequence
+        .add_media_audio_clip(
+            track_id,
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("audio clip"),
+            AudioSourceComponentId::primary(),
+        )
+        .expect("route source into Program");
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+
+    let render = |mode, block_sizes: &[usize]| {
+        let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            &sequence,
+            &[],
+            &ConstantStereoResolver,
+            &resolver,
+            render_contract(mode),
+            None,
+            AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024),
+        )
+        .expect("prepare CLAP Program");
+        if runtime.requires_state_entry() {
+            runtime
+                .enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(1),
+                    start_sample: 0,
+                })
+                .expect("enter CLAP continuity");
+        }
+        let mut rendered = Vec::new();
+        let mut start_sample = 0_i64;
+        for &frames in block_sizes {
+            let mut block = vec![0.0_f32; frames * 2];
+            runtime
+                .render_into(AudioRenderRequest { start_sample, frames }, &mut block)
+                .expect("render CLAP block");
+            rendered.extend(block);
+            start_sample += frames as i64;
+        }
+        rendered
+    };
+    let preview = render(AudioProcessingMode::Realtime, &[16, 48]);
+    let export = render(AudioProcessingMode::Offline, &[64]);
+    assert_eq!(preview.len(), 128);
+    assert_eq!(preview.len(), export.len());
+    for (frame, (actual, offline)) in
+        preview.chunks_exact(2).zip(export.chunks_exact(2)).enumerate()
+    {
+        for (channel, (&actual, &offline)) in actual.iter().zip(offline).enumerate() {
+            let expected = if channel == 0 { 0.125 } else { -0.125 };
+            assert!(
+                (actual - expected).abs() <= 1e-6,
+                "frame {frame} channel {channel}: {actual}"
+            );
+            assert!(
+                (actual - offline).abs() <= 1e-6,
+                "frame {frame} channel {channel}: Preview {actual}, Export {offline}"
+            );
+        }
+    }
+}
+
 fn tt(numerator: i64, denominator: i64) -> TimelineTime {
     TimelineTime::new(numerator, denominator).expect("valid time")
 }
@@ -492,6 +628,7 @@ fn sequence_with_parallel_hosted_delay() -> Sequence {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.delay".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -679,6 +816,7 @@ fn typed_sidechain_retains_detector_only_track_and_supplies_auxiliary_pcm() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.sidechain_copy".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1539,6 +1677,7 @@ fn selected_bus_processor_prevents_unprepared_silence_substitution() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.generator-capable".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1578,6 +1717,7 @@ fn pre_fader_tap_does_not_retain_an_unreachable_post_fader_processor() {
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.unreachable-generator".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -1612,6 +1752,7 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     authored_processor.definition = mondrian_timeline::AudioProcessorDefinitionRef::Clap {
         plugin_id: "com.example.effect".to_owned(),
         schema_version: 1,
+        binary_sha256: None,
     };
     authored_processor.opaque_state = Some(vec![1, 2, 3].into());
     sequence
@@ -2060,6 +2201,7 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.delay".to_owned(),
             schema_version: 1,
+            binary_sha256: None,
         },
         bypassed: false,
         parameters: Default::default(),
@@ -2821,15 +2963,17 @@ fn nested_public_output_hides_child_lookahead_without_double_compensation() {
         fail_first_state_entry: false,
         ..Default::default()
     };
-    let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
-        &root,
-        &[child],
-        &RampResolver,
-        &resolver,
-        contract,
-        None,
-    )
-    .expect("recursive lookahead runtime");
+    let mut runtime =
+        AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+            &root,
+            &[child],
+            &RampResolver,
+            &resolver,
+            contract,
+            AudioCompileRequest::program(root.audio_program.outputs[0].id),
+            AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024),
+        )
+        .expect("recursive lookahead runtime");
     assert_eq!(runtime.public_output_lookahead_frames(), 0);
     assert!(runtime.requires_state_entry());
     runtime

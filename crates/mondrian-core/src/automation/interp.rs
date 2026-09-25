@@ -21,8 +21,8 @@ pub(crate) fn interpolation_defaults(
             KeyframeTemporalFlags::default(),
         ),
         InterpolationType::Bezier => (
-            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
             KeyframeInterpolation::Bezier(default_in_bezier_handle()),
+            KeyframeInterpolation::Bezier(default_out_bezier_handle()),
             KeyframeTemporalFlags::default(),
         ),
         InterpolationType::AutoBezier => (

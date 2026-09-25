@@ -21,3 +21,7 @@ impl AppState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "dynamic_hdr_authoring_tests.rs"]
+mod tests;

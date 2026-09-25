@@ -1,15 +1,18 @@
 use super::*;
+#[cfg(any(test, feature = "validation"))]
+use mondrian_audio::BuiltInAudioProcessorResolver;
 use mondrian_audio::{
     AudioAuditionOverlay, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
     AudioDeliveryEvidence, AudioMediaResolver, AudioMeterObserver, AudioProcessingMode,
-    AudioProgramDeliveryRuntime, AudioProgramExecutionDemand, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant, ResolvedAudioSource,
+    AudioProcessorResolver, AudioProgramDeliveryRuntime, AudioProgramExecutionDemand,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant,
+    ResolvedAudioSource,
 };
 use mondrian_core::{AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken};
 use mondrian_media::{AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
 
-const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
+pub(super) const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
     state: Mutex<TimelineAudioRenderState>,
@@ -62,6 +65,7 @@ impl TimelineAudioPcmRenderer {
         Ok(renderer)
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn new(
         sequence: Sequence,
         sequences: Vec<Sequence>,
@@ -71,6 +75,31 @@ impl TimelineAudioPcmRenderer {
         audition: AudioAuditionOverlay,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
+    ) -> mondrian_core::Result<Self> {
+        Self::new_with_processor_resolver(
+            sequence,
+            sequences,
+            library,
+            source_cache,
+            runtime_grant,
+            audition,
+            sample_rate,
+            channel_layout,
+            &BuiltInAudioProcessorResolver,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_processor_resolver(
+        sequence: Sequence,
+        sequences: Vec<Sequence>,
+        library: Arc<AssetLibrary>,
+        source_cache: Arc<AudioSourceCache>,
+        runtime_grant: AudioRuntimeResourceGrant,
+        audition: AudioAuditionOverlay,
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+        processor_resolver: &dyn AudioProcessorResolver,
     ) -> mondrian_core::Result<Self> {
         let program_channel_layout = sequence.settings.audio_channel_layout;
         let contract = AudioRenderContract {
@@ -90,15 +119,17 @@ impl TimelineAudioPcmRenderer {
             sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
                 audio_render_error("timeline_audio_prepare", "Sequence has no Program Output")
             })?;
-        let runtime = AudioProgramRuntime::build_with_compile_request_and_resource_grant(
-            &sequence,
-            &sequences,
-            &resolver,
-            contract,
-            AudioCompileRequest { output_id, audition },
-            runtime_grant,
-        )
-        .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
+        let runtime =
+            AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
+                &sequence,
+                &sequences,
+                &resolver,
+                processor_resolver,
+                contract,
+                AudioCompileRequest { output_id, audition },
+                runtime_grant,
+            )
+            .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
         let continuity_model = if runtime.requires_state_entry() {
             AudioPcmContinuityModel::GenerationState
         } else {
@@ -485,6 +516,184 @@ mod tests {
             mondrian_audio::AudioDeliveryMappingKind::Identity
                 | mondrian_audio::AudioDeliveryMappingKind::ProvenSilence
         ));
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "requires a built Mondrian executable and the Clack gain reference DLL"]
+    fn preview_runtime_executes_installed_clap_through_selected_resolver() {
+        use mondrian_audio::{
+            DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to the app executable");
+        let plugin = std::env::var_os("MONDRIAN_CLAP_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("set MONDRIAN_CLAP_TEST_PLUGIN to the Clack gain DLL");
+        let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover reference plugin");
+        let descriptor = installed.descriptors()[0].clone();
+        let instance = installed
+            .create_instance(
+                &descriptor.plugin_id,
+                reference_render_contract(),
+                Some(0.5_f32.to_le_bytes().to_vec()),
+            )
+            .expect("capture pinned CLAP instance");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_preview_gain(instance, &resolver);
+    }
+
+    #[test]
+    #[ignore = "requires MONDRIAN_VST3_TEST_HELPER and MONDRIAN_VST3_TEST_PLUGIN"]
+    fn preview_runtime_executes_installed_vst3_through_selected_resolver() {
+        use mondrian_audio::{
+            DiscoveredVst3AudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
+        };
+
+        let helper = std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+            .map(std::path::PathBuf::from)
+            .expect("built Mondrian helper executable");
+        let plugin = std::env::var_os("MONDRIAN_VST3_TEST_PLUGIN")
+            .map(std::path::PathBuf::from)
+            .expect("VST3 Gain reference file or bundle");
+        let installed = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [plugin])
+            .expect("discover VST3 Gain");
+        let class_id = installed.descriptors()[0].class_id.clone();
+        let mut instance = installed
+            .create_instance(&class_id, reference_render_contract(), None)
+            .expect("capture pinned VST3 instance");
+        let id = instance.parameters.keys().next().cloned().expect("Gain parameter ID");
+        instance
+            .parameters
+            .get_mut(&id)
+            .expect("Gain parameter")
+            .set_automation(mondrian_core::ExactAutomationCurve::new(id, 0.5).expect("Gain curve"))
+            .expect("set Gain curve");
+        let resolver = IsolatedAudioProcessorResolver::new(Arc::new(installed));
+        assert_reference_preview_gain(instance, &resolver);
+    }
+
+    fn reference_render_contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        }
+    }
+
+    fn assert_reference_preview_gain(
+        instance: mondrian_timeline::audio::AudioProcessorInstance,
+        resolver: &dyn AudioProcessorResolver,
+    ) {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-preview-plugin-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        std::fs::create_dir_all(&root).expect("preview test directory");
+        let source_path = root.join("constant-stereo.wav");
+        let sample_rate = 48_000_u32;
+        let frames = sample_rate as usize;
+        let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
+        let mut wave = std::io::BufWriter::new(
+            std::fs::File::create(&source_path).expect("create nonzero WAV source"),
+        );
+        wave.write_all(b"RIFF").expect("RIFF");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("format");
+        wave.write_all(&16_u32.to_le_bytes()).expect("format extent");
+        wave.write_all(&3_u16.to_le_bytes()).expect("IEEE Float");
+        wave.write_all(&2_u16.to_le_bytes()).expect("stereo");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("block alignment");
+        wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
+        wave.write_all(b"data").expect("data");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
+        for _ in 0..frames {
+            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
+            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        }
+        wave.flush().expect("complete WAV source");
+        drop(wave);
+        let source_path = std::fs::canonicalize(source_path).expect("canonical WAV path");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let asset_id = library
+            .commit_media_probe(
+                mondrian_assets::AssetMediaProbeCandidate::new(
+                    source_path.clone(),
+                    mondrian_core::MediaFileFingerprint::capture(&source_path),
+                    mondrian_media::probe_media_info(&source_path).expect("probe WAV"),
+                )
+                .expect("audio source candidate"),
+                None,
+            )
+            .expect("register WAV source");
+        let mut sequence = Sequence::new("native plugin preview");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    asset_id,
+                    mondrian_core::TimelineTime::ZERO,
+                    mondrian_core::TimelineTime::ONE,
+                )
+                .expect("audio Clip"),
+                mondrian_core::AudioSourceComponentId::primary(),
+            )
+            .expect("add WAV Clip");
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
+            sequence,
+            Vec::new(),
+            library,
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+            AudioAuditionOverlay::default(),
+            48_000,
+            AudioChannelLayout::Stereo,
+            resolver,
+        )
+        .expect("prepare native plugin preview");
+        assert!(renderer.execution_demand().requires_execution());
+        let output = renderer
+            .render(
+                AudioPcmRenderRequest {
+                    start_sample: 0,
+                    frame_count: 64,
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
+                },
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("render through native plugin worker");
+        assert_eq!(output.samples.len(), 128);
+        for (frame, pair) in output.samples.chunks_exact(2).enumerate() {
+            assert!(
+                (pair[0] - 0.125).abs() <= 1e-6,
+                "left frame {frame}: {}",
+                pair[0]
+            );
+            assert!(
+                (pair[1] + 0.125).abs() <= 1e-6,
+                "right frame {frame}: {}",
+                pair[1]
+            );
+        }
         drop(renderer);
         let _ = std::fs::remove_dir_all(root);
     }

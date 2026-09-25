@@ -14,8 +14,8 @@ use mondrian_core::automation::{AnimationParameterAddress, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
-    AssetId, AudioSourceComponentId, ClipId, EffectId, FramePosition, GeneratedAssetKind, JobId,
-    KeyframeId, SequenceId, TrackId, VideoTransitionId,
+    AssetId, AudioProcessorInstanceId, AudioSourceComponentId, BlendMode, ClipId, EffectId,
+    FramePosition, GeneratedAssetKind, JobId, KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     Color, GalleryColorStatistics, GalleryStillId, GalleryStillRaster, GradeDefinitionId,
@@ -59,6 +59,7 @@ pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
 /// External action name for placing one Asset on a stable Timeline Track.
 pub const TIMELINE_PLACE_ASSET: &str = "place_asset";
+pub const TIMELINE_PLACE_FILE: &str = "place_file";
 /// External action name for inserting one Asset through an explicit edit scope.
 pub const TIMELINE_INSERT_ASSET: &str = "insert_asset";
 /// External action name for replacing the current Clip selection with a nested Sequence.
@@ -100,6 +101,8 @@ pub const CLIP_NAMESPACE: &str = "ui.clip";
 pub const CLIP_SET_ENABLED: &str = "set_enabled";
 /// External action name for changing one Solid Color Clip's source color.
 pub const CLIP_SET_SOLID_COLOR: &str = "set_solid_color";
+/// External action name for choosing one video Clip's compositing mode.
+pub const CLIP_SET_BLEND_MODE: &str = "set_blend_mode";
 /// External action name for changing one Clip or linked group to an exact signed rate.
 pub const CLIP_SET_RATE: &str = "set_rate";
 /// External action name for holding one video Clip at an exact Sequence frame.
@@ -160,6 +163,8 @@ pub const VISUAL_EFFECT_NAMESPACE: &str = "ui.visual_effect";
 
 /// External action name for inserting one registered visual Effect on a Clip.
 pub const VISUAL_EFFECT_ADD_TO_CLIP: &str = "add_to_clip";
+/// External action name for installing a selected OpenFX Filter bundle.
+pub const VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE: &str = "install_openfx_bundle";
 /// External action name for selecting one visual Effect instance.
 pub const VISUAL_EFFECT_SELECT: &str = "select";
 /// External action name for changing one visual Effect enabled state.
@@ -170,6 +175,10 @@ pub const VISUAL_EFFECT_REMOVE: &str = "remove";
 pub const VISUAL_EFFECT_REORDER: &str = "reorder";
 /// External action name for writing one stable-address visual Effect parameter.
 pub const VISUAL_EFFECT_SET_PARAMETER_VALUE: &str = "set_parameter_value";
+/// External action name for editing a visual Effect numeric curve by stable key identity.
+pub const VISUAL_EFFECT_EDIT_NUMERIC_CURVE: &str = "edit_numeric_curve";
+/// External action name for toggling a key at the current Effect author time.
+pub const VISUAL_EFFECT_TOGGLE_CURRENT_KEY: &str = "toggle_current_key";
 
 /// External custom-action namespace for Sequence grading hierarchy.
 pub const GRADE_NAMESPACE: &str = "ui.grade";
@@ -201,6 +210,14 @@ pub const AUDIO_NAMESPACE: &str = "ui.audio";
 pub const AUDIO_EDIT_PROCESSOR_RACK: &str = "edit_processor_rack";
 /// External action name for inserting one product-visible built-in Processor.
 pub const AUDIO_INSERT_BUILT_IN_PROCESSOR: &str = "insert_built_in_processor";
+/// External action name for registering one selected CLAP library in this session.
+pub const AUDIO_INSTALL_CLAP_LIBRARY: &str = "install_clap_library";
+/// External action name for inserting one installed CLAP processor.
+pub const AUDIO_INSERT_CLAP_PROCESSOR: &str = "insert_clap_processor";
+pub const AUDIO_REBIND_CLAP_PROCESSOR: &str = "rebind_clap_processor";
+pub const AUDIO_INSTALL_VST3_PLUGIN: &str = "install_vst3_plugin";
+pub const AUDIO_INSERT_VST3_PROCESSOR: &str = "insert_vst3_processor";
+pub const AUDIO_REBIND_VST3_PROCESSOR: &str = "rebind_vst3_processor";
 /// External action name for one normative Channel Strip edit.
 pub const AUDIO_EDIT_CHANNEL_STRIP: &str = "edit_channel_strip";
 /// External action name for one atomic Bus/Route graph edit.
@@ -360,9 +377,11 @@ pub enum ExportProductAction {
     ClearTerminalHistory,
 }
 
-/// Closed Clip-local visual Effect operations.
+/// Closed visual Effect installation, authoring, and selection operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VisualEffectProductAction {
+    /// Discover and register supported Filters from one selected bundle.
+    InstallOpenFxBundle(VisualEffectInstallOpenFxBundlePayload),
     /// Instantiate one currently registered definition and append it to a Clip.
     AddToClip(VisualEffectAddToClipPayload),
     /// Select one existing Effect instance in the App selection scope.
@@ -375,6 +394,10 @@ pub enum VisualEffectProductAction {
     Reorder(VisualEffectReorderPayload),
     /// Write one parameter value through its stable author instance address.
     SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
+    /// Edit one floating-point parameter curve using a stable Effect and key identity.
+    EditNumericCurve(Box<VisualEffectEditNumericCurvePayload>),
+    /// Toggle a key at the current author time without lossy UI time quantization.
+    ToggleCurrentKey(VisualEffectParameterTargetPayload),
 }
 
 /// Closed Sequence grading hierarchy operations.
@@ -406,6 +429,8 @@ pub enum ClipProductAction {
     SetEnabled(ClipSetEnabledPayload),
     /// Change the generated source color of one Solid Color Clip.
     SetSolidColor(ClipSetSolidColorPayload),
+    /// Set or clear one video Clip's override of the owning Track blend mode.
+    SetBlendMode(ClipSetBlendModePayload),
     /// Set an exact nonzero forward or reverse source-time rate.
     SetRate(ClipSetRatePayload),
     /// Hold a video Clip at the picture selected on the Sequence grid.
@@ -436,6 +461,18 @@ pub enum AudioProductAction {
     EditProcessorRack(AudioProcessorRackEditRequest),
     /// Resolve and insert one canonical product-visible built-in Processor.
     InsertBuiltInProcessor(AudioProcessorInsertBuiltInPayload),
+    /// Discover a selected library in an isolated helper and publish its definitions.
+    InstallClapLibrary(AudioInstallClapLibraryPayload),
+    /// Probe and insert an installed native processor in one author transaction.
+    InsertClapProcessor(AudioProcessorInsertClapPayload),
+    /// Re-probe an installed CLAP binary and explicitly update one authored instance.
+    RebindClapProcessor(AudioProcessorRebindClapPayload),
+    /// Discover the effect classes in a selected VST3 file or directory bundle.
+    InstallVst3Plugin(AudioInstallVst3PluginPayload),
+    /// Probe and insert an installed VST3 class in one author transaction.
+    InsertVst3Processor(AudioProcessorInsertVst3Payload),
+    /// Re-probe and explicitly rebind an authored VST3 instance.
+    RebindVst3Processor(AudioProcessorRebindVst3Payload),
     /// Apply one Track, Bus, or Program Output Channel Strip mutation.
     EditChannelStrip(AudioChannelStripEditRequest),
     /// Apply one Bus/Route graph mutation.
@@ -465,6 +502,8 @@ pub enum TimelineProductAction {
     CreateBasicTitle,
     /// Place one Asset on one stable Track at an explicit evaluation coordinate.
     PlaceAsset(TimelineDropAssetPayload),
+    /// Probe and atomically place one external file on a Track.
+    PlaceFile(TimelineDropFilePayload),
     /// Insert one Asset through an exact author-time edit scope.
     InsertAsset(Box<TimelineInsertAssetPayload>),
     /// Replace the current Clip selection with one nested Sequence atomically.
@@ -626,6 +665,9 @@ impl ProductAction {
                     TIMELINE_PLACE_ASSET => {
                         TimelineProductAction::PlaceAsset(decode_payload(namespace, name, payload)?)
                     }
+                    TIMELINE_PLACE_FILE => {
+                        TimelineProductAction::PlaceFile(decode_payload(namespace, name, payload)?)
+                    }
                     TIMELINE_INSERT_ASSET => TimelineProductAction::InsertAsset(Box::new(
                         decode_payload(namespace, name, payload)?,
                     )),
@@ -690,6 +732,36 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
+                AUDIO_INSTALL_CLAP_LIBRARY => {
+                    Ok(Some(Self::Audio(AudioProductAction::InstallClapLibrary(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSERT_CLAP_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::InsertClapProcessor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_REBIND_CLAP_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::RebindClapProcessor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSTALL_VST3_PLUGIN => {
+                    Ok(Some(Self::Audio(AudioProductAction::InstallVst3Plugin(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_INSERT_VST3_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::InsertVst3Processor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_REBIND_VST3_PROCESSOR => {
+                    Ok(Some(Self::Audio(AudioProductAction::RebindVst3Processor(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
                 AUDIO_EDIT_CHANNEL_STRIP => Ok(Some(Self::Audio(
                     AudioProductAction::EditChannelStrip(decode_payload(namespace, name, payload)?),
                 ))),
@@ -759,6 +831,9 @@ impl ProductAction {
                     decode_payload(namespace, name, payload)?,
                 )))),
                 CLIP_SET_SOLID_COLOR => Ok(Some(Self::Clip(ClipProductAction::SetSolidColor(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                CLIP_SET_BLEND_MODE => Ok(Some(Self::Clip(ClipProductAction::SetBlendMode(
                     decode_payload(namespace, name, payload)?,
                 )))),
                 CLIP_SET_RATE => Ok(Some(Self::Clip(ClipProductAction::SetRate(
@@ -862,6 +937,11 @@ impl ProductAction {
                 _ => Ok(None),
             },
             VISUAL_EFFECT_NAMESPACE => match name.as_str() {
+                VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::InstallOpenFxBundle(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 VISUAL_EFFECT_ADD_TO_CLIP => Ok(Some(Self::VisualEffect(
                     VisualEffectProductAction::AddToClip(decode_payload(namespace, name, payload)?),
                 ))),
@@ -883,6 +963,16 @@ impl ProductAction {
                     VisualEffectProductAction::SetParameterValue(Box::new(decode_payload(
                         namespace, name, payload,
                     )?)),
+                ))),
+                VISUAL_EFFECT_EDIT_NUMERIC_CURVE => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::EditNumericCurve(Box::new(decode_payload(
+                        namespace, name, payload,
+                    )?)),
+                ))),
+                VISUAL_EFFECT_TOGGLE_CURRENT_KEY => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::ToggleCurrentKey(decode_payload(
+                        namespace, name, payload,
+                    )?),
                 ))),
                 _ => Ok(None),
             },
@@ -1129,6 +1219,11 @@ impl ProductAction {
                 TIMELINE_PLACE_ASSET,
                 serde_json::json!(payload),
             ),
+            Self::Timeline(TimelineProductAction::PlaceFile(payload)) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_PLACE_FILE,
+                serde_json::json!(payload),
+            ),
             Self::Timeline(TimelineProductAction::InsertAsset(payload)) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_INSERT_ASSET,
@@ -1185,6 +1280,36 @@ impl ProductAction {
                 AUDIO_INSERT_BUILT_IN_PROCESSOR,
                 serde_json::json!(payload),
             ),
+            Self::Audio(AudioProductAction::InstallClapLibrary(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSTALL_CLAP_LIBRARY,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::InsertClapProcessor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSERT_CLAP_PROCESSOR,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::RebindClapProcessor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REBIND_CLAP_PROCESSOR,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::InstallVst3Plugin(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSTALL_VST3_PLUGIN,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::InsertVst3Processor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_INSERT_VST3_PROCESSOR,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::RebindVst3Processor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_REBIND_VST3_PROCESSOR,
+                serde_json::json!(payload),
+            ),
             Self::Audio(AudioProductAction::EditChannelStrip(request)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_EDIT_CHANNEL_STRIP,
@@ -1206,6 +1331,11 @@ impl ProductAction {
             Self::Clip(ClipProductAction::SetSolidColor(payload)) => (
                 CLIP_NAMESPACE,
                 CLIP_SET_SOLID_COLOR,
+                serde_json::json!(payload),
+            ),
+            Self::Clip(ClipProductAction::SetBlendMode(payload)) => (
+                CLIP_NAMESPACE,
+                CLIP_SET_BLEND_MODE,
                 serde_json::json!(payload),
             ),
             Self::Clip(ClipProductAction::SetRate(payload)) => {
@@ -1308,6 +1438,11 @@ impl ProductAction {
                 VISUAL_EFFECT_ADD_TO_CLIP,
                 serde_json::json!(payload),
             ),
+            Self::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE,
+                serde_json::json!(payload),
+            ),
             Self::VisualEffect(VisualEffectProductAction::Select(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SELECT,
@@ -1331,6 +1466,16 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::EditNumericCurve(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_EDIT_NUMERIC_CURVE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_TOGGLE_CURRENT_KEY,
                 serde_json::json!(payload),
             ),
             Self::Grade(GradeProductAction::CreateDefinition(payload)) => (
@@ -1615,6 +1760,66 @@ pub struct AudioProcessorInsertBuiltInPayload {
     pub placement: mondrian_timeline::AudioProcessorRackPlacement,
 }
 
+/// Explicit native library selected by the user for session discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioInstallClapLibraryPayload {
+    /// Absolute path selected by the native file dialog.
+    pub path: PathBuf,
+}
+
+/// Stable plugin ID and Rack placement for an installed CLAP definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInsertClapPayload {
+    /// Rack receiving the new processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// CLAP identity discovered from the selected binary.
+    pub plugin_id: String,
+    /// Stable position inside the Rack.
+    pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Existing processor selected for an explicit installed CLAP revision rebind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorRebindClapPayload {
+    /// Rack containing the processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Stable processor instance identity.
+    pub processor_id: AudioProcessorInstanceId,
+}
+
+/// Explicit VST3 binary selected by the user for session discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioInstallVst3PluginPayload {
+    /// Absolute path to a selected VST3 file or directory bundle.
+    pub path: PathBuf,
+}
+
+/// Stable class identity and Rack placement for an installed VST3 effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorInsertVst3Payload {
+    /// Rack receiving the new processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// VST3 class identity discovered from the selected binary.
+    pub class_id: String,
+    /// Stable position inside the Rack.
+    pub placement: mondrian_timeline::AudioProcessorRackPlacement,
+}
+
+/// Existing VST3 processor selected for an explicit installed-revision rebind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProcessorRebindVst3Payload {
+    /// Rack containing the processor.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Stable processor instance identity.
+    pub processor_id: AudioProcessorInstanceId,
+}
+
 /// Transient Track audition intent owned by the open App Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1742,6 +1947,18 @@ pub struct TimelineSetInOutPointPayload {
 pub struct TimelineDropAssetPayload {
     /// Asset being placed.
     pub asset_id: AssetId,
+    /// Track that should receive the created Clip.
+    pub target_track_id: TrackId,
+    /// Exact input frame coordinate and its declared evaluation time base.
+    pub position: FramePosition,
+}
+
+/// One external file and exact Track target captured at pointer release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineDropFilePayload {
+    /// Source file to probe without importing first.
+    pub path: PathBuf,
     /// Track that should receive the created Clip.
     pub target_track_id: TrackId,
     /// Exact input frame coordinate and its declared evaluation time base.
@@ -2012,6 +2229,14 @@ struct ExportCancelWirePayload {
     job_id: JobId,
 }
 
+/// Machine-local OpenFX bundle explicitly selected for Filter installation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectInstallOpenFxBundlePayload {
+    /// Absolute `.ofx.bundle` directory chosen through the native picker.
+    pub path: PathBuf,
+}
+
 /// Clip and registered definition selected for one visual Effect insertion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2068,6 +2293,32 @@ pub struct VisualEffectSetParameterValuePayload {
     pub parameter: AnimationParameterAddress,
     /// Value to write statically or as a key at the current Clip-local author time.
     pub value: PropertyValue,
+}
+
+/// Edit one numeric visual Effect curve over the owning Clip's author span.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectEditNumericCurvePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// Stable Effect instance owned by the Clip.
+    pub effect_id: EffectId,
+    /// Stable parameter instance and definition identity.
+    pub parameter: AnimationParameterAddress,
+    /// One stable-key normalized curve edit.
+    pub edit: ClipCurveEditPayload,
+}
+
+/// Stable identity for one Effect parameter key at the current author time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualEffectParameterTargetPayload {
+    /// Canonical Clip identity.
+    pub clip_id: ClipId,
+    /// Stable Effect instance.
+    pub effect_id: EffectId,
+    /// Stable parameter instance and definition identity.
+    pub parameter: AnimationParameterAddress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2253,6 +2504,16 @@ pub struct ClipSetSolidColorPayload {
     pub color: Color,
 }
 
+/// Set an explicit video Clip blend mode, or inherit its Track mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipSetBlendModePayload {
+    /// Canonical Clip identity; current Track placement is derived at dispatch.
+    pub clip_id: ClipId,
+    /// `None` follows the owning Track's current mode.
+    pub blend_mode: Option<BlendMode>,
+}
+
 /// Change one Clip and, optionally, its complete link group to an exact signed rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2320,6 +2581,13 @@ pub enum ClipCurveEditPayload {
     Remove {
         /// Stable key identity captured by the current projection.
         keyframe_id: KeyframeId,
+    },
+    /// Change the interpolation preset of one existing complete key.
+    SetInterpolation {
+        /// Stable key identity captured by the current projection.
+        keyframe_id: KeyframeId,
+        /// Authoring preset, including constrained Bezier modes.
+        interpolation: mondrian_core::automation::InterpolationType,
     },
 }
 
@@ -2486,6 +2754,9 @@ impl<'a> ProductActionAvailability<'a> {
             TimelineProductAction::PlaceAsset(payload) => {
                 self.state.can_place_asset_on_timeline(*payload)
             }
+            TimelineProductAction::PlaceFile(payload) => {
+                self.state.can_queue_file_on_timeline(payload)
+            }
             TimelineProductAction::InsertAsset(payload) => {
                 self.state.can_insert_asset_from_product_action(payload)
             }
@@ -2587,6 +2858,10 @@ impl<'a> ProductActionAvailability<'a> {
             ClipProductAction::SetSolidColor(payload) => self
                 .state
                 .clip_solid_color_write_would_change(payload.clip_id, payload.color)
+                .unwrap_or(false),
+            ClipProductAction::SetBlendMode(payload) => self
+                .state
+                .clip_blend_mode_write_would_change(payload.clip_id, payload.blend_mode)
                 .unwrap_or(false),
             ClipProductAction::SetRate(payload) => {
                 if payload.rate.numerator() == 0 {
@@ -2729,10 +3004,14 @@ impl<'a> ProductActionAvailability<'a> {
     }
 
     fn allows_visual_effect(&self, action: &VisualEffectProductAction) -> bool {
+        if let VisualEffectProductAction::InstallOpenFxBundle(payload) = action {
+            return payload.path.is_absolute();
+        }
         let Some(sequence) = self.state.active_sequence() else {
             return false;
         };
         match action {
+            VisualEffectProductAction::InstallOpenFxBundle(_) => false,
             VisualEffectProductAction::AddToClip(payload) => {
                 visual_effect_clip(sequence, payload.clip_id).is_some_and(|target| {
                     target.track_unlocked
@@ -2792,6 +3071,28 @@ impl<'a> ProductActionAvailability<'a> {
                             })
                             .is_some()
                     },
+                )
+            }
+            VisualEffectProductAction::EditNumericCurve(payload) => {
+                super::clip_authoring::numeric_curve_edit_from_payload(&payload.edit)
+                    .ok()
+                    .and_then(|edit| {
+                        self.state
+                            .effect_numeric_curve_edit_would_change(
+                                payload.clip_id,
+                                payload.effect_id,
+                                &payload.parameter,
+                                edit,
+                            )
+                            .ok()
+                    })
+                    .unwrap_or(false)
+            }
+            VisualEffectProductAction::ToggleCurrentKey(payload) => {
+                self.state.effect_current_key_toggle_available(
+                    payload.clip_id,
+                    payload.effect_id,
+                    &payload.parameter,
                 )
             }
         }
@@ -3067,6 +3368,11 @@ mod tests {
                     position: FramePosition::new(33, Rational::new(1, 25)),
                 },
             )),
+            ProductAction::Timeline(TimelineProductAction::PlaceFile(TimelineDropFilePayload {
+                path: PathBuf::from("E:/media/external.mov"),
+                target_track_id: track_id,
+                position: FramePosition::new(34, Rational::new(1, 25)),
+            })),
             ProductAction::Timeline(TimelineProductAction::InsertAsset(Box::new(
                 TimelineInsertAssetPayload {
                     asset_id: AssetId::new(),
@@ -3676,6 +3982,11 @@ mod tests {
             parameter_id: mondrian_core::ParameterId::new_static("mondrian.effect.test.amount"),
         };
         let actions = [
+            ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                VisualEffectInstallOpenFxBundlePayload {
+                    path: PathBuf::from("E:/plugins/Basic.ofx.bundle"),
+                },
+            )),
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
                 VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
             )),
@@ -3711,10 +4022,24 @@ mod tests {
                 VisualEffectSetParameterValuePayload {
                     clip_id,
                     effect_id,
-                    parameter,
+                    parameter: parameter.clone(),
                     value: PropertyValue::Float(0.75),
                 },
             ))),
+            ProductAction::VisualEffect(VisualEffectProductAction::EditNumericCurve(Box::new(
+                VisualEffectEditNumericCurvePayload {
+                    clip_id,
+                    effect_id,
+                    parameter: parameter.clone(),
+                    edit: ClipCurveEditPayload::SetInterpolation {
+                        keyframe_id: KeyframeId::new(),
+                        interpolation: mondrian_core::automation::InterpolationType::AutoBezier,
+                    },
+                },
+            ))),
+            ProductAction::VisualEffect(VisualEffectProductAction::ToggleCurrentKey(
+                VisualEffectParameterTargetPayload { clip_id, effect_id, parameter },
+            )),
         ];
 
         for expected in actions {
@@ -3958,6 +4283,53 @@ mod tests {
             .expect("recognized product action");
 
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn external_codec_round_trips_native_plugin_install_and_insertion_intents() {
+        let address = AudioProcessorRackAddress::ProcessingScope {
+            scope_id: mondrian_core::AudioProcessingScopeId::new(),
+        };
+        for expected in [
+            ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                AudioInstallClapLibraryPayload { path: PathBuf::from("C:/plugins/gain.clap") },
+            )),
+            ProductAction::Audio(AudioProductAction::InsertClapProcessor(
+                AudioProcessorInsertClapPayload {
+                    address,
+                    plugin_id: "org.example.gain".to_owned(),
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::RebindClapProcessor(
+                AudioProcessorRebindClapPayload {
+                    address,
+                    processor_id: AudioProcessorInstanceId::new(),
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path: PathBuf::from("C:/plugins/gain.vst3") },
+            )),
+            ProductAction::Audio(AudioProductAction::InsertVst3Processor(
+                AudioProcessorInsertVst3Payload {
+                    address,
+                    class_id: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )),
+            ProductAction::Audio(AudioProductAction::RebindVst3Processor(
+                AudioProcessorRebindVst3Payload {
+                    address,
+                    processor_id: AudioProcessorInstanceId::new(),
+                },
+            )),
+        ] {
+            assert_eq!(
+                ProductAction::decode_external(&expected.clone().into_external_action())
+                    .expect("valid external payload"),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -4390,6 +4762,22 @@ mod tests {
         assert!(!state.product_action_availability().allows(&set_changed));
         assert!(!state.product_action_availability().allows(&move_after));
         assert!(state.product_action_availability().allows(&select));
+    }
+
+    #[test]
+    fn openfx_install_is_machine_local_and_requires_an_absolute_selection() {
+        let state = AppState::new();
+        let availability = state.product_action_availability();
+        let absolute = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload {
+                path: std::env::temp_dir().join("Basic.ofx.bundle"),
+            },
+        ));
+        let relative = ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+            VisualEffectInstallOpenFxBundlePayload { path: PathBuf::from("Basic.ofx.bundle") },
+        ));
+        assert!(availability.allows(&absolute));
+        assert!(!availability.allows(&relative));
     }
 
     #[test]

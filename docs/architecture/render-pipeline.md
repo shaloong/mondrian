@@ -1,5 +1,11 @@
 # Render Pipeline
 
+Prepared visual Clip programs bind sequence frame rate, exact sample aspect
+ratio, and Clip source-time availability before compiling their effect graph.
+The prepared-program cache compares this context when reusing Clip effects
+across revisions, so changing frame geometry or source range cannot retain a
+program whose external effect parameters were evaluated under older facts.
+
 At the App media boundary, an admitted GPU consumer can receive compact CPU
 YUV before native decoder discovery. P010 remains CPU-resident and enters the
 existing renderer upload path; this is not evidence of hardware decoding or
@@ -58,6 +64,13 @@ threshold, rolloff, strength, and working-space CIE-Y coefficients. Both paths
 retain straight alpha, do no frame allocation or readback, and are qualified on
 a real wgpu device for Rec.709 and ACEScg. They never become a renderer-only
 filter or a Preview/Export fork.
+
+Chroma Key and Luma Key are executable Float32 Effect graphs. Prepared visual
+program evaluation retains each keyer on its Clip in an Export render plan;
+CPU compositor admission and graph execution then use the same compiled graph
+as Preview. A regression test checks that the planned graph removes a known
+keyed pixel, rather than expecting these former modeled-only definitions to
+fail closed.
 
 The intended render path is shared by preview and export:
 
@@ -194,7 +207,10 @@ process-wide compiled graph; every non-identity compiled graph belongs to its
 Prepared Program, one frame-local uncached reference evaluation, or the
 consumer's bounded Effect Execution Session. Effect preparation
 failure is retained as a Clip-local blocker, so an unavailable effect later in
-the timeline does not disable an unrelated Preview region. Transition
+the timeline does not disable an unrelated Preview region. Preview classifies
+a missing bound Float32 custom processor as blocked; a processor error, panic,
+or invalid output length is an execution failure. Neither case publishes the
+staged frame. Transition
 definition identity, Property Bag, and opaque parameters are also captured once
 behind one shared immutable snapshot; repeated interval queries copy only its
 `Arc`, while exact progress and endpoint samples remain frame-local.
@@ -2209,6 +2225,10 @@ validation: AAC/PCM admit the explicit Mono, Stereo, 5.1(side), 5.1(back), and
 7.1 lowerings; MP3 admits only Mono/Stereo. Unsupported named/custom or
 Discrete pairs fail during preset resolution with codec plus Program/target
 layout evidence instead of being reduced to a matching `-ac` count.
+The queue binds one immutable `AudioProcessorResolver` at construction. Normal
+audio output and every audio stem use it when realizing the frozen selected-range
+Program closure. The stem aggregate-resource pass uses the same resolver as
+the subsequent stem renders; an unresolved external processor fails the job.
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip

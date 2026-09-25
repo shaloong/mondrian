@@ -73,6 +73,16 @@ impl PlatformService for SystemPlatformService {
         })
     }
 
+    fn open_folder_dialog(
+        &self,
+        title: &str,
+    ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+        Ok(match configured_file_dialog(title, &[]).pick_folder() {
+            Some(path) => FileDialogOutcome::Selected(path),
+            None => FileDialogOutcome::Cancelled,
+        })
+    }
+
     fn save_file_dialog(
         &self,
         title: &str,

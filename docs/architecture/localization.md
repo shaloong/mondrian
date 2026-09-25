@@ -1,0 +1,151 @@
+# Product localization
+
+## Implementation status
+
+The App UI now has a machine-local locale preference, a General settings
+dropdown, and an immutable Fluent formatter for `zh-CN`, `en-US`, and a pseudo
+locale. The preference is stored in `app_ui_preferences.json`; switching it
+reprojects the dialog model without changing Project authoring state. System
+resolution supports English language tags and otherwise falls back to Chinese.
+The initial catalogs cover the language selector, notification copy, the
+complete application menu bar, Startup screen chrome, Asset Browser chrome/cards/menus, and the Effect Browser's built-in effect names,
+categories, title, search hint, and empty state. Menu rows carry stable message IDs; locale
+changes update retained dropdown widgets, including nested rows, without
+discarding their open submenu or focus state, and remeasure trigger hit regions.
+The Graphics menu's OpenFX installation entry and its native bundle picker
+also use stable message IDs. Plugin-supplied names remain untranslated data.
+Effect Browser projection uses definition keys for built-in messages and stable
+category path IDs for tree state and action payloads. Locale changes rebuild
+only displayed labels, then restore the retained panel state by stable IDs.
+Categories use a semantic order independent of translated spelling; effects
+within each category sort by their displayed name. Third-party effect names
+fall back to their declared display name until plugin catalogs are supported.
+Asset Browser construction formats labels while reading the library snapshot;
+the folder name, Asset ID, folder ID, drag payload, and action payload stay
+canonical. Context menus are captured in the same locale snapshot so a
+language switch rebuilds their labels together with cards and breadcrumbs.
+Viewer chrome is projected from the same locale snapshot, including status,
+frame count, Fit zoom, empty state, and color rejection diagnostics. The window
+retains its `Localizer` for playback-frame updates so realtime status refreshes
+do not parse catalogs on every frame. Timecode and diagnostic codes retain
+their stable representations. Free-form Preview failure details currently remain
+raw diagnostic evidence and need typed message codes before full English UI
+coverage can be claimed.
+The Startup screen resolves the saved machine-local locale at launch and
+reprojects its heading, actions, and section labels when the preference
+changes. Recent project names and paths remain user-authored data.
+The New Project dialog uses the same locale snapshot at either startup or
+workspace entry. Its labels, resolution presets, proxy/cache choices, and
+Custom OCIO file selection copy are formatted at the UI boundary; field edits
+continue to modify the same draft settings regardless of locale. A new draft
+uses the current language for its editable default name and empty-name
+fallback; the chosen name is then persisted as ordinary project author data.
+The Project Color Engine dialog uses the same UI locale and shared color-engine
+menu IDs as New Project. It formats engine package, working-space, output
+binding, and SHA-256 details through Fluent arguments while preserving the
+draft engine and exact compatibility checks.
+The Sequence Settings dialog now formats chrome, editable enum choices,
+preview scale, and the owning Project color-engine label in the selected
+locale. Technical frame rates, color-space names, and codec names keep their
+standard notation. The active draft is unchanged when labels are projected;
+validation retains the modal and shows a localized empty-name error. Other
+sequence validation diagnostics still need typed localization instead of raw
+backend error text.
+The unsaved-project close/quit confirmation also projects action-specific body
+copy and save buttons from the machine-local locale. Its save, discard, cancel,
+Enter, and Escape actions keep the same typed dispatch independent of locale.
+Startup recovery rows and confirmation dialogs project the same immutable
+recovery candidate in the selected locale. Relative age, snapshot count, source
+and target paths, and target revision state are presentation only; confirmation
+passes the unchanged candidate to recovery admission. A newer target revision
+has its own warning copy. Locale changes reproject visible rows without changing
+candidate identity. These dialogs require an explicit locale at construction;
+the alpha UI does not retain duplicate default-language constructors.
+Recent project rows retain file modification time and size as raw metadata;
+the startup panel formats relative age and unavailable-file status at paint time
+in the active locale. Switching locales never changes the recent project path.
+Native project, media, plugin, package, export, ancillary, and display-profile
+file dialogs receive the machine-local UI locale explicitly. Their titles,
+suggested untitled names, and extension-filter labels come from Fluent; only
+the visible text changes, while accepted extensions, cancellation, and emitted
+typed actions stay identical.
+Dock tab labels use the same locale snapshot and existing panel message IDs.
+Audio Processor Rack and Mixer projection now use the same locale snapshot for
+built-in names, parameter labels, route ports, ownership, empty state, and lock
+copy. Installed plugin names remain plugin-supplied text; Route and Rack action
+identities are unchanged when the locale switches.
+The Inspector's video Clip blend-mode row formats its label and every canonical
+mode option through Fluent. Inspector projection requires a concrete locale;
+callers without a machine preference resolve the Chinese product default at
+the panel-model boundary. The UI model retains typed `BlendMode` values for
+actions and checked state, so changing language cannot change the authored
+mode or menu grouping.
+The underlying `PanelKind` remains stable across language changes, so saved
+layouts, active tabs, and drag targets never depend on translated text.
+The About dialog projects system-information labels and the copied diagnostic
+text from the selected UI locale at opening time. Its version, OS, renderer,
+and GPU facts remain raw system evidence; the modal has no default-language
+constructor in the alpha UI.
+Other product surfaces still contain literal Chinese and must migrate before
+English can be advertised as a complete product language.
+
+The application owns one machine-local UI locale. The Project, Timeline,
+Effects, Audio, Export, and plugin authoring contracts persist stable IDs,
+numeric values, exact time, and resource references; they never persist a
+translated label. A Project reopened under another UI locale must retain the
+same execution and cache identities.
+
+## Resource format and API
+
+Use Fluent (`.ftl`) resources for product copy, with `zh-CN` as the initial
+complete fallback and `en-US` as the first additional catalog. Fluent supports
+plain labels, named arguments, plural/select variants, reusable terms, and
+locale-specific grammar without adding application-side branches for each
+language. Keep one small App-owned `Localizer` interface: `text(message_id)`
+and `format(message_id, named_arguments)`. Panels receive a locale snapshot
+from the UI model. Widgets receive already-formatted text; neither domain
+modules nor widgets query a process-global locale.
+
+Stable `ParameterSchema::message_id` and `ParameterEnumOption::message_id`
+already identify definition-owned labels. Built-in definitions and plugin
+manifests provide translation catalogs keyed by these IDs. Missing plugin
+translations fall back to the plugin's declared default display name and emit
+a diagnostic; they do not change the parameter's stable key or execution.
+
+## Locale and formatting boundaries
+
+- Persist the chosen UI locale in machine-local `AppUiPreferences`, separate
+  from Project data and media language metadata. Resolve system preference once
+  when no explicit choice exists; switching locales rebuilds projected labels
+  without mutating author state.
+- Format numbers, dates, and counts at the App UI boundary. Timeline timecode,
+  exact rationals, file paths, codecs, IDs, and diagnostic codes retain their
+  canonical meaning. Error UI maps typed codes plus named details to messages;
+  logs retain stable codes and raw evidence.
+- Use fallback order `requested locale -> zh-CN -> stable message ID` and report
+  missing or invalid resources in development and CI. Product release requires
+  complete `zh-CN` and `en-US` catalogs for the supported surface.
+- The self-hosted text and layout path must verify glyph coverage, CJK/Latin
+  fallback fonts, IME, truncation, expansion, keyboard access, and screen-reader
+  labels. Add a pseudo locale that expands text and marks boundaries. A future
+  RTL locale requires bidirectional text, mirroring, and cursor tests before it
+  can be advertised; catalog support alone is insufficient.
+
+## Rollout
+
+Start with shared shell, menus, dialogs, Inspector enum labels, notifications,
+and errors. Migrate one panel at a time. A catalog audit checks duplicate IDs,
+argument names, fallback coverage, and remaining literal user-facing strings.
+The Interpret Footage modal is now one complete localized slice: controls,
+auto-detection, RAW options, and evidence diagnostics use the same locale
+snapshot and Fluent catalogs. Its draft and Product Action stay locale-free.
+Inspector audio Component mapping follows the same boundary: the model's
+diagnostics and the widget's policy controls share the panel locale, while
+channel layout identities and edit addresses remain typed author data.
+Avoid a custom string dictionary or `format!` templates for translatable copy:
+neither handles plural and grammar variants without later changing every call
+site.
+
+References: [Project Fluent](https://projectfluent.org/),
+[Fluent selectors](https://projectfluent.org/fluent/guide/selectors.html), and
+[the Rust Fluent bundle](https://docs.rs/fluent/latest/fluent/).

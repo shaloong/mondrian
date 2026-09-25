@@ -318,6 +318,11 @@ holding the relevant cache/permit lock, immediately before spawn, and
 immediately after spawn so no reader or child can escape a racing shutdown
 signal.
 
+The supervised-shutdown test holds a pump thread closed, waits within the
+native cleanup deadline for the permit to retire, then releases and joins the
+pump before asserting the ordering. This avoids a fixed 50 ms scheduler window
+under parallel test load.
+
 An execution owner that must prove phase isolation first obtains unique
 `AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
 through `shutdown_until` using the App's shared absolute deadline. The
@@ -730,6 +735,14 @@ during the normal background-task tick, publishes
 once per completed batch. UI panels must not call `probe_media_info` or commit
 Asset candidates directly from action handling, drag/drop, or paint/layout
 code.
+
+An external Timeline drop admits one deferred file through the same bounded
+probe lanes. Deferred results carry the immutable candidate back to `AppState`
+without committing it in the import service. The App repeats current Track
+and source validation, then coordinates the Asset Library transaction with a
+prepared authoring edit. Its terminal counters are finalized only after that
+coupled placement succeeds or fails. A canceled or superseded probe never
+crosses the Library commit seam.
 
 Prepared import results cross an additional publication gate before SQLite
 mutation. That gate serializes the irreversible commit with Project-generation

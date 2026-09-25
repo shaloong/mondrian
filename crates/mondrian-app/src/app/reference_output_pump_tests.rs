@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mondrian_app::app::endurance_reference_output::PersistentReferenceOutputPump;
-use mondrian_app::app::{AppReferenceOutputTeardownStatus, AppState};
+use crate::app::endurance_reference_output::PersistentReferenceOutputPump;
+use crate::app::{AppReferenceOutputTeardownStatus, AppState};
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
 use mondrian_reference_output::{
     ReferenceOutputAncillaryPolicy, ReferenceOutputMode, ReferenceOutputOpenRequest,

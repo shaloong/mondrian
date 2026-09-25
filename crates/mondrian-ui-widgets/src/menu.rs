@@ -51,7 +51,6 @@ use geometry::{
 /// keyboard navigation skips disabled items and separators.
 pub struct Dropdown {
     id: WidgetId,
-    #[allow(dead_code)]
     label: String,
     items: Vec<MenuItem>,
     bounds: Rect,
@@ -127,18 +126,45 @@ impl Dropdown {
         &self.items
     }
 
+    /// Current trigger label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Update only the trigger label while retaining the open menu, submenu,
+    /// keyboard focus, and pointer state. The parent must lay out the widget
+    /// again if the new label changes its measured width.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
     /// Replace presentation data without replacing this Widget's interaction identity.
     ///
     /// Trigger hover, focus, open state, bounds, and pointer-capture identity remain
     /// stable. Row-local press and submenu paths are cleared because their indices
     /// may no longer identify the same command in the replacement model.
     pub fn set_model(&mut self, label: impl Into<String>, items: Vec<MenuItem>) {
-        self.label = label.into();
+        self.set_label(label);
         self.items = items;
         self.pressed_index = None;
         self.submenu_chain.clear();
         self.hover_depth = None;
         self.clamp_scroll_offset();
+    }
+
+    /// Reformat keyed row labels without changing open, focus, or submenu state.
+    pub fn localize_item_labels(&mut self, mut translate: impl FnMut(&str) -> String) {
+        fn visit(items: &mut [MenuItem], translate: &mut impl FnMut(&str) -> String) {
+            for item in items {
+                if let Some(message_id) = &item.message_id {
+                    item.label = translate(message_id);
+                }
+                if let MenuItemKind::Submenu { children } = &mut item.kind {
+                    visit(children, translate);
+                }
+            }
+        }
+        visit(&mut self.items, &mut translate);
     }
 
     /// Select the visual style for the closed trigger.
@@ -770,6 +796,34 @@ mod tests {
     use mondrian_ui_core::widget::{DrawCommandEncoder, EventRequests, PointerCaptureRequest};
     use std::cell::RefCell;
 
+    #[test]
+    fn localizing_keyed_rows_keeps_open_submenu_and_focus() {
+        let mut menu = Dropdown::new(
+            "文件",
+            vec![MenuItem::submenu(
+                "导入",
+                vec![MenuItem::inert("文件夹...").with_message_id("folder")],
+            )
+            .with_message_id("import")],
+        );
+        menu.open = true;
+        menu.focused = true;
+        menu.submenu_chain.push(0);
+        menu.localize_item_labels(|id| match id {
+            "import" => "Import".to_owned(),
+            "folder" => "Folder...".to_owned(),
+            _ => panic!("unexpected message id"),
+        });
+        assert!(menu.open);
+        assert!(menu.focused);
+        assert_eq!(menu.submenu_chain, [0]);
+        assert_eq!(menu.items[0].label, "Import");
+        let MenuItemKind::Submenu { children } = &menu.items[0].kind else {
+            panic!("expected submenu");
+        };
+        assert_eq!(children[0].label, "Folder...");
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct SoftShadowCommand {
         bounds: Rect,
@@ -1008,6 +1062,32 @@ mod tests {
         assert_eq!(dropdown.id(), id);
         assert!(dropdown.trigger_hovered);
         assert_eq!(dropdown.items().len(), 2);
+    }
+
+    #[test]
+    fn changing_only_dropdown_label_keeps_active_menu_interaction() {
+        let mut dropdown = Dropdown::new(
+            "文件",
+            vec![MenuItem::submenu(
+                "导入",
+                vec![MenuItem::new("媒体", Action::SaveProject)],
+            )],
+        );
+        dropdown.open = true;
+        dropdown.focused = true;
+        dropdown.submenu_chain = vec![0];
+        dropdown.hover_depth = Some((1, 0));
+        let identity = dropdown.id();
+
+        dropdown.set_label("File");
+
+        assert_eq!(dropdown.label, "File");
+        assert_eq!(dropdown.id(), identity);
+        assert!(dropdown.is_open());
+        assert!(dropdown.focused);
+        assert_eq!(dropdown.submenu_chain, vec![0]);
+        assert_eq!(dropdown.hover_depth, Some((1, 0)));
+        assert_eq!(dropdown.items().len(), 1);
     }
 
     #[test]

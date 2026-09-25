@@ -1,4 +1,4 @@
-use mondrian_app::app::AppState;
+use crate::app::AppState;
 use mondrian_core::{AuthoringList, Rational, TimelineTime};
 use mondrian_interchange::{
     inspect_import, prepare_export, InterchangeAssetSnapshot, InterchangeExportRequest,

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mondrian_app::app::{AppReferenceOutputError, AppReferenceOutputTeardownStatus, AppState};
-use mondrian_app::app_ui::preferences_store::{
+use crate::app::{AppReferenceOutputError, AppReferenceOutputTeardownStatus, AppState};
+use crate::app_ui::preferences_store::{
     load_app_ui_preferences_from, persist_app_ui_preferences_to, AppUiPreferences,
 };
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};

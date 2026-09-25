@@ -1,6 +1,6 @@
 //! 效果节点抽象
 
-use crate::execution::CustomEffectRenderProcessor;
+use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::{Lut3D, LutPreparationCache};
 use crate::mask::MaskComponent;
@@ -20,7 +20,7 @@ use mondrian_core::{
         ParameterResourceReference, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyValue,
     },
     types::{Color, ColorSpace, EffectId, WorkingColorSpace},
-    ParameterId, TimelineTime,
+    FrameRounding, ParameterId, Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange,
 };
 // Re-export effect data types from mondrian-core.
 pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
@@ -41,11 +41,92 @@ use std::{
     },
 };
 
+/// Exact sequence facts needed by effects that execute in a frame-based ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectFrameContext {
+    frame_rate: Rational,
+    pixel_aspect_ratio: SampleAspectRatio,
+    available_range: TimelineTimeRange,
+}
+
+/// An owner range cannot be represented as a frame-based effect contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectFrameContextError {
+    /// The sequence frame rate must be positive.
+    #[error("effect frame rate must be positive")]
+    InvalidFrameRate,
+    /// The effect owner needs a nonempty available interval.
+    #[error("effect frame range is empty")]
+    EmptyRange,
+    /// Exact interval conversion failed.
+    #[error("effect frame range cannot be mapped to its sequence grid: {0}")]
+    Time(#[from] mondrian_core::TimelineTimeError),
+}
+
+impl EffectFrameContext {
+    /// Bind one exact half-open owner range to a validated sequence grid.
+    pub fn new(
+        frame_rate: Rational,
+        pixel_aspect_ratio: SampleAspectRatio,
+        available_range: TimelineTimeRange,
+    ) -> Result<Self, EffectFrameContextError> {
+        if frame_rate.num <= 0 || frame_rate.den <= 0 {
+            return Err(EffectFrameContextError::InvalidFrameRate);
+        }
+        if available_range.is_empty() {
+            return Err(EffectFrameContextError::EmptyRange);
+        }
+        let value = Self { frame_rate, pixel_aspect_ratio, available_range };
+        value.available_frames()?;
+        Ok(value)
+    }
+
+    /// Sequence frame rate as an exact rational.
+    pub const fn frame_rate(self) -> Rational {
+        self.frame_rate
+    }
+
+    /// Exact width-to-height ratio of a sample.
+    pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
+        self.pixel_aspect_ratio
+    }
+
+    /// Half-open availability interval in the effect owner's time domain.
+    pub const fn available_range(self) -> TimelineTimeRange {
+        self.available_range
+    }
+
+    /// Inclusive frame coordinates covering the entire half-open owner interval.
+    /// The first frame may begin before the interval when the owner starts between frames.
+    pub fn available_frames(self) -> Result<(i64, i64), EffectFrameContextError> {
+        let first = self
+            .available_range
+            .start
+            .to_frame_position(self.frame_rate, FrameRounding::Floor)?
+            .frame;
+        let last = self
+            .available_range
+            .end()?
+            .to_frame_position(self.frame_rate, FrameRounding::Ceil)?
+            .frame
+            .checked_sub(1)
+            .ok_or(mondrian_core::TimelineTimeError::Overflow)?;
+        Ok((first, last))
+    }
+
+    /// Lower an exact owner time to the OpenFX-style double frame coordinate.
+    pub fn frame_coordinate(self, time: TimelineTime) -> f64 {
+        time.to_f64() * self.frame_rate.to_f64()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EffectEvalContext {
     pub time: TimelineTime,
     /// Sequence working identity used by scene-linear effect algorithms.
     pub working_color_space: WorkingColorSpace,
+    /// Explicit frame-grid facts; absent only for standalone effect evaluation.
+    pub frame_context: Option<EffectFrameContext>,
 }
 
 /// Recovery owner for one unresolved effect resource.
@@ -569,9 +650,17 @@ pub enum EffectRenderOp {
     ColorCurves {
         curves: Arc<crate::PreparedColorCurves>,
     },
+    /// Unclamped scene-linear RGB hue, saturation, and lightness adjustment.
+    HueSaturationLightness {
+        grade: crate::HslGrade,
+    },
     /// Scene-linear working RGB to refined AlphaMask qualification.
     Qualifier {
         qualifier: Arc<crate::PreparedQualifier>,
+    },
+    /// Scene-linear RGB chromaticity selection into an AlphaMask.
+    ChromaKey {
+        keyer: crate::PreparedChromaKey,
     },
     /// AlphaMask to opaque black/white working-RGB observation transform.
     MattePreview {
@@ -676,10 +765,16 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::ColorCurves { curves } => {
                 formatter.debug_struct("ColorCurves").field("curves", curves).finish()
             }
+            Self::HueSaturationLightness { grade } => {
+                formatter.debug_struct("HueSaturationLightness").field("grade", grade).finish()
+            }
             Self::Qualifier { qualifier } => formatter
                 .debug_struct("Qualifier")
                 .field("semantic_fingerprint", qualifier.semantic_fingerprint())
                 .finish(),
+            Self::ChromaKey { keyer } => {
+                formatter.debug_struct("ChromaKey").field("keyer", keyer).finish()
+            }
             Self::MattePreview { invert } => {
                 formatter.debug_struct("MattePreview").field("invert", invert).finish()
             }
@@ -736,9 +831,17 @@ impl std::fmt::Debug for EffectRenderOp {
 #[derive(Clone)]
 pub struct CustomEffectProcessorBinding {
     revision: u64,
-    processor: CustomEffectRenderProcessor,
+    processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
 }
+
+#[derive(Clone)]
+enum CustomEffectProcessor {
+    Rgba8(CustomEffectRenderProcessor),
+    Float32(CustomEffectFloatRenderProcessor),
+}
+
+static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct CustomEffectRuntimeOwner {
@@ -749,10 +852,17 @@ struct CustomEffectRuntimeOwner {
 
 impl CustomEffectProcessorBinding {
     pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
-        static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
         Self {
-            revision: NEXT_REVISION.fetch_add(1, Ordering::AcqRel),
-            processor,
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Rgba8(processor),
+            runtime_owner: None,
+        }
+    }
+
+    pub(crate) fn new_f32(processor: CustomEffectFloatRenderProcessor) -> Self {
+        Self {
+            revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+            processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
         }
     }
@@ -762,8 +872,25 @@ impl CustomEffectProcessorBinding {
         self.revision
     }
 
-    pub(crate) fn processor(&self) -> &CustomEffectRenderProcessor {
-        &self.processor
+    pub(crate) fn rgba8_processor(&self) -> Option<&CustomEffectRenderProcessor> {
+        match &self.processor {
+            CustomEffectProcessor::Rgba8(processor) => Some(processor),
+            CustomEffectProcessor::Float32(_) => None,
+        }
+    }
+
+    pub(crate) fn float32_processor(&self) -> Option<&CustomEffectFloatRenderProcessor> {
+        match &self.processor {
+            CustomEffectProcessor::Rgba8(_) => None,
+            CustomEffectProcessor::Float32(processor) => Some(processor),
+        }
+    }
+
+    pub(crate) fn execution_modes(&self) -> crate::EffectExecutionModes {
+        match self.processor {
+            CustomEffectProcessor::Rgba8(_) => crate::EffectExecutionModes::CPU_U8,
+            CustomEffectProcessor::Float32(_) => crate::EffectExecutionModes::CPU_F32,
+        }
     }
 
     pub(crate) fn with_runtime_owner(
@@ -774,7 +901,7 @@ impl CustomEffectProcessorBinding {
     ) -> Self {
         Self {
             revision: self.revision,
-            processor: Arc::clone(&self.processor),
+            processor: self.processor.clone(),
             runtime_owner: contract.cloned().map(|contract| CustomEffectRuntimeOwner {
                 effect_key: effect_key.to_owned(),
                 definition_registry_revision,
@@ -903,9 +1030,21 @@ impl EffectRenderOp {
                 13u8.hash(state);
                 curves.semantic_fingerprint().hash(state);
             }
+            EffectRenderOp::HueSaturationLightness { grade } => {
+                19u8.hash(state);
+                for value in grade.controls() {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Qualifier { qualifier } => {
                 14u8.hash(state);
                 qualifier.semantic_fingerprint().hash(state);
+            }
+            EffectRenderOp::ChromaKey { keyer } => {
+                20u8.hash(state);
+                for value in keyer.controls() {
+                    value.to_bits().hash(state);
+                }
             }
             EffectRenderOp::MattePreview { invert } => {
                 15u8.hash(state);
@@ -991,9 +1130,11 @@ impl EffectRenderOp {
             | EffectRenderOp::HighlightRecovery { .. } => 1,
             EffectRenderOp::HdrGrading { .. } => 2,
             EffectRenderOp::ColorCurves { .. } => 3,
+            EffectRenderOp::HueSaturationLightness { .. } => 2,
             EffectRenderOp::Qualifier { qualifier } => {
                 4 + qualifier.denoise_radius() + qualifier.input_halo()
             }
+            EffectRenderOp::ChromaKey { .. } => 2,
             EffectRenderOp::MattePreview { .. } => 1,
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
@@ -1187,25 +1328,51 @@ impl EffectDefinition {
     }
 
     pub fn with_custom_render_backend(
-        mut self,
+        self,
         params_builder: EffectRenderParamsBuilder,
         cache_key_builder: Option<EffectCacheKeyBuilder>,
         cache_policy: EffectCachePolicy,
         processor: CustomEffectRenderProcessor,
     ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding::new(processor),
+        )
+    }
+
+    /// Bind a Float32 processor to the same compiled graph used by preview and export.
+    pub fn with_custom_float_render_backend(
+        self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        processor: CustomEffectFloatRenderProcessor,
+    ) -> Self {
+        self.with_custom_processor_binding(
+            params_builder,
+            cache_key_builder,
+            cache_policy,
+            CustomEffectProcessorBinding::new_f32(processor),
+        )
+    }
+
+    fn with_custom_processor_binding(
+        mut self,
+        params_builder: EffectRenderParamsBuilder,
+        cache_key_builder: Option<EffectCacheKeyBuilder>,
+        cache_policy: EffectCachePolicy,
+        processor: CustomEffectProcessorBinding,
+    ) -> Self {
         let effect_key = self.key.clone();
-        let processor = CustomEffectProcessorBinding::new(processor);
-        let params_builder_for_graph = Arc::clone(&params_builder);
-        let effect_key_for_graph = effect_key.clone();
-        let cache_key_builder_for_graph = cache_key_builder.clone();
         self.evaluator_factory = Some(EffectEvaluatorFactory::Frame(Arc::new(
             move |effect, context, graph| {
-                if let Some(params) = params_builder_for_graph(effect, context)? {
-                    let cache_key = cache_key_builder_for_graph
-                        .as_ref()
-                        .and_then(|builder| builder(effect, context));
+                if let Some(params) = params_builder(effect, context)? {
+                    let cache_key =
+                        cache_key_builder.as_ref().and_then(|builder| builder(effect, context));
                     graph.append_unary(EffectRenderOp::Custom {
-                        key: effect_key_for_graph.clone(),
+                        key: effect_key.clone(),
                         params,
                         cache_key,
                         cache_policy,
@@ -2206,6 +2373,17 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
                 Some(0.01),
             );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "抠像",
+                "保留键色",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
         }
         EffectType::LumaKey => {
             define_builtin_property(
@@ -2229,6 +2407,17 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.0),
                 Some(1.0),
                 Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "亮度键",
+                "保留暗部",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
             );
         }
         EffectType::Plugin(_) => {}
@@ -2420,31 +2609,8 @@ fn builtin_parameter_id(effect_type: &EffectType, parameter: &str) -> ParameterI
     })
 }
 
-fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
-    match effect_type {
-        EffectType::BasicCorrection
-        | EffectType::WhiteBalance
-        | EffectType::ColorWheel
-        | EffectType::HdrGrading
-        | EffectType::AscCdl
-        | EffectType::Curves
-        | EffectType::GamutCompression
-        | EffectType::HighlightRecovery
-        | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
-        EffectType::Qualifier => vec!["抠像".to_string(), "Qualifier".to_string()],
-        EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
-        EffectType::Crop => vec!["变换".to_string()],
-        EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
-        EffectType::Vignette | EffectType::ChromaticAberration | EffectType::Grain => {
-            vec!["风格化".to_string()]
-        }
-        EffectType::ChromaKey | EffectType::LumaKey => vec!["抠像".to_string()],
-        EffectType::Plugin(_) => vec!["插件".to_string()],
-    }
-}
-
 fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
-    let category = builtin_effect_category(&effect_type);
+    let category = effect_type.category_path().into_iter().map(str::to_owned).collect();
     let definition = EffectDefinition::new(
         effect_type.key(),
         builtin_display_name(&effect_type),
@@ -2456,7 +2622,10 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
     if let Some(graph_preparer) = builtin_graph_preparer_for(&effect_type) {
         definition.with_prepared_graph_builder(graph_preparer)
     } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
-        if matches!(effect_type, EffectType::Qualifier) {
+        if matches!(
+            effect_type,
+            EffectType::Qualifier | EffectType::LumaKey | EffectType::ChromaKey
+        ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
             definition.with_graph_builder(graph_builder)
@@ -2535,11 +2704,26 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
-        EffectType::HueSaturationLightness
-        | EffectType::ChromaKey
-        | EffectType::LumaKey
-        | EffectType::Plugin(_) => EffectExecutionContract {
+        EffectType::LumaKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: 0,
+                vertical_pixels: 0,
+            },
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::ChromaKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::Plugin(_) => EffectExecutionContract {
             execution_modes: EffectExecutionModes::NONE,
+            ..cpu_linear
+        },
+        EffectType::HueSaturationLightness => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
             ..cpu_linear
         },
     }
@@ -2971,7 +3155,8 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                             context.time,
                             0.1,
                         ),
-                        samples: &samples,
+                        samples: (mode == crate::QualifierMode::ThreeDimensional)
+                            .then_some(&samples),
                         three_d_tolerance: effect.evaluate_f32_parameter(
                             &tolerance_id,
                             context.time,
@@ -3034,6 +3219,120 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     graph.add_mask(source, matte, invert, crate::MaskOp::Add)
                 };
                 graph.set_current_output(output);
+                Ok(())
+            }))
+        }
+        EffectType::LumaKey => {
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let threshold = effect.evaluate_f32_parameter(&threshold_id, context.time, 0.5);
+                let softness = effect.evaluate_f32_parameter(&softness_id, context.time, 0.1);
+                let qualifier = crate::PreparedQualifier::new(
+                    crate::QualifierAuthoring {
+                        mode: crate::QualifierMode::Hsl,
+                        hue_center_degrees: 0.0,
+                        hue_width_degrees: 360.0,
+                        hue_softness_degrees: 0.0,
+                        saturation_low: 0.0,
+                        saturation_high: 1.0,
+                        saturation_softness: 0.0,
+                        luminance_low: threshold,
+                        luminance_high: 1.0,
+                        luminance_softness: softness,
+                        samples: None,
+                        three_d_tolerance: 0.0,
+                        three_d_softness: 0.0,
+                        denoise_radius: 0,
+                        blur_radius: 0.0,
+                        clean_black: 0.0,
+                        clean_white: 0.0,
+                    },
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                let invert = matches!(
+                    effect.evaluate_parameter(&invert_id, context.time),
+                    Some(PropertyValue::Bool(true))
+                );
+                let source = graph.current_output();
+                let matte = graph.append_unary_in_domain(
+                    EffectRenderOp::Qualifier { qualifier: Arc::new(qualifier) },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::SceneLinearRgb,
+                        output: EffectColorDomain::AlphaMask,
+                    },
+                );
+                let output = graph.add_mask(source, matte, invert, crate::MaskOp::Add);
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
+        EffectType::ChromaKey => {
+            let color_id = builtin_parameter_id(effect_type, "key_color");
+            let similarity_id = builtin_parameter_id(effect_type, "similarity");
+            let blend_id = builtin_parameter_id(effect_type, "blend");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let Some(PropertyValue::Color(color)) =
+                    effect.evaluate_parameter(&color_id, context.time)
+                else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "Chroma Key requires a color parameter".to_owned(),
+                    });
+                };
+                let keyer = crate::PreparedChromaKey::new(
+                    color,
+                    effect.evaluate_f32_parameter(&similarity_id, context.time, 0.2),
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.1),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                let keep_key_color = matches!(
+                    effect.evaluate_parameter(&invert_id, context.time),
+                    Some(PropertyValue::Bool(true))
+                );
+                let source = graph.current_output();
+                let matte = graph.append_unary_in_domain(
+                    EffectRenderOp::ChromaKey { keyer },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::SceneLinearRgb,
+                        output: EffectColorDomain::AlphaMask,
+                    },
+                );
+                let output = graph.add_mask(source, matte, !keep_key_color, crate::MaskOp::Add);
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
+        EffectType::HueSaturationLightness => {
+            let hue_id = builtin_parameter_id(effect_type, "hue");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
+            let lightness_id = builtin_parameter_id(effect_type, "lightness");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::HslGrade::new(
+                    effect.evaluate_f32_parameter(&hue_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&saturation_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&lightness_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::HueSaturationLightness { grade });
+                }
                 Ok(())
             }))
         }
@@ -3176,6 +3475,36 @@ mod tests {
         TimelineTime::new(frame, 25).expect("valid test time")
     }
 
+    #[test]
+    fn frame_context_covers_subframe_clip_range_without_dropping_it() {
+        let range = TimelineTimeRange::new(
+            TimelineTime::new(1, 100).expect("start"),
+            TimelineTime::new(1, 100).expect("duration"),
+        )
+        .expect("short range");
+        let context = EffectFrameContext::new(Rational::FPS_25, SampleAspectRatio::SQUARE, range)
+            .expect("subframe range remains renderable");
+        assert_eq!(context.available_frames().expect("frame bounds"), (0, 0));
+        assert_eq!(context.frame_coordinate(range.start), 0.25);
+
+        let ntsc = EffectFrameContext::new(
+            Rational::FPS_23976,
+            SampleAspectRatio::new(4, 3).expect("sample aspect"),
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(1001, 24000).expect("one frame"),
+            )
+            .expect("frame range"),
+        )
+        .expect("NTSC context");
+        assert_eq!(ntsc.available_frames().expect("NTSC bounds"), (0, 0));
+        assert_eq!(
+            ntsc.frame_coordinate(ntsc.available_range().end().expect("end")),
+            1.0
+        );
+        assert_eq!(ntsc.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
+    }
+
     fn test_plugin_execution_contract() -> EffectExecutionContract {
         EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_F32,
@@ -3194,6 +3523,48 @@ mod tests {
             execution_modes: crate::EffectExecutionModes::CPU_U8,
             ..test_plugin_execution_contract()
         }
+    }
+
+    #[test]
+    fn authored_float_custom_backend_executes_through_compiled_graph() {
+        let plugin_type = EffectType::Plugin("plugin.test.float.custom_backend".to_owned());
+        register_effect_definition(
+            EffectDefinition::new(
+                plugin_type.key(),
+                "Float Custom",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+                ..test_plugin_execution_contract()
+            })
+            .with_custom_float_render_backend(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({ "gain": 0.25 })))),
+                None,
+                EffectCachePolicy::Deterministic,
+                Arc::new(|pixels, _, _, params, _| {
+                    pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
+                    Ok(())
+                }),
+            ),
+        )
+        .expect("register float custom effect");
+        let effect = EffectNode::with_defaults(plugin_type);
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile float custom effect");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(
+            crate::apply_compiled_effect_graph_rgba_f32(
+                &[[2.0, -0.25, 0.5, 1.0]],
+                1,
+                1,
+                &compiled,
+                0,
+            )
+            .expect("execute float custom effect"),
+            vec![[2.25, -0.25, 0.5, 1.0]]
+        );
     }
 
     #[test]
@@ -3349,6 +3720,9 @@ mod tests {
             EffectType::GamutCompression,
             EffectType::HighlightRecovery,
             EffectType::Qualifier,
+            EffectType::LumaKey,
+            EffectType::HueSaturationLightness,
+            EffectType::ChromaKey,
             EffectType::Crop,
             EffectType::GaussianBlur,
             EffectType::Sharpen,
@@ -3366,14 +3740,135 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(actual, expected);
-        for modeled_only in [
-            EffectType::HueSaturationLightness,
-            EffectType::ChromaKey,
-            EffectType::LumaKey,
-        ] {
-            let definition = effect_definition(&modeled_only).expect("built-in definition");
-            assert!(!definition.supports_visual_evaluation());
+        for effect_type in builtin_effect_types() {
+            assert!(
+                effect_definition(&effect_type)
+                    .expect("built-in definition")
+                    .supports_visual_evaluation(),
+                "{effect_type:?} must have an executable graph"
+            );
         }
+    }
+
+    #[test]
+    fn luma_key_keeps_bright_or_dark_pixels_with_original_alpha() {
+        let mut effect = instantiate_effect_node(EffectType::LumaKey).expect("Luma Key definition");
+        let input = [[0.02, 0.02, 0.02, 0.5], [2.0, 2.0, 2.0, 0.5]];
+        let compiled = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Luma Key");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
+            .expect("execute Luma Key");
+        assert!(output[0][3] <= 1.0e-6);
+        assert!((output[1][3] - 0.5).abs() <= 1.0e-6);
+
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LumaKey.property_path("invert"),
+                value: PropertyValue::Bool(true),
+            })
+            .expect("retain dark pixels");
+        let inverted = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile inverted Luma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &inverted, 0)
+            .expect("execute inverted Luma Key");
+        assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
+        assert!(output[1][3] <= 1.0e-6);
+    }
+
+    #[test]
+    fn chroma_key_removes_bright_and_shadowed_green_without_keying_black() {
+        let mut effect =
+            instantiate_effect_node(EffectType::ChromaKey).expect("Chroma Key definition");
+        let input = [
+            [0.0, 0.1, 0.0, 0.5],
+            [0.0, 2.0, 0.0, 0.5],
+            [2.0, 0.0, 0.0, 0.5],
+            [0.0, 0.0, 0.0, 0.5],
+        ];
+        let compiled = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile Chroma Key");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!(compiled
+            .execution_envelope()
+            .admit_single_frame_backend(
+                crate::EffectProcessingBackend::Gpu,
+                crate::EffectWorkingPrecision::Float32,
+            )
+            .is_err());
+        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &compiled, 0)
+            .expect("execute Chroma Key");
+        assert!(output[0][3] <= 1.0e-6);
+        assert!(output[1][3] <= 1.0e-6);
+        assert!((output[2][3] - 0.5).abs() <= 1.0e-6);
+        assert!((output[3][3] - 0.5).abs() <= 1.0e-6);
+
+        let saved = serde_json::to_vec(&effect).expect("save Chroma Key author state");
+        let reopened: EffectNode = serde_json::from_slice(&saved).expect("reopen Chroma Key");
+        let reopened_graph = compile_clip_effect_graph(&[reopened], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile reopened Chroma Key");
+        assert_eq!(
+            crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &reopened_graph, 0)
+                .expect("execute reopened Chroma Key"),
+            output,
+        );
+
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChromaKey.property_path("invert"),
+                value: PropertyValue::Bool(true),
+            })
+            .expect("keep key color");
+        let inverted = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile inverted Chroma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &inverted, 0)
+            .expect("execute inverted Chroma Key");
+        assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
+        assert!(output[2][3] <= 1.0e-6);
+
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChromaKey.property_path("key_color"),
+                value: PropertyValue::Color(Color::BLACK),
+            })
+            .expect("author black key color");
+        assert!(matches!(
+            compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE),
+            Err(EffectGraphBuildError::InvalidAuthorState { .. })
+        ));
+    }
+
+    #[test]
+    fn authored_hsl_runs_in_float_without_clipping_hdr_or_alpha() {
+        let mut effect =
+            instantiate_effect_node(EffectType::HueSaturationLightness).expect("HSL definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::HueSaturationLightness.property_path("hue"),
+                value: PropertyValue::Float(180.0),
+            })
+            .expect("author HSL hue");
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("compile HSL");
+        assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert!(compiled
+            .execution_envelope()
+            .admit_single_frame_backend(
+                crate::EffectProcessingBackend::Gpu,
+                crate::EffectWorkingPrecision::Float32,
+            )
+            .is_err());
+        assert_eq!(
+            crate::apply_compiled_effect_graph_rgba_f32(
+                &[[2.0, -1.0, -1.0, 0.4]],
+                1,
+                1,
+                &compiled,
+                0,
+            )
+            .expect("execute HSL"),
+            vec![[-1.0, 2.0, 2.0, 0.4]],
+        );
     }
 
     #[test]
@@ -3855,20 +4350,6 @@ mod tests {
                 .expect("finite sharpen halo"),
             }
         );
-    }
-
-    #[test]
-    fn enabled_modeled_only_effect_fails_instead_of_rendering_identity() {
-        let effect = EffectNode::with_defaults(EffectType::HueSaturationLightness);
-
-        let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
-            .expect_err("modeled-only effect must not render as identity");
-
-        assert!(matches!(
-            error,
-            EffectGraphBuildError::EvaluationUnsupported { effect_key, .. }
-                if effect_key == "builtin.hue_saturation_lightness"
-        ));
     }
 
     #[test]

@@ -487,22 +487,23 @@ impl AppState {
         }
         self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
         self.prepare_project_session_close()?;
-        self.finalize_project_close_state();
-        Ok(())
+        self.finalize_project_close_state()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
     /// Remove the already-quiesced Authoring Session and invalidate every
     /// Project-scoped execution Adapter.
     ///
     /// Persistence ownership must be retired before this method is called.
-    pub(super) fn finalize_project_close_state(&mut self) {
-        let _ = self.reference_output.retire();
+    pub(super) fn finalize_project_close_state(&mut self) -> Result<(), AppReferenceOutputError> {
+        let reference_output_retirement = self.reference_output.retire();
         self.audio_idle_warmup.set_dispatch_enabled(false);
         self.audio_idle_warmup.bind_authoring(None);
         self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(None);
         self.media_import.bind_project(None);
         self.media_import_batches.clear();
+        self.pending_timeline_file_drops.clear();
         self.media_asset_mutations.bind_project(None);
         #[cfg(test)]
         mondrian_media::clear_thread_local_preview_decode_session();
@@ -519,6 +520,7 @@ impl AppState {
         self.dragging_asset = None;
         self.clear_status_hint();
         self.project_close_fault = None;
+        reference_output_retirement
     }
 
     pub fn add_video_track(&mut self) -> anyhow::Result<()> {

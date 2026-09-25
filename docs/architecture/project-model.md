@@ -5,6 +5,42 @@ stores editing decisions, project settings, sequence structure, and asset-librar
 metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
 must live outside `.mdp`.
 
+## Portable project package
+
+The `.mdp` writer includes only `manifest.json`, `project.json`, and
+`library/index.db`; external media and LUT files remain external to an ordinary
+save. Explicit `.mdpkg` export captures one Project and Library snapshot,
+deduplicates canonical dependency paths, copies each local file to a bounded
+relative entry, and records exact source spellings, length, and SHA-256 in a
+versioned manifest. The directory is published atomically with create-only
+semantics. Missing resources and unsupported transitive Custom OCIO dependencies
+fail preflight rather than producing a partial package.
+
+Package open verifies every file and the nested `.mdp` before Session handoff,
+then remaps typed LUT/resource references and SQLite file Assets in a private
+Library generation. Asset IDs and valid media/audio probe bindings survive
+rebinding to byte-identical files. The imported Session is unsaved; its first
+ordinary `.mdp` save targets a new sibling and never rewrites the package.
+
+The File menu exposes a destination dialog, background copy progress, and
+cancel. Ordinary `.mdp` Save/Save As keeps external file references; explicit
+`.mdpkg` export always embeds admitted local dependencies. A linked option
+inside the package command would duplicate ordinary save and make a
+supposedly portable artifact depend on its source machine, so the two file
+actions provide the choice directly. The relocated-package test removes the
+original LUT and proves identical Viewer and Export pixels after reopening;
+the real-media relocated-package test deletes the source video, proves bundled
+Preview decode pixel parity, admits an Export snapshot bound to the bundled
+file with its exact video stream and fingerprint, and encodes a valid single
+PNG frame from that file. A physical second-machine run remains release
+qualification.
+Installed third-party plugin binaries and fonts must not be bundled without a
+distributable license. Generated caches remain excluded.
+CLAP processor definitions in `project.json` retain the selected binary's
+SHA-256 revision, but never the installed machine path or the binary itself.
+Preview and Export reject a different revision until the author explicitly
+rebinds that processor; copying the project does not silently substitute sound.
+
 Persistent Timeline render-cache artifacts live in a versioned machine-local
 cache namespace. Project/Sequence authoring persists only enablement and format
 intent; no artifact path, LRU state, checksum, cache hit, or rendered pixel is
@@ -449,6 +485,19 @@ It therefore creates no Sequence/Project History entry: the next Undo/Redo
 targets the preceding Author Transaction and leaves the Library membership
 retired. Reimporting the same canonical concrete path is the current restoration
 operation and preserves the same `AssetId`.
+
+`commit_media_probe_with` keeps a new or refreshed file row inside the same
+SQLite transaction while a dependent operation examines the staged `AssetRecord`.
+An error from that operation rolls back the row entirely, including folder and
+membership changes for a path already present in the Library. The callback
+must not re-enter `AssetLibrary`, because the database lock remains held.
+Timeline placement prepares its Authoring Session edit inside that callback
+and installs it only after SQLite commits. Coupled publication preserves an
+existing Asset's folder when there is no explicit folder target. The Library
+records the highest coupled revision before releasing its database lock;
+`snapshot_database` rejects a persistence request whose author document was
+captured before that revision. Ordinary forward drift from independent Asset
+imports remains allowed.
 
 Single and multi-selection removal share one Library transaction. It
 deduplicates and preflights every requested visible Asset and folder before

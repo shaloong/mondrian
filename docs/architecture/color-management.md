@@ -363,6 +363,11 @@ substitution of another config, approximate LUT, or non-conformant native conver
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
+When creating a Custom OCIO Project, `$OCIO` is a selection input only: the
+constructor resolves it to a canonical regular file and persists that path in
+the pinned identity. Later environment changes cannot retarget the Project,
+and portable packaging can copy the same config and its dependency resources.
+Explicit Custom OCIO file selections also pin a canonical regular file.
 `ColorEngine::output_display_view(target)` is the engine-owned resolution
 boundary. Standard and ACES resolve from their immutable package/preset; Custom
 OCIO resolves only an exact binding saved for that target. Its unqualified
@@ -410,6 +415,10 @@ x. Duplicate, unknown, malformed, or route-unavailable properties fail closed
 during author validation or processor preparation. Missing fields, semantic
 mismatches, config edits, role/view/endpoint changes, and external LUT changes
 fail closed during deserialization or config validation.
+The external-file inventory is produced by the same route and processor-metadata
+walk as the dependency fingerprint. Portable packaging rebinds only the config
+locator while retaining all pinned bytes and validates that each newly resolved
+FileTransform lies inside the verified package.
 
 Dynamic payload values are author semantics but not static OCIO object
 identity. Config validation, CPU processor lookup, GPU shader/layout/pipeline,

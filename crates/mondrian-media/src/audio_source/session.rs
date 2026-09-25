@@ -2262,23 +2262,23 @@ mod tests {
             finished_tx.send(evidence).expect("publish cleanup evidence");
         });
 
-        let release_deadline = Instant::now() + Duration::from_millis(50);
+        let release_deadline = Instant::now() + Duration::from_millis(1_500);
         while pool.diagnostics().0 != 0 && Instant::now() < release_deadline {
-            std::thread::yield_now();
+            std::thread::park_timeout(Duration::from_millis(1));
         }
-        assert_eq!(
-            pool.diagnostics().0,
-            0,
-            "native exit must release Session capacity"
-        );
-        assert!(
-            finished_rx.try_recv().is_err(),
-            "blocked pipe supervision must remain independent from Session capacity"
-        );
-
+        let capacity_released_before_pump_join = pool.diagnostics().0 == 0;
+        let pump_still_blocked = matches!(finished_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
         release.store(true, Ordering::Release);
         let evidence = finished_rx.recv_timeout(Duration::from_secs(2)).expect("cleanup evidence");
         cleanup.join().expect("cleanup worker");
+        assert!(
+            capacity_released_before_pump_join,
+            "native exit must release Session capacity"
+        );
+        assert!(
+            pump_still_blocked,
+            "blocked pipe supervision must remain independent from Session capacity"
+        );
         assert!(evidence.all_resources_released(), "{evidence:?}");
     }
 

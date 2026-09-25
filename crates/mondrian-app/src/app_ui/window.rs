@@ -4234,6 +4234,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::HoveredFile(path) => {
+                        session.last_cursor = current_native_file_point(&session.window, session.last_cursor);
                         let result = session.ui_runtime.route_hovered_file(
                             &session.window,
                             &mut session.router,
@@ -4262,6 +4263,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::DroppedFile(path) => {
+                        session.last_cursor = current_native_file_point(&session.window, session.last_cursor);
                         let ui_path = path.clone();
                         let paths = vec![path];
                         let result = session.ui_runtime.route_dropped_file(
@@ -7799,7 +7801,7 @@ fn validate_display_calibration_proof(
 enum NativeFileDndDiagnostic {
     HoverUnhandled,
     HoverCancelUnhandled,
-    DropImportedAsMedia { file_count: usize },
+    DropIgnoredOutsideTarget { file_count: usize },
     DropIgnoredEmpty,
 }
 
@@ -7817,6 +7819,27 @@ fn native_file_hover_cancelled_diagnostic(result: EventResult) -> Option<NativeF
     (result == EventResult::Ignored).then_some(NativeFileDndDiagnostic::HoverCancelUnhandled)
 }
 
+#[cfg(target_os = "windows")]
+fn current_native_file_point(window: &winit::window::Window, fallback: Point) -> Point {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let Ok(origin) = window.inner_position() else {
+        return fallback;
+    };
+    let mut cursor = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes one POINT to the valid stack address.
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return fallback;
+    }
+    Point::new((cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_native_file_point(_window: &winit::window::Window, fallback: Point) -> Point {
+    fallback
+}
+
 fn native_file_drop_handling(result: EventResult, paths: Vec<PathBuf>) -> NativeFileDropHandling {
     if result == EventResult::Handled {
         return NativeFileDropHandling { action: None, diagnostic: None };
@@ -7831,8 +7854,8 @@ fn native_file_drop_handling(result: EventResult, paths: Vec<PathBuf>) -> Native
 
     let file_count = paths.len();
     NativeFileDropHandling {
-        action: Some(mondrian_editor_state::Action::ImportMedia(paths)),
-        diagnostic: Some(NativeFileDndDiagnostic::DropImportedAsMedia { file_count }),
+        action: None,
+        diagnostic: Some(NativeFileDndDiagnostic::DropIgnoredOutsideTarget { file_count }),
     }
 }
 
@@ -7844,10 +7867,10 @@ fn log_native_file_dnd_diagnostic(diagnostic: NativeFileDndDiagnostic) {
         NativeFileDndDiagnostic::HoverCancelUnhandled => {
             tracing::debug!("app UI native file hover cancellation had no active widget target")
         }
-        NativeFileDndDiagnostic::DropImportedAsMedia { file_count } => {
-            tracing::info!(
+        NativeFileDndDiagnostic::DropIgnoredOutsideTarget { file_count } => {
+            tracing::debug!(
                 file_count,
-                "app UI native file drop fell back to media import"
+                "app UI native file drop missed an accepted target"
             )
         }
         NativeFileDndDiagnostic::DropIgnoredEmpty => {
@@ -9127,7 +9150,6 @@ mod tests {
         ViewerGpuOutputWorkingResidency as AppUiViewerGpuOutputWorkingResidency,
     };
     use mondrian_core::WorkingColorSpace;
-    use mondrian_editor_state::Action;
     use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
     use mondrian_renderer::{
         GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
@@ -11511,17 +11533,19 @@ mod tests {
     }
 
     #[test]
-    fn native_file_drop_ignored_by_widgets_falls_back_to_media_import() {
+    fn native_file_drop_ignored_by_widgets_does_not_import() {
         let paths = vec![
             PathBuf::from("E:/media/a.mov"),
             PathBuf::from("E:/media/b.wav"),
         ];
 
         assert_eq!(
-            native_file_drop_handling(EventResult::Ignored, paths.clone()),
+            native_file_drop_handling(EventResult::Ignored, paths),
             NativeFileDropHandling {
-                action: Some(Action::ImportMedia(paths)),
-                diagnostic: Some(NativeFileDndDiagnostic::DropImportedAsMedia { file_count: 2 }),
+                action: None,
+                diagnostic: Some(NativeFileDndDiagnostic::DropIgnoredOutsideTarget {
+                    file_count: 2
+                }),
             }
         );
     }

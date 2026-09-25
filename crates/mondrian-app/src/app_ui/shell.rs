@@ -4,12 +4,14 @@
 //! module owns the reusable root widget composition above the dock/panel layer.
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
-use mondrian_editor_state::Action;
+use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatus};
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_timeline::Sequence;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_widgets::dock_panel::DockPanel;
@@ -21,7 +23,12 @@ use mondrian_ui_widgets::{
 };
 use std::path::Path;
 
+use crate::app::product_action::{
+    AudioInstallClapLibraryPayload, AudioInstallVst3PluginPayload, AudioProductAction,
+    ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
+};
 use crate::app::ui_actions::{
+    app_shell_export_portable_package_action,
     app_shell_preferences_display_management_changed_action, assets_import_files_action,
     assets_relink_asset_action, assets_set_interpretation_action, export_edit_draft_action,
     project_create_with_settings_action, project_recover_from_autosave_action,
@@ -37,7 +44,10 @@ use crate::app::ui_actions::{
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
     APP_SHELL_CONFIRM_PROJECT_SETTINGS, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
-    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG,
+    APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG, APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG,
+    APP_SHELL_INSTALL_VST3_BINARY_DIALOG, APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG,
     APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
@@ -50,12 +60,16 @@ use crate::app::ui_actions::{
     VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::waveform_service::AudioWaveformSource;
-use crate::app::AppState;
+use crate::app::{AppState, StatusLogEntry};
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
+#[cfg(test)]
+use crate::app_ui::localization::AppUiLocale;
+use crate::app_ui::localization::Localizer;
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
+use crate::app_ui::notifications::NotificationOverlay;
 use crate::app_ui::panels::{
     build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
     AssetThumbnailSource, ScopesPanelModel, ViewerPanelModel, ViewerPreviewSource,
@@ -101,28 +115,67 @@ struct PanelScrollState {
 }
 
 /// File dialog filters for project file commands.
-pub fn project_file_filters() -> Vec<FileFilter> {
+pub fn project_file_filters(localizer: &Localizer) -> Vec<FileFilter> {
     vec![FileFilter::new(
-        "Mondrian 项目",
+        localizer.text("file-filter-project"),
         vec![PROJECT_FILE_EXTENSION],
     )]
 }
 
+/// File dialog filter for the portable package directory destination.
+pub fn portable_package_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-package"),
+        vec!["mdpkg"],
+    )]
+}
+
 /// File dialog filters for media import commands.
-pub fn media_import_filters() -> Vec<FileFilter> {
+pub fn media_import_filters(localizer: &Localizer) -> Vec<FileFilter> {
     vec![
-        FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new(
-            "图片 / Camera RAW",
+            localizer.text("file-filter-video"),
+            vec!["mp4", "mov", "mkv", "webm", "avi"],
+        ),
+        FileFilter::new(
+            localizer.text("file-filter-image"),
             vec!["dng", "dpx", "exr", "png", "jpg", "jpeg", "tif", "tiff"],
         ),
-        FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
+        FileFilter::new(
+            localizer.text("file-filter-audio"),
+            vec!["mp3", "wav", "aac", "flac", "m4a"],
+        ),
     ]
 }
 
+/// Native binary extensions accepted by the CLAP discovery worker.
+pub fn clap_library_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-clap"),
+        vec!["clap", "dll"],
+    )]
+}
+
+/// Native binary extensions accepted by the VST3 discovery worker.
+pub fn vst3_binary_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    let extensions = match std::env::consts::OS {
+        "windows" => vec!["vst3", "dll"],
+        "linux" => vec!["so", "vst3"],
+        "macos" => vec!["dylib", "vst3"],
+        _ => vec!["vst3"],
+    };
+    vec![FileFilter::new(
+        localizer.text("file-filter-vst3"),
+        extensions,
+    )]
+}
+
 /// File dialog filter for monitor calibration profiles.
-pub fn display_icc_profile_filters() -> Vec<FileFilter> {
-    vec![FileFilter::new("ICC 显示配置文件", vec!["icc", "icm"])]
+pub fn display_icc_profile_filters(localizer: &Localizer) -> Vec<FileFilter> {
+    vec![FileFilter::new(
+        localizer.text("file-filter-icc"),
+        vec!["icc", "icm"],
+    )]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,11 +201,42 @@ struct StatusBar {
     id: WidgetId,
     bounds: Rect,
     model: StatusBarModel,
+    history: Vec<StatusLogEntry>,
+    history_open: bool,
+    history_offset: usize,
+    notifications: NotificationOverlay,
 }
 
 impl StatusBar {
     fn set_model(&mut self, model: StatusBarModel) {
         self.model = model;
+    }
+
+    fn sync_history(&mut self, history: &[StatusLogEntry]) {
+        if self.history != history {
+            self.history = history.to_vec();
+            self.history_offset = self.history_offset.min(self.history.len().saturating_sub(8));
+        }
+    }
+
+    fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
+        self.notifications.expire(now)
+    }
+
+    fn next_notification_deadline(&self) -> Option<std::time::Instant> {
+        self.notifications.next_deadline()
+    }
+
+    fn history_rect(&self) -> Rect {
+        let rows = self.history.len().clamp(1, 8);
+        let height = 34.0 + rows as f32 * 26.0;
+        let width = (self.bounds.width - 24.0).clamp(0.0, 520.0);
+        Rect::new(
+            self.bounds.x + 12.0,
+            (self.bounds.y - height - 6.0).max(0.0),
+            width,
+            height,
+        )
     }
 }
 
@@ -169,8 +253,60 @@ impl Widget for StatusBar {
         self.bounds = bounds;
     }
 
-    fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
-        EventResult::Ignored
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.history_open
+            && self.notifications.event(event, self.bounds) == EventResult::Handled
+        {
+            return EventResult::Handled;
+        }
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
+                ctx.focus.request_focus(self.id);
+                self.history_open = !self.history_open;
+                self.history_offset = 0;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none()
+                    && ctx.focus.focused_widget() == Some(self.id) =>
+            {
+                self.history_open = !self.history_open;
+                self.history_offset = 0;
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { position, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, .. } | UiEvent::MouseMove { position, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { .. } if self.history_open => {
+                self.history_open = false;
+                EventResult::Ignored
+            }
+            UiEvent::MouseWheel { position, delta, .. }
+                if self.history_open && self.history_rect().contains(*position) =>
+            {
+                let max_offset = self.history.len().saturating_sub(8);
+                if *delta > 0.0 {
+                    self.history_offset = self.history_offset.saturating_add(1).min(max_offset);
+                } else if *delta < 0.0 {
+                    self.history_offset = self.history_offset.saturating_sub(1);
+                }
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.history_open => {
+                self.history_open = false;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -233,14 +369,72 @@ impl Widget for StatusBar {
             );
         }
         ctx.pop_clip();
+        if self.history_open {
+            let panel = self.history_rect();
+            if panel.width < 48.0 {
+                return;
+            }
+            ctx.encoder.draw_rect(panel, colors.popover, 8.0);
+            ctx.encoder.draw_text(
+                "最近通知",
+                font_size,
+                Point::new(panel.x + 12.0, panel.y + 10.0),
+                colors.popover_foreground,
+            );
+            if self.history.is_empty() {
+                ctx.encoder.draw_text(
+                    "暂无通知",
+                    font_size,
+                    Point::new(panel.x + 12.0, panel.y + 36.0),
+                    colors.muted_foreground,
+                );
+            } else {
+                for (index, entry) in
+                    self.history.iter().rev().skip(self.history_offset).take(8).enumerate()
+                {
+                    let text = elide_text_to_width(&entry.message, font_size, panel.width - 24.0);
+                    ctx.encoder.draw_text(
+                        &text,
+                        font_size,
+                        Point::new(panel.x + 12.0, panel.y + 36.0 + index as f32 * 26.0),
+                        if entry.is_error {
+                            colors.destructive_foreground
+                        } else {
+                            colors.popover_foreground
+                        },
+                    );
+                }
+            }
+        }
+        if !self.history_open {
+            self.notifications.paint(ctx, self.bounds);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+            || self.history_open && self.history_rect().contains(point)
+            || !self.history_open && self.notifications.hit_test(point, self.bounds)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Button)
+                .with_name(format!("最近通知，当前状态：{}", self.model.message))
+                .with_state(AccessibilityState {
+                    focusable: true,
+                    pressed: Some(self.history_open),
+                    ..AccessibilityState::default()
+                }),
+        )
     }
 }
 
-fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
     if text.is_empty() || max_width <= 0.0 {
         return String::new();
     }
@@ -269,7 +463,9 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
     let jobs = state.export_jobs_snapshot();
     let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
-    let (message, is_error, is_busy) = if let Some(job) = active_jobs.first() {
+    let (message, is_error, is_busy) = if let Some((message, true)) = &state.status_hint {
+        (message.clone(), true, false)
+    } else if let Some(job) = active_jobs.first() {
         let message = match &job.status {
             JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
             JobStatus::Running { phase } => match job.progress.detail {
@@ -324,15 +520,18 @@ fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
 }
 
 /// File dialog filter for timeline export output commands.
-pub fn export_output_filters(extension: &str) -> Vec<FileFilter> {
+pub fn export_output_filters(extension: &str, localizer: &Localizer) -> Vec<FileFilter> {
     let extension = normalized_export_extension(extension);
     if extension.is_empty() {
         vec![FileFilter::new(
-            "媒体",
+            localizer.text("file-filter-media"),
             vec!["mp4", "mov", "mkv", "gif", "mxf", "webm"],
         )]
     } else {
-        vec![FileFilter::new("导出", vec![extension])]
+        vec![FileFilter::new(
+            localizer.text("file-filter-export"),
+            vec![extension],
+        )]
     }
 }
 
@@ -340,17 +539,14 @@ fn normalized_export_extension(extension: &str) -> String {
     extension.trim().trim_start_matches('.').trim().to_ascii_lowercase()
 }
 
-/// Resolve an app-shell action into a concrete editor action.
-///
-/// Native file dialogs stay behind [`PlatformService`]. Widgets and menus emit
-/// stable app-shell requests, while the window entrypoint injects platform
-/// capabilities and dispatches only concrete editor actions.
-pub fn resolve_app_shell_action(
+#[cfg(test)]
+fn resolve_app_shell_action(
     action: Action,
     platform: &dyn PlatformService,
     current_project_path: Option<&Path>,
 ) -> Option<Action> {
-    match try_resolve_app_shell_action(action, platform, current_project_path) {
+    let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+    match try_resolve_app_shell_action(action, platform, current_project_path, &localizer) {
         Ok(action) => action,
         Err(err) => {
             tracing::warn!("app-shell action failed: {err}");
@@ -359,11 +555,13 @@ pub fn resolve_app_shell_action(
     }
 }
 
-/// Resolve an app-shell action and report protocol errors.
+/// Resolve a shell request into a concrete editor action using the active formatter.
+/// Native file dialogs stay behind [`PlatformService`].
 pub fn try_resolve_app_shell_action(
     action: Action,
     platform: &dyn PlatformService,
     current_project_path: Option<&Path>,
+    localizer: &Localizer,
 ) -> Result<Option<Action>> {
     match action {
         Action::Custom { namespace, name, .. }
@@ -371,9 +569,12 @@ pub fn try_resolve_app_shell_action(
         {
             let path = platform
                 .save_file_dialog(
-                    "创建 Mondrian 项目",
-                    &format!("未命名.{PROJECT_FILE_EXTENSION}"),
-                    &project_file_filters(),
+                    &localizer.text("file-dialog-create-project"),
+                    &format!(
+                        "{}.{PROJECT_FILE_EXTENSION}",
+                        localizer.text("file-default-untitled")
+                    ),
+                    &project_file_filters(localizer),
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection();
@@ -389,7 +590,10 @@ pub fn try_resolve_app_shell_action(
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_OPEN_PROJECT_DIALOG =>
         {
             let Some(paths) = platform
-                .open_file_dialog("打开 Mondrian 项目", &project_file_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-open-project"),
+                    &project_file_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -420,7 +624,10 @@ pub fn try_resolve_app_shell_action(
                 serde_json::from_value(payload).map_err(|err| app_shell_action_error(&name, err))?
             };
             let Some(paths) = platform
-                .open_file_dialog("导入媒体", &media_import_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-import-media"),
+                    &media_import_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -435,6 +642,72 @@ pub fn try_resolve_app_shell_action(
                 } else {
                     Action::ImportMedia(paths)
                 }
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_INSTALL_CLAP_LIBRARY_DIALOG =>
+        {
+            let selected = platform
+                .open_file_dialog(
+                    &localizer.text("file-dialog-install-clap"),
+                    &clap_library_filters(localizer),
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+                .and_then(|paths| paths.into_iter().next());
+            Ok(selected.map(|path| {
+                ProductAction::Audio(AudioProductAction::InstallClapLibrary(
+                    AudioInstallClapLibraryPayload { path },
+                ))
+                .into_external_action()
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INSTALL_VST3_BINARY_DIALOG =>
+        {
+            let selected = platform
+                .open_file_dialog(
+                    &localizer.text("file-dialog-install-vst3"),
+                    &vst3_binary_filters(localizer),
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+                .and_then(|paths| paths.into_iter().next());
+            Ok(selected.map(|path| {
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path },
+                ))
+                .into_external_action()
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INSTALL_VST3_BUNDLE_DIALOG =>
+        {
+            let selected = platform
+                .open_folder_dialog(&localizer.text("file-dialog-install-vst3-bundle"))
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection();
+            Ok(selected.map(|path| {
+                ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                    AudioInstallVst3PluginPayload { path },
+                ))
+                .into_external_action()
+            }))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_INSTALL_OPENFX_BUNDLE_DIALOG =>
+        {
+            let selected = platform
+                .open_folder_dialog(&localizer.text("file-dialog-install-openfx-bundle"))
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection();
+            Ok(selected.map(|path| {
+                ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload { path },
+                ))
+                .into_external_action()
             }))
         }
         Action::Custom { namespace, name, payload }
@@ -453,7 +726,10 @@ pub fn try_resolve_app_shell_action(
             let payload: AppShellRelinkAssetDialogPayload = serde_json::from_value(payload)
                 .map_err(|err| app_shell_action_error(&name, err))?;
             let Some(paths) = platform
-                .open_file_dialog("重新链接媒体", &media_import_filters())
+                .open_file_dialog(
+                    &localizer.text("file-dialog-relink-media"),
+                    &media_import_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
             else {
@@ -473,12 +749,42 @@ pub fn try_resolve_app_shell_action(
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("未命名.{PROJECT_FILE_EXTENSION}"));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}.{PROJECT_FILE_EXTENSION}",
+                        localizer.text("file-default-untitled")
+                    )
+                });
             Ok(platform
-                .save_file_dialog("另存 Mondrian 项目", &default_name, &project_file_filters())
+                .save_file_dialog(
+                    &localizer.text("file-dialog-save-as-project"),
+                    &default_name,
+                    &project_file_filters(localizer),
+                )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
                 .map(Action::SaveProjectAs))
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_EXPORT_PORTABLE_PACKAGE_DIALOG =>
+        {
+            let stem = current_project_path
+                .and_then(Path::file_stem)
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| localizer.text("file-default-untitled-project"));
+            let default_name = format!("{stem}.mdpkg");
+            Ok(platform
+                .save_file_dialog(
+                    &localizer.text("file-dialog-package-project"),
+                    &default_name,
+                    &portable_package_filters(localizer),
+                )
+                .map_err(|error| native_shell_error(&name, error))?
+                .into_selection()
+                .map(app_shell_export_portable_package_action))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_EXPORT_OUTPUT_DIALOG =>
@@ -490,9 +796,9 @@ pub fn try_resolve_app_shell_action(
                 normalized_export_default_file_name(&payload.default_file_name, &extension);
             Ok(platform
                 .save_file_dialog(
-                    "选择导出输出",
+                    &localizer.text("file-dialog-export-output"),
                     &default_name,
-                    &export_output_filters(&extension),
+                    &export_output_filters(&extension, localizer),
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
@@ -508,9 +814,9 @@ pub fn try_resolve_app_shell_action(
         {
             let Some(paths) = platform
                 .open_file_dialog(
-                    "导入 ANC / 广播字幕",
+                    &localizer.text("file-dialog-import-ancillary"),
                     &[FileFilter::new(
-                        "ANC JSON / SCC V1.0 / 原始 CDP",
+                        localizer.text("file-filter-ancillary"),
                         vec!["json", "mdanc", "scc", "cdp"],
                     )],
                 )
@@ -530,8 +836,11 @@ pub fn try_resolve_app_shell_action(
         {
             let Some(paths) = platform
                 .open_file_dialog(
-                    "导入监管 PSE 配置",
-                    &[FileFilter::new("Regulatory PSE JSON", vec!["json"])],
+                    &localizer.text("file-dialog-import-pse"),
+                    &[FileFilter::new(
+                        localizer.text("file-filter-pse"),
+                        vec!["json"],
+                    )],
                 )
                 .map_err(|error| native_shell_error(&name, error))?
                 .into_selection()
@@ -617,9 +926,9 @@ impl ViewerZoomMode {
         }
     }
 
-    fn label(self) -> String {
+    fn label(self, fit_label: &str) -> String {
         match self {
-            Self::Fit => "适合".to_owned(),
+            Self::Fit => fit_label.to_owned(),
             Self::Fixed(percent) => format!("{percent}%"),
         }
     }
@@ -689,7 +998,7 @@ fn project_sequence_color_contracts(state: &AppState) -> Vec<(WorkingColorSpace,
 }
 
 fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoomMode) {
-    model.zoom_label = mode.label();
+    model.zoom_label = mode.label(&model.fit_label);
     model.zoom_scale = mode.scale();
 }
 
@@ -699,9 +1008,11 @@ pub struct AppUiAppRoot {
     title_bar: TitleBar,
     dock: DockSplitter,
     status_bar: StatusBar,
+    notification_session_id: Option<AuthoringSessionId>,
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
+    localizer: Localizer,
     audio_output_device_catalog: AudioOutputDeviceCatalogState,
     workspace_preset: WorkspacePreset,
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
@@ -755,23 +1066,22 @@ impl AppUiAppRoot {
         waveform_source: Option<AudioWaveformSource>,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
-        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-            state, None, thumbnails, preview,
-        );
+        let locale = preferences.locale_preference.resolve(sys_locale::get_locale().as_deref());
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        let mut models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                state,
+                None,
+                thumbnails,
+                preview,
+                Some(&localizer),
+            );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
         apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
-        let mut root = Self::new_with_preferences(
-            TitleBar::new(
-                window_title_for_app_state(state),
-                MenuBar::for_app_state_with_shortcut_overrides(
-                    state,
-                    &preferences.shortcut_overrides,
-                ),
-            ),
-            models,
+        let mut preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
                 state,
                 preferences.workspace_preset,
@@ -782,11 +1092,26 @@ impl AppUiAppRoot {
                 preferences.viewer_canvas_background,
                 preferences.audio_output_device.clone(),
                 AudioOutputDeviceCatalogState::Loading,
-            ),
+            );
+        preferences_model.set_locale_preference(
+            preferences.locale_preference,
+            sys_locale::get_locale().as_deref(),
+        );
+        let mut menu_bar =
+            MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
+        menu_bar.set_locale(preferences_model.locale);
+        let mut root = Self::new_with_preferences(
+            TitleBar::new(window_title_for_app_state(state), menu_bar),
+            models,
+            preferences_model,
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
             status_bar_model(state),
         );
+        root.status_bar.sync_history(&state.status_log);
+        root.status_bar.notifications =
+            NotificationOverlay::from_existing(&state.notifications, root.preferences_model.locale);
+        root.notification_session_id = state.authoring_session_id();
         root.active_sequence = state.active_sequence().cloned();
         root.project_color_environment = state.project_color_environment().clone();
         root.new_sequence_defaults = state.new_sequence_defaults().clone();
@@ -845,6 +1170,8 @@ impl AppUiAppRoot {
             custom_workspace_layout.as_ref(),
         );
         let audio_output_device_catalog = preferences_model.audio_output_device_catalog.clone();
+        let localizer =
+            Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid");
         let mut root = Self {
             id: WidgetId::new(),
             title_bar,
@@ -853,10 +1180,19 @@ impl AppUiAppRoot {
                 id: WidgetId::new(),
                 bounds: Rect::ZERO,
                 model: status_bar_model,
+                history: Vec::new(),
+                history_open: false,
+                history_offset: 0,
+                notifications: NotificationOverlay::from_existing(
+                    &Default::default(),
+                    preferences_model.locale,
+                ),
             },
+            notification_session_id: None,
             models,
             asset_folder_id: None,
             preferences_model,
+            localizer,
             audio_output_device_catalog,
             workspace_preset,
             custom_workspace_layout,
@@ -945,7 +1281,10 @@ impl AppUiAppRoot {
 
     /// Show the pending-close confirmation modal.
     pub fn show_pending_close_dialog(&mut self, action: PendingCloseDialogAction) {
-        self.modal = Some(ShellModal::pending_close(action));
+        self.modal = Some(ShellModal::pending_close(
+            action,
+            self.preferences_model.locale,
+        ));
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
         }
@@ -1020,10 +1359,13 @@ impl AppUiAppRoot {
     /// Refresh panel contents from the current application state snapshot.
     pub fn refresh_from_app_state(&mut self, state: &AppState) {
         let preferences = AppUiPreferences {
-            version: 1,
+            version: AppUiPreferences::default().version,
             theme_preference: self.preferences_model.theme_preference,
+            locale_preference: self.preferences_model.locale_preference,
             workspace_preset: self.workspace_preset,
             recent_projects: Vec::new(),
+            installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
@@ -1044,9 +1386,15 @@ impl AppUiAppRoot {
     ) -> bool {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
-        let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        self.status_bar.sync_history(&state.status_log);
+        self.sync_notifications(state, self.preferences_model.locale);
+        let mut viewer = ViewerPanelModel::from_app_state_with_preview_and_locale(
+            state,
+            preview,
+            Some(&self.localizer),
+        );
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
-            viewer.retain_presentation_from(&self.models.viewer, state);
+            viewer.retain_presentation_from(&self.models.viewer, state, Some(&self.localizer));
         }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
@@ -1066,7 +1414,9 @@ impl AppUiAppRoot {
     /// Refresh a user transport intent without claiming the retained output is exact.
     pub fn refresh_transport_intent_from_app_state(&mut self, state: &AppState) {
         self.refresh_playback_frame_from_app_state(state, None);
-        self.models.viewer.mark_presentation_pending_after_transport_intent(state);
+        self.models
+            .viewer
+            .mark_presentation_pending_after_transport_intent(state, Some(&self.localizer));
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
     }
 
@@ -1121,21 +1471,31 @@ impl AppUiAppRoot {
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.set_model(status_bar_model(state));
+        self.status_bar.sync_history(&state.status_log);
         self.active_sequence = state.active_sequence().cloned();
         self.project_color_environment = state.project_color_environment().clone();
         self.new_sequence_defaults = state.new_sequence_defaults().clone();
         self.project_sequence_color_contracts = project_sequence_color_contracts(state);
-        let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
-            state,
-            self.asset_folder_id.as_deref(),
-            thumbnails,
-            preview,
-        );
+        let locale = if preferences.locale_preference == self.preferences_model.locale_preference {
+            self.preferences_model.locale
+        } else {
+            preferences.locale_preference.resolve(sys_locale::get_locale().as_deref())
+        };
+        let localizer = Localizer::new(locale).expect("bundled UI catalogs must be valid");
+        let mut models =
+            AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_preview_and_locale(
+                state,
+                self.asset_folder_id.as_deref(),
+                thumbnails,
+                preview,
+                Some(&localizer),
+            );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
         apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
+        self.localizer = localizer;
         self.set_models(models);
         let preferences_model =
             AppUiPreferencesModel::from_app_state_with_shortcut_overrides_and_audio_output(
@@ -1150,13 +1510,52 @@ impl AppUiAppRoot {
                 self.audio_output_device_catalog.clone(),
             );
         let mut preferences_model = preferences_model;
+        if preferences.locale_preference == self.preferences_model.locale_preference {
+            preferences_model.locale_preference = self.preferences_model.locale_preference;
+            preferences_model.locale = self.preferences_model.locale;
+        } else {
+            preferences_model.set_locale_preference(
+                preferences.locale_preference,
+                sys_locale::get_locale().as_deref(),
+            );
+        }
         preferences_model
             .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
+        self.title_bar.menu_bar_mut().set_locale(preferences_model.locale);
+        self.sync_notifications(state, preferences_model.locale);
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
         }
         self.refresh_shell_menu_checked_state();
+    }
+
+    /// Remove expired transient messages without changing authoring state.
+    pub(crate) fn expire_notifications(&mut self, now: std::time::Instant) -> bool {
+        self.status_bar.expire_notifications(now)
+    }
+
+    fn sync_notifications(
+        &mut self,
+        state: &AppState,
+        locale: crate::app_ui::localization::AppUiLocale,
+    ) {
+        if self.notification_session_id != state.authoring_session_id() {
+            self.notification_session_id = state.authoring_session_id();
+            self.status_bar.notifications =
+                NotificationOverlay::from_existing(&state.notifications, locale);
+        } else {
+            self.status_bar.notifications.sync(
+                &state.notifications,
+                locale,
+                std::time::Instant::now(),
+            );
+        }
+    }
+
+    /// Earliest deadline at which a toast must be removed from the surface.
+    pub(crate) fn next_notification_deadline(&self) -> Option<std::time::Instant> {
+        self.status_bar.next_notification_deadline()
     }
 
     /// Publish one device-catalog observation without rebuilding editor panels.
@@ -1398,7 +1797,10 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_NEW_PROJECT_DIALOG =>
             {
-                self.modal = Some(ShellModal::new_project(AppUiNewProjectDraft::default()));
+                self.modal = Some(ShellModal::new_project_with_locale(
+                    AppUiNewProjectDraft::for_locale(self.preferences_model.locale),
+                    self.preferences_model.locale,
+                ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1451,9 +1853,9 @@ impl AppUiAppRoot {
                 }
                 let Some(path) = platform
                     .save_file_dialog(
-                        "创建 Mondrian 项目",
-                        &default_project_file_name(&draft.name),
-                        &project_file_filters(),
+                        &self.localizer.text("file-dialog-create-project"),
+                        &default_project_file_name(&draft.display_name()),
+                        &project_file_filters(&self.localizer),
                     )
                     .map_err(|error| native_shell_error(&name, error))?
                     .into_selection()
@@ -1468,11 +1870,12 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
             {
-                self.modal = Some(ShellModal::project_settings(
+                self.modal = Some(ShellModal::project_settings_with_locale(
                     AppUiProjectSettingsDraft::new(
                         self.project_color_environment.engine().clone(),
                         self.project_sequence_color_contracts.clone(),
                     ),
+                    self.preferences_model.locale,
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
@@ -1514,7 +1917,7 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_ABOUT =>
             {
-                self.modal = Some(ShellModal::about());
+                self.modal = Some(ShellModal::about(self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1534,7 +1937,10 @@ impl AppUiAppRoot {
                     && name == APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE =>
             {
                 let Some(path) = platform
-                    .open_file_dialog("选择显示器 ICC 配置文件", &display_icc_profile_filters())
+                    .open_file_dialog(
+                        &self.localizer.text("file-dialog-select-icc"),
+                        &display_icc_profile_filters(&self.localizer),
+                    )
                     .map_err(|error| native_shell_error(&name, error))?
                     .into_selection()
                     .and_then(|paths| paths.into_iter().next())
@@ -1567,7 +1973,7 @@ impl AppUiAppRoot {
                     payload.auto_interpretation,
                 )
                 .with_input_diagnostics(payload.video_signal, payload.input_pipeline);
-                self.modal = Some(ShellModal::interpret_asset(draft));
+                self.modal = Some(ShellModal::interpret_asset(draft, self.localizer.locale()));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
                 }
@@ -1611,7 +2017,10 @@ impl AppUiAppRoot {
                     )
                 });
                 if let Some(draft) = draft {
-                    self.modal = Some(ShellModal::sequence_settings(draft));
+                    self.modal = Some(ShellModal::sequence_settings_with_locale(
+                        draft,
+                        self.preferences_model.locale,
+                    ));
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                         self.layout(self.bounds);
                     }
@@ -1656,7 +2065,12 @@ impl AppUiAppRoot {
                 else {
                     return Ok(None);
                 };
-                if draft.validate().is_err() {
+                if let Err(error) = draft.validate() {
+                    if let Some(dialog) =
+                        self.modal.as_mut().and_then(ShellModal::as_sequence_settings_mut)
+                    {
+                        dialog.set_validation_error(&error);
+                    }
                     return Ok(None);
                 }
                 self.modal = None;
@@ -1696,7 +2110,12 @@ impl AppUiAppRoot {
                 self.modal = None;
                 Ok(None)
             }
-            action => try_resolve_app_shell_action(action, platform, current_project_path),
+            action => try_resolve_app_shell_action(
+                action,
+                platform,
+                current_project_path,
+                &self.localizer,
+            ),
         }
     }
 
@@ -2149,6 +2568,9 @@ impl Widget for AppUiAppRoot {
         if self.title_bar.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
+        if self.status_bar.event(event, ctx) == EventResult::Handled {
+            return EventResult::Handled;
+        }
         self.dock.event(event, ctx)
     }
 
@@ -2198,16 +2620,20 @@ mod tests {
         app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
         app_shell_confirm_new_project_dialog_action, app_shell_confirm_project_settings_action,
         app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
-        app_shell_import_media_dialog_action, app_shell_import_media_dialog_action_with_target,
-        app_shell_interpret_asset_dialog_action, app_shell_interpret_asset_draft_changed_action,
-        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
-        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
-        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
-        app_shell_project_settings_action, app_shell_project_settings_draft_changed_action,
-        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
-        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-        app_shell_save_project_as_dialog_action, app_shell_select_custom_ocio_config_action,
-        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        app_shell_export_portable_package_dialog_action, app_shell_import_media_dialog_action,
+        app_shell_import_media_dialog_action_with_target,
+        app_shell_install_clap_library_dialog_action,
+        app_shell_install_openfx_bundle_dialog_action, app_shell_install_vst3_binary_dialog_action,
+        app_shell_install_vst3_bundle_dialog_action, app_shell_interpret_asset_dialog_action,
+        app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
+        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
+        app_shell_open_recent_project_action, app_shell_preferences_action,
+        app_shell_preferences_tab_changed_action, app_shell_project_settings_action,
+        app_shell_project_settings_draft_changed_action, app_shell_recover_project_action,
+        app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
+        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
+        app_shell_select_custom_ocio_config_action, app_shell_sequence_settings_action,
+        app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
@@ -2299,8 +2725,11 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakePlatform {
         open_paths: Option<Vec<PathBuf>>,
+        open_folder: Option<PathBuf>,
         save_path: Option<PathBuf>,
         revealed_paths: Mutex<Vec<PathBuf>>,
+        dialog_titles: Mutex<Vec<String>>,
+        dialog_default_names: Mutex<Vec<String>>,
     }
 
     impl PlatformService for FakePlatform {
@@ -2314,21 +2743,38 @@ mod tests {
 
         fn open_file_dialog(
             &self,
-            _title: &str,
+            title: &str,
             _filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<Vec<PathBuf>>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
             Ok(match self.open_paths.clone() {
                 Some(paths) => FileDialogOutcome::Selected(paths),
                 None => FileDialogOutcome::Cancelled,
             })
         }
 
+        fn open_folder_dialog(
+            &self,
+            title: &str,
+        ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            Ok(match self.open_folder.clone() {
+                Some(path) => FileDialogOutcome::Selected(path),
+                None => FileDialogOutcome::Cancelled,
+            })
+        }
+
         fn save_file_dialog(
             &self,
-            _title: &str,
-            _default_name: &str,
+            title: &str,
+            default_name: &str,
             _filters: &[FileFilter],
         ) -> Result<FileDialogOutcome<PathBuf>, FileDialogError> {
+            self.dialog_titles.lock().expect("dialog titles lock").push(title.to_owned());
+            self.dialog_default_names
+                .lock()
+                .expect("dialog default names lock")
+                .push(default_name.to_owned());
             Ok(match self.save_path.clone() {
                 Some(path) => FileDialogOutcome::Selected(path),
                 None => FileDialogOutcome::Cancelled,
@@ -2930,7 +3376,8 @@ mod tests {
 
     #[test]
     fn media_import_filters_cover_video_and_audio_extensions() {
-        let filters = media_import_filters();
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = media_import_filters(&localizer);
 
         assert!(filters.iter().any(
             |filter| filter.name == "视频" && filter.extensions.iter().any(|ext| ext == "mp4")
@@ -2941,8 +3388,44 @@ mod tests {
     }
 
     #[test]
+    fn native_file_dialogs_use_selected_locale_without_changing_cancel_semantics() {
+        let platform = FakePlatform::default();
+        let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");
+        let opened = try_resolve_app_shell_action(
+            app_shell_open_project_dialog_action(),
+            &platform,
+            None,
+            &english,
+        )
+        .expect("English open-project dialog");
+        let packaged = try_resolve_app_shell_action(
+            crate::app::ui_actions::app_shell_export_portable_package_dialog_action(),
+            &platform,
+            None,
+            &english,
+        )
+        .expect("English package dialog");
+        assert_eq!(opened, None);
+        assert_eq!(packaged, None);
+        assert_eq!(
+            platform.dialog_titles.lock().expect("dialog titles lock").as_slice(),
+            &["Open Mondrian project", "Package Mondrian project"]
+        );
+        assert_eq!(
+            platform
+                .dialog_default_names
+                .lock()
+                .expect("dialog default names lock")
+                .as_slice(),
+            &["Untitled Project.mdpkg"]
+        );
+        assert_eq!(project_file_filters(&english)[0].name, "Mondrian project");
+    }
+
+    #[test]
     fn project_file_filters_cover_mondrian_project_extension() {
-        let filters = project_file_filters();
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = project_file_filters(&localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "Mondrian 项目");
@@ -2953,8 +3436,17 @@ mod tests {
     }
 
     #[test]
+    fn portable_package_dialog_uses_distinct_directory_extension() {
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = portable_package_filters(&localizer);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].extensions, vec!["mdpkg"]);
+    }
+
+    #[test]
     fn export_output_filters_normalize_requested_extension() {
-        let filters = export_output_filters(".MP4 ");
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = export_output_filters(".MP4 ", &localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "导出");
@@ -2963,7 +3455,8 @@ mod tests {
 
     #[test]
     fn export_output_filters_fall_back_for_empty_extension() {
-        let filters = export_output_filters(" . ");
+        let localizer = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
+        let filters = export_output_filters(" . ", &localizer);
 
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].name, "媒体");
@@ -3307,7 +3800,9 @@ mod tests {
             .expect("complete Custom OCIO identity");
         assert_eq!(
             identity.source(),
-            &mondrian_core::OcioConfigSource::Path { path: config_path }
+            &mondrian_core::OcioConfigSource::Path {
+                path: config_path.canonicalize().expect("fixture config path"),
+            }
         );
         let output = identity
             .output(mondrian_core::ColorSpace::Rec709)
@@ -3344,7 +3839,7 @@ mod tests {
             dialog.draft().color_environment.engine(),
             &mondrian_core::ColorEngine::mondrian_standard()
         );
-        assert!(dialog.error_text().contains("not found"));
+        assert!(!dialog.error_text().is_empty());
     }
 
     #[test]
@@ -3780,6 +4275,68 @@ mod tests {
     }
 
     #[test]
+    fn invalid_sequence_name_keeps_modal_and_explains_rejection() {
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Scene 01");
+        state.test_set_active_sequence(sequence.id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+
+        root.handle_shell_action(app_shell_sequence_settings_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Name(String::new()),
+            ),
+            &platform,
+            None,
+        );
+        assert_eq!(
+            root.handle_shell_action(
+                app_shell_confirm_sequence_settings_action(),
+                &platform,
+                None,
+            ),
+            None
+        );
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_sequence_settings)
+            .expect("modal remains open");
+        assert_eq!(dialog.error_text(), "序列名称不能为空");
+
+        root.handle_shell_action(
+            app_shell_sequence_settings_draft_changed_action(
+                SequenceSettingsDraftUpdatePayload::Name("Scene 02".to_owned()),
+            ),
+            &platform,
+            None,
+        );
+        assert_eq!(
+            root.modal
+                .as_ref()
+                .and_then(ShellModal::as_sequence_settings)
+                .expect("modal")
+                .error_text(),
+            ""
+        );
+        assert!(root
+            .handle_shell_action(
+                app_shell_confirm_sequence_settings_action(),
+                &platform,
+                None
+            )
+            .is_some());
+        assert!(root.modal.is_none());
+    }
+
+    #[test]
     fn app_root_ignores_sequence_settings_without_active_sequence() {
         let platform = FakePlatform::default();
         let mut root = AppUiAppRoot::from_app_state(&AppState::new());
@@ -3876,6 +4433,71 @@ mod tests {
         assert!(dialog.model().project_status.contains("live.mdp"));
         assert!(dialog.model().sequence_summary.contains("Live"));
         assert_eq!(dialog.model().proxy_mode, "已启用");
+    }
+
+    #[test]
+    fn app_root_refresh_preserves_machine_locale_choice() {
+        let state = AppState::new();
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::EnUs,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        let platform = FakePlatform::default();
+        assert_eq!(
+            root.try_handle_shell_action(app_shell_open_project_dialog_action(), &platform, None)
+                .expect("English project dialog"),
+            None
+        );
+        assert_eq!(
+            platform.dialog_titles.lock().expect("dialog titles lock").as_slice(),
+            &["Open Mondrian project"]
+        );
+        assert_eq!(
+            root.preferences_model.locale,
+            crate::app_ui::localization::AppUiLocale::EnUs
+        );
+        assert_eq!(
+            root.models.effects.filter_placeholder.as_deref(),
+            Some("Search effects")
+        );
+        assert_eq!(root.models.assets.subtitle, "Project library");
+        assert_eq!(root.models.viewer.title, "Viewer");
+        assert_eq!(root.models.viewer.status, "No sequence");
+        assert_eq!(root.models.viewer.fit_label, "Fit");
+        root.refresh_playback_frame_from_app_state(&state, None);
+        assert_eq!(root.models.viewer.status, "No sequence");
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(
+            root.preferences_model.locale_preference,
+            crate::app_ui::localization::AppUiLocalePreference::EnUs
+        );
+        assert_eq!(
+            root.preferences_model.locale,
+            crate::app_ui::localization::AppUiLocale::EnUs
+        );
+        assert!(root.models.effects.items.iter().any(|item| item.title == "Color"));
+        assert_eq!(
+            root.models.assets.filter_placeholder.as_deref(),
+            Some("Search assets")
+        );
+
+        let chinese = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        root.refresh_from_app_state_with_preferences(&state, &chinese);
+        assert_eq!(
+            root.models.effects.filter_placeholder.as_deref(),
+            Some("搜索效果")
+        );
+        assert!(root.models.effects.items.iter().any(|item| item.title == "颜色"));
+        assert_eq!(root.models.assets.subtitle, "项目素材库");
+        assert_eq!(root.models.viewer.title, "预览");
+        assert_eq!(root.models.viewer.status, "没有序列");
+        assert_eq!(root.models.viewer.fit_label, "适合");
     }
 
     #[test]
@@ -4091,6 +4713,115 @@ mod tests {
     }
 
     #[test]
+    fn status_history_opens_scrolls_and_closes_without_blocking_editing() {
+        let mut state = AppState::new();
+        for index in 0..12 {
+            state.set_status_hint(format!("Activity {index}"), index == 11);
+        }
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(root.status_bar.history.len(), 12);
+        let bar_center = root.status_bar.bounds.center();
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseDown {
+                    position: bar_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(root.status_bar.history_open);
+        let history_center = root.status_bar.history_rect().center();
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseWheel {
+                    delta: 1.0,
+                    position: history_center,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(root.status_bar.history_offset, 1);
+        assert_eq!(
+            root.event(
+                &UiEvent::MouseUp {
+                    position: history_center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            root.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(!root.status_bar.history_open);
+    }
+
+    #[test]
+    fn root_projects_only_new_terminal_notifications_and_expires_them() {
+        let mut state = AppState::new();
+        state.notifications.publish(
+            "save:before-root",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        assert!(root.next_notification_deadline().is_none());
+
+        state.notifications.publish(
+            "save:after-root",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        root.refresh_from_app_state(&state);
+        let deadline = root.next_notification_deadline().expect("visible terminal toast");
+        assert!(root.expire_notifications(deadline));
+        assert!(root.next_notification_deadline().is_none());
+    }
+
+    #[test]
+    fn authoring_session_switch_discards_stale_toast() {
+        let mut state = AppState::new();
+        state.test_set_project_path(PathBuf::from("E:/projects/notification-first.mdp"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        state.notifications.publish(
+            "save:first-session",
+            crate::app::notifications::AppNotificationSeverity::Success,
+            crate::app::notifications::AppNotificationMessage::new("notification-save-complete"),
+        );
+        root.refresh_from_app_state(&state);
+        assert!(root.next_notification_deadline().is_some());
+
+        state.test_set_project_path(PathBuf::from("E:/projects/notification-second.mdp"));
+        root.refresh_from_app_state(&state);
+        assert!(root.next_notification_deadline().is_none());
+    }
+
+    #[test]
     fn app_root_refresh_updates_status_bar_paint_model() {
         let mut root = AppUiAppRoot::demo();
         let mut state = AppState::new();
@@ -4225,6 +4956,88 @@ mod tests {
     }
 
     #[test]
+    fn clap_install_picker_cancels_cleanly_and_uses_first_selected_library() {
+        let request = app_shell_install_clap_library_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/gain.clap");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone(), PathBuf::from("E:/plugins/other.clap")]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected library");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(
+                AudioProductAction::InstallClapLibrary(AudioInstallClapLibraryPayload { path })
+            ))
+        );
+    }
+
+    #[test]
+    fn vst3_install_picker_cancels_cleanly_and_uses_first_selected_binary() {
+        let request = app_shell_install_vst3_binary_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/gain.vst3");
+        let platform = FakePlatform {
+            open_paths: Some(vec![path.clone(), PathBuf::from("E:/plugins/other.vst3")]),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected binary");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path }
+            )))
+        );
+    }
+
+    #[test]
+    fn vst3_bundle_picker_cancels_cleanly_and_returns_selected_directory() {
+        let request = app_shell_install_vst3_bundle_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Gain.vst3");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected bundle");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::Audio(AudioProductAction::InstallVst3Plugin(
+                AudioInstallVst3PluginPayload { path }
+            )))
+        );
+    }
+
+    #[test]
+    fn openfx_bundle_picker_cancels_without_installing_and_keeps_selected_directory() {
+        let request = app_shell_install_openfx_bundle_dialog_action();
+        assert!(
+            resolve_app_shell_action(request.clone(), &FakePlatform::default(), None).is_none()
+        );
+        let path = PathBuf::from("E:/plugins/Basic.ofx.bundle");
+        let platform = FakePlatform {
+            open_folder: Some(path.clone()),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(request, &platform, None).expect("selected bundle");
+        assert_eq!(
+            ProductAction::decode_external(&action).expect("decode"),
+            Some(ProductAction::VisualEffect(
+                VisualEffectProductAction::InstallOpenFxBundle(
+                    VisualEffectInstallOpenFxBundlePayload { path },
+                ),
+            ))
+        );
+    }
+
+    #[test]
     fn resolve_app_shell_import_dialog_with_folder_returns_asset_import_action() {
         let paths = vec![
             PathBuf::from("E:/media/a.mov"),
@@ -4291,6 +5104,7 @@ mod tests {
             }),
             &platform,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect("resolve reveal action");
 
@@ -4318,6 +5132,25 @@ mod tests {
         assert_eq!(
             action,
             Some(Action::SaveProjectAs(PathBuf::from("E:/projects/out.mdp")))
+        );
+    }
+
+    #[test]
+    fn resolve_app_shell_package_dialog_returns_export_action() {
+        let platform = FakePlatform {
+            save_path: Some(PathBuf::from("E:/projects/share.mdpkg")),
+            ..FakePlatform::default()
+        };
+        let action = resolve_app_shell_action(
+            app_shell_export_portable_package_dialog_action(),
+            &platform,
+            Some(Path::new("E:/projects/current.mdp")),
+        );
+        assert_eq!(
+            action,
+            Some(app_shell_export_portable_package_action(PathBuf::from(
+                "E:/projects/share.mdpkg"
+            )))
         );
     }
 
@@ -4424,6 +5257,7 @@ mod tests {
             app_shell_open_project_dialog_action(),
             &mondrian_platform::NoopPlatformService,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect_err("unavailable native dialog must remain an actionable failure");
 
@@ -4451,6 +5285,7 @@ mod tests {
             },
             &platform,
             None,
+            &Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog"),
         )
         .expect_err("unknown app-shell command should fail");
 
@@ -4941,7 +5776,11 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
-        let mut root = AppUiAppRoot::from_app_state(&state);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         assert_eq!(root.models.viewer.zoom_label, "适合");
@@ -4964,7 +5803,11 @@ mod tests {
         let mut state = AppState::new();
         state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
-        let mut root = AppUiAppRoot::from_app_state(&state);
+        let preferences = AppUiPreferences {
+            locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
         let resolved = root

@@ -5,13 +5,16 @@
 
 use super::*;
 
-pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
+pub(super) fn audio_mixer_panel(
+    model: &AudioMixerPanelModel,
+    localizer: &Localizer,
+) -> PropertyPanel {
     if let Some(message) = model.empty_message.as_deref().filter(|message| !message.is_empty()) {
         let (title, description) = message
             .split_once('\n')
             .map_or((message, ""), |(title, description)| (title, description));
         let mut panel = PropertyPanel::with_options(
-            "音频混音器",
+            localizer.text("mixer-title"),
             PropertyPanelOptions {
                 label_width: 0.0,
                 control_gap: 0.0,
@@ -29,7 +32,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
     }
 
     let mut panel = PropertyPanel::with_options(
-        "音频混音器",
+        localizer.text("mixer-title"),
         PropertyPanelOptions {
             label_width: 104.0,
             control_gap: 8.0,
@@ -41,27 +44,31 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
     .with_embedded_panel_chrome();
 
     let create_bus = audio_mixer_create_bus_action(model);
-    let create_bus_label = model
-        .next_bus_name
-        .as_deref()
-        .map_or("新建 Bus".to_owned(), |name| format!("新建 {name}"));
-    panel = panel.with_section(PropertySection::new("路由图").with_row(PropertyRow::new(
-        "Bus",
-        Box::new(Button::new(create_bus_label).enabled(create_bus.is_some()).on_click(create_bus)),
-    )));
+    let create_bus_label = model.next_bus_name.as_deref().map_or_else(
+        || localizer.text("mixer-create-bus"),
+        |name| localizer.format_text("mixer-create-named-bus", "name", name),
+    );
+    panel = panel.with_section(
+        PropertySection::new(localizer.text("mixer-routing-graph")).with_row(PropertyRow::new(
+            "Bus",
+            Box::new(
+                Button::new(create_bus_label).enabled(create_bus.is_some()).on_click(create_bus),
+            ),
+        )),
+    );
 
     for channel in &model.channels {
         let kind = match channel.kind {
-            AudioMixerChannelKind::Track => "轨道",
-            AudioMixerChannelKind::Bus => "Bus",
-            AudioMixerChannelKind::ProgramOutput => "节目输出",
+            AudioMixerChannelKind::Track => localizer.text("mixer-track"),
+            AudioMixerChannelKind::Bus => localizer.text("mixer-bus"),
+            AudioMixerChannelKind::ProgramOutput => localizer.text("mixer-program-output"),
         };
         let mut section = PropertySection::new(format!("{kind} · {}", channel.name));
         if let (Some(muted), mondrian_timeline::AudioChannelStripOwner::Track { track_id }) =
             (channel.track_muted, channel.owner)
         {
             section = section.with_row(PropertyRow::new(
-                "静音",
+                localizer.text("mixer-mute"),
                 Box::new(
                     Checkbox::new("M", muted)
                         .on_change(move |value| audio_mixer_set_track_mute_action(track_id, value)),
@@ -72,7 +79,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             (channel.track_soloed, channel.owner)
         {
             section = section.with_row(PropertyRow::new(
-                "独奏",
+                localizer.text("mixer-solo"),
                 Box::new(
                     Checkbox::new("S", soloed)
                         .on_change(move |value| audio_mixer_set_track_solo_action(track_id, value)),
@@ -80,12 +87,12 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             ));
         }
         section = section.with_row(PropertyRow::new(
-            "电平",
-            Box::new(Label::new(audio_mixer_meter_label(channel)).muted()),
+            localizer.text("mixer-level"),
+            Box::new(Label::new(audio_mixer_meter_label(channel, localizer)).muted()),
         ));
         let trim_channel = channel.clone();
         section = section.with_row(PropertyRow::new(
-            "输入增益",
+            localizer.text("mixer-input-trim"),
             numeric_slider_input_control_with_hard_range(
                 channel.input_trim_db as f32,
                 -60.0,
@@ -102,7 +109,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             AudioMixerGainModel::Static { value_db } => {
                 let fader_channel = channel.clone();
                 section = section.with_row(PropertyRow::new(
-                    "推子",
+                    localizer.text("mixer-fader"),
                     numeric_slider_input_control_with_hard_range(
                         value_db as f32,
                         -60.0,
@@ -118,20 +125,23 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             }
             AudioMixerGainModel::Automated { keyframe_count } => {
                 section = section.with_row(PropertyRow::new(
-                    "推子",
-                    Box::new(Label::new(format!("自动化 · {keyframe_count} 个关键帧")).muted()),
+                    localizer.text("mixer-fader"),
+                    Box::new(Label::new(mixer_automation_label(localizer, keyframe_count)).muted()),
                 ));
             }
         }
         if let Some(automation) = &channel.fader_automation {
             section = section.with_row(
-                PropertyRow::new("推子曲线", audio_automation_curve_control(automation))
-                    .with_height(118.0),
+                PropertyRow::new(
+                    localizer.text("mixer-fader-curve"),
+                    audio_automation_curve_control(automation),
+                )
+                .with_height(118.0),
             );
         }
         if let Some(reason) = &channel.edit_disabled_reason {
             section = section.with_row(PropertyRow::new(
-                "只读",
+                localizer.text("mixer-read-only"),
                 Box::new(Label::new(reason.clone()).muted()),
             ));
         }
@@ -142,16 +152,23 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             )
         {
             section = section.with_row(PropertyRow::new(
-                "输入路由",
-                Box::new(Label::new(format!("{} 条", channel.incoming_route_count)).muted()),
+                localizer.text("mixer-incoming-routes"),
+                Box::new(
+                    Label::new(localizer.format_text(
+                        "mixer-route-count",
+                        "count",
+                        &channel.incoming_route_count.to_string(),
+                    ))
+                    .muted(),
+                ),
             ));
         }
         if matches!(channel.kind, AudioMixerChannelKind::Bus) {
             let rename_channel = channel.clone();
             section = section.with_row(PropertyRow::new(
-                "名称",
+                localizer.text("mixer-name"),
                 Box::new(
-                    TextInput::new("Bus 名称")
+                    TextInput::new(localizer.text("mixer-bus-name"))
                         .with_text(&channel.name)
                         .enabled(channel.is_editable)
                         .on_commit(move |name| {
@@ -172,16 +189,23 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 })
                 .collect();
             section = section.with_row(PropertyRow::new(
-                "添加路由",
-                Box::new(Dropdown::new("选择 tap 与目标…", items).with_max_visible_items(12)),
+                localizer.text("mixer-add-route"),
+                Box::new(
+                    Dropdown::new(localizer.text("mixer-choose-route"), items)
+                        .with_max_visible_items(12),
+                ),
             ));
         }
         if let Some(removal) = &channel.bus_removal {
             let action = audio_mixer_remove_bus_action(removal);
             let label = if removal.connected_route_count == 0 {
-                "删除 Bus".to_owned()
+                localizer.text("mixer-remove-bus")
             } else {
-                format!("删除 Bus 与 {} 条路由", removal.connected_route_count)
+                localizer.format_text(
+                    "mixer-remove-bus-routes",
+                    "count",
+                    &removal.connected_route_count.to_string(),
+                )
             };
             section = section.with_row(PropertyRow::new(
                 "Bus",
@@ -189,7 +213,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             ));
             if let Some(reason) = &removal.edit_disabled_reason {
                 section = section.with_row(PropertyRow::new(
-                    "删除受阻",
+                    localizer.text("mixer-remove-blocked"),
                     Box::new(Label::new(reason.clone()).muted()),
                 ));
             }
@@ -202,12 +226,12 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 PropertySection::new(format!("Route · {}", route.destination_label))
                     .with_row(PropertyRow::new(
                         "Tap",
-                        Box::new(Label::new(route.source_port_label).muted()),
+                        Box::new(Label::new(route.source_port_label.clone()).muted()),
                     ))
                     .with_row(PropertyRow::new(
-                        "启用",
+                        localizer.text("mixer-enabled"),
                         Box::new(
-                            Checkbox::new("传递信号", route.enabled)
+                            Checkbox::new(localizer.text("mixer-pass-signal"), route.enabled)
                                 .enabled(route.is_editable)
                                 .on_change(move |enabled| {
                                     audio_mixer_set_route_enabled_action(&enabled_route, enabled)
@@ -218,7 +242,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 AudioMixerGainModel::Static { value_db } => {
                     let gain_route = route.clone();
                     route_section = route_section.with_row(PropertyRow::new(
-                        "电平",
+                        localizer.text("mixer-level"),
                         numeric_slider_input_control_with_hard_range(
                             value_db as f32,
                             -60.0,
@@ -234,23 +258,28 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 }
                 AudioMixerGainModel::Automated { keyframe_count } => {
                     route_section = route_section.with_row(PropertyRow::new(
-                        "电平",
-                        Box::new(Label::new(format!("自动化 · {keyframe_count} 个关键帧")).muted()),
+                        localizer.text("mixer-level"),
+                        Box::new(
+                            Label::new(mixer_automation_label(localizer, keyframe_count)).muted(),
+                        ),
                     ));
                 }
             }
             if let Some(automation) = &route.gain_automation {
                 route_section = route_section.with_row(
-                    PropertyRow::new("电平曲线", audio_automation_curve_control(automation))
-                        .with_height(118.0),
+                    PropertyRow::new(
+                        localizer.text("mixer-level-curve"),
+                        audio_automation_curve_control(automation),
+                    )
+                    .with_height(118.0),
                 );
             }
             route_section = route_section.with_row(PropertyRow::new(
-                "控制",
+                localizer.text("mixer-controls"),
                 effect_icon_button(
                     AppIcon::Trash,
-                    "删除 Route",
-                    "删除这条 Route 或 Send",
+                    localizer.text("mixer-remove-route"),
+                    localizer.text("mixer-remove-route-tooltip"),
                     remove_action.is_some(),
                     remove_action,
                 ),
@@ -265,16 +294,16 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
                 .collect::<Vec<_>>();
             if !rewire_items.is_empty() {
                 route_section = route_section.with_row(PropertyRow::new(
-                    "重连",
+                    localizer.text("mixer-rewire"),
                     Box::new(
-                        Dropdown::new("选择新的 tap 与目标…", rewire_items)
+                        Dropdown::new(localizer.text("mixer-choose-new-route"), rewire_items)
                             .with_max_visible_items(12),
                     ),
                 ));
             }
             if let Some(reason) = &route.edit_disabled_reason {
                 route_section = route_section.with_row(PropertyRow::new(
-                    "只读",
+                    localizer.text("mixer-read-only"),
                     Box::new(Label::new(reason.clone()).muted()),
                 ));
             }
@@ -284,6 +313,7 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
             panel,
             &channel.processor_racks,
             channel.is_editable,
+            localizer,
         );
     }
     panel
@@ -291,9 +321,10 @@ pub(super) fn audio_mixer_panel(model: &AudioMixerPanelModel) -> PropertyPanel {
 
 pub(super) fn audio_mixer_meter_label(
     channel: &crate::app_ui::audio_mixer::AudioMixerChannelModel,
+    localizer: &Localizer,
 ) -> String {
     let Some(meter) = &channel.meter else {
-        return "未执行".to_owned();
+        return localizer.text("mixer-meter-not-running");
     };
     let peak = meter
         .channels
@@ -310,13 +341,24 @@ pub(super) fn audio_mixer_meter_label(
     let warning = match (clipped, invalid) {
         (0, 0) => String::new(),
         (clipped, 0) => format!(" · CLIP {clipped}"),
-        (0, invalid) => format!(" · 非有限 {invalid}"),
-        (clipped, invalid) => format!(" · CLIP {clipped} · 非有限 {invalid}"),
+        (0, invalid) => localizer.format_text("mixer-meter-invalid", "count", &invalid.to_string()),
+        (clipped, invalid) => format!(
+            " · CLIP {clipped}{}",
+            localizer.format_text("mixer-meter-invalid", "count", &invalid.to_string())
+        ),
     };
     format!(
         "P {} · RMS {}{warning}",
         audio_meter_dbfs_label(f64::from(peak)),
         audio_meter_dbfs_label(rms),
+    )
+}
+
+pub(super) fn mixer_automation_label(localizer: &Localizer, keyframe_count: usize) -> String {
+    localizer.format_text(
+        "mixer-automation-keyframes",
+        "count",
+        &keyframe_count.to_string(),
     )
 }
 
@@ -328,7 +370,7 @@ pub(super) fn audio_meter_dbfs_label(linear: f64) -> String {
     }
 }
 
-pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
+pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer) -> PropertyPanel {
     let selected_clip = model.selected_clip;
     let opacity_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.opacity.clone());
@@ -378,24 +420,21 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         return panel;
     }
     let curve = if let Some(curve_model) = model.opacity_curve.clone() {
-        let points = curve_model.keys.iter().map(|key| key.point).collect();
-        let point_policies = curve_model
-            .keys
-            .iter()
-            .map(|key| {
-                if key.keyframe_id.is_some() {
-                    CurvePointPolicy::editable()
-                } else {
-                    CurvePointPolicy::anchor()
-                }
-            })
-            .collect();
-        let display_points = curve_model.display_points.clone();
-        CurveEditor::with_points(points)
-            .with_point_policies(point_policies)
-            .with_display_points(display_points)
-            .enabled(can_edit)
-            .on_edit(move |edit| inspector_curve_edit_action(selected_clip, &curve_model, edit))
+        numeric_curve_editor(
+            curve_model,
+            can_edit,
+            None,
+            move |curve, edit| inspector_curve_edit_action(selected_clip, curve, edit),
+            move |curve, keyframe_id, interpolation| {
+                selected_clip.map(|selection| {
+                    clip_edit_numeric_curve_action(ClipEditNumericCurvePayload {
+                        clip_id: selection.clip_id,
+                        parameter: curve.property.clone(),
+                        edit: ClipCurveEditPayload::SetInterpolation { keyframe_id, interpolation },
+                    })
+                })
+            },
+        )
     } else {
         CurveEditor::with_points(vec![
             CurvePoint::new(0.0, model.opacity / 100.0),
@@ -430,6 +469,16 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 },
             ),
         ));
+    if let (Some(selection), Some(blend_mode)) = (selected_clip, model.blend_mode.as_ref()) {
+        style_section = style_section.with_row(PropertyRow::new(
+            &blend_mode.row_label,
+            Box::new(inspector_blend_mode_dropdown(
+                blend_mode,
+                selection.clip_id,
+                can_edit,
+            )),
+        ));
+    }
     if model.shows_tint {
         let mut tint = color_picker_trigger(model.tint).enabled(can_edit);
         tint.picker_mut().set_area_mode(model.tint_area_mode);
@@ -592,6 +641,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 edit_id,
                 &component.channel_mapping,
                 can_edit,
+                localizer,
             );
             let max_fade_seconds = component.clip_duration.to_f64().max(0.0) as f32;
             let fade_in_curve =
@@ -672,7 +722,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         }
     }
 
-    panel = with_audio_processor_rack_sections(panel, &model.audio_processor_racks, can_edit);
+    panel = with_audio_processor_rack_sections(
+        panel,
+        &model.audio_processor_racks,
+        can_edit,
+        localizer,
+    );
 
     panel = panel.with_section(
         PropertySection::new("变换")
@@ -1072,6 +1127,12 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         }),
                 ),
             ));
+        if mask.shape_label == "路径" && model.selected_mask_id == Some(mask_id) {
+            section = section.with_row(PropertyRow::new(
+                "Viewer",
+                Box::new(Label::new("Alt+单击曲线：插入控制点").muted()),
+            ));
+        }
         let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
             matches!(
                 status.phase,
@@ -1325,6 +1386,40 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                     selected_clip,
                     effect_id,
                 ));
+                if let Some(curve) = property.numeric_curve.as_ref()
+                    && curve.curve.keys.iter().any(|key| key.keyframe_id.is_some())
+                {
+                    let curve_model = curve.curve.clone();
+                    section = section.with_row(
+                        PropertyRow::new(
+                            format!("{} 曲线", property.label),
+                            Box::new(numeric_curve_editor(
+                                curve_model,
+                                can_edit,
+                                Some(property.schema.allowed_interpolations.clone()),
+                                move |curve, edit| {
+                                    effect_curve_edit_action(selected_clip, effect_id, curve, edit)
+                                },
+                                move |curve, keyframe_id, interpolation| {
+                                    selected_clip.map(|selection| {
+                                        visual_effect_edit_numeric_curve_action(
+                                            VisualEffectEditNumericCurvePayload {
+                                                clip_id: selection.clip_id,
+                                                effect_id,
+                                                parameter: curve.property.clone(),
+                                                edit: ClipCurveEditPayload::SetInterpolation {
+                                                    keyframe_id,
+                                                    interpolation,
+                                                },
+                                            },
+                                        )
+                                    })
+                                },
+                            )),
+                        )
+                        .with_height(118.0),
+                    );
+                }
             }
             panel = panel.with_section(section);
         }
@@ -1336,10 +1431,38 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     )
 }
 
+pub(super) fn inspector_blend_mode_dropdown(
+    model: &InspectorBlendModeModel,
+    clip_id: ClipId,
+    can_edit: bool,
+) -> Dropdown {
+    let mut items = Vec::with_capacity(model.options.len() + 6);
+    for option in &model.options {
+        if option.separator_before {
+            items.push(MenuItem::separator());
+        }
+        let action = (option.mode != model.selected).then(|| {
+            crate::app::ui_actions::clip_set_blend_mode_action(
+                crate::app::ui_actions::ClipSetBlendModePayload {
+                    clip_id,
+                    blend_mode: option.mode,
+                },
+            )
+        });
+        items.push(
+            MenuItem::new(option.label.clone(), action).checked(option.mode == model.selected),
+        );
+    }
+    Dropdown::new(model.selected_label.clone(), items)
+        .with_max_visible_items(14)
+        .enabled(can_edit)
+}
+
 pub(super) fn with_audio_processor_rack_sections(
     mut panel: PropertyPanel,
     racks: &[AudioProcessorRackModel],
     surface_editable: bool,
+    localizer: &Localizer,
 ) -> PropertyPanel {
     for (rack_index, rack) in racks.iter().enumerate() {
         let rack_can_edit = surface_editable && rack.is_editable;
@@ -1350,39 +1473,55 @@ pub(super) fn with_audio_processor_rack_sections(
         } else {
             format!("{} {}", rack.title, rack_index + 1)
         };
-        let insert_items = rack
+        let mut insert_items: Vec<MenuItem> = rack
             .insert_options
             .iter()
             .map(|option| {
                 MenuItem::new(
-                    option.label,
-                    audio_processor_insert_action(rack, option.preset),
+                    option.label.clone(),
+                    audio_processor_insert_option_action(rack, &option.choice),
                 )
             })
             .collect();
+        insert_items.push(MenuItem::separator());
+        insert_items.push(MenuItem::new(
+            localizer.text("audio-rack-install-clap"),
+            app_shell_install_clap_library_dialog_action(),
+        ));
+        insert_items.push(MenuItem::new(
+            localizer.text("audio-rack-install-vst3-bundle"),
+            app_shell_install_vst3_bundle_dialog_action(),
+        ));
+        insert_items.push(MenuItem::new(
+            localizer.text("audio-rack-install-vst3-file"),
+            app_shell_install_vst3_binary_dialog_action(),
+        ));
         let mut rack_section = PropertySection::new(title)
             .with_row(PropertyRow::new(
-                "作用域",
+                localizer.text("audio-rack-scope-row"),
                 Box::new(Label::new(rack.ownership_label.clone()).muted()),
             ))
             .with_row(PropertyRow::new(
-                "添加",
+                localizer.text("audio-rack-add-row"),
                 Box::new(
-                    Dropdown::new("添加处理器…", insert_items)
+                    Dropdown::new(localizer.text("audio-rack-add-processor"), insert_items)
                         .with_max_visible_items(8)
                         .enabled(rack_can_edit),
                 ),
             ));
         if let Some(reason) = &rack.edit_disabled_reason {
             rack_section = rack_section.with_row(PropertyRow::new(
-                "只读",
+                localizer.text("mixer-read-only"),
                 Box::new(Label::new(reason.clone()).muted()),
             ));
         }
         if let Some(automation) = &rack.scope_input_gain_automation {
             rack_section = rack_section.with_row(
-                PropertyRow::new("Scope 输入曲线", audio_automation_curve_control(automation))
-                    .with_height(118.0),
+                PropertyRow::new(
+                    localizer.text("audio-rack-scope-input-curve"),
+                    audio_automation_curve_control(automation),
+                )
+                .with_height(118.0),
             );
         }
         panel = panel.with_section(rack_section);
@@ -1412,41 +1551,46 @@ pub(super) fn with_audio_processor_rack_sections(
             };
             let mut section =
                 PropertySection::new(processor.label.clone()).with_row(PropertyRow::new(
-                    "控制",
+                    localizer.text("mixer-controls"),
                     Box::new(
                         FlexContainer::row(vec![
                             FlexChild::flex(
                                 Box::new(
-                                    Checkbox::new("旁路", processor.bypassed)
-                                        .enabled(rack_can_edit)
-                                        .on_change(move |bypassed| {
+                                    Checkbox::new(
+                                        localizer.text("audio-rack-bypass"),
+                                        processor.bypassed,
+                                    )
+                                    .enabled(rack_can_edit)
+                                    .on_change(
+                                        move |bypassed| {
                                             audio_processor_bypass_action(
                                                 &rack_for_bypass,
                                                 &processor_for_bypass,
                                                 bypassed,
                                             )
-                                        }),
+                                        },
+                                    ),
                                 ),
                                 1.0,
                             ),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::CaretUp,
-                                "Up",
-                                "Move processor up",
+                                localizer.text("audio-rack-move-up"),
+                                localizer.text("audio-rack-move-up-tooltip"),
                                 can_move_up,
                                 Some(move_up),
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::CaretDown,
-                                "Down",
-                                "Move processor down",
+                                localizer.text("audio-rack-move-down"),
+                                localizer.text("audio-rack-move-down-tooltip"),
                                 can_move_down,
                                 Some(move_down),
                             )),
                             FlexChild::fixed(effect_icon_button(
                                 AppIcon::Trash,
-                                "Remove",
-                                "Remove processor",
+                                localizer.text("audio-rack-remove"),
+                                localizer.text("audio-rack-remove-tooltip"),
                                 rack_can_edit,
                                 Some(audio_processor_remove_action(rack, processor)),
                             )),
@@ -1454,13 +1598,24 @@ pub(super) fn with_audio_processor_rack_sections(
                         .with_gap(8.0),
                     ),
                 ));
+            if processor.native_format.is_some() {
+                let rebind = audio_processor_rebind_native_action(rack, processor);
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("audio-rack-plugin-binding"),
+                    Box::new(
+                        Button::new(localizer.text("audio-rack-rebind-installed"))
+                            .enabled(rebind.is_some())
+                            .on_click(rebind),
+                    ),
+                ));
+            }
             for parameter in &processor.parameters {
                 let label = audio_processor_parameter_label(parameter);
                 if parameter.keyframe_count > 0 {
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
                         Box::new(
-                            Label::new(format!("自动化 · {} 个关键帧", parameter.keyframe_count))
+                            Label::new(mixer_automation_label(localizer, parameter.keyframe_count))
                                 .muted(),
                         ),
                     ));
@@ -1492,13 +1647,15 @@ pub(super) fn with_audio_processor_rack_sections(
                 } else {
                     section = section.with_row(PropertyRow::new(
                         label.clone(),
-                        Box::new(Label::new("此参数没有数值编辑契约").muted()),
+                        Box::new(
+                            Label::new(localizer.text("audio-rack-nonnumeric-parameter")).muted(),
+                        ),
                     ));
                 }
                 if let Some(automation) = &parameter.automation {
                     section = section.with_row(
                         PropertyRow::new(
-                            format!("{label} 曲线"),
+                            localizer.format_text("audio-rack-parameter-curve", "name", &label),
                             audio_automation_curve_control(automation),
                         )
                         .with_height(118.0),
@@ -1544,10 +1701,38 @@ pub(super) fn audio_processor_parameter_decimals(step: Option<f64>) -> usize {
 
 pub(super) fn audio_automation_curve_control(model: &AudioAutomationCurveModel) -> Box<dyn Widget> {
     let action_model = model.clone();
+    let interpolation_menus = model
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let keyframe = key.keyframe.as_ref()?;
+            Some(
+                [
+                    ("保持", InterpolationType::Hold),
+                    ("线性", InterpolationType::Linear),
+                    ("贝塞尔", InterpolationType::Bezier),
+                    ("自动贝塞尔", InterpolationType::AutoBezier),
+                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
+                ]
+                .into_iter()
+                .filter_map(|(label, interpolation)| {
+                    audio_automation_interpolation_action(model, index, interpolation).map(
+                        |action| {
+                            MenuItem::new(label, action)
+                                .checked(audio_keyframe_interpolation(keyframe) == interpolation)
+                        },
+                    )
+                })
+                .collect(),
+            )
+        })
+        .collect();
     Box::new(
         CurveEditor::with_points(model.points())
             .with_point_policies(model.point_policies())
             .with_display_points(model.display_points.clone())
+            .with_point_context_menus(interpolation_menus)
             .enabled(model.is_editable)
             .on_edit(move |edit| audio_automation_curve_edit_action(&action_model, edit)),
     )
@@ -2014,12 +2199,72 @@ pub(super) fn inspector_reorder_mask_action(
     })
 }
 
-pub(super) fn inspector_curve_edit_action(
-    selection: Option<SelectedClipRef>,
+fn numeric_curve_editor(
+    model: InspectorCurveModel,
+    can_edit: bool,
+    allowed_interpolations: Option<Vec<ParameterInterpolation>>,
+    on_edit: impl Fn(&InspectorCurveModel, CurveEdit) -> Option<Action> + 'static,
+    on_interpolation: impl Fn(&InspectorCurveModel, KeyframeId, InterpolationType) -> Option<Action>,
+) -> CurveEditor {
+    let points = model.keys.iter().map(|key| key.point).collect();
+    let point_policies = model
+        .keys
+        .iter()
+        .map(|key| {
+            if key.keyframe_id.is_some() {
+                CurvePointPolicy::editable()
+            } else {
+                CurvePointPolicy::anchor()
+            }
+        })
+        .collect();
+    let interpolation_menus = model
+        .keys
+        .iter()
+        .map(|key| {
+            let id = key.keyframe_id?;
+            Some(
+                [
+                    ("保持", InterpolationType::Hold),
+                    ("线性", InterpolationType::Linear),
+                    ("贝塞尔", InterpolationType::Bezier),
+                    ("自动贝塞尔", InterpolationType::AutoBezier),
+                    ("连续贝塞尔", InterpolationType::ContinuousBezier),
+                    ("缓入", InterpolationType::EaseIn),
+                    ("缓出", InterpolationType::EaseOut),
+                ]
+                .into_iter()
+                .filter(|(_, interpolation)| {
+                    allowed_interpolations.as_ref().is_none_or(|allowed| {
+                        let schema_interpolation = match interpolation {
+                            InterpolationType::Hold => ParameterInterpolation::Hold,
+                            InterpolationType::Linear => ParameterInterpolation::Linear,
+                            _ => ParameterInterpolation::Bezier,
+                        };
+                        allowed.contains(&schema_interpolation)
+                    })
+                })
+                .map(|(label, interpolation)| {
+                    MenuItem::new(label, on_interpolation(&model, id, interpolation))
+                        .checked(key.interpolation == Some(interpolation))
+                })
+                .collect(),
+            )
+        })
+        .collect();
+    let display_points = model.display_points.clone();
+    CurveEditor::with_points(points)
+        .with_point_policies(point_policies)
+        .with_display_points(display_points)
+        .with_point_context_menus(interpolation_menus)
+        .enabled(can_edit)
+        .on_edit(move |edit| on_edit(&model, edit))
+}
+
+fn numeric_curve_edit_payload(
     model: &InspectorCurveModel,
     edit: CurveEdit,
-) -> Option<Action> {
-    let selection = selection?;
+) -> Option<ClipCurveEditPayload> {
     let edit = match edit {
         CurveEdit::Insert { point, .. } => ClipCurveEditPayload::Upsert {
             keyframe_id: None,
@@ -2037,11 +2282,37 @@ pub(super) fn inspector_curve_edit_action(
             ClipCurveEditPayload::Remove { keyframe_id }
         }
     };
+    Some(edit)
+}
+
+pub(super) fn inspector_curve_edit_action(
+    selection: Option<SelectedClipRef>,
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Option<Action> {
+    let selection = selection?;
     Some(clip_edit_numeric_curve_action(
         ClipEditNumericCurvePayload {
             clip_id: selection.clip_id,
             parameter: model.property.clone(),
-            edit,
+            edit: numeric_curve_edit_payload(model, edit)?,
+        },
+    ))
+}
+
+fn effect_curve_edit_action(
+    selection: Option<SelectedClipRef>,
+    effect_id: EffectId,
+    model: &InspectorCurveModel,
+    edit: CurveEdit,
+) -> Option<Action> {
+    let selection = selection?;
+    Some(visual_effect_edit_numeric_curve_action(
+        VisualEffectEditNumericCurvePayload {
+            clip_id: selection.clip_id,
+            effect_id,
+            parameter: model.property.clone(),
+            edit: numeric_curve_edit_payload(model, edit)?,
         },
     ))
 }
@@ -2132,16 +2403,44 @@ pub(super) fn inspector_property_row(
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
 ) -> PropertyRow {
-    let row = PropertyRow::new(
-        property.label.clone(),
-        inspector_property_value_widget(
-            property,
-            can_edit,
-            selection,
-            target.clone(),
-            property.path.clone(),
-        ),
+    let value = inspector_property_value_widget(
+        property,
+        can_edit,
+        selection,
+        target.clone(),
+        property.path.clone(),
     );
+    let value: Box<dyn Widget> =
+        if let (InspectorPropertyTarget::Effect { effect_id, .. }, Some(curve), Some(selection)) =
+            (&target, &property.numeric_curve, selection)
+        {
+            let toggle =
+                visual_effect_toggle_current_key_action(VisualEffectParameterTargetPayload {
+                    clip_id: selection.clip_id,
+                    effect_id: *effect_id,
+                    parameter: property.address.clone(),
+                });
+            Box::new(
+                FlexContainer::row(vec![
+                    FlexChild::flex(value, 1.0),
+                    FlexChild::fixed(Box::new(
+                        Button::new(if curve.current_keyframe_id.is_some() {
+                            "◆"
+                        } else {
+                            "◇"
+                        })
+                        .minimal()
+                        .active(curve.current_keyframe_id.is_some())
+                        .enabled(can_edit)
+                        .on_click(Some(toggle)),
+                    )),
+                ])
+                .with_gap(4.0),
+            )
+        } else {
+            value
+        };
+    let row = PropertyRow::new(property.label.clone(), value);
     let height = if matches!(&target, InspectorPropertyTarget::Clip { .. })
         && property.path == mondrian_core::BasicTitle::TEXT_PATH
     {
@@ -2352,22 +2651,18 @@ pub(super) fn inspector_property_value_widget(
             }
         }
         PropertyValue::Enum(value) => {
-            let items = property
-                .schema
-                .enum_options
-                .iter()
-                .map(|option| {
-                    MenuItem::new(
-                        option.key.clone(),
-                        inspector_property_action(
-                            selection,
-                            target.clone(),
-                            &path,
-                            PropertyValue::Enum(option.key.clone()),
-                        ),
-                    )
-                })
-                .collect();
+            let mut items = Vec::with_capacity(property.schema.enum_options.len());
+            for option in &property.schema.enum_options {
+                items.push(MenuItem::new(
+                    option.key.clone(),
+                    inspector_property_action(
+                        selection,
+                        target.clone(),
+                        &path,
+                        PropertyValue::Enum(option.key.clone()),
+                    ),
+                ));
+            }
             Box::new(Dropdown::new(value.clone(), items).enabled(can_edit))
         }
         PropertyValue::Resource(reference) => {

@@ -13,13 +13,19 @@ use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformD
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
+use crate::app::native_audio_plugin::{NativeAudioPluginFormat, NativeAudioPluginSelection};
+use crate::app_ui::localization::AppUiLocalePreference;
 use crate::app_ui::shortcuts::{is_known_shortcut_id, AppUiShortcutOverride};
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 const APP_UI_PREFERENCES_FILE: &str = "app_ui_preferences.json";
-const APP_UI_PREFERENCES_VERSION: u32 = 1;
+const APP_UI_PREFERENCES_VERSION: u32 = 3;
 /// Maximum number of recent projects kept by the app UI startup surface.
 pub const MAX_RECENT_PROJECTS: usize = 12;
+/// Bound the number of machine-local native libraries retried on startup.
+pub const MAX_NATIVE_AUDIO_PLUGINS: usize = 64;
+/// Bound the number of selected OpenFX bundles restored on startup.
+pub const MAX_NATIVE_OPENFX_BUNDLES: usize = 64;
 
 /// Versioned user preferences owned by the app UI shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,10 +35,17 @@ pub struct AppUiPreferences {
     /// Active product theme preference. `System` resolves to a concrete preset
     /// at runtime and is not persisted as a third theme token set.
     pub theme_preference: ThemePreference,
+    /// Machine-local UI language; never persisted in a Project.
+    #[serde(default)]
+    pub locale_preference: AppUiLocalePreference,
     /// Built-in workspace preset restored when the app UI shell opens.
     pub workspace_preset: WorkspacePreset,
     /// Most recently opened project files for the startup surface.
     pub recent_projects: Vec<PathBuf>,
+    /// Explicitly selected native audio binaries; project files store plugin identities only.
+    pub installed_audio_plugins: Vec<NativeAudioPluginSelection>,
+    /// Explicitly selected native OpenFX bundles; project files retain effect identities.
+    pub installed_openfx_bundles: Vec<PathBuf>,
     /// User overrides for app UI shell shortcut descriptors.
     #[serde(default)]
     pub shortcut_overrides: Vec<AppUiShortcutOverride>,
@@ -66,8 +79,11 @@ impl Default for AppUiPreferences {
         Self {
             version: APP_UI_PREFERENCES_VERSION,
             theme_preference: ThemePreference::System,
+            locale_preference: AppUiLocalePreference::System,
             workspace_preset: WorkspacePreset::Editing,
             recent_projects: Vec::new(),
+            installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
@@ -88,6 +104,25 @@ impl AppUiPreferences {
         self.recent_projects.truncate(MAX_RECENT_PROJECTS);
     }
 
+    /// Remember one successfully scanned native library without adding duplicates.
+    pub fn record_native_audio_plugin(&mut self, format: NativeAudioPluginFormat, path: PathBuf) {
+        self.installed_audio_plugins
+            .retain(|existing| existing.format != format || existing.path != path);
+        self.installed_audio_plugins.push(NativeAudioPluginSelection { format, path });
+        if self.installed_audio_plugins.len() > MAX_NATIVE_AUDIO_PLUGINS {
+            self.installed_audio_plugins.remove(0);
+        }
+    }
+
+    /// Remember one successfully admitted OpenFX bundle without duplicates.
+    pub fn record_openfx_bundle(&mut self, path: PathBuf) {
+        self.installed_openfx_bundles.retain(|existing| existing != &path);
+        self.installed_openfx_bundles.push(path);
+        if self.installed_openfx_bundles.len() > MAX_NATIVE_OPENFX_BUNDLES {
+            self.installed_openfx_bundles.remove(0);
+        }
+    }
+
     fn sanitize_loaded(mut self) -> Self {
         if self.version != APP_UI_PREFERENCES_VERSION {
             return Self::default();
@@ -104,6 +139,30 @@ impl AppUiPreferences {
             }
         }
         self.recent_projects = sanitized;
+
+        let mut plugins = Vec::new();
+        for selection in self.installed_audio_plugins {
+            if !selection.path.is_absolute() || plugins.contains(&selection) {
+                continue;
+            }
+            plugins.push(selection);
+            if plugins.len() == MAX_NATIVE_AUDIO_PLUGINS {
+                break;
+            }
+        }
+        self.installed_audio_plugins = plugins;
+
+        let mut bundles = Vec::new();
+        for path in self.installed_openfx_bundles {
+            if !path.is_absolute() || bundles.contains(&path) {
+                continue;
+            }
+            bundles.push(path);
+            if bundles.len() == MAX_NATIVE_OPENFX_BUNDLES {
+                break;
+            }
+        }
+        self.installed_openfx_bundles = bundles;
 
         let mut shortcut_overrides = Vec::new();
         for entry in self.shortcut_overrides {
@@ -214,8 +273,11 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION + 1,
                 theme_preference: ThemePreference::Light,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Export,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -240,10 +302,13 @@ mod tests {
         let path = temp_preferences_path("round-trip-preferences");
         let project_path = temp_preferences_path("round-trip-project").with_extension("mdp");
         let preferences = AppUiPreferences {
-            version: 1,
+            version: AppUiPreferences::default().version,
             theme_preference: ThemePreference::Light,
+            locale_preference: AppUiLocalePreference::EnUs,
             workspace_preset: WorkspacePreset::Compositing,
             recent_projects: vec![project_path.clone()],
+            installed_audio_plugins: Vec::new(),
+            installed_openfx_bundles: Vec::new(),
             shortcut_overrides: vec![AppUiShortcutOverride {
                 id: "panel.inspector".to_owned(),
                 binding: None,
@@ -319,6 +384,80 @@ mod tests {
     }
 
     #[test]
+    fn native_plugin_selections_are_bounded_deduplicated_and_missing_files_remain_recoverable() {
+        let path = temp_preferences_path("clap-library-preferences");
+        let missing = temp_preferences_path("missing-plugin").with_extension("clap");
+        let mut preferences = AppUiPreferences::default();
+        preferences.record_native_audio_plugin(NativeAudioPluginFormat::Clap, missing.clone());
+        preferences.record_native_audio_plugin(NativeAudioPluginFormat::Clap, missing.clone());
+        let expected = NativeAudioPluginSelection {
+            format: NativeAudioPluginFormat::Clap,
+            path: missing.clone(),
+        };
+        assert_eq!(preferences.installed_audio_plugins, vec![expected.clone()]);
+        persist_app_ui_preferences_to(&path, &preferences).expect("persist selections");
+        assert_eq!(
+            load_app_ui_preferences_from(&path).installed_audio_plugins,
+            vec![expected.clone()]
+        );
+        for index in 0..=MAX_NATIVE_AUDIO_PLUGINS {
+            preferences.record_native_audio_plugin(
+                NativeAudioPluginFormat::Clap,
+                std::env::temp_dir().join(format!("mondrian-clap-library-{index}.dll")),
+            );
+        }
+        assert_eq!(
+            preferences.installed_audio_plugins.len(),
+            MAX_NATIVE_AUDIO_PLUGINS
+        );
+        assert!(!preferences.installed_audio_plugins.contains(&expected));
+
+        let missing_bundle = temp_preferences_path("missing-openfx").with_extension("ofx.bundle");
+        preferences.record_openfx_bundle(missing_bundle.clone());
+        preferences.record_openfx_bundle(missing_bundle.clone());
+        assert_eq!(
+            preferences.installed_openfx_bundles,
+            vec![missing_bundle.clone()]
+        );
+        persist_app_ui_preferences_to(&path, &preferences).expect("persist bundle selection");
+        assert_eq!(
+            load_app_ui_preferences_from(&path).installed_openfx_bundles,
+            vec![missing_bundle.clone()]
+        );
+        for index in 0..=MAX_NATIVE_OPENFX_BUNDLES {
+            preferences.record_openfx_bundle(
+                std::env::temp_dir().join(format!("mondrian-filter-{index}.ofx.bundle")),
+            );
+        }
+        assert_eq!(
+            preferences.installed_openfx_bundles.len(),
+            MAX_NATIVE_OPENFX_BUNDLES
+        );
+        assert!(!preferences.installed_openfx_bundles.contains(&missing_bundle));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn future_locale_value_preserves_other_machine_preferences() {
+        let path = temp_preferences_path("future-locale");
+        let mut value = serde_json::to_value(AppUiPreferences {
+            theme_preference: ThemePreference::Light,
+            ..AppUiPreferences::default()
+        })
+        .expect("serialize preferences");
+        value["locale_preference"] = serde_json::Value::String("FutureLocale".to_owned());
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("serialize future locale"),
+        )
+        .expect("write future locale");
+        let loaded = load_app_ui_preferences_from(&path);
+        fs::remove_file(path).ok();
+        assert_eq!(loaded.theme_preference, ThemePreference::Light);
+        assert_eq!(loaded.locale_preference, AppUiLocalePreference::Unknown);
+    }
+
+    #[test]
     fn legacy_preferences_without_display_policy_restore_safe_default() {
         let path = temp_preferences_path("legacy-display-policy");
         let mut value = serde_json::to_value(AppUiPreferences::default())
@@ -384,10 +523,13 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -451,8 +593,11 @@ mod tests {
             serde_json::to_vec(&AppUiPreferences {
                 version: APP_UI_PREFERENCES_VERSION,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Custom,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
@@ -520,10 +665,13 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: vec![missing, existing.clone(), existing.clone()],
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
@@ -550,10 +698,13 @@ mod tests {
         fs::write(
             &path,
             serde_json::to_vec(&AppUiPreferences {
-                version: 1,
+                version: AppUiPreferences::default().version,
                 theme_preference: ThemePreference::Dark,
+                locale_preference: Default::default(),
                 workspace_preset: WorkspacePreset::Editing,
                 recent_projects: Vec::new(),
+                installed_audio_plugins: Vec::new(),
+                installed_openfx_bundles: Vec::new(),
                 shortcut_overrides: vec![
                     AppUiShortcutOverride { id: "panel.inspector".to_owned(), binding: None },
                     AppUiShortcutOverride { id: "unknown.shortcut".to_owned(), binding: None },

@@ -185,6 +185,18 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::HueSaturationLightness { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "hue_saturation_lightness",
+                parameter: "requires_float32",
+            });
+        }
+        EffectRenderOp::ChromaKey { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "chroma_key",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::GaussianBlur { radius } => {
             let Some(radius) = valid_gaussian_radius(*radius) else {
                 return Err(EffectExecutionError::InvalidRenderParameter {
@@ -255,12 +267,25 @@ pub(crate) fn apply_render_op(
         }
         EffectRenderOp::Custom { key, params, processor, .. } => {
             if let Some(processor) = processor {
+                let Some(callback) = processor.rgba8_processor() else {
+                    return Err(EffectExecutionError::CustomProcessorUnavailable {
+                        key: key.clone(),
+                    });
+                };
                 let mut staged = working.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    (processor.processor())(&mut staged, width, height, params, frame_seed)
+                    callback(&mut staged, width, height, params, frame_seed)
                 }));
                 match result {
-                    Ok(Ok(())) => *working = staged,
+                    Ok(Ok(())) if staged.len() == working.len() => *working = staged,
+                    Ok(Ok(())) => {
+                        let reason = "custom render processor changed the pixel count".to_owned();
+                        processor.record_runtime_failure(reason.clone());
+                        return Err(EffectExecutionError::CustomProcessorFailed {
+                            key: key.clone(),
+                            reason,
+                        });
+                    }
                     Ok(Err(error)) => {
                         let reason = error.to_string();
                         processor.record_runtime_failure(reason.clone());
@@ -284,6 +309,52 @@ pub(crate) fn apply_render_op(
         }
     }
     Ok(())
+}
+
+pub(crate) fn apply_custom_render_op_f32(
+    working: &mut Vec<[f32; 4]>,
+    width: u32,
+    height: u32,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+) -> Result<(), EffectExecutionError> {
+    let EffectRenderOp::Custom { key, params, processor, .. } = op else {
+        return Err(EffectExecutionError::InvalidRenderParameter {
+            op: "custom",
+            parameter: "operation",
+        });
+    };
+    let Some(processor) = processor else {
+        return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
+    };
+    let Some(callback) = processor.float32_processor() else {
+        return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
+    };
+    let mut staged = working.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        callback(&mut staged, width, height, params, frame_seed)
+    }));
+    match result {
+        Ok(Ok(())) if staged.len() == working.len() => {
+            *working = staged;
+            Ok(())
+        }
+        Ok(Ok(())) => {
+            let reason = "custom render processor changed the pixel count".to_owned();
+            processor.record_runtime_failure(reason.clone());
+            Err(EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
+        }
+        Ok(Err(error)) => {
+            let reason = error.to_string();
+            processor.record_runtime_failure(reason.clone());
+            Err(EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
+        }
+        Err(_) => {
+            let reason = "custom render processor panicked".to_owned();
+            processor.record_runtime_failure(reason.clone());
+            Err(EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
+        }
+    }
 }
 
 pub(crate) fn apply_render_op_f32(
@@ -310,7 +381,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
-        EffectRenderOp::ChromaticAberration { .. } => 1,
+        EffectRenderOp::ChromaticAberration { .. } | EffectRenderOp::Custom { .. } => 1,
         EffectRenderOp::ColorAdjust { .. }
         | EffectRenderOp::WhiteBalance { .. }
         | EffectRenderOp::Primaries { .. }
@@ -319,13 +390,14 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::GamutCompression { .. }
         | EffectRenderOp::HighlightRecovery { .. }
         | EffectRenderOp::ColorCurves { .. }
+        | EffectRenderOp::HueSaturationLightness { .. }
+        | EffectRenderOp::ChromaKey { .. }
         | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Grain { .. }
         | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
-        | EffectRenderOp::Lut3D { .. }
-        | EffectRenderOp::Custom { .. } => 0,
+        | EffectRenderOp::Lut3D { .. } => 0,
     }
 }
 
@@ -369,11 +441,19 @@ impl EffectRasterRegion {
         Self { frame_width, frame_height, x, y, width, height }
     }
 
-    const fn is_full_frame(self) -> bool {
+    pub(crate) const fn is_full_frame(self) -> bool {
         self.x == 0
             && self.y == 0
             && self.width == self.frame_width
             && self.height == self.frame_height
+    }
+
+    pub(crate) const fn frame_width(self) -> u32 {
+        self.frame_width
+    }
+
+    pub(crate) const fn frame_height(self) -> u32 {
+        self.frame_height
     }
 
     pub(crate) const fn row_width(self) -> usize {
@@ -486,6 +566,19 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::ColorCurves { curves } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| curves.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::HueSaturationLightness { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::ChromaKey { keyer } => {
+            for chunk in working.chunks_mut(256) {
+                checkpoint()?;
+                for pixel in chunk {
+                    *pixel = [0.0, 0.0, 0.0, keyer.matte([pixel[0], pixel[1], pixel[2]])];
+                }
+            }
             Ok(true)
         }
         EffectRenderOp::Qualifier { qualifier } => {

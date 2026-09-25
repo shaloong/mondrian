@@ -1130,7 +1130,7 @@ impl AppState {
         })?;
         let runtime_grant = self.execution_resources.decision().audio.runtime_grant;
         let audition = self.audio_monitoring.audition_overlay(authoring_session_id, sequence);
-        let renderer = TimelineAudioPcmRenderer::new(
+        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence.clone(),
             self.sequences().to_vec(),
             library,
@@ -1139,6 +1139,7 @@ impl AppState {
             audition,
             self.audio_sample_rate,
             AUDIO_OUTPUT_LAYOUT,
+            self.audio_processor_resolver.as_ref(),
         )
         .map_err(|error| transport_action_error(action, error))?;
         let requires_execution = renderer.execution_demand().requires_execution();
@@ -1230,6 +1231,7 @@ impl AppState {
                     "failed to clear stale audio after committed authoring change"
                 );
             }
+            self.set_status_hint(format!("音频处理无法准备：{error}"), true);
         }
     }
 
