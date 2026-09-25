@@ -173,6 +173,8 @@ pub(crate) enum ProjectClosePoll {
     Pending,
     /// The exact Session was quiesced, retired, and removed from AppState.
     Closed,
+    /// The Project was closed but Reference Output release was not proven.
+    ClosedWithTeardownFailure(String),
     /// A required manual save was not durable, so admission was resumed and
     /// the still-open Project may be corrected or retried.
     SaveRejected(String),
@@ -527,8 +529,8 @@ impl AppState {
             anyhow::bail!(reason);
         }
         self.retain_current_project_library_generation();
-        self.finalize_project_close_state();
-        Ok(())
+        self.finalize_project_close_state()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
     fn retain_project_close_fault(&mut self, session_id: AuthoringSessionId, reason: String) {
@@ -588,8 +590,10 @@ impl AppState {
                     return ProjectClosePoll::Faulted(reason);
                 }
                 self.retain_current_project_library_generation();
-                self.finalize_project_close_state();
-                ProjectClosePoll::Closed
+                match self.finalize_project_close_state() {
+                    Ok(()) => ProjectClosePoll::Closed,
+                    Err(error) => ProjectClosePoll::ClosedWithTeardownFailure(error.to_string()),
+                }
             }
             Err(reason) => {
                 self.retain_project_close_fault(pending.session_id, reason.clone());

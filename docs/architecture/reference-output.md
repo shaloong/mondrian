@@ -86,7 +86,12 @@ otherwise fail with `TeardownInProgress`; a terminal receipt latches `Failed`
 and prevents a second hardware owner from being admitted. Project close retires
 the complete Module within a fixed product budget. App Drop uses a zero-wait
 handoff, so neither path performs Session shutdown or Adapter/bridge Drop on the
-UI/calling thread.
+UI/calling thread. The ordinary retirement budget allows bounded scheduling
+headroom for the shutdown coordinator under a loaded editor; a timeout remains
+an unproven release and latches the device owner fail-closed. Synchronous
+Project close reports that failure after removing retired author state, and
+asynchronous close returns a distinct closed-with-teardown-failure outcome so
+the UI does not present successful hardware release or continue Quit.
 
 If the provider rejects or panics during the non-blocking request, the App does
 not report `Stopping`: it immediately latches request-failed-pending state,

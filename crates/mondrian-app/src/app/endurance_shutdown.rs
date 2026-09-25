@@ -1047,7 +1047,9 @@ impl AppState {
                     }
                     break;
                 }
-                ProjectClosePoll::SaveRejected(reason) | ProjectClosePoll::Faulted(reason) => {
+                ProjectClosePoll::SaveRejected(reason)
+                | ProjectClosePoll::Faulted(reason)
+                | ProjectClosePoll::ClosedWithTeardownFailure(reason) => {
                     lifecycle_failure = Some(reason);
                 }
             }

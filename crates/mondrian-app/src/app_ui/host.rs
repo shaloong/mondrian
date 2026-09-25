@@ -1292,6 +1292,17 @@ impl AppUiHost {
                     }
                 }
             }
+            ProjectClosePoll::ClosedWithTeardownFailure(reason) => {
+                tracing::error!(%reason, "Project closed without proven Reference Output release");
+                self.quiescing_close_action = None;
+                self.refresh_recovery_candidates();
+                self.app_state.borrow_mut().set_status_hint(
+                    format!("项目已关闭，但参考输出设备未能确认释放：{reason}"),
+                    true,
+                );
+                self.mark_dirty();
+                (true, false)
+            }
             ProjectClosePoll::SaveRejected(reason) => {
                 tracing::warn!(%reason, "save-before-close was rejected; Project remains open");
                 self.quiescing_close_action = None;
@@ -2111,6 +2122,17 @@ impl AppUiHost {
                     }
                 }
                 Err(err) => {
+                    if !self.app_state.borrow().has_project_close_fault() {
+                        self.pending_close_action = None;
+                        self.root.close_pending_close_dialog();
+                        self.refresh_recovery_candidates();
+                        self.app_state.borrow_mut().set_status_hint(
+                            format!("项目已关闭，但参考输出设备未能确认释放：{err}"),
+                            true,
+                        );
+                        self.mark_dirty();
+                        return;
+                    }
                     self.waveform_service
                         .set_library(self.app_state.borrow().asset_library_handle());
                     self.app_state
