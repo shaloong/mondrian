@@ -410,6 +410,10 @@ x. Duplicate, unknown, malformed, or route-unavailable properties fail closed
 during author validation or processor preparation. Missing fields, semantic
 mismatches, config edits, role/view/endpoint changes, and external LUT changes
 fail closed during deserialization or config validation.
+The external-file inventory is produced by the same route and processor-metadata
+walk as the dependency fingerprint. Portable packaging rebinds only the config
+locator while retaining all pinned bytes and validates that each newly resolved
+FileTransform lies inside the verified package.
 
 Dynamic payload values are author semantics but not static OCIO object
 identity. Config validation, CPU processor lookup, GPU shader/layout/pipeline,

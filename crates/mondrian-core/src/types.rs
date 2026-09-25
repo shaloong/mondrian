@@ -1320,6 +1320,22 @@ impl CustomOcioProjectIdentity {
         )
     }
 
+    /// Bind the same pinned config and resource bytes to a relocated config file.
+    ///
+    /// The caller must verify the new source through `ColorEngine::ensure_loaded`
+    /// before using it; this only changes the locator, never the author contract.
+    pub fn with_source(&self, source: OcioConfigSource) -> Result<Self, String> {
+        Self::from_pinned_parts(
+            source,
+            self.config_sha256.clone(),
+            self.dependency_manifest_sha256.clone(),
+            self.working_space.clone(),
+            self.outputs.clone(),
+            self.roles.clone(),
+            self.dynamic_properties.clone(),
+        )
+    }
+
     pub(crate) fn static_processor_identity(&self) -> Self {
         let mut identity = self.clone();
         identity.dynamic_properties.clear();

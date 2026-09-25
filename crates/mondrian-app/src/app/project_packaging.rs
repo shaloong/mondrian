@@ -17,7 +17,7 @@ use mondrian_core::automation::{
     ParameterResourceReference, PropertyBag, PropertyHost, PropertyMutation, PropertyValue,
 };
 use mondrian_core::grade_graph::GradeGraphNodeKind;
-use mondrian_core::{AssetId, AssetSource, ColorEngine, OcioConfigSource};
+use mondrian_core::{AssetId, AssetSource, ColorEngine, OcioConfigSource, ProjectColorEnvironment};
 use mondrian_editor_state::AuthoringSnapshot;
 use mondrian_project::ProjectDocument;
 use mondrian_project::{
@@ -74,6 +74,8 @@ pub struct PortableDependencyFile {
     pub owners: Vec<String>,
     /// Exact persisted spellings that refer to this canonical source file.
     pub source_paths: Vec<PathBuf>,
+    /// Required package placement for a path-resolved dependency, if any.
+    pub bundled_path: Option<PathBuf>,
 }
 
 /// An immutable package file and its exact source-reference bindings.
@@ -361,9 +363,15 @@ fn export_snapshot_package_with_progress(
             })
             .unwrap_or("bin");
         let name = format!("{index:08}.{extension}");
-        let bundled_path = PathBuf::from("files").join(name);
+        let bundled_path = dependency
+            .bundled_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("files").join(name));
         let mut source = fs::File::open(&dependency.path)
             .with_context(|| format!("open package source {}", dependency.path.display()))?;
+        if let Some(parent) = staging.path().join(&bundled_path).parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut destination = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -406,6 +414,9 @@ fn export_snapshot_package_with_progress(
             size_bytes: copied_len,
         });
     }
+    ensure_export_active(cancel)?;
+    validate_relocated_ocio(&snapshot.document, &package_files, staging.path())?;
+    ensure_export_active(cancel)?;
     phase.store(3, Ordering::Release);
     let archive_path = staging.path().join("project.mdp");
     ensure_export_active(cancel)?;
@@ -501,8 +512,8 @@ pub fn verify_portable_project_package(root: &Path) -> anyhow::Result<PortablePa
         let mut parts = relative.components();
         anyhow::ensure!(
             matches!(parts.next(), Some(std::path::Component::Normal(part)) if part == "files")
-                && matches!(parts.next(), Some(std::path::Component::Normal(_)))
-                && parts.next().is_none(),
+                && parts.clone().next().is_some()
+                && parts.all(|part| matches!(part, std::path::Component::Normal(_))),
             "unsafe portable package file path: {}",
             relative.display()
         );
@@ -522,6 +533,15 @@ pub fn verify_portable_project_package(root: &Path) -> anyhow::Result<PortablePa
             );
         }
         let bundled = root.join(relative);
+        let mut parent = root.to_path_buf();
+        for component in relative.components().take(relative.components().count() - 1) {
+            parent.push(component.as_os_str());
+            anyhow::ensure!(
+                fs::symlink_metadata(&parent)?.file_type().is_dir(),
+                "portable package directory is a link or not a real directory: {}",
+                parent.display()
+            );
+        }
         reject_link_or_non_file(&bundled)?;
         let (sha256, length) = hash_reader(&mut fs::File::open(&bundled)?)?;
         anyhow::ensure!(
@@ -627,8 +647,62 @@ pub(super) fn rebind_document_resources(
             }
         }
     }
+    if let ColorEngine::CustomOcio { identity } = document.color_environment.engine()
+        && let OcioConfigSource::Path { path } = identity.source()
+    {
+        let bundled = bindings.get(path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Custom OCIO config is absent from portable manifest: {}",
+                path.display()
+            )
+        })?;
+        let relocated = ColorEngine::CustomOcio {
+            identity: Box::new(
+                identity
+                    .with_source(OcioConfigSource::Path { path: bundled.clone() })
+                    .map_err(anyhow::Error::msg)?,
+            ),
+        };
+        relocated.ensure_loaded().map_err(anyhow::Error::msg)?;
+        let bundled_paths = bindings.values().collect::<BTreeSet<_>>();
+        for resource in mondrian_core::custom_ocio_dependencies(&relocated)
+            .map_err(anyhow::Error::msg)?
+            .files
+        {
+            let resolved = mondrian_assets::canonical_native_path(&resource.resolved_path)?;
+            anyhow::ensure!(
+                bundled_paths.contains(&resolved),
+                "Custom OCIO resource resolves outside portable package: {}",
+                resolved.display()
+            );
+        }
+        document.color_environment = ProjectColorEnvironment::new(relocated);
+    }
     document.validate()?;
     Ok(())
+}
+
+fn validate_relocated_ocio(
+    document: &ProjectDocument,
+    files: &[PortablePackageFile],
+    staging: &Path,
+) -> anyhow::Result<()> {
+    let ColorEngine::CustomOcio { identity } = document.color_environment.engine() else {
+        return Ok(());
+    };
+    let OcioConfigSource::Path { .. } = identity.source() else {
+        return Ok(());
+    };
+    let mut bindings = BTreeMap::new();
+    for file in files {
+        let bundled = mondrian_assets::canonical_native_path(&staging.join(&file.bundled_path))?;
+        for source in &file.source_paths {
+            bindings.insert(source.clone(), bundled.clone());
+        }
+    }
+    let mut relocated = document.clone();
+    rebind_document_resources(&mut relocated, &bindings)
+        .context("Custom OCIO resources do not resolve inside the portable package")
 }
 
 fn rebind_property_bag(
@@ -740,13 +814,10 @@ fn collect_project_dependencies(
     }
     if let ColorEngine::CustomOcio { identity } = document.color_environment.engine() {
         match identity.source() {
-            OcioConfigSource::Path { path } => {
-                collector.add_file("project:custom-ocio-config".to_owned(), path);
-                collector.issue(
-                    "project:custom-ocio-config",
-                    "Custom OCIO may reference additional search-path or environment resources; complete dependency collection is not yet available",
-                );
-            }
+            OcioConfigSource::Path { path } => collector.add_custom_ocio(
+                document.color_environment.engine(),
+                path,
+            ),
             OcioConfigSource::Environment => collector.issue(
                 "project:custom-ocio-config",
                 "environment-selected OCIO config is not portable; pin an explicit config and its resources",
@@ -762,9 +833,16 @@ fn collect_project_dependencies(
 
 struct DependencyCollector<'a> {
     library: &'a AssetLibrary,
-    files: BTreeMap<PathBuf, (u64, BTreeSet<String>, BTreeSet<PathBuf>)>,
+    files: BTreeMap<PathBuf, CollectedDependencyFile>,
     seen_assets: BTreeSet<AssetId>,
     issues: Vec<PortableDependencyIssue>,
+}
+
+struct CollectedDependencyFile {
+    size_bytes: u64,
+    owners: BTreeSet<String>,
+    source_paths: BTreeSet<PathBuf>,
+    bundled_path: Option<PathBuf>,
 }
 
 impl<'a> DependencyCollector<'a> {
@@ -774,6 +852,75 @@ impl<'a> DependencyCollector<'a> {
             files: BTreeMap::new(),
             seen_assets: BTreeSet::new(),
             issues: Vec::new(),
+        }
+    }
+
+    fn add_custom_ocio(&mut self, engine: &ColorEngine, path: &Path) {
+        const OWNER: &str = "project:custom-ocio-config";
+        let Ok(config_path) = fs::canonicalize(path) else {
+            self.issue(OWNER, "Custom OCIO config path cannot be resolved");
+            return;
+        };
+        let Some(mut common_root) = config_path.parent().map(Path::to_path_buf) else {
+            self.issue(OWNER, "Custom OCIO config has no parent directory");
+            return;
+        };
+        let dependencies = match mondrian_core::custom_ocio_dependencies(engine) {
+            Ok(dependencies) => dependencies,
+            Err(error) => {
+                self.issue(OWNER, error);
+                return;
+            }
+        };
+        for search_path in &dependencies.search_paths {
+            if Path::new(search_path).is_absolute()
+                || search_path.contains('$')
+                || search_path.contains('%')
+            {
+                self.issue(
+                    OWNER,
+                    format!("OCIO search path is not portable: {search_path}"),
+                );
+            }
+        }
+        for variable in &dependencies.environment_variables {
+            self.issue(
+                OWNER,
+                format!("OCIO context variable requires a portable binding: {variable}"),
+            );
+        }
+        let mut resources = Vec::new();
+        for resource in dependencies.files {
+            let owner = format!("project:custom-ocio-resource:{}", resource.reference);
+            match fs::canonicalize(&resource.resolved_path) {
+                Ok(canonical) => resources.push((owner, resource.resolved_path, canonical)),
+                Err(_) => self.issue(&owner, "OCIO FileTransform resource is unavailable"),
+            }
+        }
+        for (_, _, canonical) in &resources {
+            while !canonical.starts_with(&common_root) {
+                let Some(parent) = common_root.parent() else {
+                    self.issue(OWNER, "OCIO resources have no common filesystem root");
+                    return;
+                };
+                common_root = parent.to_path_buf();
+            }
+        }
+        let package_root = PathBuf::from("files").join("ocio");
+        let Ok(config_relative) = config_path.strip_prefix(&common_root) else {
+            self.issue(OWNER, "Custom OCIO config cannot be placed in package");
+            return;
+        };
+        self.add_file_at(OWNER.to_owned(), path, package_root.join(config_relative));
+        for (owner, original, canonical) in resources {
+            let Ok(relative) = canonical.strip_prefix(&common_root) else {
+                self.issue(
+                    &owner,
+                    "OCIO FileTransform resource cannot be placed in package",
+                );
+                continue;
+            };
+            self.add_file_at(owner, &original, package_root.join(relative));
         }
     }
 
@@ -873,12 +1020,34 @@ impl<'a> DependencyCollector<'a> {
                 return;
             }
         };
-        let entry = self
-            .files
-            .entry(canonical)
-            .or_insert_with(|| (metadata.len(), BTreeSet::new(), BTreeSet::new()));
-        entry.1.insert(owner);
-        entry.2.insert(path.to_path_buf());
+        let entry = self.files.entry(canonical).or_insert_with(|| CollectedDependencyFile {
+            size_bytes: metadata.len(),
+            owners: BTreeSet::new(),
+            source_paths: BTreeSet::new(),
+            bundled_path: None,
+        });
+        entry.owners.insert(owner);
+        entry.source_paths.insert(path.to_path_buf());
+    }
+
+    fn add_file_at(&mut self, owner: String, path: &Path, bundled_path: PathBuf) {
+        self.add_file(owner.clone(), path);
+        let Ok(canonical) = fs::canonicalize(path) else {
+            return;
+        };
+        let Some(entry) = self.files.get_mut(&canonical) else {
+            return;
+        };
+        if let Some(existing) = &entry.bundled_path {
+            if existing != &bundled_path {
+                self.issue(
+                    owner,
+                    "one OCIO resource requires conflicting package paths",
+                );
+            }
+        } else {
+            entry.bundled_path = Some(bundled_path);
+        }
     }
 
     fn issue(&mut self, owner: impl Into<String>, reason: impl Into<String>) {
@@ -891,14 +1060,13 @@ impl<'a> DependencyCollector<'a> {
             files: self
                 .files
                 .into_iter()
-                .map(
-                    |(path, (size_bytes, owners, source_paths))| PortableDependencyFile {
-                        path,
-                        size_bytes,
-                        owners: owners.into_iter().collect(),
-                        source_paths: source_paths.into_iter().collect(),
-                    },
-                )
+                .map(|(path, collected)| PortableDependencyFile {
+                    path,
+                    size_bytes: collected.size_bytes,
+                    owners: collected.owners.into_iter().collect(),
+                    source_paths: collected.source_paths.into_iter().collect(),
+                    bundled_path: collected.bundled_path,
+                })
                 .collect(),
             issues: self.issues,
         }
@@ -1093,6 +1261,191 @@ mod tests {
             settings,
             ProjectSettings::default(),
         )
+    }
+
+    fn custom_ocio_document(config: &Path) -> ProjectDocument {
+        let sequence = Sequence::new("Custom OCIO portable");
+        let settings = sequence.settings.clone();
+        let engine = ColorEngine::custom_ocio(
+            OcioConfigSource::Path { path: config.to_path_buf() },
+            mondrian_core::WorkingColorSpace::LinearRec2020,
+            ColorSpace::Rec709,
+            "Test Display",
+            "Test View",
+        )
+        .expect("pin config and LUT");
+        ProjectDocument::new(
+            "Custom OCIO portable",
+            SequenceCollection::new(sequence),
+            ProjectColorEnvironment::new(engine),
+            settings,
+            ProjectSettings::default(),
+        )
+    }
+
+    fn custom_ocio_output_sample(engine: &ColorEngine) -> [f32; 4] {
+        let mut sample = [0.25, 0.5, 0.75, 0.625];
+        mondrian_core::OcioCpuProcessorSession::default()
+            .display_transform_identity_float(
+                engine,
+                &mut sample,
+                mondrian_core::OcioColorSpaceIdentity::Working(
+                    mondrian_core::WorkingColorSpace::LinearRec2020,
+                ),
+                "Test Display",
+                "Test View",
+            )
+            .expect("Custom OCIO output pixels");
+        sample
+    }
+
+    #[test]
+    fn custom_ocio_package_relocates_config_and_search_path_lut() {
+        const CONFIG: &str = r#"ocio_profile_version: 2.1
+search_path: luts
+strictparsing: true
+roles:
+  default: Linear Rec.2020
+  scene_linear: Linear Rec.2020
+displays:
+  Test Display:
+    - !<View> {name: Test View, colorspace: LUT Output}
+active_displays: [Test Display]
+active_views: [Test View]
+colorspaces:
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    isdata: false
+  - !<ColorSpace>
+    name: LUT Output
+    isdata: false
+    from_scene_reference: !<FileTransform> {src: test.cube}
+"#;
+        const LUT: &str = RED_INVERT_CUBE_2;
+        let root = tempfile::tempdir().expect("root");
+        let config_root = root.path().join("studio");
+        fs::create_dir_all(config_root.join("luts")).expect("resource directory");
+        let config = config_root.join("config.ocio");
+        let lut = config_root.join("luts/test.cube");
+        fs::write(&config, CONFIG).expect("config");
+        fs::write(&lut, LUT).expect("LUT");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let document = custom_ocio_document(&config);
+        let original_sample = custom_ocio_output_sample(document.color_environment.engine());
+        assert!(
+            (original_sample[0] - 0.75).abs() < 1.0e-6,
+            "{original_sample:?}"
+        );
+        assert_eq!(original_sample[3], 0.625);
+        let inventory = collect_project_dependencies(&document, &library).expect("inventory");
+        assert!(inventory.is_complete(), "{:?}", inventory.issues);
+        assert_eq!(inventory.files.len(), 2);
+        let session = AuthoringSession::new_unsaved(
+            document,
+            root.path().join("original.mdp"),
+            root.path().join("runtime"),
+            library,
+        )
+        .expect("session");
+        let package = root.path().join("portable.mdpkg");
+        export_snapshot_package(session.snapshot().expect("snapshot"), &package).expect("export");
+        let moved = root.path().join("moved.mdpkg");
+        fs::rename(&package, &moved).expect("move");
+        fs::remove_file(&config).expect("remove source config");
+        fs::remove_file(&lut).expect("remove source LUT");
+        let manifest = verify_portable_project_package(&moved).expect("verify");
+        assert_eq!(manifest.files.len(), 2);
+        assert!(moved.join("files/ocio/config.ocio").is_file());
+        assert!(moved.join("files/ocio/luts/test.cube").is_file());
+        let mut imported = AppState::new();
+        imported
+            .open_portable_project_package(moved.clone())
+            .expect("open moved package");
+        let relocated = imported.authoring.as_ref().expect("session").document();
+        relocated.color_environment.engine().ensure_loaded().expect("relocated config");
+        assert_eq!(
+            custom_ocio_output_sample(relocated.color_environment.engine()),
+            original_sample,
+            "moving a package must preserve Custom OCIO Float32 pixels"
+        );
+        let resources =
+            mondrian_core::custom_ocio_dependencies(relocated.color_environment.engine())
+                .expect("relocated resources");
+        assert_eq!(resources.files.len(), 1);
+        assert_eq!(
+            fs::canonicalize(&resources.files[0].resolved_path).expect("resource"),
+            fs::canonicalize(moved.join("files/ocio/luts/test.cube")).expect("bundled LUT")
+        );
+        drop(imported);
+
+        let mut omitted = manifest.clone();
+        omitted.files.retain(|file| !file.bundled_path.ends_with("test.cube"));
+        fs::write(
+            moved.join("manifest.json"),
+            serde_json::to_vec(&omitted).expect("manifest"),
+        )
+        .expect("omit resource binding");
+        verify_portable_project_package(&moved).expect("remaining bytes are valid");
+        let mut rejected = AppState::new();
+        assert!(rejected.open_portable_project_package(moved).is_err());
+        assert!(!rejected.has_open_project());
+
+        let external_root = root.path().join("external-search");
+        let external_luts = root.path().join("external-luts");
+        fs::create_dir_all(&external_root).expect("config directory");
+        fs::create_dir_all(&external_luts).expect("external search directory");
+        let external_config = external_root.join("config.ocio");
+        fs::write(external_luts.join("test.cube"), LUT).expect("external search LUT");
+        fs::write(
+            &external_config,
+            CONFIG.replace("search_path: luts", "search_path: ../external-luts"),
+        )
+        .expect("external config");
+        let external_library =
+            AssetLibrary::open(root.path().join("external-library")).expect("external library");
+        let external_document = custom_ocio_document(&external_config);
+        let external_sample =
+            custom_ocio_output_sample(external_document.color_environment.engine());
+        let external_inventory =
+            collect_project_dependencies(&external_document, &external_library)
+                .expect("external inventory");
+        assert!(
+            external_inventory.is_complete(),
+            "{:?}",
+            external_inventory.issues
+        );
+        let external_session = AuthoringSession::new_unsaved(
+            external_document,
+            root.path().join("external.mdp"),
+            root.path().join("external-runtime"),
+            external_library,
+        )
+        .expect("external session");
+        let external_package = root.path().join("external.mdpkg");
+        export_snapshot_package(
+            external_session.snapshot().expect("external snapshot"),
+            &external_package,
+        )
+        .expect("package sibling search path");
+        let external_moved = root.path().join("external-moved.mdpkg");
+        fs::rename(&external_package, &external_moved).expect("move sibling package");
+        fs::remove_file(&external_config).expect("remove sibling config");
+        fs::remove_file(external_luts.join("test.cube")).expect("remove sibling LUT");
+        verify_portable_project_package(&external_moved).expect("verify sibling package");
+        let mut external_imported = AppState::new();
+        external_imported
+            .open_portable_project_package(external_moved.clone())
+            .expect("open sibling package");
+        let external_engine = external_imported
+            .authoring
+            .as_ref()
+            .expect("sibling session")
+            .document()
+            .color_environment
+            .engine();
+        assert_eq!(custom_ocio_output_sample(external_engine), external_sample);
+        assert!(external_moved.join("files/ocio/external-search/config.ocio").is_file());
+        assert!(external_moved.join("files/ocio/external-luts/test.cube").is_file());
     }
 
     #[test]

@@ -41,11 +41,12 @@ The ordinary `.mdp` remains a lightweight authoring archive. The App's
 and one stable Asset Library revision before package publication. It includes
 visible Library Assets, Assets still referenced by Clips, external resource
 parameters on Clips and every saved Grade Version (including inactive ones),
-and explicit Custom OCIO config paths. Canonical regular-file paths are
+and explicit Custom OCIO config paths and the external FileTransform resources
+reachable from the pinned processor routes. Canonical regular-file paths are
 deduplicated while retaining every stable author owner and an observed byte
 count. Missing files, dangling Asset IDs, remote resources, environment-selected
-OCIO, and Custom OCIO with uncollected transitive resources produce explicit
-issues; an inventory with issues cannot authorize a complete package. This is
+OCIO, and Custom OCIO resources that cannot be safely relocated together
+produce explicit issues; an inventory with issues cannot authorize a complete package. This is
 read-only preflight: source files must be revalidated as retained objects while
 copying, and no portable artifact is published by the inventory itself.
 
@@ -55,7 +56,22 @@ with exact original path spellings, file lengths, and SHA-256 digests. The copy
 checks every source again through its retained handle before an atomic,
 create-only directory publication. SQLite is captured through its online
 snapshot API; its temporary backup is discarded before publication. The
-product command performs preflight and publication on a dedicated cancellable
+Custom OCIO config and its resources retain their relative layout from their
+nearest common source directory under `files/ocio/`. Before publication, a
+temporary rebound document loads that config and proves every FileTransform
+resolves to a copied manifest file. Absolute or environment-expanded search
+paths, context variables, and resources that still resolve outside the package
+fail the package as a whole. On import, the
+pinned config and dependency digests remain unchanged while the source locator
+is rebound to the verified package path, then the same resource containment
+check runs before the new Session is installed. This admits ordinary relative
+LUT search paths, including sibling directories reached through `../`,
+without copying unrelated studio directories.
+The Custom OCIO relocation regression uses a nonidentity 3D LUT and compares
+Float32 display-transform pixels and alpha before export and after moving the
+package and removing both original files. A sibling search path outside the
+config directory is also moved and compared pixel for pixel after import.
+The product command performs preflight and publication on a dedicated cancellable
 worker. Cancellation is checked during file copy and hashing and immediately
 before final publication; dropping staging removes incomplete output. The
 package verifier checks paths against traversal and symlinks, all file hashes,

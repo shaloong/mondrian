@@ -2096,6 +2096,66 @@ fn custom_ocio_dependency_manifest_sha256(
     working_space: &str,
     outputs: &[CustomOcioOutputIdentity],
 ) -> Result<String, String> {
+    custom_ocio_dependency_manifest(config, working_space, outputs).map(|(digest, _)| digest)
+}
+
+/// One external file actually used by a pinned Custom OCIO processor route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomOcioExternalFile {
+    /// File identity reported by OCIO processor metadata; it may be resolved.
+    pub reference: String,
+    /// File selected by OCIO's current context for that spelling.
+    pub resolved_path: PathBuf,
+}
+
+/// Resolution inputs and actual external files of the pinned Custom OCIO routes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomOcioDependencies {
+    /// External files used by processors in the pinned dependency manifest.
+    pub files: Vec<CustomOcioExternalFile>,
+    /// Search paths declared by the selected configuration.
+    pub search_paths: Vec<String>,
+    /// Context variable declarations that may change resource resolution.
+    pub environment_variables: Vec<String>,
+}
+
+/// Enumerate the files covered by the exact Custom OCIO dependency fingerprint.
+///
+/// This revalidates the pinned identity before returning any paths. The caller
+/// must still check that relocated files resolve inside its own package.
+pub fn custom_ocio_dependencies(engine: &ColorEngine) -> Result<CustomOcioDependencies, String> {
+    let ColorEngine::CustomOcio { identity } = engine else {
+        return Err("external file enumeration requires a Custom OCIO engine".to_owned());
+    };
+    with_ocio_config_for_engine(engine, |config, _| {
+        let (digest, files) =
+            custom_ocio_dependency_manifest(config, identity.working_space(), identity.outputs())?;
+        if digest != identity.dependency_manifest_sha256() {
+            return Err("Custom OCIO dependency resources changed during enumeration".to_owned());
+        }
+        let search_paths = (0..config.num_search_paths())
+            .map(|index| {
+                config.search_path_by_index(index).ok_or_else(|| {
+                    format!("Custom OCIO search path at index {index} is unavailable")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let environment_variables = (0..config.num_environment_vars())
+            .map(|index| {
+                config.environment_var_name_by_index(index).ok_or_else(|| {
+                    format!("Custom OCIO context variable at index {index} is unavailable")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CustomOcioDependencies { files, search_paths, environment_variables })
+    })
+}
+
+fn custom_ocio_dependency_manifest(
+    config: &Config,
+    working_space: &str,
+    outputs: &[CustomOcioOutputIdentity],
+) -> Result<(String, Vec<CustomOcioExternalFile>), String> {
     let mut color_spaces = (0..config.num_color_spaces())
         .filter_map(|index| config.color_space_name_by_index(index))
         .collect::<Vec<_>>();
@@ -2105,6 +2165,7 @@ fn custom_ocio_dependency_manifest_sha256(
         .ok_or_else(|| "Custom OCIO config has no current context".to_owned())?;
 
     let mut digest = Sha256::new();
+    let mut files = Vec::new();
     digest.update(b"mondrian-custom-ocio-dependency-manifest-v1\0");
     update_fingerprint_field(&mut digest, "working-space", working_space);
     for color_space in color_spaces {
@@ -2117,6 +2178,7 @@ fn custom_ocio_dependency_manifest_sha256(
                 &format!("colorspace:{color_space}->{working_space}"),
                 processor,
                 &context,
+                &mut files,
             )?;
         }
         if let Ok(processor) = config.processor(working_space, &color_space) {
@@ -2125,6 +2187,7 @@ fn custom_ocio_dependency_manifest_sha256(
                 &format!("colorspace:{working_space}->{color_space}"),
                 processor,
                 &context,
+                &mut files,
             )?;
         }
     }
@@ -2162,9 +2225,16 @@ fn custom_ocio_dependency_manifest_sha256(
             ),
             display_processor,
             &context,
+            &mut files,
         )?;
     }
-    Ok(finish_sha256_hex(digest))
+    files.sort_by(|left, right| {
+        left.reference
+            .cmp(&right.reference)
+            .then(left.resolved_path.cmp(&right.resolved_path))
+    });
+    files.dedup();
+    Ok((finish_sha256_hex(digest), files))
 }
 
 fn update_custom_processor_dependency_manifest(
@@ -2172,6 +2242,7 @@ fn update_custom_processor_dependency_manifest(
     label: &str,
     processor: ocio_rs::Processor,
     context: &ocio_rs::Context,
+    files: &mut Vec<CustomOcioExternalFile>,
 ) -> Result<(), String> {
     update_fingerprint_field(digest, "processor", label);
     let metadata = processor
@@ -2199,6 +2270,7 @@ fn update_custom_processor_dependency_manifest(
                 "Custom OCIO processor '{label}' dependency '{reference}' at '{resolved}' could not be read: {error}"
             )
         })?;
+        files.push(CustomOcioExternalFile { reference, resolved_path: PathBuf::from(resolved) });
         resource_digests.push(sha256_hex(&bytes));
     }
     resource_digests.sort();
