@@ -3,6 +3,5 @@ pub mod app;
 pub mod app_ui;
 pub mod openfx_adapter;
 pub mod openfx_effect;
-#[cfg(windows)]
 pub mod openfx_host;
 pub(crate) mod product_assets;

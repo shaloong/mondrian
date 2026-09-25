@@ -6,13 +6,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     emit_cargo_build_attestation();
+    build_openfx_host();
 
     #[cfg(target_os = "linux")]
     emit_linux_link_resource_policy();
 
     #[cfg(target_os = "windows")]
     {
-        build_openfx_host();
         if let Err(err) = embed_windows_icon() {
             println!("cargo:warning=写入 Windows 图标资源失败: {err}");
         }
@@ -22,7 +22,6 @@ fn main() {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn build_openfx_host() {
     let vendor = std::path::Path::new("native/openfx/vendor");
     let mut build = cc::Build::new();

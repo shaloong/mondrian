@@ -63,8 +63,8 @@ description, instance creation, or render. An independently built official
 Float32 Basic example provides the local ABI discovery qualification fixture;
 its binary stays outside the shipped product.
 
-The Windows application now includes a selected-binary Float32 filter host
-using vendored BSD-3-Clause OpenFX HostSupport source and separate supervised
+The application builds a selected-binary Float32 filter host on Windows,
+Linux, and macOS using vendored BSD-3-Clause OpenFX HostSupport source and separate supervised
 description/render children. The description child runs DescribeInContext for
 one selected Filter and returns bounded Double/Boolean defaults, labels, hints,
 numeric hard/display ranges, and animation/visibility flags. Plain and Scale

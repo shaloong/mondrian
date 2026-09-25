@@ -1,7 +1,5 @@
 //! Real OpenFX Float32 filter admission through the supervised product worker.
 
-#![cfg(windows)]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

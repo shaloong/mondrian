@@ -9,7 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return mondrian_app::openfx_adapter::run_openfx_discovery_worker().map_err(Into::into);
     }
-    #[cfg(windows)]
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
             mondrian_app::openfx_host::OPENFX_DESCRIBE_WORKER_ARGUMENT,
@@ -17,7 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return mondrian_app::openfx_host::run_openfx_describe_worker().map_err(Into::into);
     }
-    #[cfg(windows)]
     if mode.as_deref()
         == Some(std::ffi::OsStr::new(
             mondrian_app::openfx_host::OPENFX_RENDER_WORKER_ARGUMENT,
