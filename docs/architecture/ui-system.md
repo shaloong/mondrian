@@ -2583,3 +2583,10 @@ The Effect Browser reads category paths from registered executable Definitions,
 including native plugin definitions, instead of reducing every Plugin key to
 the generic core-data category. Built-in categories retain their semantic
 ordering and plugin subcategories retain stable tree IDs across locale changes.
+
+The Mixer and shared Inspector/Mixer Audio Processor Rack widgets format their
+own control labels from the shell's captured Fluent locale. Their projected
+Channel Strip, Route, parameter, and processor identities remain typed and
+locale-independent; rebuilding the widgets after a language change does not
+rewrite audio authoring state. Both bundled catalogs must contain identical
+message IDs so an untranslated new control cannot silently fall back.

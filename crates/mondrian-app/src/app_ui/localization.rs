@@ -223,6 +223,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_catalogs_have_identical_message_ids() {
+        fn ids(catalog: &str) -> std::collections::BTreeSet<&str> {
+            catalog
+                .lines()
+                .filter_map(|line| {
+                    let (key, _) = line.split_once('=')?;
+                    let key = key.trim();
+                    (!key.is_empty()
+                        && key.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        }))
+                    .then_some(key)
+                })
+                .collect()
+        }
+
+        let chinese = ids(ZH_CN_CATALOG);
+        let english = ids(EN_US_CATALOG);
+        assert!(
+            chinese.len() > 400,
+            "product catalog unexpectedly truncated"
+        );
+        assert_eq!(chinese, english, "a product string lacks one translation");
+    }
+
+    #[test]
     fn blend_mode_catalogs_cover_every_typed_option() {
         let chinese = Localizer::new(AppUiLocale::ZhCn).expect("Chinese catalog");
         let english = Localizer::new(AppUiLocale::EnUs).expect("English catalog");

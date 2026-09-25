@@ -3497,9 +3497,14 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
                 &localizer,
             )))))
         }
-        PanelKind::Mixer => Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
-            &models.mixer,
-        ))))),
+        PanelKind::Mixer => {
+            let localizer =
+                Localizer::new(models.locale).expect("bundled UI catalogs must be valid");
+            Box::new(ScrollView::new(Some(Box::new(audio_mixer_panel(
+                &models.mixer,
+                &localizer,
+            )))))
+        }
         PanelKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
 }
@@ -4314,8 +4319,8 @@ fn with_asset_icon(item: AssetGridItem, icon: AppIcon) -> AssetGridItem {
 
 fn effect_icon_button(
     icon: AppIcon,
-    fallback_label: &'static str,
-    tooltip: &'static str,
+    fallback_label: impl Into<String>,
+    tooltip: impl Into<String>,
     enabled: bool,
     action: Option<Action>,
 ) -> Box<dyn Widget> {

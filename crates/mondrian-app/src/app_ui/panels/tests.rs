@@ -8,6 +8,27 @@ fn chinese_localizer() -> Localizer {
 }
 
 #[test]
+fn mixer_automation_and_meter_status_follow_locale() {
+    let chinese = chinese_localizer();
+    let english = Localizer::new(AppUiLocale::EnUs).expect("bundled English catalog");
+    let visible = |text: String| text.replace(['\u{2068}', '\u{2069}'], "");
+    assert_eq!(
+        visible(mixer_automation_label(&chinese, 3)),
+        "自动化 · 3 个关键帧"
+    );
+    assert_eq!(
+        visible(mixer_automation_label(&english, 3)),
+        "Automated · 3 keyframes"
+    );
+    assert_eq!(chinese.text("mixer-meter-not-running"), "未执行");
+    assert_eq!(english.text("mixer-meter-not-running"), "Not running");
+    assert_eq!(
+        visible(english.format_text("mixer-route-count", "count", "2")),
+        "2 routes"
+    );
+}
+
+#[test]
 fn empty_timeline_projection_does_not_construct_an_app_owner() {
     let before = crate::app::test_app_state_construction_count();
     let model = TimelinePanelModel::empty();
