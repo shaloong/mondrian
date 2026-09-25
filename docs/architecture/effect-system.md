@@ -14,6 +14,17 @@ and no second result cache.
 
 Effects are timeline-instance operations that transform image data through a compiled render graph.
 
+Clip effect preparation binds an exact `EffectFrameContext`: sequence frame rate,
+sample aspect ratio, and the Clip's half-open source-time interval. The context
+travels through zero-time graph compilation and subsequent parameter evaluation.
+Frame-based external ABIs lower `TimelineTime` to a floating frame coordinate
+only at their boundary; the renderer's frame seed is a cache/execution key and
+cannot substitute for effect time. Inclusive available-frame bounds cover
+subframe source intervals by flooring the start and ceiling the exclusive end.
+Standalone effect preparation has no sequence frame context and an adapter that
+requires one must reject that invocation. A change to any bound frame fact
+invalidates cross-revision Clip-program reuse.
+
 This document describes visual effects. Audio processing uses the distinct
 Sequence-owned Audio Processor model in [Audio Pipeline](audio-pipeline.md).
 Both domains reuse foundation concepts such as strong IDs, typed parameter

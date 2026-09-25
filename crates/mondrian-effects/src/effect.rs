@@ -20,7 +20,7 @@ use mondrian_core::{
         ParameterResourceReference, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyValue,
     },
     types::{Color, ColorSpace, EffectId, WorkingColorSpace},
-    ParameterId, TimelineTime,
+    FrameRounding, ParameterId, Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange,
 };
 // Re-export effect data types from mondrian-core.
 pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
@@ -41,11 +41,92 @@ use std::{
     },
 };
 
+/// Exact sequence facts needed by effects that execute in a frame-based ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectFrameContext {
+    frame_rate: Rational,
+    pixel_aspect_ratio: SampleAspectRatio,
+    available_range: TimelineTimeRange,
+}
+
+/// An owner range cannot be represented as a frame-based effect contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectFrameContextError {
+    /// The sequence frame rate must be positive.
+    #[error("effect frame rate must be positive")]
+    InvalidFrameRate,
+    /// The effect owner needs a nonempty available interval.
+    #[error("effect frame range is empty")]
+    EmptyRange,
+    /// Exact interval conversion failed.
+    #[error("effect frame range cannot be mapped to its sequence grid: {0}")]
+    Time(#[from] mondrian_core::TimelineTimeError),
+}
+
+impl EffectFrameContext {
+    /// Bind one exact half-open owner range to a validated sequence grid.
+    pub fn new(
+        frame_rate: Rational,
+        pixel_aspect_ratio: SampleAspectRatio,
+        available_range: TimelineTimeRange,
+    ) -> Result<Self, EffectFrameContextError> {
+        if frame_rate.num <= 0 || frame_rate.den <= 0 {
+            return Err(EffectFrameContextError::InvalidFrameRate);
+        }
+        if available_range.is_empty() {
+            return Err(EffectFrameContextError::EmptyRange);
+        }
+        let value = Self { frame_rate, pixel_aspect_ratio, available_range };
+        value.available_frames()?;
+        Ok(value)
+    }
+
+    /// Sequence frame rate as an exact rational.
+    pub const fn frame_rate(self) -> Rational {
+        self.frame_rate
+    }
+
+    /// Exact width-to-height ratio of a sample.
+    pub const fn pixel_aspect_ratio(self) -> SampleAspectRatio {
+        self.pixel_aspect_ratio
+    }
+
+    /// Half-open availability interval in the effect owner's time domain.
+    pub const fn available_range(self) -> TimelineTimeRange {
+        self.available_range
+    }
+
+    /// Inclusive frame coordinates covering the entire half-open owner interval.
+    /// The first frame may begin before the interval when the owner starts between frames.
+    pub fn available_frames(self) -> Result<(i64, i64), EffectFrameContextError> {
+        let first = self
+            .available_range
+            .start
+            .to_frame_position(self.frame_rate, FrameRounding::Floor)?
+            .frame;
+        let last = self
+            .available_range
+            .end()?
+            .to_frame_position(self.frame_rate, FrameRounding::Ceil)?
+            .frame
+            .checked_sub(1)
+            .ok_or(mondrian_core::TimelineTimeError::Overflow)?;
+        Ok((first, last))
+    }
+
+    /// Lower an exact owner time to the OpenFX-style double frame coordinate.
+    pub fn frame_coordinate(self, time: TimelineTime) -> f64 {
+        time.to_f64() * self.frame_rate.to_f64()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EffectEvalContext {
     pub time: TimelineTime,
     /// Sequence working identity used by scene-linear effect algorithms.
     pub working_color_space: WorkingColorSpace,
+    /// Explicit frame-grid facts; absent only for standalone effect evaluation.
+    pub frame_context: Option<EffectFrameContext>,
 }
 
 /// Recovery owner for one unresolved effect resource.
@@ -3415,6 +3496,36 @@ mod tests {
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::new(frame, 25).expect("valid test time")
+    }
+
+    #[test]
+    fn frame_context_covers_subframe_clip_range_without_dropping_it() {
+        let range = TimelineTimeRange::new(
+            TimelineTime::new(1, 100).expect("start"),
+            TimelineTime::new(1, 100).expect("duration"),
+        )
+        .expect("short range");
+        let context = EffectFrameContext::new(Rational::FPS_25, SampleAspectRatio::SQUARE, range)
+            .expect("subframe range remains renderable");
+        assert_eq!(context.available_frames().expect("frame bounds"), (0, 0));
+        assert_eq!(context.frame_coordinate(range.start), 0.25);
+
+        let ntsc = EffectFrameContext::new(
+            Rational::FPS_23976,
+            SampleAspectRatio::new(4, 3).expect("sample aspect"),
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(1001, 24000).expect("one frame"),
+            )
+            .expect("frame range"),
+        )
+        .expect("NTSC context");
+        assert_eq!(ntsc.available_frames().expect("NTSC bounds"), (0, 0));
+        assert_eq!(
+            ntsc.frame_coordinate(ntsc.available_range().end().expect("end")),
+            1.0
+        );
+        assert_eq!(ntsc.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
     }
 
     fn test_plugin_execution_contract() -> EffectExecutionContract {

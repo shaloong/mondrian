@@ -1,5 +1,11 @@
 # Render Pipeline
 
+Prepared visual Clip programs bind sequence frame rate, exact sample aspect
+ratio, and Clip source-time availability before compiling their effect graph.
+The prepared-program cache compares this context when reusing Clip effects
+across revisions, so changing frame geometry or source range cannot retain a
+program whose external effect parameters were evaluated under older facts.
+
 At the App media boundary, an admitted GPU consumer can receive compact CPU
 YUV before native decoder discovery. P010 remains CPU-resident and enters the
 existing renderer upload path; this is not evidence of hardware decoding or
