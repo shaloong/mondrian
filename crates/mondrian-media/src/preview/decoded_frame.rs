@@ -23,22 +23,29 @@ pub struct RgbaFrame {
     pub decode_execution: PreviewDecodeExecutionPath,
 }
 
-/// CPU-resident RGBA f32 preview frame that preserves scene-linear samples.
+/// CPU-resident high-precision RGBA preview frame.
 #[derive(Debug, Clone)]
-pub struct FloatRgbaFrame {
+pub struct HighPrecisionRgbaFrame<T> {
     /// Frame width in pixels.
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
-    /// Shared CPU-resident interleaved RGBA f32 pixels.
-    data: Arc<Vec<f32>>,
+    /// Shared CPU-resident interleaved RGBA samples.
+    data: Arc<Vec<T>>,
     /// Color and alpha semantics of the decoded pixels.
     pub color_contract: DecodedRgbaFrameContract,
     /// Decode/cache diagnostics for this frame.
     pub diagnostics: PreviewDecodeDiagnostics,
     /// Frame-local execution provenance retained across every cache layer.
     pub decode_execution: PreviewDecodeExecutionPath,
+    residency: DecodedFrameResidency,
 }
+
+/// CPU-resident RGBA f32 frame, including scene-linear sources.
+pub type FloatRgbaFrame = HighPrecisionRgbaFrame<f32>;
+
+/// CPU-resident source-encoded RGBA16 UNORM frame.
+pub type Unorm16RgbaFrame = HighPrecisionRgbaFrame<u16>;
 
 /// Chroma sampling retained by a compact CPU YUV Preview frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -415,21 +422,55 @@ impl FloatRgbaFrame {
             color_contract,
             diagnostics,
             decode_execution: PreviewDecodeExecutionPath::SoftwareCpu,
+            residency: DecodedFrameResidency::CpuFloat,
+        }
+    }
+}
+
+impl Unorm16RgbaFrame {
+    pub(crate) fn new(
+        width: u32,
+        height: u32,
+        data: Vec<u16>,
+        color_contract: DecodedRgbaFrameContract,
+        path: PreviewDecodePath,
+    ) -> Self {
+        debug_assert_eq!(data.len(), width as usize * height as usize * 4);
+        let mut diagnostics = PreviewDecodeDiagnostics::new(path);
+        diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuUnorm16;
+        Self {
+            width,
+            height,
+            data: Arc::new(data),
+            color_contract,
+            diagnostics,
+            decode_execution: PreviewDecodeExecutionPath::SoftwareCpu,
+            residency: DecodedFrameResidency::CpuUnorm16,
         }
     }
 
-    /// Borrow decoded RGBA f32 pixels.
-    pub fn rgba(&self) -> &[f32] {
+    /// Materialize normalized floating-point channels for CPU-only consumers.
+    pub fn into_normalized_f32(self) -> Vec<f32> {
+        self.into_data()
+            .into_iter()
+            .map(|sample| f32::from(sample) / f32::from(u16::MAX))
+            .collect()
+    }
+}
+
+impl<T: Clone> HighPrecisionRgbaFrame<T> {
+    /// Borrow decoded RGBA samples.
+    pub fn rgba(&self) -> &[T] {
         self.data.as_slice()
     }
 
-    /// Consume this frame and return shared decoded RGBA f32 pixels.
-    pub fn into_shared_data(self) -> Arc<Vec<f32>> {
+    /// Consume this frame and return shared decoded RGBA samples.
+    pub fn into_shared_data(self) -> Arc<Vec<T>> {
         self.data
     }
 
-    /// Consume this frame and return owned decoded RGBA f32 pixels.
-    pub fn into_data(self) -> Vec<f32> {
+    /// Consume this frame and return owned decoded RGBA samples.
+    pub fn into_data(self) -> Vec<T> {
         Arc::try_unwrap(self.data).unwrap_or_else(|data| data.as_ref().clone())
     }
 
@@ -497,7 +538,7 @@ impl FloatRgbaFrame {
 
     pub(super) fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
         self.diagnostics = self.diagnostics.with_hardware_decode_plan(plan);
-        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        self.diagnostics.decoded_frame_residency = self.residency;
         self
     }
 
@@ -542,7 +583,7 @@ impl FloatRgbaFrame {
         let selected_temporal_extent_source = self.diagnostics.selected_temporal_extent_source;
         let temporal_approximation = self.diagnostics.temporal_approximation;
         self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
-        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        self.diagnostics.decoded_frame_residency = self.residency;
         self.diagnostics.decoded_surface_format = decoded_surface_format;
         self.diagnostics.decoded_video_sampling = decoded_video_sampling;
         self.diagnostics.requested_pts = requested_pts;

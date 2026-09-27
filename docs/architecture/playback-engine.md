@@ -2408,10 +2408,12 @@ decode capability probes.
   backward time, controls remain responsive;
 - recovery handoff produces bounded phase evidence and no visible timeline jump;
 - 100 cross-region seeks with latest epoch only;
-- sustained 4K/Long-GOP pressure reaches bounded
-  `product_process_tree_private_commit_v2` memory and reports drops; every
-  cadence sample covers the App plus demux/FFmpeg descendants with complete
-  scope/count/inventory evidence, so current-process-only data fails closed;
+- sustained 4K/Long-GOP pressure reaches bounded native process-tree memory
+  (`product_process_tree_private_commit_v2` on Windows or
+  `macos_product_process_tree_physical_footprint_v1` on the 16 GiB macOS
+  qualification host) and reports drops; every cadence sample covers the App
+  plus demux/FFmpeg descendants with complete scope/count/inventory evidence,
+  so current-process-only data fails closed;
 - every planned Headless observation advances the complete execution-resource
   cycle before GPU completion, Prepared Successor, or exact-current reuse can
   return; fewer resource-policy applications than planned observations fails

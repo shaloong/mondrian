@@ -288,6 +288,7 @@ fn sampling_matches_delivery(
             PixelFormat::Yuv444p
                 | PixelFormat::Yuv444p10le
                 | PixelFormat::Yuv444p12le
+                | PixelFormat::Yuva444p12le
                 | PixelFormat::Yuv444p16le
                 | PixelFormat::Gbrap10le
                 | PixelFormat::Gbrap12le

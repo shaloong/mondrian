@@ -115,6 +115,11 @@ pub(super) fn source_rgba(
     let source = frame.gpu_source().context("decoded media did not retain a CPU source frame")?;
     match source.source.as_ref() {
         CpuSourceColorFrame::EncodedRgba8(frame) => Ok(frame.rgba().to_vec()),
+        CpuSourceColorFrame::EncodedUnorm16(frame) => Ok(frame
+            .rgba()
+            .iter()
+            .map(|sample| (f32::from(*sample) * 255.0 / f32::from(u16::MAX)).round() as u8)
+            .collect()),
         CpuSourceColorFrame::EncodedFloat(frame) => {
             let mut rgba = Vec::with_capacity(frame.rgba_f32().data.len().saturating_mul(4));
             for pixel in &frame.rgba_f32().data {

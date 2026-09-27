@@ -906,7 +906,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn prepare_buffer_pass(
         &self,
         device: &wgpu::Device,
@@ -2009,6 +2009,184 @@ mod tests {
                 (*channel - 1.0).abs() < 0.002,
                 "white channel was {channel}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn p210_and_p410_shader_preserve_ten_bit_codes_on_real_wgpu_device() {
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU color qualification policy");
+        let Some(context) = policy
+            .admit_adapter("native-yuv-10-bit-422-444", crate::GpuContext::new().await)
+            .expect("real GPU adapter admission")
+        else {
+            return;
+        };
+        if !policy
+            .admit_capability(
+                "native-yuv-10-bit-422-444",
+                "16-bit normalized planes",
+                context.adapter.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+            )
+            .expect("16-bit plane admission")
+        {
+            return;
+        }
+        assert!(context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM));
+        eprintln!(
+            "native-yuv-10-bit-422-444 adapter={:?}",
+            context.adapter.get_info()
+        );
+
+        let luma_codes = [513u16; 4];
+        let luma_bytes = luma_codes
+            .into_iter()
+            .flat_map(|code| (code << 6).to_le_bytes())
+            .collect::<Vec<_>>();
+        let decoder = GpuNativeYuvDecoder::new(&context.device);
+        // Independent limited-range BT.709 reference: Y=(513-64)/876,
+        // Cb/Cr=(code-512)/896. Non-multiple-of-four codes expose an
+        // accidental 8-bit truncation before the shader reads P210/P410.
+        for (case, format, chroma_width, chroma_codes, expected) in [
+            (
+                "P210",
+                GpuNativeDecodedFrameTextureFormat::P210,
+                1,
+                vec![(700u16, 300u16), (300, 700)],
+                [
+                    [0.1399481, 0.584014, 0.9019017],
+                    [0.1399481, 0.584014, 0.9019017],
+                    [0.8429839, 0.4586568, 0.0735089],
+                    [0.8429839, 0.4586568, 0.0735089],
+                ],
+            ),
+            (
+                "P410",
+                GpuNativeDecodedFrameTextureFormat::P410,
+                2,
+                vec![(512u16, 512u16), (700, 300), (300, 700), (513, 511)],
+                [
+                    [0.5125571, 0.5125571, 0.5125571],
+                    [0.1399481, 0.584014, 0.9019017],
+                    [0.8429839, 0.4586568, 0.0735089],
+                    [0.5107995, 0.5128705, 0.5146281],
+                ],
+            ),
+        ] {
+            let luma = context.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("10-bit luma plane"),
+                size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let chroma = context.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("10-bit chroma plane"),
+                size: wgpu::Extent3d {
+                    width: chroma_width,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg16Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let chroma_bytes = chroma_codes
+                .into_iter()
+                .flat_map(|(cb, cr)| [(cb << 6).to_le_bytes(), (cr << 6).to_le_bytes()])
+                .flatten()
+                .collect::<Vec<_>>();
+            write_test_texture(&context.queue, &luma, 2, 2, 4, &luma_bytes);
+            write_test_texture(
+                &context.queue,
+                &chroma,
+                chroma_width,
+                2,
+                chroma_width * 4,
+                &chroma_bytes,
+            );
+
+            let handle = GpuColorFrameHandle::new(
+                GpuColorFrameId::from_raw(if chroma_width == 1 { 1200 } else { 1201 }),
+                ColorFrameDescriptor {
+                    width: 2,
+                    height: 2,
+                    color_space: ColorSpace::Rec709.into(),
+                    domain: ColorFrameDomain::Source,
+                    encoding: ColorFrameEncoding::EncodedFloat,
+                    residency: ColorFrameResidency::Gpu,
+                    alpha: crate::ColorFrameAlpha::Opaque,
+                },
+                product_gpu_working_texture_format(),
+                "10-bit native YUV output",
+            )
+            .expect("output handle");
+            let plan = GpuNativeYuvDecodePlan::new(
+                format,
+                GpuNativeVideoExtent { width: 2, height: 2 },
+                GpuNativeVideoExtent { width: 2, height: 2 },
+                GpuNativeVideoExtent { width: 2, height: 2 },
+                GpuNativeDecodedFrameVideoSampling {
+                    range: GpuVideoRange::Limited,
+                    matrix: ColorMatrixCoefficients::Bt709,
+                    transfer: ColorTransferCharacteristic::Bt709,
+                    bit_depth: 10,
+                    chroma_location: GpuVideoChromaLocation::Left,
+                },
+                handle,
+            )
+            .expect("10-bit native YUV plan");
+            let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+            let luma_view = luma.create_view(&Default::default());
+            let chroma_view = chroma.create_view(&Default::default());
+            let prepared = decoder.prepare_pass(
+                &context.device,
+                &plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma_view,
+                    chroma: &chroma_view,
+                    chroma_v: &chroma_view,
+                },
+            );
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            decoder
+                .record(&mut encoder, &plan, &prepared, &output)
+                .expect("record native YUV decode");
+            let readback_plan =
+                crate::GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
+                    .expect("diagnostic readback plan");
+            let readback = crate::GpuColorFrameReadback::record_copy(
+                &context.device,
+                &mut encoder,
+                &readback_plan,
+                &output,
+            )
+            .expect("diagnostic readback");
+            context.queue.submit([encoder.finish()]);
+            let mapped = map_readback_buffer(&context.device, &readback);
+            let actual = readback_plan.unpack_mapped_rgba32float(&mapped).expect("decoded pixels");
+            readback.unmap();
+            for (index, (pixel, expected)) in actual.chunks_exact(4).zip(expected).enumerate() {
+                for channel in 0..3 {
+                    assert!(
+                        (pixel[channel] - expected[channel]).abs() < 0.0008,
+                        "{case} pixel {index} channel {channel}: actual={} expected={}",
+                        pixel[channel],
+                        expected[channel]
+                    );
+                }
+                assert!(
+                    (pixel[3] - 1.0).abs() < 0.0008,
+                    "{case} pixel {index} alpha={}",
+                    pixel[3]
+                );
+            }
         }
     }
 

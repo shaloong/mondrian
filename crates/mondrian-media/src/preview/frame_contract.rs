@@ -34,6 +34,7 @@ pub(super) fn decoded_surface_format_from_pixel(
         ffmpeg::util::format::pixel::Pixel::YUV444P => DecodedVideoSurfaceFormat::Yuv444p,
         ffmpeg::util::format::pixel::Pixel::YUV444P10LE => DecodedVideoSurfaceFormat::Yuv444p10le,
         ffmpeg::util::format::pixel::Pixel::YUV444P12LE => DecodedVideoSurfaceFormat::Yuv444p12le,
+        ffmpeg::util::format::pixel::Pixel::YUVA444P12LE => DecodedVideoSurfaceFormat::Yuva444p12le,
         ffmpeg::util::format::pixel::Pixel::RGBA => DecodedVideoSurfaceFormat::Rgba8,
         ffmpeg::util::format::pixel::Pixel::BGRA => DecodedVideoSurfaceFormat::Bgra8,
         ffmpeg::util::format::pixel::Pixel::RGBAF16LE => DecodedVideoSurfaceFormat::Rgba16Float,

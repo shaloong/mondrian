@@ -2532,9 +2532,9 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
         Path::new("synthetic-rgba64"),
         test_source_color(),
     )
-    .expect("high-bit software frame materializes as encoded float");
+    .expect("high-bit software frame materializes as encoded RGBA16");
 
-    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+    let PreviewDecodedFramePayload::CpuUnorm16(frame) = payload else {
         panic!("high-bit software frames must not quantize through RGBA8");
     };
     assert_eq!(
@@ -2542,10 +2542,10 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
         DecodedRgbaEncoding::SourceEncodedRgb
     );
     assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 16);
-    assert!((frame.rgba()[0] - 1.0 / 65_535.0).abs() < 1.0e-7);
-    assert!((frame.rgba()[4] - 257.0 / 65_535.0).abs() < 1.0e-7);
-    assert_eq!(frame.rgba()[3], 1.0);
-    assert_eq!(frame.rgba()[7], 1.0);
+    assert_eq!(frame.rgba()[0], 1);
+    assert_eq!(frame.rgba()[4], 257);
+    assert_eq!(frame.rgba()[3], u16::MAX);
+    assert_eq!(frame.rgba()[7], u16::MAX);
     let mut stream = reduced_test_stream();
     stream.width = 2;
     stream.height = 1;
@@ -2560,8 +2560,150 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
     assert_eq!(
         source.cpu_rgba_retained_bytes_per_pixel(test_source_color()) * 2,
         std::mem::size_of_val(frame.rgba()),
-        "source metadata reserves the materializer's actual float payload"
+        "source metadata reserves the materializer's actual RGBA16 payload"
     );
+}
+
+#[test]
+fn prores_4444_yuva12_preserves_straight_color_at_zero_alpha() {
+    use ffmpeg::util::format::pixel::Pixel;
+
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 2, 1);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for (plane, samples) in [
+        (0, [3000_u16, 3000]),
+        (1, [2048, 2048]),
+        (2, [2048, 2048]),
+        (3, [0, 4095]),
+    ] {
+        for (x, sample) in samples.into_iter().enumerate() {
+            decoded.data_mut(plane)[x * 2..x * 2 + 2].copy_from_slice(&sample.to_le_bytes());
+        }
+    }
+
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::PRORES,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("synthetic-prores-4444.mov"),
+        test_source_color(),
+    )
+    .expect("YUVA 4:4:4 12-bit materializes through RGBA64");
+    let PreviewDecodedFramePayload::CpuUnorm16(frame) = payload else {
+        panic!("12-bit YUVA must retain high-depth color and alpha");
+    };
+    assert_eq!(
+        frame.diagnostics.decoded_surface_format,
+        DecodedVideoSurfaceFormat::Yuva444p12le
+    );
+    assert!(
+        frame
+            .diagnostics
+            .decoded_surface_format
+            .descriptor()
+            .expect("modeled YUVA surface")
+            .has_alpha
+    );
+    assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 12);
+    let rgba = frame.rgba();
+    assert_eq!(rgba[3], 0);
+    assert!(rgba[..3].iter().all(|component| *component > u16::MAX / 2));
+    assert!(
+        rgba[7] > u16::MAX - 64,
+        "12-bit opaque alpha was not retained: {}",
+        rgba[7]
+    );
+    for channel in 0..3 {
+        assert!(rgba[channel].abs_diff(rgba[4 + channel]) < 66);
+    }
+}
+
+#[test]
+fn prores_4444_yuva12_cpu_float_retains_full_horizontal_chroma() {
+    use ffmpeg::util::format::pixel::Pixel;
+
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 64, 2);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for plane in 0..4 {
+        let stride = decoded.stride(plane);
+        for y in 0..2 {
+            for x in 0..64 {
+                let sample: u16 = match plane {
+                    0 => 1800,
+                    1 => {
+                        if x % 2 == 0 {
+                            800
+                        } else {
+                            3200
+                        }
+                    }
+                    2 => {
+                        if x % 2 == 0 {
+                            3200
+                        } else {
+                            800
+                        }
+                    }
+                    _ => 2048,
+                };
+                let start = y * stride + x * 2;
+                decoded.data_mut(plane)[start..start + 2].copy_from_slice(&sample.to_le_bytes());
+            }
+        }
+    }
+
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::PRORES,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        64,
+        2,
+        Path::new("synthetic-prores-4444-chroma.mov"),
+        test_source_color(),
+    )
+    .expect("12-bit 4:4:4 alpha frame materializes without chroma loss");
+    let PreviewDecodedFramePayload::CpuUnorm16(frame) = payload else {
+        panic!("high-depth 4:4:4 must retain encoded float color");
+    };
+    let rgba = frame.rgba();
+    assert!(
+        u32::from(rgba[128]) > u32::from(rgba[132]) + u32::from(u16::MAX / 2),
+        "red chroma was reused: {:?} {:?}",
+        &rgba[128..132],
+        &rgba[132..136]
+    );
+    assert!(
+        u32::from(rgba[134]) > u32::from(rgba[130]) + u32::from(u16::MAX / 2),
+        "blue chroma was reused: {:?} {:?}",
+        &rgba[128..132],
+        &rgba[132..136]
+    );
+    assert!(rgba[3].abs_diff(u16::MAX / 2) < 656);
+    assert!(rgba[7].abs_diff(u16::MAX / 2) < 656);
 }
 
 #[test]
@@ -2577,7 +2719,7 @@ fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
             ffmpeg::util::format::pixel::Pixel::YUV420P10LE,
             crate::info::PixelFormat::Yuv420p10le,
             10,
-            16,
+            8,
         ),
     ] {
         let mut decoded = ffmpeg::util::frame::video::Video::new(format, 4, 2);
@@ -2609,6 +2751,7 @@ fn proven_cpu_sampling_reservation_matches_actual_eight_and_ten_bit_payloads() {
         let retained = match payload {
             PreviewDecodedFramePayload::CpuRgba(frame) => std::mem::size_of_val(frame.rgba()),
             PreviewDecodedFramePayload::CpuFloat(frame) => std::mem::size_of_val(frame.rgba()),
+            PreviewDecodedFramePayload::CpuUnorm16(frame) => std::mem::size_of_val(frame.rgba()),
             _ => panic!("CPU RGBA representation required"),
         };
         let mut stream = reduced_test_stream();
@@ -3254,6 +3397,7 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
         PreviewDecodedFramePayload::NativeGpu(frame) => frame,
         PreviewDecodedFramePayload::CpuRgba(_)
         | PreviewDecodedFramePayload::CpuFloat(_)
+        | PreviewDecodedFramePayload::CpuUnorm16(_)
         | PreviewDecodedFramePayload::CpuYuv(_) => {
             panic!("explicit D3D11 NV12 frame must not transfer to CPU")
         }
@@ -4508,6 +4652,7 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
     let diagnostics = match recovered {
         PreviewDecodeOutcome::Frame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::FloatFrame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::Unorm16Frame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::CpuYuvFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::NativeGpuFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::Canceled(cancellation) => {
@@ -4595,6 +4740,9 @@ fn preview_decode_fixture_perf_smoke() {
         }
         PreviewDecodeOutcome::FloatFrame(_) => {
             panic!("Rec.709 still-frame perf fixture unexpectedly decoded as float")
+        }
+        PreviewDecodeOutcome::Unorm16Frame(_) => {
+            panic!("Rec.709 still-frame perf fixture unexpectedly decoded as RGBA16")
         }
         PreviewDecodeOutcome::CpuYuvFrame(_) => {
             panic!("still-frame perf decode requires CPU RGBA output")
@@ -4853,6 +5001,9 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         {
             PreviewDecodeOutcome::Frame(frame) => (frame.width, frame.height, frame.diagnostics),
             PreviewDecodeOutcome::FloatFrame(frame) => {
+                (frame.width, frame.height, frame.diagnostics)
+            }
+            PreviewDecodeOutcome::Unorm16Frame(frame) => {
                 (frame.width, frame.height, frame.diagnostics)
             }
             PreviewDecodeOutcome::Canceled(_) => {

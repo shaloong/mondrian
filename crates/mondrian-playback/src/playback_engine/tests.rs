@@ -771,6 +771,44 @@ fn refreshed_audio_point_cannot_rewind_an_already_extrapolated_phase() {
 }
 
 #[test]
+fn slower_audio_device_does_not_accumulate_wall_clock_phase_correction() {
+    let mut engine = engine();
+    engine.play(100_000, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let sample_rate = AudioSampleRate::new(48_000).expect("sample rate");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+
+    // A physical device may differ from the host monotonic clock by a few
+    // parts per million. Over thirty minutes, 10 ppm is 18 ms: larger than
+    // one callback's uncertainty, but no single callback is implausible.
+    let mut previous_sample = 0;
+    for frame in 1..=54_000_u64 {
+        let observed_at =
+            MonotonicTimestamp::from_duration(Duration::from_nanos(frame * 1_000_000_000 / 30));
+        engine.tick(observed_at).expect("advance between callbacks");
+        let nominal_frames = frame * 1_600;
+        let device_frames = nominal_frames - nominal_frames / 100_000;
+        let mut observation = audio_observation(&engine, 1_000 + device_frames, observed_at);
+        observation.uncertainty_frames = 512;
+        let snapshot = engine.observe_audio_device_clock(observation).expect("observe device");
+        assert_eq!(snapshot.clock_master, Some(ClockMaster::AudioDevice));
+        let sample = engine
+            .authoritative_audio_sample_position_at(snapshot.epoch, observed_at, sample_rate)
+            .expect("monotonic device phase")
+            .sample();
+        assert!(sample >= previous_sample);
+        previous_sample = sample;
+    }
+
+    assert!(
+        engine.audio_device_anchor.expect("device anchor").last_uncertainty_frames <= 514,
+        "wall-clock extrapolation must not feed its error back into the device sample"
+    );
+}
+
+#[test]
 fn output_retirement_renews_pending_and_consumed_still_tickets_without_seeking() {
     for completed in [false, true] {
         let mut engine = engine();

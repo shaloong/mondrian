@@ -964,6 +964,9 @@ fn execute_export_gpu_output_boundary_with_backend(
             ExportGpuOutputFallbackReason::MissingReadbackBuffer,
         ))?;
     let readback_plan = match boundary_texture_format {
+        GpuColorFrameTextureFormat::Rgba16Unorm => {
+            return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
+        }
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.output().clone())
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
@@ -988,6 +991,9 @@ fn execute_export_gpu_output_boundary_with_backend(
         deadline,
     )?;
     let pipe_bytes = match boundary_texture_format {
+        GpuColorFrameTextureFormat::Rgba16Unorm => {
+            return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
+        }
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             let actual = readback_plan
                 .unpack_mapped_rgba8(&mapped)
@@ -8561,8 +8567,7 @@ fn finish_export_gpu_visual_output(
             ExportGpuOutputFallbackBreakdown::default(),
         );
     }
-    canvas.clear();
-    canvas.extend_from_slice(&attempt.pipe_bytes);
+    *canvas = attempt.pipe_bytes;
     Ok(())
 }
 
@@ -9181,8 +9186,7 @@ fn render_prepared_visual_node_into(
             gpu_output_fallback_reasons,
         );
     }
-    output_target.clear();
-    output_target.extend_from_slice(&final_bytes);
+    *output_target = final_bytes;
     Ok(())
 }
 
@@ -10122,7 +10126,7 @@ fn finish_empty_sequence_target(
     }
 }
 
-/// Immutable author and delivery facts for one export still-frame decode.
+/// Immutable author and delivery facts for one export source-frame decode.
 ///
 /// The request owns the renderer source-preparation intent so media decode
 /// cannot reinterpret color-managed versus DataTexture execution while a job
@@ -10140,7 +10144,7 @@ struct ExportVideoLayerDecodeRequest<'a> {
     preparation_intent: SourceFramePreparationIntent,
 }
 
-/// Job-owned mutable execution services for one export still-frame decode.
+/// Job-owned mutable execution services for one export source-frame decode.
 ///
 /// Keeping these borrows outside `ExportVideoLayerDecodeRequest` makes the
 /// immutable cache-authorizing request reusable without obscuring mutation of
@@ -10186,7 +10190,9 @@ fn decode_video_layer_scaled(
     let mut media_request = PreviewDecodeRequest::new(
         path,
         source_sample,
-        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        // Export owns a decoder session across frames; exact playback selection
+        // retains forward decode while still seeking for discontinuous source time.
+        PreviewDecodeAccessMode::PlaybackCursor,
         source_color,
     )
     .with_field_processing(
@@ -10219,74 +10225,70 @@ fn decode_video_layer_scaled(
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
-    let (source, decode_diagnostics): (PreparedSourceFrame, PreviewDecodeDiagnostics) =
-        match outcome {
-            Ok(PreviewDecodeOutcome::Frame(frame)) => {
-                let diagnostics = frame.diagnostics;
-                let source = prepare_decoded_cpu_source_frame(
-                    frame,
-                    alpha_interpretation,
-                    preparation_intent.clone(),
-                )
-                .map_err(|err| {
-                    format!(
-                        "asset={} path={} source frame preparation failed: {}",
-                        asset_id,
-                        path.display(),
-                        err
-                    )
-                })?;
-                (source, diagnostics)
-            }
-            Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
-                let diagnostics = frame.diagnostics;
-                let source = prepare_decoded_cpu_source_frame(
-                    frame,
-                    alpha_interpretation,
-                    preparation_intent,
-                )
-                .map_err(|err| {
-                    format!(
-                        "asset={} path={} source frame preparation failed: {}",
-                        asset_id,
-                        path.display(),
-                        err
-                    )
-                })?;
-                (source, diagnostics)
-            }
-            Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
-                return Err(format!(
-                    "asset={} path={} err=export still-frame CPU fallback requires CPU-addressable RGB, got compact GPU-materialization YUV",
+    let (decoded, decode_diagnostics) = match outcome {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
+            return Err(format!(
+                    "asset={} path={} err=export CPU decode requires CPU-addressable RGB, got compact GPU-materialization YUV",
                     asset_id,
                     path.display()
                 ));
-            }
-            Ok(PreviewDecodeOutcome::Canceled(_)) => {
-                return Err(format!(
-                    "asset={} path={} err=export still-frame decode canceled unexpectedly",
-                    asset_id,
-                    path.display()
-                ));
-            }
-            Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
-                return Err(format!(
-                "asset={} path={} err=export still-frame CPU fallback requires CPU RGBA, got native GPU {} {:?}",
+        }
+        Ok(PreviewDecodeOutcome::Canceled(_)) => {
+            return Err(format!(
+                "asset={} path={} err=export source-frame decode canceled unexpectedly",
+                asset_id,
+                path.display()
+            ));
+        }
+        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
+            return Err(format!(
+                "asset={} path={} err=export CPU decode requires CPU RGBA, got native GPU {} {:?}",
                 asset_id,
                 path.display(),
                 frame.handle_kind().as_str(),
                 frame.surface_format
             ));
-            }
-            Err(err) => {
-                return Err(format!(
-                    "asset={} path={} err={}",
+        }
+        Err(err) => {
+            return Err(format!(
+                "asset={} path={} err={}",
+                asset_id,
+                path.display(),
+                err
+            ));
+        }
+    };
+    let source: PreparedSourceFrame =
+        prepare_decoded_cpu_source_frame(decoded, alpha_interpretation, preparation_intent)
+            .map_err(|err| {
+                format!(
+                    "asset={} path={} source frame preparation failed: {}",
                     asset_id,
                     path.display(),
                     err
-                ));
-            }
-        };
+                )
+            })?;
     let is_data_texture = source.is_data_texture();
     let execution = source
         .execute_cpu_with_session(color_session)
@@ -10550,7 +10552,7 @@ mod tests {
 
         assert_eq!(
             decode.matches("prepare_decoded_cpu_source_frame(").count(),
-            2
+            1
         );
         assert!(!decode.contains("CpuEncodedFloatColorFrame"));
         assert!(!decode.contains("LinearFloatSource"));
@@ -13149,6 +13151,22 @@ mod tests {
         );
         assert_eq!(second.source_fingerprint, dependency.source_fingerprint);
         assert_eq!(second.video_stream_index, 0);
+        assert_eq!(
+            second.decode_diagnostics.as_ref().expect("real decode diagnostics").access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+
+        let backward = decode(TimelineTime::ZERO, &mut session);
+        let backward_diagnostics =
+            backward.decode_diagnostics.as_ref().expect("reverse decode diagnostics");
+        assert_eq!(
+            backward_diagnostics.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+        assert_eq!(
+            backward_diagnostics.requested_pts,
+            backward_diagnostics.selected_pts
+        );
         assert_eq!(session.decode_context.resident_session_count(), 1);
 
         session.release_decode_sessions();
@@ -16944,6 +16962,29 @@ mod tests {
                     == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,setsar=1/1"
         }));
         assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
+    }
+
+    #[test]
+    fn prores_xq_keeps_legal_twelve_bit_delivery_separate_from_encoder_input() {
+        let settings = SequenceSettings::default();
+        let delivery = crate::delivery::resolve_export_delivery(
+            &crate::preset::ExportPreset::prores_4444_alpha(),
+            &settings,
+            &mondrian_core::ProjectColorEnvironment::default(),
+        )
+        .expect("valid ProRes 4444 XQ delivery");
+        assert_eq!(delivery.bit_depth, DeliveryBitDepth::Twelve);
+        assert_eq!(delivery.video_range, VideoRange::Legal);
+        assert_eq!(delivery.pixel_format, "yuva444p12le");
+        let mut command = Command::new("ffmpeg");
+        apply_export_video_signal_args(&mut command, &settings, &delivery);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        #[cfg(target_os = "macos")]
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "ayuv64le"]));
     }
 
     #[test]

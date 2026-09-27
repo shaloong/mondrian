@@ -840,7 +840,11 @@ struct AudioDeviceClockAnchor {
     last_consumed_frames: u64,
     last_effective_consumed_frames: u64,
     last_observed_at: MonotonicTimestamp,
+    /// Physical device measurement. Never replace this with a host-clock
+    /// extrapolation: even ppm-scale device drift would then accumulate.
     last_media_position_ns: i128,
+    /// Holds the previously published phase only until the device catches up.
+    phase_floor_ns: Option<i128>,
     last_uncertainty_frames: u32,
 }
 
@@ -1587,7 +1591,8 @@ impl PlaybackEngine {
                 last_consumed_frames: observation.consumed_frames,
                 last_effective_consumed_frames: measured_effective_consumed,
                 last_observed_at: observation.observed_at,
-                last_media_position_ns: handoff_phase_ns,
+                last_media_position_ns: candidate_ns,
+                phase_floor_ns: (handoff_correction_ns > 0).then_some(handoff_phase_ns),
                 last_uncertainty_frames: handoff_uncertainty_frames,
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
@@ -1671,9 +1676,10 @@ impl PlaybackEngine {
             )?;
             return Ok(self.snapshot());
         }
-        // Moving the point estimate must retain its displacement in the error
-        // bound. Never advertise the fresh callback's smaller uncertainty for
-        // a clamped phase, or silently exceed the existing Audio policy.
+        // A temporary published floor must retain its displacement in the
+        // error bound. The next anchor still uses the physical device point:
+        // feeding the floor back into that measurement would accumulate the
+        // host/device ppm difference for the lifetime of the stream.
         let correction_frames = phase_regression_ns
             .checked_mul(u128::from(observation.sample_rate))
             .and_then(|value| value.checked_add(999_999_999))
@@ -1701,7 +1707,8 @@ impl PlaybackEngine {
             last_consumed_frames: observation.consumed_frames,
             last_effective_consumed_frames: effective_consumed,
             last_observed_at: observation.observed_at,
-            last_media_position_ns: media_position_ns,
+            last_media_position_ns: measured_media_position_ns,
+            phase_floor_ns: (phase_regression_ns > 0).then_some(media_position_ns),
             last_uncertainty_frames: corrected_uncertainty_frames,
         });
         self.clock_master = Some(ClockMaster::AudioDevice);
@@ -2213,11 +2220,12 @@ impl PlaybackEngine {
         let elapsed = now.checked_elapsed_since(anchor.last_observed_at)?;
         let elapsed_ns = i128::try_from(elapsed.as_nanos())
             .map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
+        let measured_phase = anchor
+            .last_media_position_ns
+            .checked_add(elapsed_ns)
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
         Ok(Some(
-            anchor
-                .last_media_position_ns
-                .checked_add(elapsed_ns)
-                .ok_or(PlaybackError::TransportArithmeticOverflow)?,
+            anchor.phase_floor_ns.map_or(measured_phase, |floor| measured_phase.max(floor)),
         ))
     }
 

@@ -175,3 +175,133 @@ fn native_repeated_export_cancel_retry_retains_independent_artifacts_and_closure
     );
     run(root, output).map(drop)
 }
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires an external 4K ProRes 4444 source and a create-only /tmp evidence directory"]
+fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result<()> {
+    let frame_count = std::env::var("MONDRIAN_HIGH_DEPTH_EXPORT_FRAMES")
+        .ok()
+        .map(|value| value.parse::<i64>())
+        .transpose()?
+        .unwrap_or(2);
+    ensure!(
+        (2..=60).contains(&frame_count),
+        "expected 2–60 full-quality export frames"
+    );
+    let source = PathBuf::from(
+        std::env::var_os("MONDRIAN_HIGH_DEPTH_EXPORT_SOURCE").context("4K source path")?,
+    );
+    let output = PathBuf::from(
+        std::env::var_os("MONDRIAN_HIGH_DEPTH_EXPORT_OUTPUT").context("evidence path")?,
+    );
+    ensure!(!output.exists(), "export evidence directory already exists");
+    std::fs::create_dir(&output)?;
+    let source = mondrian_assets::canonical_asset_file_path(&source)?;
+    let mut state = AppState::new();
+    let mut export_wall_ms = None;
+    let result = (|| -> anyhow::Result<super::super::harness::CompletedExportEvidence> {
+        state.create_new_project_with_settings_at(
+            output.join("high-depth-export.mdp"),
+            "High-depth alpha Export",
+            SequenceSettings {
+                resolution: Resolution { width: 3840, height: 2160 },
+                frame_rate: Rational::FPS_30,
+                ..SequenceSettings::default()
+            },
+            ProjectColorEnvironment::default(),
+            ProjectSettings::default(),
+        )?;
+        state.dispatch_action(mondrian_editor_state::Action::ImportMedia(vec![
+            source.clone()
+        ]))?;
+        let import_deadline = Instant::now() + Duration::from_secs(120);
+        while state.pending_media_import_batches() > 0 {
+            state.poll_media_imports();
+            ensure!(
+                Instant::now() < import_deadline,
+                "4K source import timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let assets = state.asset_library().context("asset library")?.list_assets()?;
+        let asset = assets
+            .iter()
+            .find(|asset| asset.file_path() == Some(source.as_path()))
+            .context("imported 4K source")?;
+        let stream = asset
+            .media_probe()
+            .and_then(|probe| probe.video_streams.first())
+            .context("probed 4K video stream")?;
+        ensure!(
+            stream.width == 3840
+                && stream.height == 2160
+                && stream.pixel_format == mondrian_core::PixelFormat::Yuva444p12le
+                && stream.bit_depth == 12,
+            "source is not the required full-resolution 12-bit 4:4:4 alpha media"
+        );
+        let track = add_track(&mut state, TrackAddKind::Video)?;
+        place(&mut state, asset.id, track, 0, frame_count, true)?;
+        let clip_id = state
+            .active_sequence()
+            .context("sequence")?
+            .video_tracks
+            .iter()
+            .find(|candidate| candidate.id == track)
+            .and_then(|track| track.clips.first())
+            .context("placed source clip")?
+            .id;
+        ensure!(
+            state.set_clip_media_interpretation(
+                crate::app::selection::SelectedClipRef {
+                    track_id: track,
+                    is_video_track: true,
+                    clip_id,
+                },
+                mondrian_timeline::clip::MediaInterpretation {
+                    color_space_override: Some(mondrian_core::ColorSpace::Rec709),
+                    field_order_override: Some(FieldOrder::Progressive),
+                    ..Default::default()
+                },
+            )?,
+            "explicit Rec.709 and progressive source interpretation was not authored"
+        );
+        let export_started = Instant::now();
+        let export_result = super::super::harness::execute_export_job(
+            &mut state,
+            ExportPreset::prores_4444_alpha(),
+            None,
+            TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: frame_count },
+            output.join("high-depth-export.mov"),
+            Duration::from_secs(300),
+        );
+        export_wall_ms = Some(export_started.elapsed().as_millis());
+        export_result
+    })();
+    let shutdown = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(90));
+    let shutdown_released = shutdown.all_resources_released();
+    let artifact_sha256 = result
+        .as_ref()
+        .ok()
+        .map(|completed| sha256_file(&completed.output_path))
+        .transpose()?;
+    let report = json!({
+        "schema_version": 1,
+        "profile": "single-source-high-depth-alpha-export-v1",
+        "requested_frames": frame_count,
+        "export_wall_ms": export_wall_ms,
+        "source": source,
+        "source_sha256": sha256_file(&source)?,
+        "completed_export": result.as_ref().ok(),
+        "artifact_sha256": artifact_sha256,
+        "failure": result.as_ref().err().map(ToString::to_string),
+        "shutdown_all_resources_released": shutdown_released,
+        "shutdown": shutdown,
+    });
+    write_new(&output.join("high-depth-export-report.json"), &report)?;
+    ensure!(
+        shutdown_released,
+        "App owner shutdown left resources behind"
+    );
+    result.map(drop)
+}

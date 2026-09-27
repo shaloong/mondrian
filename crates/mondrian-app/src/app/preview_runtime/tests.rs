@@ -4963,14 +4963,14 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         playback_video_preroll_for_state(&service, &state),
         Some(PreviewVideoPreroll {
             ready_media_frames: 0,
-            preservable_media_frames: 2,
+            preservable_media_frames: 3,
             bounded_cold_activation_ready: true,
             bounded_cold_activation_frame: None,
         })
     );
     assert_eq!(
         service.jobs.diagnostics().queued_prefetch_jobs,
-        2,
+        3,
         "preroll observation must actively admit its bounded future prefix; residency is charged at the decode representation extent (source raster)"
     );
 
@@ -5027,7 +5027,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         playback_video_preroll_for_state(&service, &state),
         Some(PreviewVideoPreroll {
             ready_media_frames: 1,
-            preservable_media_frames: 2,
+            preservable_media_frames: 3,
             bounded_cold_activation_ready: true,
             bounded_cold_activation_frame: None,
         })
@@ -5072,7 +5072,7 @@ fn layered_cold_activation_reserves_its_complete_surface_closure_atomically() {
     constrained.frame_store.replace(PreviewFrameStoreAdapter::new(
         PreviewFrameStoreAdapterConfig {
             media_entry_capacity: 6,
-            media_byte_budget: 384 * 1024 * 1024,
+            media_byte_budget: 320 * 1024 * 1024,
             media_resource_unit_budget: 1,
             current_media_working_set_entry_limit: 6,
             current_media_working_set_byte_limit: 640 * 1024 * 1024,
@@ -5136,8 +5136,9 @@ fn layered_cold_activation_reserves_its_complete_surface_closure_atomically() {
     );
     let diagnostics = admitted.frame_store.borrow().diagnostics();
     assert_eq!(diagnostics.media_work_reservations, 2);
-    assert!(
-        diagnostics.media_work_reserved_bytes > 500 * 1024 * 1024,
+    assert_eq!(
+        diagnostics.media_work_reserved_bytes,
+        2 * 3840 * 2160 * (8 + 16),
         "both exact UHD CPU decode/working reservations must be owned atomically"
     );
     assert!(diagnostics.media_work_reserved_bytes <= 640 * 1024 * 1024);
@@ -5855,7 +5856,7 @@ fn future_media_window_revalidates_each_physical_source_once_per_planning_turn()
     let window = MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
     let first = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
-    assert_eq!(first.len(), 2);
+    assert_eq!(first.len(), 3);
     let populated = service.diagnostics().future_media_window;
     assert_eq!(
         populated.source_fingerprint_observations, 0,

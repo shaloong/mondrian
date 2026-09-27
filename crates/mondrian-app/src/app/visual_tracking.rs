@@ -1505,6 +1505,12 @@ fn decode_tracking_frame(
             TrackingFrame::from_rgba_f32(frame.width, frame.height, frame.rgba())
                 .map_err(|error| error.to_string())
         }
+        Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
+            let width = frame.width;
+            let height = frame.height;
+            TrackingFrame::from_rgba_f32(width, height, &frame.into_normalized_f32())
+                .map_err(|error| error.to_string())
+        }
         Ok(PreviewDecodeOutcome::Canceled(_)) => Err("tracking decode canceled".to_owned()),
         Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
             Err("tracking requested CPU RGBA but decoder returned CPU YUV".to_owned())

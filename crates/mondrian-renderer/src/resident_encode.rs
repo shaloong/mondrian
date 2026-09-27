@@ -11,11 +11,13 @@ use mondrian_media::{
     ResidentEncodeColorimetry,
 };
 
+use crate::GpuColorFrameTextureFormat;
 #[cfg(target_os = "windows")]
 use crate::GpuResidentEncoderInputLease;
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use crate::{
     ColorFrameAlpha, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace,
-    GpuColorFrameContract, GpuColorFrameTextureFormat,
+    GpuColorFrameContract,
 };
 
 #[cfg(target_os = "linux")]
@@ -111,6 +113,7 @@ impl ResidentEncodeAdapterContract {
 /// Backward-compatible name for the single resident conversion contract.
 pub type D3D12ResidentEncodeAdapterContract = ResidentEncodeAdapterContract;
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn validate_resident_source_contract(
     contract: ResidentEncodeAdapterContract,
     actual: GpuColorFrameContract,

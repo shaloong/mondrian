@@ -537,6 +537,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
             | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessFfmpegCpuUnorm16
             | PreviewDecodePath::InProcessCameraRawDng
             | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 bump(&self.metrics.decode_in_process_cpu_frames);

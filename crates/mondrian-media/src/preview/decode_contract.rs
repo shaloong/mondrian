@@ -460,18 +460,17 @@ impl PreviewDecodeSource {
 
     /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
     ///
-    /// Encoded sources above eight bits retain float RGBA just like the actual
-    /// decoder materializer. Unproven sampling reserves float capacity; proven
-    /// eight-bit sources retain their smaller RGBA8 allocation. Compact YUV and
-    /// native surfaces have separate representation-specific accounting.
+    /// Proven 9–16-bit encoded sources retain packed RGBA16. Scene-linear,
+    /// floating-point, and unproven sources reserve float capacity. Compact
+    /// YUV and native surfaces have separate representation-specific accounting.
     pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
-        if color.is_scene_linear()
-            || color.is_data_texture()
-            || self.cpu_component_bit_depth.is_none_or(cpu_preview_uses_float)
-        {
-            4 * std::mem::size_of::<f32>()
-        } else {
-            4
+        if color.is_scene_linear() {
+            return 4 * std::mem::size_of::<f32>();
+        }
+        match self.cpu_component_bit_depth {
+            None | Some(17..) => 4 * std::mem::size_of::<f32>(),
+            Some(9..=16) => 4 * std::mem::size_of::<u16>(),
+            Some(_) => 4,
         }
     }
 
@@ -1011,6 +1010,7 @@ const fn native_surface_hint_from_pixel_format(
         PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
         PixelFormat::Yuv422p
         | PixelFormat::Yuv444p
+        | PixelFormat::Yuva444p12le
         | PixelFormat::Gbrp10le
         | PixelFormat::Gbrp12le
         | PixelFormat::Gbrp16le
@@ -1254,6 +1254,21 @@ mod tests {
         )
         .expect("ProRes remains a valid CPU-decodable source");
         assert_eq!(source.native_surface_hint(), None);
+    }
+
+    #[test]
+    fn prores_4444_alpha_requires_cpu_decode_until_native_pixel_parity_is_proven() {
+        let mut prores = video_stream(6, PixelFormat::Yuva444p12le, true);
+        prores.codec = VideoCodec::ProRes(mondrian_core::ProResVariant::R4444);
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/prores-4444.mov"),
+            exact_fingerprint(17),
+            &prores,
+        )
+        .expect("ProRes 4444 remains CPU-decodable");
+        assert_eq!(source.alpha_presence(), PreviewDecodeAlphaPresence::Present);
+        assert_eq!(source.native_surface_hint(), None);
+        assert!(!source.permits_native_output());
     }
 
     #[test]

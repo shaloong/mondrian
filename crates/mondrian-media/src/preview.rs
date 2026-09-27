@@ -216,6 +216,8 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
     InProcessFfmpegCpuFloat,
+    /// In-process FFmpeg scaler preserved source-encoded RGBA16 UNORM samples.
+    InProcessFfmpegCpuUnorm16,
     /// In-process DNG/CinemaDNG Adapter returned developed scene-linear RGBA32F.
     InProcessCameraRawDng,
     /// In-process FFmpeg decoder retained compact CPU YUV planes for GPU materialization.
@@ -464,6 +466,8 @@ pub enum PreviewNativeDecodeFallback {
     SurfaceFormatUnavailable,
     /// Required range, chroma-location, or bit-depth metadata was incomplete.
     SamplingMetadataIncomplete,
+    /// Decoded sampling metadata conflicted with a codec-defined sampling grid.
+    SamplingMetadataConflict,
     /// FFmpeg could not retain or expose the native decoder resource.
     ResourceRetentionFailed,
     /// A hardware-preferred Session failed during runtime decode and the same
@@ -1208,6 +1212,7 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
+            Self::InProcessFfmpegCpuUnorm16 => "InProcessFfmpegCpuUnorm16",
             Self::InProcessCameraRawDng => "InProcessCameraRawDng",
             Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
@@ -1670,6 +1675,8 @@ pub enum PreviewDecodeOutcome {
     Frame(RgbaFrame),
     /// Decode completed with a CPU scene-linear RGBA f32 preview frame.
     FloatFrame(FloatRgbaFrame),
+    /// Decode completed with source-encoded CPU RGBA16 UNORM samples.
+    Unorm16Frame(Unorm16RgbaFrame),
     /// Decode completed with compact CPU YUV planes for direct GPU materialization.
     CpuYuvFrame(CpuYuvFrame),
     /// Decode completed with a GPU-resident native frame.

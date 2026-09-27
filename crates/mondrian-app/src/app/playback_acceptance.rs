@@ -18,8 +18,50 @@ const PROCESS_MEMORY_WARMUP_END_US: u64 = 5 * 60 * 1_000_000;
 const PROCESS_MEMORY_BASELINE_END_US: u64 = 10 * 60 * 1_000_000;
 const PROCESS_MEMORY_FINAL_WINDOW_START_US: u64 = 25 * 60 * 1_000_000;
 const PROCESS_MEMORY_MIN_WINDOW_SAMPLES: u64 = 240;
-const PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES: u64 = 256 * 1024 * 1024;
+#[cfg(not(target_os = "macos"))]
+const WINDOWS_PROCESS_TREE_PRIVATE_COMMIT_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(not(target_os = "macos"))]
+const WINDOWS_PROCESS_TREE_SETTLED_GROWTH_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+// The 16 GiB macOS qualification host reserves at least three quarters of
+// unified memory outside this process tree. The settled-growth cap is 1/16 of
+// that footprint budget. These are native footprint limits, not conversions
+// of Windows private commit or a 32 GiB project-scale qualification.
+#[cfg(target_os = "macos")]
+const MACOS_PROCESS_TREE_PHYSICAL_FOOTPRINT_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+const MACOS_PROCESS_TREE_SETTLED_GROWTH_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ProcessMemoryQualificationProfile {
+    name: &'static str,
+    backend: mondrian_platform::ProcessMemoryProbeBackend,
+    metric: mondrian_platform::ProcessPrivateMemoryMetric,
+    max_private_memory_bytes: u64,
+    max_settled_growth_bytes: u64,
+}
+
+fn process_memory_qualification_profile() -> ProcessMemoryQualificationProfile {
+    #[cfg(target_os = "macos")]
+    {
+        ProcessMemoryQualificationProfile {
+            name: "macos_product_process_tree_physical_footprint_v1",
+            backend: mondrian_platform::ProcessMemoryProbeBackend::MacOsLibprocProcessTree,
+            metric: mondrian_platform::ProcessPrivateMemoryMetric::MacOsPhysicalFootprint,
+            max_private_memory_bytes: MACOS_PROCESS_TREE_PHYSICAL_FOOTPRINT_LIMIT_BYTES,
+            max_settled_growth_bytes: MACOS_PROCESS_TREE_SETTLED_GROWTH_LIMIT_BYTES,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ProcessMemoryQualificationProfile {
+            name: "product_process_tree_private_commit_v2",
+            backend: mondrian_platform::ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+            metric: mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit,
+            max_private_memory_bytes: WINDOWS_PROCESS_TREE_PRIVATE_COMMIT_LIMIT_BYTES,
+            max_settled_growth_bytes: WINDOWS_PROCESS_TREE_SETTLED_GROWTH_LIMIT_BYTES,
+        }
+    }
+}
 
 use super::preview_access_mode::{
     MediaPreviewJobQueueDiagnostics, MediaPreviewSchedulerDiagnostics,
@@ -359,11 +401,9 @@ pub(crate) struct PreviewPlaybackQualificationGateReport {
 
 /// Bounded, whole-product memory evidence collected by a native platform Adapter.
 ///
-/// The collector keeps only scalar aggregates. The current professional gate
-/// deliberately requires Windows private commit summed across the verified
-/// Mondrian process tree and reports reclaimable working sets as diagnostics.
-/// Other platform-native private metrics remain valid resource-policy evidence
-/// but cannot be relabelled into this Windows qualification profile.
+/// The collector keeps only scalar aggregates and preserves the native metric
+/// identity. Acceptance selects an explicit platform profile; process-tree
+/// footprint and Windows private commit are never relabelled as each other.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct PreviewProcessMemoryEvidenceReport {
     scope: Option<String>,
@@ -379,14 +419,14 @@ pub(crate) struct PreviewProcessMemoryEvidenceReport {
     maximum_observed_process_count: u32,
     maximum_inventory_attempts: u32,
     observed_duration_us: u64,
-    peak_private_committed_bytes: u64,
+    peak_private_memory_bytes: u64,
     peak_resident_bytes: u64,
     os_peak_resident_bytes: u64,
     baseline_sample_count: u64,
-    baseline_average_private_committed_bytes: u64,
+    baseline_average_private_memory_bytes: u64,
     final_sample_count: u64,
-    final_average_private_committed_bytes: u64,
-    post_stress_private_committed_bytes: Option<u64>,
+    final_average_private_memory_bytes: u64,
+    post_stress_private_memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -430,16 +470,16 @@ impl PreviewProcessMemoryEvidenceCollector {
         &mut self,
         sample: mondrian_platform::ProcessMemoryProbeResult,
     ) {
-        self.report.post_stress_private_committed_bytes = self.observe_sample(sample);
+        self.report.post_stress_private_memory_bytes = self.observe_sample(sample);
     }
 
     pub(crate) fn report(mut self) -> PreviewProcessMemoryEvidenceReport {
         self.report.inventory_complete = self.report.attempted_samples > 0
             && self.report.observed_samples == self.report.attempted_samples
             && self.report.probe_errors == 0;
-        self.report.baseline_average_private_committed_bytes =
+        self.report.baseline_average_private_memory_bytes =
             average_bytes(self.baseline_private_sum, self.report.baseline_sample_count);
-        self.report.final_average_private_committed_bytes =
+        self.report.final_average_private_memory_bytes =
             average_bytes(self.final_private_sum, self.report.final_sample_count);
         self.report
     }
@@ -506,13 +546,13 @@ impl PreviewProcessMemoryEvidenceCollector {
         let Some(private_bytes) = sample.private_memory_bytes else {
             self.report.probe_errors = self.report.probe_errors.saturating_add(1);
             self.report.last_probe_error = sample.error.or_else(|| {
-                Some("process-memory sample omitted private committed bytes".to_owned())
+                Some("process-memory sample omitted platform-native private memory".to_owned())
             });
             return None;
         };
         self.report.observed_samples = self.report.observed_samples.saturating_add(1);
-        self.report.peak_private_committed_bytes =
-            self.report.peak_private_committed_bytes.max(private_bytes);
+        self.report.peak_private_memory_bytes =
+            self.report.peak_private_memory_bytes.max(private_bytes);
         if let Some(resident_bytes) = sample.resident_bytes {
             self.report.peak_resident_bytes = self.report.peak_resident_bytes.max(resident_bytes);
         }
@@ -547,17 +587,17 @@ pub(crate) struct PreviewProcessMemoryGateReport {
     observed_samples: u64,
     probe_errors: u64,
     observed_duration_us: u64,
-    max_private_committed_bytes: u64,
-    peak_private_committed_bytes: u64,
+    max_private_memory_bytes: u64,
+    peak_private_memory_bytes: u64,
     peak_resident_bytes: u64,
     os_peak_resident_bytes: u64,
     max_settled_growth_bytes: u64,
     baseline_sample_count: u64,
     final_sample_count: u64,
-    baseline_average_private_committed_bytes: u64,
-    final_average_private_committed_bytes: u64,
+    baseline_average_private_memory_bytes: u64,
+    final_average_private_memory_bytes: u64,
     settled_growth_bytes: u64,
-    post_stress_private_committed_bytes: Option<u64>,
+    post_stress_private_memory_bytes: Option<u64>,
     post_stress_growth_bytes: Option<u64>,
     passed: bool,
     failures: Vec<PreviewAcceptanceFailure>,
@@ -566,6 +606,10 @@ pub(crate) struct PreviewProcessMemoryGateReport {
 impl PreviewProcessMemoryGateReport {
     pub(crate) fn passed(&self) -> bool {
         self.passed
+    }
+
+    pub(crate) fn profile_name(&self) -> &'static str {
+        self.profile
     }
 }
 
@@ -1530,6 +1574,7 @@ fn evaluate_process_memory(
     failures: &mut Vec<PreviewAcceptanceFailure>,
 ) -> PreviewProcessMemoryGateReport {
     let failure_start = failures.len();
+    let profile = process_memory_qualification_profile();
     if evidence.scope.as_deref()
         != Some(mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str())
     {
@@ -1545,20 +1590,27 @@ fn evaluate_process_memory(
         push_failure(
             failures,
             "process_memory_probe_unavailable",
-            "native product-process-tree private-commit evidence",
+            "native product-process-tree memory evidence",
             evidence.backend.as_deref().unwrap_or("unavailable"),
             evidence.last_probe_error.as_deref().unwrap_or("no native backend"),
         );
     }
-    if evidence.private_memory_metric.as_deref()
-        != Some(mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit.as_str())
-    {
+    if evidence.backend.as_deref() != Some(profile.backend.as_str()) {
         push_failure(
             failures,
-            "process_memory_metric_not_windows_private_commit",
-            mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit.as_str(),
+            "process_memory_backend_mismatch",
+            profile.backend.as_str(),
+            evidence.backend.as_deref().unwrap_or("unavailable"),
+            "the qualification profile requires its matching native process-tree probe",
+        );
+    }
+    if evidence.private_memory_metric.as_deref() != Some(profile.metric.as_str()) {
+        push_failure(
+            failures,
+            "process_memory_metric_mismatch",
+            profile.metric.as_str(),
             evidence.private_memory_metric.as_deref().unwrap_or("unavailable"),
-            "this qualification profile is Windows-specific; platform-native footprint metrics are not interchangeable",
+            "platform-native private-memory metrics are not interchangeable",
         );
     }
     if !evidence.inventory_complete
@@ -1606,7 +1658,7 @@ fn evaluate_process_memory(
             "process_memory_baseline_coverage_below_minimum",
             format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 5-10"),
             evidence.baseline_sample_count.to_string(),
-            "fixed-cadence product-process-tree private-commit samples",
+            "fixed-cadence product-process-tree native-memory samples",
         );
     }
     if evidence.final_sample_count < PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
@@ -1615,61 +1667,67 @@ fn evaluate_process_memory(
             "process_memory_final_coverage_below_minimum",
             format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 25-30"),
             evidence.final_sample_count.to_string(),
-            "fixed-cadence product-process-tree private-commit samples",
+            "fixed-cadence product-process-tree native-memory samples",
         );
     }
-    if evidence.peak_private_committed_bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
+    if evidence.peak_private_memory_bytes > profile.max_private_memory_bytes {
         push_failure(
             failures,
-            "process_memory_private_commit_above_limit",
-            format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
-            format!("{} bytes", evidence.peak_private_committed_bytes),
-            "native product-process-tree private-commit high-water mark",
+            "process_memory_native_private_bytes_above_limit",
+            format!("at most {} bytes", profile.max_private_memory_bytes),
+            format!("{} bytes", evidence.peak_private_memory_bytes),
+            "native product-process-tree private-memory high-water mark",
         );
     }
     let settled_growth_bytes = evidence
-        .final_average_private_committed_bytes
-        .saturating_sub(evidence.baseline_average_private_committed_bytes);
-    if settled_growth_bytes > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
+        .final_average_private_memory_bytes
+        .saturating_sub(evidence.baseline_average_private_memory_bytes);
+    if settled_growth_bytes > profile.max_settled_growth_bytes {
         push_failure(
             failures,
             "process_memory_did_not_plateau",
-            format!("at most {PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES} bytes average growth"),
+            format!(
+                "at most {} bytes average growth",
+                profile.max_settled_growth_bytes
+            ),
             format!("{settled_growth_bytes} bytes"),
-            "minutes 25-30 average private commit minus minutes 5-10 average",
+            "minutes 25-30 average native private memory minus minutes 5-10 average",
         );
     }
     let post_stress_growth_bytes = evidence
-        .post_stress_private_committed_bytes
-        .map(|bytes| bytes.saturating_sub(evidence.final_average_private_committed_bytes));
+        .post_stress_private_memory_bytes
+        .map(|bytes| bytes.saturating_sub(evidence.final_average_private_memory_bytes));
     match (
-        evidence.post_stress_private_committed_bytes,
+        evidence.post_stress_private_memory_bytes,
         post_stress_growth_bytes,
     ) {
         (None, _) => push_failure(
             failures,
             "process_memory_post_stress_sample_missing",
-            "one private-commit sample after the gate's terminal stress and quiescence",
+            "one native private-memory sample after the gate's terminal stress and quiescence",
             "missing",
             "post-stress process-memory evidence",
         ),
         (Some(bytes), Some(growth)) => {
-            if bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
+            if bytes > profile.max_private_memory_bytes {
                 push_failure(
                     failures,
-                    "process_memory_post_stress_private_commit_above_limit",
-                    format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
+                    "process_memory_post_stress_native_private_bytes_above_limit",
+                    format!("at most {} bytes", profile.max_private_memory_bytes),
                     format!("{bytes} bytes"),
-                    "post-stress native product-process-tree private commit",
+                    "post-stress native product-process-tree private memory",
                 );
             }
-            if growth > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
+            if growth > profile.max_settled_growth_bytes {
                 push_failure(
                     failures,
                     "process_memory_stress_did_not_settle",
-                    format!("at most {PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES} bytes above final playback average"),
+                    format!(
+                        "at most {} bytes above final playback average",
+                        profile.max_settled_growth_bytes
+                    ),
                     format!("{growth} bytes"),
-                    "private commit after Broker/worker quiescence",
+                    "native private memory after Broker/worker quiescence",
                 );
             }
         }
@@ -1679,7 +1737,7 @@ fn evaluate_process_memory(
     let memory_failures = failures[failure_start..].to_vec();
     let passed = memory_failures.is_empty();
     PreviewProcessMemoryGateReport {
-        profile: "product_process_tree_private_commit_v2",
+        profile: profile.name,
         scope: evidence.scope.clone(),
         backend: evidence.backend.clone(),
         private_memory_metric: evidence.private_memory_metric.clone(),
@@ -1691,17 +1749,17 @@ fn evaluate_process_memory(
         observed_samples: evidence.observed_samples,
         probe_errors: evidence.probe_errors,
         observed_duration_us: evidence.observed_duration_us,
-        max_private_committed_bytes: PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES,
-        peak_private_committed_bytes: evidence.peak_private_committed_bytes,
+        max_private_memory_bytes: profile.max_private_memory_bytes,
+        peak_private_memory_bytes: evidence.peak_private_memory_bytes,
         peak_resident_bytes: evidence.peak_resident_bytes,
         os_peak_resident_bytes: evidence.os_peak_resident_bytes,
-        max_settled_growth_bytes: PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES,
+        max_settled_growth_bytes: profile.max_settled_growth_bytes,
         baseline_sample_count: evidence.baseline_sample_count,
         final_sample_count: evidence.final_sample_count,
-        baseline_average_private_committed_bytes: evidence.baseline_average_private_committed_bytes,
-        final_average_private_committed_bytes: evidence.final_average_private_committed_bytes,
+        baseline_average_private_memory_bytes: evidence.baseline_average_private_memory_bytes,
+        final_average_private_memory_bytes: evidence.final_average_private_memory_bytes,
         settled_growth_bytes,
-        post_stress_private_committed_bytes: evidence.post_stress_private_committed_bytes,
+        post_stress_private_memory_bytes: evidence.post_stress_private_memory_bytes,
         post_stress_growth_bytes,
         passed,
         failures: memory_failures,
@@ -2414,13 +2472,13 @@ mod tests {
             report.baseline_sample_count,
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES
         );
-        assert_eq!(report.baseline_average_private_committed_bytes, 500 * mib);
+        assert_eq!(report.baseline_average_private_memory_bytes, 500 * mib);
         assert_eq!(
             report.final_sample_count,
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES + 1
         );
-        assert_eq!(report.final_average_private_committed_bytes, 540 * mib);
-        assert_eq!(report.post_stress_private_committed_bytes, Some(560 * mib));
+        assert_eq!(report.final_average_private_memory_bytes, 540 * mib);
+        assert_eq!(report.post_stress_private_memory_bytes, Some(560 * mib));
         assert_eq!(
             report.attempted_samples,
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES * 2 + 2
@@ -2489,17 +2547,45 @@ mod tests {
     }
 
     #[test]
+    fn process_memory_gate_accepts_complete_native_profile_and_rejects_other_metric() {
+        let evidence = passing_process_memory_evidence();
+        let mut failures = Vec::new();
+        let gate = evaluate_process_memory(&evidence, &mut failures);
+        assert!(gate.passed(), "{failures:?}");
+        assert_eq!(
+            gate.profile_name(),
+            process_memory_qualification_profile().name
+        );
+
+        let mut wrong_metric = evidence;
+        wrong_metric.private_memory_metric = Some(
+            match process_memory_qualification_profile().metric {
+                mondrian_platform::ProcessPrivateMemoryMetric::MacOsPhysicalFootprint => {
+                    mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit
+                }
+                _ => mondrian_platform::ProcessPrivateMemoryMetric::MacOsPhysicalFootprint,
+            }
+            .as_str()
+            .to_owned(),
+        );
+        let mut failures = Vec::new();
+        let gate = evaluate_process_memory(&wrong_metric, &mut failures);
+        assert!(!gate.passed());
+        assert!(failures.iter().any(|failure| failure.code == "process_memory_metric_mismatch"));
+    }
+
+    #[test]
     fn rejects_process_memory_growth_that_does_not_plateau() {
         let media = main10_media();
         let evidence = passing_playback_evidence();
         let diagnostics = passing_preview_diagnostics();
         let mut process_memory = passing_process_memory_evidence();
-        process_memory.final_average_private_committed_bytes = process_memory
-            .baseline_average_private_committed_bytes
-            .saturating_add(PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES)
+        process_memory.final_average_private_memory_bytes = process_memory
+            .baseline_average_private_memory_bytes
+            .saturating_add(process_memory_qualification_profile().max_settled_growth_bytes)
             .saturating_add(1);
-        process_memory.post_stress_private_committed_bytes =
-            Some(process_memory.final_average_private_committed_bytes);
+        process_memory.post_stress_private_memory_bytes =
+            Some(process_memory.final_average_private_memory_bytes);
 
         let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
             media: &media,
@@ -2581,11 +2667,9 @@ mod tests {
             scope: Some(
                 mondrian_platform::ProcessMemoryScope::ProductProcessTree.as_str().to_owned(),
             ),
-            backend: Some("test-product-process-tree-private-commit".to_owned()),
+            backend: Some(process_memory_qualification_profile().backend.as_str().to_owned()),
             private_memory_metric: Some(
-                mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit
-                    .as_str()
-                    .to_owned(),
+                process_memory_qualification_profile().metric.as_str().to_owned(),
             ),
             discovery_available: true,
             inventory_complete: true,
@@ -2597,14 +2681,14 @@ mod tests {
             maximum_observed_process_count: 4,
             maximum_inventory_attempts: 2,
             observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-            peak_private_committed_bytes: 768 * 1024 * 1024,
+            peak_private_memory_bytes: 768 * 1024 * 1024,
             peak_resident_bytes: 512 * 1024 * 1024,
             os_peak_resident_bytes: 512 * 1024 * 1024,
             baseline_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
-            baseline_average_private_committed_bytes: 512 * 1024 * 1024,
+            baseline_average_private_memory_bytes: 512 * 1024 * 1024,
             final_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
-            final_average_private_committed_bytes: 544 * 1024 * 1024,
-            post_stress_private_committed_bytes: Some(560 * 1024 * 1024),
+            final_average_private_memory_bytes: 544 * 1024 * 1024,
+            post_stress_private_memory_bytes: Some(560 * 1024 * 1024),
         }
     }
 
@@ -2658,16 +2742,16 @@ mod tests {
     }
 
     fn process_memory_sample(
-        private_committed_bytes: u64,
+        private_memory_bytes: u64,
     ) -> mondrian_platform::ProcessMemoryProbeResult {
         mondrian_platform::ProcessMemoryProbeResult::observed(
             mondrian_platform::ProcessMemoryScope::ProductProcessTree,
-            mondrian_platform::ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+            process_memory_qualification_profile().backend,
             3,
             1,
-            private_committed_bytes,
-            private_committed_bytes.saturating_sub(64 * 1024 * 1024),
-            private_committed_bytes,
+            private_memory_bytes,
+            private_memory_bytes.saturating_sub(64 * 1024 * 1024),
+            private_memory_bytes,
         )
     }
 

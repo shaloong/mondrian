@@ -736,7 +736,7 @@ pub(crate) fn evaluate_professional_audio_playback(
         push_failure(
             &mut failures,
             "product_process_tree_memory_gate_failed",
-            "product_process_tree_private_commit_v2 passes",
+            format!("{} passes", process_memory.profile_name()),
             "failed",
             "fixed-cadence complete Mondrian process-tree memory evidence",
         );
@@ -1165,10 +1165,14 @@ mod tests {
         let evidence = passing_playback_evidence();
         let mut memory_collector =
             super::super::playback_acceptance::PreviewProcessMemoryEvidenceCollector::default();
+        #[cfg(target_os = "macos")]
+        let memory_backend = ProcessMemoryProbeBackend::MacOsLibprocProcessTree;
+        #[cfg(not(target_os = "macos"))]
+        let memory_backend = ProcessMemoryProbeBackend::WindowsToolhelpProcessTree;
         let memory_sample = || {
             ProcessMemoryProbeResult::observed(
                 mondrian_platform::ProcessMemoryScope::ProductProcessTree,
-                ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                memory_backend,
                 3,
                 1,
                 512 * 1024 * 1024,

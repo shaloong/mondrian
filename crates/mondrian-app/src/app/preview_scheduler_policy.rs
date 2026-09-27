@@ -602,7 +602,7 @@ mod tests {
                 assert_eq!(
                     media_preview_residency_reservation(&key, PreviewHardwareDecodeRequest::Auto)
                         .cpu_bytes,
-                    3840 * 2160 * 32
+                    3840 * 2160 * (8 + 16)
                 );
             }
         }

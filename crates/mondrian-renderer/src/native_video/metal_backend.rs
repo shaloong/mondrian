@@ -264,16 +264,13 @@ impl DirectNativeYuvPlaneAdapter for MetalNativeYuvPlaneAdapter {
     }
 }
 
+type MetalPlaneFormat = (MTLPixelFormat, wgpu::TextureFormat);
+type MetalPlaneFormats = (MetalPlaneFormat, MetalPlaneFormat);
+
 fn metal_plane_formats(
     source: GpuNativeDecodedFrameTextureFormat,
     actual: u32,
-) -> Result<
-    (
-        (MTLPixelFormat, wgpu::TextureFormat),
-        (MTLPixelFormat, wgpu::TextureFormat),
-    ),
-    GpuNativeDecodedFrameImportError,
-> {
+) -> Result<MetalPlaneFormats, GpuNativeDecodedFrameImportError> {
     match source {
         GpuNativeDecodedFrameTextureFormat::Nv12
             if matches!(

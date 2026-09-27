@@ -1,12 +1,14 @@
 //! Real decoder agreement through the production Viewer and isolated demux.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::{bail, Context, Result};
 use mondrian_core::{
     BlendMode, ColorEngine, ColorSpace, SequenceId, SourceSampleTarget, TimelineTime,
     WorkingColorSpace,
 };
 use mondrian_media::preview::*;
-use mondrian_media::{DecodedVideoRange, MediaFileFingerprint};
+use mondrian_media::{
+    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSurfaceFormat, MediaFileFingerprint,
+};
 use mondrian_renderer::color::ProgramOutputBoundary as RenderOutputColorBoundary;
 use mondrian_renderer::*;
 use std::{
@@ -17,6 +19,7 @@ use std::{
 #[path = "support/viewer_retirement.rs"]
 mod retirement;
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires NVIDIA CUDA/Vulkan, explicit demux worker and 30 fps SDR fixtures"]
 fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
@@ -30,8 +33,8 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
         .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
     let result = (|| -> Result<()> {
         for path in std::env::split_paths(&fixtures) {
-            let cpu = measure(&path, false, &context, &mut runtime)?;
-            let native = measure(&path, true, &context, &mut runtime)?;
+            let cpu = measure(&path, false, None, &context, &mut runtime)?;
+            let native = measure(&path, true, None, &context, &mut runtime)?;
             anyhow::ensure!(cpu.len() == native.len());
             for (index, (cpu, native)) in cpu.iter().zip(&native).enumerate() {
                 anyhow::ensure!(cpu.len() == native.len());
@@ -56,6 +59,53 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     closure?;
     Ok(())
 }
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker, and tagged HEVC 4:2:0/4:2:2/4:4:4 fixtures"]
+fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
+    let fixtures = std::env::var_os("MONDRIAN_MACOS_NATIVE_FIXTURES")
+        .context("explicit HEVC 4:2:0, 4:2:2 and 4:4:4 fixtures")?;
+    let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+    anyhow::ensure!(paths.len() == 3, "expected 4:2:0, 4:2:2 and 4:4:4 fixtures");
+    let context = pollster::block_on(GpuContext::new())?;
+    anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    anyhow::ensure!(runtime
+        .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
+    let result = (|| -> Result<()> {
+        for (path, surface) in paths.into_iter().zip([
+            DecodedVideoSurfaceFormat::P010,
+            DecodedVideoSurfaceFormat::P210,
+            DecodedVideoSurfaceFormat::P410,
+        ]) {
+            let cpu = measure(&path, false, None, &context, &mut runtime)?;
+            let native = measure(&path, true, Some(surface), &context, &mut runtime)?;
+            anyhow::ensure!(cpu.len() == native.len());
+            for (index, (cpu, native)) in cpu.iter().zip(&native).enumerate() {
+                anyhow::ensure!(cpu.len() == native.len());
+                let max =
+                    cpu.iter().zip(native).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+                eprintln!(
+                    "{} seek sample {index}: maximum float output difference {max}",
+                    path.display()
+                );
+                anyhow::ensure!(
+                    max <= 1.0 / 1024.0,
+                    "CPU/VideoToolbox Viewer pixel disagreement: {max}"
+                );
+            }
+        }
+        Ok(())
+    })();
+    let closure = retirement::retire_runtime(&context.device, runtime);
+    result?;
+    closure?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires Vulkan, explicit demux worker and equivalent tagged planar SDR fixtures"]
 fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
@@ -73,9 +123,9 @@ fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
     anyhow::ensure!(runtime
         .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
     let result = (|| -> Result<()> {
-        let reference = measure(&paths[0], false, &context, &mut runtime)?;
+        let reference = measure(&paths[0], false, None, &context, &mut runtime)?;
         for path in &paths[1..] {
-            let actual = measure(path, false, &context, &mut runtime)?;
+            let actual = measure(path, false, None, &context, &mut runtime)?;
             anyhow::ensure!(actual.len() == reference.len());
             for (expected, actual) in reference.iter().zip(actual) {
                 anyhow::ensure!(expected.len() == actual.len());
@@ -96,12 +146,21 @@ fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
 fn measure(
     path: &Path,
     native: bool,
+    expected_native_surface: Option<DecodedVideoSurfaceFormat>,
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
 ) -> Result<Vec<Vec<f32>>> {
-    measure_with_resource_observer(path, native, context, runtime, |_, _, _| {})
+    measure_with_resource_observer(
+        path,
+        native,
+        expected_native_surface,
+        context,
+        runtime,
+        |_, _, _| {},
+    )
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires Vulkan, explicit demux worker and a 4K 30 fps tagged SDR planar fixture"]
 fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
@@ -120,6 +179,7 @@ fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
     let result = measure_with_resource_observer(
         Path::new(&path),
         false,
+        None,
         &context,
         &mut runtime,
         |width, height, diagnostics| {
@@ -146,6 +206,7 @@ fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
 fn measure_with_resource_observer(
     path: &Path,
     native: bool,
+    expected_native_surface: Option<DecodedVideoSurfaceFormat>,
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
     mut observe: impl FnMut(u32, u32, GpuColorFrameWgpuResourcePoolDiagnostics),
@@ -207,13 +268,25 @@ fn measure_with_resource_observer(
             PreviewDecodeRepresentation::CompactCpuYuv
         };
         if native {
-            request.hardware_decode_device_selector = Some(selector.context("exact CUDA device")?);
+            if cfg!(target_os = "linux") {
+                request.hardware_decode_device_selector =
+                    Some(selector.context("exact CUDA device")?);
+            } else {
+                request.hardware_decode_device_selector = selector;
+            }
         }
         let outcome = decoder.decode_cancellable(request, move || Instant::now() >= deadline)?;
         let (width, height, native_source, cpu_yuv_source) = match outcome {
             PreviewDecodeOutcome::NativeGpuFrame(f) if native => {
+                assert!(f.diagnostics.hardware_decode_active);
                 assert!(!f.diagnostics.hardware_decode_cpu_transfer_observed);
-                assert!(!f.diagnostics.temporal_approximation && !f.diagnostics.zero_copy_active);
+                assert!(!f.diagnostics.temporal_approximation);
+                assert_eq!(f.diagnostics.zero_copy_active, cfg!(target_os = "macos"));
+                if let Some(expected) = expected_native_surface {
+                    assert_eq!(f.handle_kind(), DecodedGpuFrameHandleKind::CVPixelBuffer);
+                    assert_eq!(f.surface_format, expected);
+                    assert_eq!(f.diagnostics.decoded_video_sampling.bit_depth, 10);
+                }
                 (
                     f.width,
                     f.height,

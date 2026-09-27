@@ -2888,29 +2888,39 @@ mod tests {
 
     #[test]
     fn new_sequence_revision_reuses_only_exact_clip_effect_author_fingerprints() {
-        let mut sequence =
-            single_solid_sequence(Some(EffectNode::with_defaults(EffectType::GaussianBlur)));
-        let rate = sequence.time_base();
-        sequence.video_tracks[0]
-            .add_clip(
-                Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(30, rate), tt(10, rate))
-                    .expect("second Clip"),
-            )
-            .expect("add second Clip");
-        let mut cache = PreparedVisualProgramCache::new(4);
-        cache.prepare(&sequence).expect("initial program");
+        let (placement_only, effect_changed) = with_stable_effect_registry(|| {
+            let mut sequence =
+                single_solid_sequence(Some(EffectNode::with_defaults(EffectType::GaussianBlur)));
+            let rate = sequence.time_base();
+            sequence.video_tracks[0]
+                .add_clip(
+                    Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(30, rate), tt(10, rate))
+                        .expect("second Clip"),
+                )
+                .expect("add second Clip");
+            let mut cache = PreparedVisualProgramCache::new(4);
+            let prepare = |cache: &mut PreparedVisualProgramCache, sequence: &Sequence| match cache
+                .prepare(sequence)
+            {
+                Ok(program) => Some(program),
+                Err(PreparedVisualProgramError::EffectRegistryChanged { .. }) => None,
+                Err(error) => panic!("unexpected visual preparation failure: {error}"),
+            };
+            prepare(&mut cache, &sequence)?;
 
-        sequence.video_tracks[0].clips[0].position = tt(1, rate);
-        sequence.revision = sequence.revision.checked_next().expect("placement revision");
-        let placement_only = cache.prepare(&sequence).expect("placement-only replacement");
-        assert_eq!(placement_only.diagnostics().prepared_clips, 2);
-        assert_eq!(placement_only.diagnostics().reused_clips, 2);
+            sequence.video_tracks[0].clips[0].position = tt(1, rate);
+            sequence.revision = sequence.revision.checked_next().expect("placement revision");
+            let placement_only = prepare(&mut cache, &sequence)?.diagnostics();
 
-        sequence.video_tracks[0].clips[0].effects[0].is_enabled = false;
-        sequence.revision = sequence.revision.checked_next().expect("Effect revision");
-        let effect_changed = cache.prepare(&sequence).expect("Effect replacement");
-        assert_eq!(effect_changed.diagnostics().prepared_clips, 2);
-        assert_eq!(effect_changed.diagnostics().reused_clips, 1);
+            sequence.video_tracks[0].clips[0].effects[0].is_enabled = false;
+            sequence.revision = sequence.revision.checked_next().expect("Effect revision");
+            let effect_changed = prepare(&mut cache, &sequence)?.diagnostics();
+            Some((placement_only, effect_changed))
+        });
+        assert_eq!(placement_only.prepared_clips, 2);
+        assert_eq!(placement_only.reused_clips, 2);
+        assert_eq!(effect_changed.prepared_clips, 2);
+        assert_eq!(effect_changed.reused_clips, 1);
     }
 
     #[test]

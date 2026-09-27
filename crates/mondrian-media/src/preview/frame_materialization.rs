@@ -12,9 +12,11 @@ use super::{
     PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeStageDurations,
     PreviewDecodedFramePayload, PreviewHardwareDecodePlan, PreviewNativeDecodeFallback,
     PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewSourceColorContract, RgbaFrame,
+    PreviewSourceColorContract, RgbaFrame, Unorm16RgbaFrame,
 };
-use crate::decoder::{DecodedVideoChromaLocation, DecodedVideoSurfaceFormat};
+use crate::decoder::{
+    DecodedVideoChromaLocation, DecodedVideoSurfaceChromaSubsampling, DecodedVideoSurfaceFormat,
+};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use std::path::Path;
@@ -266,13 +268,13 @@ pub(super) fn convert_decoded_to_rgba(
     }))
 }
 
-fn convert_decoded_to_encoded_float_rgba(
+fn convert_decoded_to_encoded_unorm16_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     scaler: &mut ffmpeg::software::scaling::Context,
     path: &Path,
     source_color: PreviewSourceColorContract,
     scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
-) -> Result<FloatRgbaFrame> {
+) -> Result<Unorm16RgbaFrame> {
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
@@ -306,18 +308,16 @@ fn convert_decoded_to_encoded_float_rgba(
                 ),
             }
         })?;
-        output.extend(row.chunks_exact(2).map(|sample| {
-            f32::from(u16::from_le_bytes([sample[0], sample[1]])) / f32::from(u16::MAX)
-        }));
+        output.extend(row.chunks_exact(2).map(|sample| u16::from_le_bytes([sample[0], sample[1]])));
     }
     let rgba_copy_us = duration_us(copy_started_at.elapsed());
 
-    Ok(FloatRgbaFrame::new(
+    Ok(Unorm16RgbaFrame::new(
         width,
         height,
         output,
         color_contract,
-        PreviewDecodePath::InProcessFfmpegCpuFloat,
+        PreviewDecodePath::InProcessFfmpegCpuUnorm16,
     )
     .with_decoded_surface_format(decoded_surface_format)
     .with_decoded_video_sampling(decoded_video_sampling)
@@ -503,6 +503,14 @@ pub(super) enum PreviewNativeFrameMaterializationError {
     UnsupportedHardwareSurfaceFormat {
         software_format: ffmpeg::ffi::AVPixelFormat,
     },
+    #[error(
+        "decoded {codec_id:?} {surface_format:?} chroma location {actual:?} conflicts with the codec-defined 4:2:2 co-sited grid"
+    )]
+    ConflictingChromaLocation {
+        codec_id: ffmpeg::codec::Id,
+        surface_format: DecodedVideoSurfaceFormat,
+        actual: DecodedVideoChromaLocation,
+    },
     #[error(transparent)]
     Resource(#[from] FfmpegNativeDecodedFrameResourceError),
     #[error(transparent)]
@@ -521,6 +529,9 @@ impl PreviewNativeFrameMaterializationError {
                 PreviewNativeDecodeFallback::SurfaceFormatUnavailable
             }
             Self::Payload(_) => PreviewNativeDecodeFallback::SamplingMetadataIncomplete,
+            Self::ConflictingChromaLocation { .. } => {
+                PreviewNativeDecodeFallback::SamplingMetadataConflict
+            }
             Self::Resource(_) => PreviewNativeDecodeFallback::ResourceRetentionFailed,
         }
     }
@@ -615,10 +626,25 @@ fn materialize_decoded_frame_inner(
     }
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
-            match materialize_native_decoded_frame(decoded, source_color, session_output_lease) {
+            match materialize_native_decoded_frame(
+                decoded,
+                source_color,
+                hardware_decode_plan.codec_id,
+                session_output_lease,
+            ) {
                 Ok(frame) => {
                     hardware_decode_plan.mark_gpu_resident_native_observed(frame.handle_kind());
                     return Ok(PreviewDecodedFramePayload::NativeGpu(frame));
+                }
+                Err(
+                    error @ PreviewNativeFrameMaterializationError::ConflictingChromaLocation {
+                        ..
+                    },
+                ) => {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: error.to_string(),
+                    });
                 }
                 Err(error) if hardware_decode_plan.request.requires_gpu_residency() => {
                     return Err(MondrianError::DecodeFailed {
@@ -669,6 +695,7 @@ fn materialize_decoded_frame_inner(
 fn materialize_native_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     source_color: PreviewSourceColorContract,
+    codec_id: ffmpeg::codec::Id,
     session_output_lease: Option<PreviewDecodeSessionOutputLease>,
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     use ffmpeg::util::format::pixel::Pixel;
@@ -696,6 +723,11 @@ fn materialize_native_decoded_frame(
     let surface_format = decoded_native_surface_format(decoded)?;
     let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
     sampling.range = source_color.range.resolve_for_frame(sampling.range);
+    sampling.chroma_location = resolve_codec_defined_native_chroma_location(
+        codec_id,
+        surface_format,
+        sampling.chroma_location,
+    )?;
     let resource = FfmpegNativeDecodedFrameResource::retain_with_session_output_lease(
         decoded,
         session_output_lease,
@@ -738,6 +770,38 @@ fn materialize_native_decoded_frame(
         sampling,
         PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegNative),
     )?)
+}
+
+fn resolve_codec_defined_native_chroma_location(
+    codec_id: ffmpeg::codec::Id,
+    surface_format: DecodedVideoSurfaceFormat,
+    location: DecodedVideoChromaLocation,
+) -> std::result::Result<DecodedVideoChromaLocation, PreviewNativeFrameMaterializationError> {
+    // HEVC 4:2:2 chroma samples are co-sited with the corresponding luma
+    // samples by H.265 clause 6.2. Its VUI chroma-location fields apply only
+    // to 4:2:0, so FFmpeg can correctly report Unspecified for a 4:2:2 frame.
+    // Keep the inference tied to the codec and sampling grid; other formats
+    // still need explicit frame metadata before native import.
+    if codec_id != ffmpeg::codec::Id::HEVC
+        || !surface_format.descriptor().is_some_and(|descriptor| {
+            descriptor.chroma_subsampling == Some(DecodedVideoSurfaceChromaSubsampling::Cs422)
+        })
+    {
+        return Ok(location);
+    }
+    match location {
+        DecodedVideoChromaLocation::Unknown
+        | DecodedVideoChromaLocation::Left
+        | DecodedVideoChromaLocation::TopLeft
+        | DecodedVideoChromaLocation::BottomLeft => Ok(DecodedVideoChromaLocation::Left),
+        actual => Err(
+            PreviewNativeFrameMaterializationError::ConflictingChromaLocation {
+                codec_id,
+                surface_format,
+                actual,
+            },
+        ),
+    }
 }
 
 fn decoded_native_surface_format(
@@ -856,14 +920,14 @@ fn materialize_decoded_to_cpu(
             path,
         )?;
         return if destination_format == ffmpeg::util::format::pixel::Pixel::RGBA64LE {
-            convert_decoded_to_encoded_float_rgba(
+            convert_decoded_to_encoded_unorm16_rgba(
                 decoded,
                 scaler,
                 path,
                 source_color,
                 scaler_color_contract,
             )
-            .map(PreviewDecodedFramePayload::CpuFloat)
+            .map(PreviewDecodedFramePayload::CpuUnorm16)
         } else {
             convert_decoded_to_rgba(decoded, scaler, path, source_color, scaler_color_contract)
                 .map(PreviewDecodedFramePayload::CpuRgba)
@@ -951,7 +1015,7 @@ fn materialize_decoded_to_cpu(
         path,
     )?;
     if destination_format == ffmpeg::util::format::pixel::Pixel::RGBA64LE {
-        convert_decoded_to_encoded_float_rgba(
+        convert_decoded_to_encoded_unorm16_rgba(
             &transferred,
             scaler,
             path,
@@ -959,7 +1023,7 @@ fn materialize_decoded_to_cpu(
             scaler_color_contract,
         )
         .map(|frame| {
-            PreviewDecodedFramePayload::CpuFloat(frame.with_stage_durations(
+            PreviewDecodedFramePayload::CpuUnorm16(frame.with_stage_durations(
                 PreviewDecodeStageDurations {
                     hardware_transfer_us,
                     ..PreviewDecodeStageDurations::default()
@@ -1028,4 +1092,40 @@ fn ensure_preview_scaler<'a>(
         asset_id: path.display().to_string(),
         reason: "preview scaler was not initialized".to_string(),
     })
+}
+
+#[cfg(test)]
+mod codec_chroma_tests {
+    use super::*;
+
+    #[test]
+    fn hevc_422_uses_its_defined_grid_without_admitting_unknown_420_or_other_codecs() {
+        use DecodedVideoChromaLocation::{Center, Left, Unknown};
+        use DecodedVideoSurfaceFormat::{P010, P210};
+
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(ffmpeg::codec::Id::HEVC, P210, Unknown)
+                .unwrap(),
+            Left
+        );
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(ffmpeg::codec::Id::HEVC, P010, Unknown)
+                .unwrap(),
+            Unknown
+        );
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(ffmpeg::codec::Id::H264, P210, Unknown)
+                .unwrap(),
+            Unknown
+        );
+        assert!(matches!(
+            resolve_codec_defined_native_chroma_location(ffmpeg::codec::Id::HEVC, P210, Center),
+            Err(
+                PreviewNativeFrameMaterializationError::ConflictingChromaLocation {
+                    actual: Center,
+                    ..
+                }
+            )
+        ));
+    }
 }

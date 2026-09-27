@@ -139,7 +139,7 @@ pub use preview::{
     PreviewRepresentationQuality, PreviewScrubAdaptiveClass, PreviewSeekIndexCache,
     PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy, PreviewSeekIndexSource,
     PreviewSourceColorContract, PreviewSourceFieldProcessing, PreviewSourceSampleIdentity,
-    PreviewTemporalExtentSource, RgbaFrame,
+    PreviewTemporalExtentSource, RgbaFrame, Unorm16RgbaFrame,
 };
 #[cfg(target_os = "linux")]
 pub use preview::{

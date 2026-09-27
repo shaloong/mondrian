@@ -1426,10 +1426,14 @@ underrun/recovery or render-to-silence substitution,
 no source decode failure/oversize window, a bounded persistent Session pool
 with observed sequential reuse, each steady sequential ten-second window within
 the 460 ms output high-water duration, the effective product source-cache budget, and
-the shared `product_process_tree_private_commit_v2` plateau contract. Every
-sample must prove a complete Mondrian root-plus-descendant inventory, so the
-persistent FFmpeg audio child Sessions contribute to the 4 GiB cap and settled
-growth rather than disappearing behind a current-process-only measurement.
+the shared native process-tree memory plateau contract: Windows
+`product_process_tree_private_commit_v2` or macOS
+`macos_product_process_tree_physical_footprint_v1` on the 16 GiB qualification
+host. Every sample must prove a complete Mondrian root-plus-descendant
+inventory, so the persistent FFmpeg audio child Sessions contribute to the
+4 GiB cap and 256 MiB settled-growth cap rather than disappearing behind a
+current-process-only measurement. The macOS physical-footprint result is not
+interpreted as Windows Private Commit.
 Missing environment
 fixture, output device, callback facts, native memory facts, or presentation
 facts fail rather than skip.

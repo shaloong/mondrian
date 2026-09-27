@@ -648,6 +648,11 @@ pub enum RenderGpuOutputBoundaryRuntimeRecordError {
 pub enum RenderGpuInputStageRuntimeRecordError {
     /// The input transform could not be planned.
     Plan(RenderColorTransformError),
+    /// The active device cannot sample the decoded source texture format.
+    UnsupportedSourceTextureFormat {
+        /// Texture format required by the decoded source payload.
+        texture_format: GpuColorFrameTextureFormat,
+    },
     /// The planned input stage could not produce GPU resources.
     ResourcePlan(RenderGpuInputStageResourcePlanError),
     /// Pure OCIO backend contracts could not be prepared.
@@ -882,6 +887,7 @@ impl RenderGpuOutputBoundaryRuntime {
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
         let output_format = match output_texture_format {
             GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+            GpuColorFrameTextureFormat::Rgba16Unorm => OcioGpuWgpuColorTargetFormat::Rgba16Unorm,
             GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
             GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
         };
@@ -1505,6 +1511,16 @@ impl RenderGpuOutputBoundaryRuntime {
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let source_texture_format = frame.gpu_upload_texture_format();
+        if source_texture_format == GpuColorFrameTextureFormat::Rgba16Unorm
+            && !backend.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
+            return Err(
+                RenderGpuInputStageRuntimeRecordError::UnsupportedSourceTextureFormat {
+                    texture_format: source_texture_format,
+                },
+            );
+        }
         let Self {
             shader_cache,
             backend_prep,
@@ -2596,6 +2612,11 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
             GpuColorFrameTextureFormat::Rgba8Unorm => {
                 self.stage_planner.plan_output_transform(descriptor, &transform)?
             }
+            GpuColorFrameTextureFormat::Rgba16Unorm => {
+                return Err(RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "RGBA16 UNORM is a source upload format, not a Program Output target",
+                });
+            }
             GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
                 self.stage_planner.plan_output_transform_float(descriptor, &transform)?
             }
@@ -2880,6 +2901,7 @@ fn validate_gpu_color_target_encoding(
 ) -> Result<(), RenderGpuColorTransformResourcePlanError> {
     let matches = match texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Unorm => encoding == ColorFrameEncoding::EncodedRgba16,
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             encoding != ColorFrameEncoding::EncodedRgba8
         }
@@ -3355,6 +3377,7 @@ fn validate_output_texture_encoding(
 ) -> Result<(), RenderGpuOutputStageResourcePlanError> {
     let matches = match texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Unorm => false,
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             encoding == ColorFrameEncoding::EncodedFloat
         }
@@ -3376,6 +3399,13 @@ fn output_readback_plan(
 ) -> Result<GpuColorFrameReadbackPlan, RenderGpuOutputStageResourcePlanError> {
     match output.texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => GpuColorFrameReadbackPlan::encoded_rgba8(output),
+        GpuColorFrameTextureFormat::Rgba16Unorm => {
+            return Err(RenderGpuOutputStageResourcePlanError::OutputReadback(
+                crate::GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                    texture_format: GpuColorFrameTextureFormat::Rgba16Unorm,
+                },
+            ));
+        }
         GpuColorFrameTextureFormat::Rgba16Float => {
             GpuColorFrameReadbackPlan::encoded_rgba16float(output)
         }
@@ -3435,6 +3465,13 @@ impl RenderGpuInputStageResourcePlan {
                     frame,
                     GpuColorFrameTextureFormat::Rgba8Unorm,
                     "color-stage-source-rgba8-input",
+                )
+            }
+            CpuSourceColorFrame::EncodedUnorm16(frame) => {
+                GpuColorFrameUploadPlan::from_cpu_encoded_unorm16_frame(
+                    ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+                    frame,
+                    "color-stage-source-encoded-rgba16unorm-input",
                 )
             }
             CpuSourceColorFrame::EncodedFloat(frame) => {
@@ -4398,6 +4435,41 @@ pub fn execute_cpu_source_input_stage_with_session(
         CpuSourceColorFrame::EncodedRgba8(frame) => {
             execute_cpu_input_stage_with_session(frame, transform, session)
         }
+        CpuSourceColorFrame::EncodedUnorm16(frame) => {
+            let descriptor = frame.descriptor();
+            let mut planner = RenderColorStagePlanner::cpu_only();
+            let plan = planner.plan_input_to_working(descriptor, transform)?;
+            let source_color = descriptor.color_space.color().ok_or(
+                RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "encoded RGBA16 source has no source color identity",
+                },
+            )?;
+            let samples = frame
+                .rgba()
+                .iter()
+                .map(|sample| f32::from(*sample) / f32::from(u16::MAX))
+                .collect();
+            let mut float = crate::CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                descriptor.width,
+                descriptor.height,
+                source_color,
+                samples,
+            );
+            float.set_alpha_contract(descriptor.alpha);
+            let mut result =
+                CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                    &float, transform, session,
+                )
+                .map_err(|error| match error {
+                    RenderColorTransformError::ExecutionFailed(mut failure) => {
+                        failure.input = descriptor;
+                        RenderColorTransformError::ExecutionFailed(failure)
+                    }
+                    other => other,
+                })?;
+            result.diagnostics.input = descriptor;
+            Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+        }
         CpuSourceColorFrame::EncodedFloat(frame) => {
             let mut planner = RenderColorStagePlanner::cpu_only();
             let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
@@ -5088,6 +5160,7 @@ fn validate_descriptor(
 fn color_target_format_for_gpu_frame(frame: &GpuColorFrameHandle) -> OcioGpuWgpuColorTargetFormat {
     match frame.texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+        GpuColorFrameTextureFormat::Rgba16Unorm => OcioGpuWgpuColorTargetFormat::Rgba16Unorm,
         GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
         GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
     }
@@ -5160,6 +5233,7 @@ fn planned_gpu_source_upload_transform(
     let supported_source_encoding = matches!(
         upload_input.encoding,
         ColorFrameEncoding::EncodedRgba8
+            | ColorFrameEncoding::EncodedRgba16
             | ColorFrameEncoding::EncodedFloat
             | ColorFrameEncoding::LinearFloat
     );
@@ -5168,7 +5242,7 @@ fn planned_gpu_source_upload_transform(
         || upload_input.residency != ColorFrameResidency::Cpu
     {
         return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
-            reason: "GPU input upload must consume CPU RGBA8, source-encoded float, or scene-linear float source data",
+            reason: "GPU input upload requires source-encoded RGBA8/RGBA16/float or scene-linear float data",
         });
     }
     if gpu_output.domain != ColorFrameDomain::Working
@@ -6311,6 +6385,126 @@ mod tests {
         assert_eq!(diagnostics.shader_cache.entries, 1);
         assert_eq!(diagnostics.backend_prep.resources.entries, 1);
         assert_eq!(diagnostics.backend_objects.entries, 1);
+    }
+
+    #[tokio::test]
+    async fn encoded_unorm16_input_matches_cpu_color_on_real_gpu() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping RGBA16 GPU parity: no adapter");
+            return;
+        };
+        if !context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+            eprintln!("skipping RGBA16 GPU parity: adapter lacks 16-bit normalized textures");
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(context.adapter.get_info().backend, wgpu::Backend::Metal);
+
+        let mut samples = Vec::with_capacity(4 * 4 * 4);
+        for index in 0..16_u16 {
+            samples.extend_from_slice(&[
+                index * 3_001,
+                u16::MAX - index * 2_103,
+                index * 1_313,
+                [0, 32_768, u16::MAX, 16_384][usize::from(index % 4)],
+            ]);
+        }
+        for color_space in [
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ] {
+            let source =
+                CpuSourceColorFrame::from(crate::CpuEncodedUnorm16ColorFrame::source_shared(
+                    4,
+                    4,
+                    color_space,
+                    Arc::new(samples.clone()),
+                ));
+            let transform = RenderInputTransform::to_working(
+                WorkingColorSpace::LinearRec709,
+                false,
+                ColorEngine::mondrian_standard(),
+            );
+            let expected = execute_cpu_source_input_stage(&source, &transform)
+                .expect("CPU reference")
+                .result
+                .frame;
+            let mut runtime =
+                RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_310).expect("GPU runtime");
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-rgba16-input-parity"),
+                });
+            let record = runtime
+                .record_wgpu_input_stage_owned_backend(
+                    &transform,
+                    &source,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("RGBA16 source records through production OCIO input stage");
+            assert_eq!(
+                record.materialized.input.texture_format(),
+                GpuColorFrameTextureFormat::Rgba16Unorm
+            );
+            assert_eq!(record.stage_diagnostics.upload_stages, 1);
+            assert_eq!(record.stage_diagnostics.readback_stages, 0);
+
+            let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mondrian-test-rgba16-working-readback"),
+                size: 256 * 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let output = runtime
+                .frame_table()
+                .get(&record.materialized.output)
+                .expect("working output exists");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output.resource().texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            );
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let mapped = map_readback_buffer(&context.device, &readback);
+            let actual = mapped
+                .chunks_exact(256)
+                .take(4)
+                .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+                .collect::<Vec<_>>();
+            readback.unmap();
+            let expected = expected.rgba_f32().data.as_flattened();
+            let max_delta = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0_f32, f32::max);
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                max_delta <= 1.0e-3,
+                "RGBA16 {color_space:?} GPU/CPU working max delta {max_delta}"
+            );
+        }
     }
 
     #[tokio::test]

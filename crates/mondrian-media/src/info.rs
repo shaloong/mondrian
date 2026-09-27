@@ -2071,6 +2071,7 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
         Pixel::YUV420P12LE => Some(PixelFormat::Yuv420p12le),
         Pixel::YUV422P12LE => Some(PixelFormat::Yuv422p12le),
         Pixel::YUV444P12LE => Some(PixelFormat::Yuv444p12le),
+        Pixel::YUVA444P12LE => Some(PixelFormat::Yuva444p12le),
         Pixel::YUV420P16LE => Some(PixelFormat::Yuv420p16le),
         Pixel::YUV422P16LE => Some(PixelFormat::Yuv422p16le),
         Pixel::YUV444P16LE => Some(PixelFormat::Yuv444p16le),

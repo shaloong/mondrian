@@ -2694,6 +2694,8 @@ impl OcioGpuWgpuFullscreenTopology {
 pub enum OcioGpuWgpuColorTargetFormat {
     /// 8-bit normalized RGBA target.
     Rgba8Unorm,
+    /// 16-bit normalized RGBA target.
+    Rgba16Unorm,
     /// 16-bit float RGBA target.
     Rgba16Float,
     /// 32-bit float RGBA target.
@@ -2704,6 +2706,7 @@ impl OcioGpuWgpuColorTargetFormat {
     fn to_wgpu(self) -> wgpu::TextureFormat {
         match self {
             Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba16Unorm => wgpu::TextureFormat::Rgba16Unorm,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
             Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
         }

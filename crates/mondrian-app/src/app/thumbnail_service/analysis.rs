@@ -253,6 +253,20 @@ pub(super) fn decode_thumbnail(
                 )?;
                 (width, height, rgba)
             }
+            Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
+                let width = frame.width;
+                let height = frame.height;
+                let encoding = frame.color_contract.encoding;
+                let rgba = color_manage_float_with_session(
+                    width,
+                    height,
+                    frame.into_normalized_f32(),
+                    encoding,
+                    &job.key.color,
+                    color_session,
+                )?;
+                (width, height, rgba)
+            }
             Ok(PreviewDecodeOutcome::Canceled(_)) => {
                 return Err(failure(
                     ThumbnailFailureReason::DecodeCanceled,

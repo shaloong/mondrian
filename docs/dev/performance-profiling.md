@@ -128,15 +128,19 @@ positive `-ProcessTimeoutSeconds` parameter), drains both output streams, and
 terminates the complete descendant process tree on timeout. Per-child logs are
 retained under the run's `cargo-logs` directory, and a timeout is always an
 explicit suite failure rather than a missing report interpreted as success.
-Long Preview and CPAL reports use `product_process_tree_private_commit_v2`.
-Their JSON evidence must identify `product-process-tree` scope, the Windows
-Tool Help/Process Status Backend, a non-zero observed member-count range, and a
-complete inventory for every cadence and post-stress sample. This intentionally
-charges isolated demux and FFmpeg audio children to the same 4 GiB/plateau
-contract. `CurrentProcess`, an unsupported Adapter, a changing inventory after
-bounded retries, or one failed member query is a failed gate—not a zero-byte or
-smaller sample. Working Set and summed member lifetime peaks remain diagnostic;
-aggregate Private Commit is the acceptance metric.
+Long Preview and CPAL reports use an explicit native process-tree memory
+profile. Windows uses `product_process_tree_private_commit_v2`, with Tool Help
+inventory and aggregate Private Commit. macOS uses
+`macos_product_process_tree_physical_footprint_v1`, with two matching libproc
+PID/start-time inventories and aggregate `ri_phys_footprint`. Both profiles
+require `product-process-tree` scope, a non-zero member-count range, complete
+inventory for every cadence and post-stress sample, a 4 GiB peak cap, and at
+most 256 MiB settled growth. The macOS footprint cap is a separate budget for
+the 16 GiB qualification host; its readings are not Windows Private Commit.
+Isolated demux and FFmpeg audio children contribute to the same product-tree
+sample. `CurrentProcess`, a mismatched native backend or metric, a changing
+inventory after bounded retries, or one failed member query fails the gate.
+Resident Set and summed member lifetime peaks remain diagnostic.
 For `app_ui_scale`, both `preview_color_report` and
 `preview_playback_color_report` must be present and carry a recognized non-Fail
 verdict; the Rust producer also writes both structured reports before rejecting

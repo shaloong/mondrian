@@ -27,6 +27,7 @@ pub(crate) struct DirectNativeYuvTextures {
     pub(crate) chroma: wgpu::Texture,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) trait DirectNativeBufferSynchronization {
     fn submit(
         &self,
@@ -38,6 +39,7 @@ pub(crate) trait DirectNativeBufferSynchronization {
 
 /// Buffer and synchronization retain the decoder source through final GPU use;
 /// their native owner also accounts for release after the last HAL reference.
+#[cfg(target_os = "linux")]
 pub(crate) struct DirectNativeYuvBuffer {
     pub buffer: wgpu::Buffer,
     pub row_pitch: u32,
@@ -47,6 +49,7 @@ pub(crate) struct DirectNativeYuvBuffer {
 
 pub(crate) enum DirectNativeYuvInput {
     Textures(DirectNativeYuvTextures),
+    #[cfg(target_os = "linux")]
     Buffer(DirectNativeYuvBuffer),
 }
 
@@ -80,6 +83,7 @@ impl DirectRetainedSourceState {
         self.count.load(Ordering::Acquire)
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     fn wait_for_idle_until(
         &self,
         deadline: Instant,
@@ -301,6 +305,7 @@ where
                     },
                 )
             }
+            #[cfg(target_os = "linux")]
             DirectNativeYuvInput::Buffer(source) => self
                 .yuv_decoder
                 .prepare_buffer_pass(
@@ -314,6 +319,7 @@ where
         };
         let source = match &input {
             DirectNativeYuvInput::Textures(_) => self.yuv_decoder.fused_texture_input(),
+            #[cfg(target_os = "linux")]
             DirectNativeYuvInput::Buffer(_) => {
                 self.yuv_decoder.fused_buffer_input().ok_or_else(|| {
                     backend_rejected("native buffer sampling pipeline is unavailable".to_owned())
@@ -369,6 +375,7 @@ where
                 self.queue.submit([command]);
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
             DirectNativeYuvInput::Buffer(source) => {
                 source.synchronization.submit(&self.device, &self.queue, command)
             }

@@ -1111,6 +1111,8 @@ pub enum DecodedFrameResidency {
     CpuRgba,
     /// Decoder output is CPU RGBA f32 memory.
     CpuFloat,
+    /// Decoder output is CPU source-encoded RGBA16 UNORM memory.
+    CpuUnorm16,
     /// Decoder output is compact CPU YUV planes awaiting GPU materialization.
     CpuYuv,
     /// Decoder output is a GPU texture or hardware frame.
@@ -1174,6 +1176,8 @@ pub enum DecodedVideoSurfaceFormat {
     Yuv444p10le,
     /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
     Yuv444p12le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with an Alpha plane.
+    Yuva444p12le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
@@ -1211,7 +1215,7 @@ pub enum DecodedVideoSurfaceChromaSubsampling {
 pub enum DecodedVideoSurfacePlaneLayout {
     /// Luma and an interleaved CbCr plane.
     SemiPlanar,
-    /// Independent luma, Cb, and Cr planes.
+    /// Independent luma, Cb, and Cr planes, optionally followed by Alpha.
     Planar,
     /// Packed YCbCr 4:2:2 words requiring an explicit GPU unpack Adapter.
     PackedYuv422,
@@ -2123,6 +2127,7 @@ impl DecodedFrameResidency {
         match self {
             Self::CpuRgba => "CpuRgba",
             Self::CpuFloat => "CpuFloat",
+            Self::CpuUnorm16 => "CpuUnorm16",
             Self::CpuYuv => "CpuYuv",
             Self::GpuTexture => "GpuTexture",
         }
@@ -2157,6 +2162,7 @@ impl DecodedVideoSurfaceFormat {
             Self::Yuv444p => "Yuv444p",
             Self::Yuv444p10le => "Yuv444p10le",
             Self::Yuv444p12le => "Yuv444p12le",
+            Self::Yuva444p12le => "Yuva444p12le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
             Self::Rgba16Float => "Rgba16Float",
@@ -2248,7 +2254,8 @@ impl DecodedVideoSurfaceFormat {
             | Self::Yuv422p12le
             | Self::Yuv444p
             | Self::Yuv444p10le
-            | Self::Yuv444p12le => {
+            | Self::Yuv444p12le
+            | Self::Yuva444p12le => {
                 let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
                     Self::Yuv420p => (Cs420, 8, Unorm8),
                     Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
@@ -2256,7 +2263,9 @@ impl DecodedVideoSurfaceFormat {
                     Self::Yuv422p => (Cs422, 8, Unorm8),
                     Self::Yuv444p => (Cs444, 8, Unorm8),
                     Self::Yuv444p10le => (Cs444, 10, Unorm16 { most_significant_bits: false }),
-                    Self::Yuv444p12le => (Cs444, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv444p12le | Self::Yuva444p12le => {
+                        (Cs444, 12, Unorm16 { most_significant_bits: false })
+                    }
                     Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p12le => (Cs422, 12, Unorm16 { most_significant_bits: false }),
                     _ => unreachable!(),
@@ -2267,7 +2276,7 @@ impl DecodedVideoSurfaceFormat {
                     plane_layout: Planar,
                     numeric_encoding,
                     component_bit_depth,
-                    has_alpha: false,
+                    has_alpha: matches!(self, Self::Yuva444p12le),
                     native_gpu_payload: false,
                 }
             }

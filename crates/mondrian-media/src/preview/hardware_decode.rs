@@ -19,6 +19,7 @@ struct PreviewHardwareDecodeCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreviewHardwareDecodePlan {
+    pub(super) codec_id: ffmpeg::codec::Id,
     pub(super) request: PreviewHardwareDecodeRequest,
     pub(super) decision: PreviewHardwareDecodeDecision,
     pub(super) probe: HwAccelProbe,
@@ -77,6 +78,7 @@ impl PreviewHardwareDecodePlan {
             &ffmpeg_device_context,
         );
         Self {
+            codec_id,
             request,
             decision,
             probe,

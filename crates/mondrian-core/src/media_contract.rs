@@ -386,6 +386,8 @@ pub enum PixelFormat {
     Yuv422p12le,
     /// Planar YUV 4:4:4, 12-bit little-endian.
     Yuv444p12le,
+    /// Planar YUV 4:4:4 with Alpha, 12-bit little-endian.
+    Yuva444p12le,
     /// Planar YUV 4:2:0, 16-bit little-endian.
     Yuv420p16le,
     /// Planar YUV 4:2:2, 16-bit little-endian.
@@ -442,6 +444,7 @@ impl PixelFormat {
             Self::Yuv420p12le
             | Self::Yuv422p12le
             | Self::Yuv444p12le
+            | Self::Yuva444p12le
             | Self::Gbrp12le
             | Self::Gbrap12le
             | Self::P012 => 12,
@@ -467,6 +470,7 @@ impl PixelFormat {
                 | Self::Gbrap16le
                 | Self::Gbrapf32le
                 | Self::Gbrapf32be
+                | Self::Yuva444p12le
         )
     }
 

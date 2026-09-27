@@ -574,6 +574,7 @@ fn mark_runtime_hardware_fallback(
     let diagnostics = match &mut outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
@@ -1139,6 +1140,7 @@ enum PreviewSeekToTarget {
 pub(super) enum PreviewDecodedFramePayload {
     CpuRgba(RgbaFrame),
     CpuFloat(FloatRgbaFrame),
+    CpuUnorm16(Unorm16RgbaFrame),
     CpuYuv(CpuYuvFrame),
     NativeGpu(PreviewNativeDecodedFrame),
 }
@@ -1155,6 +1157,12 @@ impl From<FloatRgbaFrame> for PreviewDecodedFramePayload {
     }
 }
 
+impl From<Unorm16RgbaFrame> for PreviewDecodedFramePayload {
+    fn from(frame: Unorm16RgbaFrame) -> Self {
+        Self::CpuUnorm16(frame)
+    }
+}
+
 impl From<CpuYuvFrame> for PreviewDecodedFramePayload {
     fn from(frame: CpuYuvFrame) -> Self {
         Self::CpuYuv(frame)
@@ -1166,6 +1174,9 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => frame.rgba().len(),
             Self::CpuFloat(frame) => frame.rgba().len().saturating_mul(std::mem::size_of::<f32>()),
+            Self::CpuUnorm16(frame) => {
+                frame.rgba().len().saturating_mul(std::mem::size_of::<u16>())
+            }
             Self::CpuYuv(frame) => frame.retained_bytes(),
             Self::NativeGpu(_) => 0,
         }
@@ -1175,6 +1186,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.into_playback_ring_hit(elapsed)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.into_playback_ring_hit(elapsed)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.into_playback_ring_hit(elapsed)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.into_playback_ring_hit(elapsed)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1192,6 +1204,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_temporal_selection(requested_pts, selected_extent))
             }
+            Self::CpuUnorm16(frame) => {
+                Self::CpuUnorm16(frame.with_temporal_selection(requested_pts, selected_extent))
+            }
             Self::CpuYuv(frame) => {
                 Self::CpuYuv(frame.with_temporal_selection(requested_pts, selected_extent))
             }
@@ -1203,6 +1218,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_access_policy(policy)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_access_policy(policy)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_access_policy(policy)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_access_policy(policy)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1220,6 +1236,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_seek_index_diagnostics(diagnostics, resolution))
             }
+            Self::CpuUnorm16(frame) => {
+                Self::CpuUnorm16(frame.with_seek_index_diagnostics(diagnostics, resolution))
+            }
             Self::CpuYuv(frame) => {
                 Self::CpuYuv(frame.with_seek_index_diagnostics(diagnostics, resolution))
             }
@@ -1231,6 +1250,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_stage_durations(durations)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_stage_durations(durations)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_stage_durations(durations)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_stage_durations(durations)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1240,6 +1260,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_hardware_decode_plan(plan)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_hardware_decode_plan(plan)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_hardware_decode_plan(plan)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_hardware_decode_plan(plan)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1249,6 +1270,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_decoded_surface_format(format)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_decoded_surface_format(format)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_decoded_surface_format(format)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_decoded_surface_format(format)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1258,6 +1280,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => PreviewDecodeOutcome::Frame(frame),
             Self::CpuFloat(frame) => PreviewDecodeOutcome::FloatFrame(frame),
+            Self::CpuUnorm16(frame) => PreviewDecodeOutcome::Unorm16Frame(frame),
             Self::CpuYuv(frame) => PreviewDecodeOutcome::CpuYuvFrame(frame),
             Self::NativeGpu(frame) => PreviewDecodeOutcome::NativeGpuFrame(frame),
         }
@@ -1633,7 +1656,10 @@ pub(super) fn preview_create_rgba_scaler(
         destination_format,
         target_width,
         target_height,
-        ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
+        // The default RGB converter reuses one chroma sample for each horizontal
+        // pixel pair, even for 4:4:4 input. Preserve the decoded chroma grid.
+        ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR
+            | ffmpeg::software::scaling::flag::Flags::FULL_CHR_H_INT,
     )
     .map_err(|e| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
@@ -2381,6 +2407,42 @@ impl PreviewDecodeSession {
                         );
                     }
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
+                }
+                PreviewDecodedFramePayload::CpuUnorm16(frame) => {
+                    let conversion_us = frame
+                        .diagnostics
+                        .stage_durations
+                        .hardware_transfer_us
+                        .saturating_add(frame.diagnostics.stage_durations.swscale_us)
+                        .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+                    let packet_decode_us =
+                        duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
+                    let frame = frame
+                        .with_access_mode(access_mode)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us,
+                            seek_us,
+                            packet_decode_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_temporal_selection(target_pts, result.selected_extent)
+                        .with_access_policy(policy)
+                        .with_forward_reused(should_continue_forward)
+                        .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
+                        .with_threading(self.threading_kind, self.threading_count)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format)
+                        .with_decode_execution();
+                    if policy.use_playback_ring
+                        && let Some(selected_extent) = result.selected_extent
+                    {
+                        self.playback_ring.put(
+                            selected_extent,
+                            PreviewDecodedFramePayload::CpuUnorm16(frame.clone()),
+                        );
+                    }
+                    return Ok(PreviewDecodeOutcome::Unorm16Frame(frame));
                 }
                 PreviewDecodedFramePayload::CpuYuv(frame) => {
                     let conversion_us = frame
@@ -3587,6 +3649,30 @@ fn decode_preview_frame_outcome_in_sessions(
                         .with_elapsed(started_at.elapsed()),
                 ))
             }
+            PreviewDecodeOutcome::Unorm16Frame(frame) => {
+                let result_session_disposition = if frame.diagnostics.session_disposition
+                    == PreviewDecodeSessionDisposition::BypassedCache
+                {
+                    PreviewDecodeSessionDisposition::BypassedCache
+                } else {
+                    session_disposition
+                };
+                Ok(PreviewDecodeOutcome::Unorm16Frame(
+                    frame
+                        .with_access_mode(access_mode)
+                        .with_seek_strategy(
+                            PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                        )
+                        .with_session_disposition(result_session_disposition)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            session_open_us,
+                            output_lease_wait_us,
+                            external_process_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_elapsed(started_at.elapsed()),
+                ))
+            }
             PreviewDecodeOutcome::CpuYuvFrame(frame) => {
                 let result_session_disposition = if frame.diagnostics.session_disposition
                     == PreviewDecodeSessionDisposition::BypassedCache
@@ -3673,6 +3759,7 @@ pub(super) fn finalize_preview_decode_outcome(
     let diagnostics = match &outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
