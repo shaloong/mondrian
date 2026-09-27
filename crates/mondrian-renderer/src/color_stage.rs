@@ -9115,7 +9115,7 @@ mod tests {
         assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 2);
         assert_eq!(record.color_stage_diagnostics.upload_stages, 0);
         assert_eq!(record.color_stage_diagnostics.readback_stages, 0);
-        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 2);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 4);
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("external-adjustment-readback"),
             size: 256 * 4,
@@ -9814,11 +9814,12 @@ mod tests {
             )
             .expect("record zero-opacity adjustment graph");
 
-        assert_eq!(record.output.id(), input.id());
+        assert_ne!(record.output.id(), input.id());
         assert_eq!(record.external_adjustment_passes, 0);
         assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 0);
-        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
-        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 1);
     }
 
     #[test]

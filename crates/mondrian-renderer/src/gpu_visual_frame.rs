@@ -14,17 +14,26 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{CompiledEffectGpuPlan, EffectColorDomain};
 
 use crate::{
-    product_gpu_working_bytes_per_pixel, CpuColorFrame, GpuColorFrameHandle, GpuCompositeError,
-    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
-    GpuFrameCompositor, GpuWorkingFloatDecision, RenderColorStageDiagnostics,
-    RenderColorTransformGpuOptions, RenderGpuCompositeGraphRecordError,
-    RenderGpuEffectDomainRecordError, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, PRODUCT_GPU_WORKING_FLOAT_DECISION,
+    product_gpu_working_bytes_per_pixel, CpuColorFrame, CpuSourceColorFrame, GpuColorFrameHandle,
+    GpuCompositeError, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
+    GpuCompositingDiagnostics, GpuFrameCompositor, GpuWorkingFloatDecision,
+    RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    RenderGpuCompositeGraphRecordError, RenderGpuEffectDomainRecordError,
+    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
+    PRODUCT_GPU_WORKING_FLOAT_DECISION,
 };
 
 /// Typed pixels or procedural values entering GPU visual execution.
 #[derive(Clone)]
 pub enum GpuVisualFrameSource {
+    /// Decoded, coverage-normalized source interpreted by the shared GPU OCIO input stage.
+    ColorManaged {
+        /// Encoded or scene-linear source before the input transform.
+        source: Arc<CpuSourceColorFrame>,
+        /// Frozen source-to-working interpretation.
+        transform: RenderInputTransform,
+    },
     /// CPU working-linear color pixels uploaded without another color transform.
     Working(Arc<CpuColorFrame>),
     /// CPU RGBA numeric channels uploaded with `NonColorData + DataTexture` identity.
@@ -41,6 +50,10 @@ pub enum GpuVisualFrameSource {
 impl GpuVisualFrameSource {
     fn extent(&self, canvas_width: u32, canvas_height: u32) -> (u32, u32) {
         match self {
+            Self::ColorManaged { source, .. } => {
+                let descriptor = source.descriptor();
+                (descriptor.width, descriptor.height)
+            }
             Self::Working(frame) | Self::DataTexture(frame) => {
                 let descriptor = frame.descriptor();
                 (descriptor.width, descriptor.height)
@@ -301,6 +314,9 @@ pub enum GpuVisualFrameExecutionError {
     /// Source/transition working compositing failed.
     #[error("GPU visual source composite failed: {0}")]
     Composite(#[from] GpuCompositeError),
+    /// Shared GPU source-to-working input transform failed.
+    #[error("GPU visual input color stage failed: {0:?}")]
+    InputColor(Box<RenderGpuInputStageRuntimeRecordError>),
     /// A source Effect required an external color-domain round trip that failed.
     #[error("GPU visual source Effect-domain execution failed: {0:?}")]
     SourceEffectDomain(Box<RenderGpuEffectDomainRecordError>),
@@ -508,11 +524,31 @@ impl GpuVisualFrameExecutor {
         compositing_diagnostics: &mut GpuCompositingDiagnostics,
         color_stage_diagnostics: &mut RenderColorStageDiagnostics,
     ) -> Result<PreparedSourceLayer, GpuVisualFrameExecutionError> {
+        let prepared_source = match &source.source {
+            GpuVisualFrameSource::ColorManaged { source, transform } => {
+                let record = runtime
+                    .record_wgpu_input_stage_owned_backend(
+                        transform,
+                        source,
+                        RenderColorTransformGpuOptions::default(),
+                        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                            device,
+                            queue,
+                            encoder,
+                            load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        },
+                    )
+                    .map_err(|error| GpuVisualFrameExecutionError::InputColor(Box::new(error)))?;
+                color_stage_diagnostics.accumulate(record.stage_diagnostics);
+                GpuVisualFrameSource::GpuWorking(record.materialized.output)
+            }
+            other => other.clone(),
+        };
         if source.effect_plan.is_identity()
             || source.effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb
         {
             return Ok(PreparedSourceLayer {
-                source: source.source.clone(),
+                source: prepared_source,
                 opacity: source.opacity,
                 blend_mode: source.blend_mode,
                 transform: source.transform,
@@ -524,7 +560,7 @@ impl GpuVisualFrameExecutor {
 
         let (source_width, source_height) = source.source.extent(request.width, request.height);
         let source_layer = PreparedSourceLayer {
-            source: source.source.clone(),
+            source: prepared_source,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_AFFINE,
@@ -733,14 +769,17 @@ fn estimate_visual_source(
     estimate: &mut GpuVisualFrameActiveWorkingSetEstimate,
 ) -> Result<(), GpuVisualFrameActiveWorkingSetEstimateError> {
     let (width, height) = source.source.extent(request.width, request.height);
-    if matches!(
-        source.source,
-        GpuVisualFrameSource::Working(_) | GpuVisualFrameSource::DataTexture(_)
-    ) {
+    let upload_textures = match source.source {
+        GpuVisualFrameSource::ColorManaged { .. } => 2,
+        GpuVisualFrameSource::Working(_) | GpuVisualFrameSource::DataTexture(_) => 1,
+        GpuVisualFrameSource::GpuWorking(_) | GpuVisualFrameSource::Solid(_) => 0,
+    };
+    if upload_textures > 0 {
         estimate.source_uploads.checked_add(
-            texture_demand(
+            repeated_texture_demand(
                 width,
                 height,
+                upload_textures,
                 GpuVisualFrameActiveWorkingSetStage::SourceUploads,
             )?,
             GpuVisualFrameActiveWorkingSetStage::SourceUploads,
@@ -762,14 +801,6 @@ fn estimate_visual_source(
         )?;
     }
     Ok(())
-}
-
-fn texture_demand(
-    width: u32,
-    height: u32,
-    stage: GpuVisualFrameActiveWorkingSetStage,
-) -> Result<GpuVisualFrameActiveTextureDemand, GpuVisualFrameActiveWorkingSetEstimateError> {
-    repeated_texture_demand(width, height, 1, stage)
 }
 
 fn repeated_texture_demand(
@@ -831,6 +862,9 @@ impl PreparedSourceLayer {
     fn as_composite_layer(&self) -> GpuCompositeLayer<'_> {
         GpuCompositeLayer {
             source: match &self.source {
+                GpuVisualFrameSource::ColorManaged { .. } => {
+                    unreachable!("encoded source must cross GPU input color before compositing")
+                }
                 GpuVisualFrameSource::Working(frame) => GpuCompositeLayerSource::CpuFrame(frame),
                 GpuVisualFrameSource::DataTexture(frame) => {
                     GpuCompositeLayerSource::CpuDataTexture(frame)

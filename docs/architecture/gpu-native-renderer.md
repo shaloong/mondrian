@@ -935,7 +935,9 @@ color into a pooled working GPU frame, then use that same route; layer opacity,
 affine transform, and blending remain after the effect-domain round trip in
 authored order. The consumed plan
 is removed from the working compositor request, so an otherwise eligible
-single layer can retain its passthrough path. CPU working-frame fallbacks use an
+opaque single layer can retain its passthrough path. Straight-coverage layers
+still composite over transparent black: forwarding their working texture would
+leak hidden RGB where alpha is zero. CPU working-frame fallbacks use an
 explicit pooled RGBA32F upload node before the same effect-domain route; this
 reports exactly one upload stage and no readback, while GPU/native media retain
 their transfer-free path. The upload plan retains the CPU frame's shared
@@ -961,7 +963,7 @@ shared composite graph also ignores zero-opacity external adjustments, and the
 low-level compositor excludes all zero-contribution layers from capability
 validation, passthrough selection, and pass recording. Diagnostics therefore
 describe only executed work, and a visible GPU layer beneath an invisible
-adjustment remains a zero-pass GPU passthrough.
+adjustment retains a zero-pass GPU passthrough when the visible layer is opaque.
 
 `GpuCompositorTextureBindingDiagnostics` separately counts texture bind-group
 creation and cache hits. This keeps backend object churn observable without

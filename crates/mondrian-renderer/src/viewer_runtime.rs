@@ -3973,7 +3973,8 @@ mod tests {
         assert_eq!(record.stage_diagnostics.upload_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
         assert_eq!(record.residency.cpu_upload_layers, 1);
-        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
     }
 
     #[tokio::test]
@@ -4155,8 +4156,8 @@ mod tests {
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 3);
         assert_eq!(record.stage_diagnostics.upload_stages, 0);
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
-        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
-        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
         assert_eq!(record.residency.procedural_layers, 1);
     }
 

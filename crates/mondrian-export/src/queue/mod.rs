@@ -3969,8 +3969,7 @@ impl TimelineAudioInput {
 
 #[derive(Debug, Clone)]
 struct DecodedVideoLayer {
-    frame: CpuColorFrame,
-    is_data_texture: bool,
+    pixels: DecodedVideoLayerPixels,
     source_resolution: Resolution,
     picture_geometry: ResolvedPictureGeometry,
     source_fingerprint: MediaFileFingerprint,
@@ -3978,6 +3977,66 @@ struct DecodedVideoLayer {
     #[cfg_attr(not(test), allow(dead_code))]
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportDecodedSourceRoute {
+    CpuWorking,
+    GpuInput,
+}
+
+#[derive(Debug, Clone)]
+enum DecodedVideoLayerPixels {
+    CpuWorking {
+        frame: CpuColorFrame,
+        is_data_texture: bool,
+    },
+    GpuInput(PreparedSourceFrame),
+}
+
+impl DecodedVideoLayer {
+    fn route(&self) -> ExportDecodedSourceRoute {
+        match self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { .. } => ExportDecodedSourceRoute::CpuWorking,
+            DecodedVideoLayerPixels::GpuInput(_) => ExportDecodedSourceRoute::GpuInput,
+        }
+    }
+
+    fn extent(&self) -> Resolution {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, .. } => decoded_frame_resolution(frame),
+            DecodedVideoLayerPixels::GpuInput(source) => {
+                let (width, height) = source.extent();
+                Resolution { width, height }
+            }
+        }
+    }
+
+    fn cpu_frame(&self) -> Result<&CpuColorFrame, String> {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, .. } => Ok(frame),
+            DecodedVideoLayerPixels::GpuInput(_) => {
+                Err("GPU input source reached the CPU Export visual route".to_owned())
+            }
+        }
+    }
+
+    fn gpu_source(&self) -> Result<GpuVisualFrameSource, String> {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, is_data_texture } => {
+                Ok(export_gpu_cpu_source(frame, *is_data_texture))
+            }
+            DecodedVideoLayerPixels::GpuInput(source) => {
+                if let Some((source, transform)) = source.color_managed_gpu_input() {
+                    Ok(GpuVisualFrameSource::ColorManaged { source, transform })
+                } else if let Some(frame) = source.data_texture_frame() {
+                    Ok(GpuVisualFrameSource::DataTexture(Arc::new(frame)))
+                } else {
+                    Err("prepared GPU Export source has no typed input route".to_owned())
+                }
+            }
+        }
+    }
 }
 
 fn execute_timeline_export(
@@ -8118,6 +8177,7 @@ fn render_prepared_visual_node_gpu(
                     context.stage_diagnostics.as_deref_mut(),
                     context.visual_session,
                     context.cancellation,
+                    ExportDecodedSourceRoute::GpuInput,
                 )?);
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -8174,13 +8234,13 @@ fn render_prepared_visual_node_gpu(
                     media.transform,
                     decoded.picture_geometry.source_to_display_affine(),
                     decoded.source_resolution,
-                    decoded_frame_resolution(&decoded.frame),
+                    decoded.extent(),
                     author_resolution,
                     resolution,
                     "GPU media",
                 )?;
                 GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
-                    source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                    source: decoded.gpu_source()?,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform,
@@ -8422,18 +8482,19 @@ fn lower_export_gpu_transition_input(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::GpuInput,
             )?;
             let transform = project_export_picture_affine(
                 media.transform,
                 decoded.picture_geometry.source_to_display_affine(),
                 decoded.source_resolution,
-                decoded_frame_resolution(&decoded.frame),
+                decoded.extent(),
                 author_resolution,
                 resolution,
                 "GPU Transition media",
             )?;
             GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
-                source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                source: decoded.gpu_source()?,
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
@@ -8689,6 +8750,7 @@ fn render_prepared_visual_node_into(
                         context.stage_diagnostics.as_deref_mut(),
                         context.visual_session,
                         context.cancellation,
+                        ExportDecodedSourceRoute::CpuWorking,
                     )?);
                 }
             }
@@ -8770,7 +8832,7 @@ fn render_prepared_visual_node_into(
                                 "heterogeneous media plan was not resolved before Effect execution"
                                     .to_owned()
                             })?
-                            .frame
+                            .cpu_frame()?
                             .clone(),
                     )
                 }
@@ -8865,7 +8927,7 @@ fn render_prepared_visual_node_into(
                             "media plan was not resolved before compositing".to_owned()
                         })?;
                         (
-                            &decoded.frame,
+                            decoded.cpu_frame()?,
                             decoded.source_resolution,
                             decoded.picture_geometry.source_to_display_affine(),
                         )
@@ -9212,6 +9274,7 @@ fn decode_export_media_plan(
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
     visual_session: &mut ExportVisualRenderSession,
     cancellation: &ExecutionCancellationToken,
+    route: ExportDecodedSourceRoute,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
     let dependency = media_dependencies
         .get(&media.asset_id)
@@ -9269,6 +9332,9 @@ fn decode_export_media_plan(
         picture_geometry,
     )?;
     if let Some(decoded) = cache.get(&key) {
+        if decoded.route() != route {
+            return Err("Export decode cache route disagrees with its visual owner".to_owned());
+        }
         if decoded.source_fingerprint != dependency.source_fingerprint
             || decoded.video_stream_index != key.video_stream_index
         {
@@ -9295,6 +9361,7 @@ fn decode_export_media_plan(
             color_session: visual_session.composite_scratch.color_execution_mut(),
             decode_context: &mut visual_session.decode_context,
             cancellation,
+            route,
         },
     )?;
     if decoded.source_fingerprint != key.source_fingerprint
@@ -9600,9 +9667,10 @@ fn resolve_export_temporal_source(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
             )?;
             (
-                decoded.frame.clone(),
+                decoded.cpu_frame()?.clone(),
                 decoded.source_resolution,
                 decoded.picture_geometry.source_to_display_affine(),
             )
@@ -9877,6 +9945,7 @@ fn resolve_export_transition_input(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
             )?)
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
@@ -9969,13 +10038,13 @@ fn lower_export_transition_input<'a>(
                 media.transform,
                 frame.picture_geometry.source_to_display_affine(),
                 frame.source_resolution,
-                decoded_frame_resolution(&frame.frame),
+                frame.extent(),
                 author_resolution,
                 resolution,
                 "Transition media",
             )?;
             TimelineTransitionInput::Media(TimelineMediaLayer {
-                frame: &frame.frame,
+                frame: frame.cpu_frame()?,
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
@@ -10164,6 +10233,7 @@ struct ExportVideoLayerDecodeExecutionContext<'a> {
     color_session: &'a mut mondrian_renderer::RenderCpuColorExecutionSession,
     decode_context: &'a mut PreviewDecodeSessionContext,
     cancellation: &'a ExecutionCancellationToken,
+    route: ExportDecodedSourceRoute,
 }
 
 fn decode_video_layer_scaled(
@@ -10181,8 +10251,12 @@ fn decode_video_layer_scaled(
         alpha_interpretation,
         preparation_intent,
     } = request;
-    let ExportVideoLayerDecodeExecutionContext { color_session, decode_context, cancellation } =
-        execution;
+    let ExportVideoLayerDecodeExecutionContext {
+        color_session,
+        decode_context,
+        cancellation,
+        route,
+    } = execution;
     let path = dependency.path.as_path();
     if !dependency.source_fingerprint.authorizes_reuse() {
         return Err(format!(
@@ -10300,19 +10374,30 @@ fn decode_video_layer_scaled(
                     err
                 )
             })?;
-    let is_data_texture = source.is_data_texture();
-    let execution = source
-        .execute_cpu_with_session(color_session)
-        .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+    let (pixels, stage_diagnostics) = match route {
+        ExportDecodedSourceRoute::CpuWorking => {
+            let is_data_texture = source.is_data_texture();
+            let execution = source
+                .execute_cpu_with_session(color_session)
+                .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+            (
+                DecodedVideoLayerPixels::CpuWorking { frame: execution.frame, is_data_texture },
+                execution.stage_diagnostics,
+            )
+        }
+        ExportDecodedSourceRoute::GpuInput => (
+            DecodedVideoLayerPixels::GpuInput(source),
+            RenderColorStageDiagnostics::default(),
+        ),
+    };
     Ok(Arc::new(DecodedVideoLayer {
-        frame: execution.frame,
-        is_data_texture,
+        pixels,
         source_resolution,
         picture_geometry,
         source_fingerprint: dependency.source_fingerprint,
         video_stream_index,
         decode_diagnostics: Some(decode_diagnostics),
-        stage_diagnostics: execution.stage_diagnostics,
+        stage_diagnostics,
     }))
 }
 
@@ -12876,22 +12961,26 @@ mod tests {
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         )
         .expect("decode and prepare RGB data texture");
 
-        assert!(decoded.is_data_texture);
+        assert!(matches!(
+            decoded.pixels,
+            DecodedVideoLayerPixels::CpuWorking { is_data_texture: true, .. }
+        ));
         assert_eq!(
             decoded.stage_diagnostics,
             RenderColorStageDiagnostics::default()
         );
-        let pixel = decoded.frame.rgba_f32().data[0];
+        let pixel = decoded.cpu_frame().expect("CPU data texture").rgba_f32().data[0];
         assert!((pixel[0] - 17.0 / 255.0).abs() < 1.0e-6);
         assert!((pixel[1] - 64.0 / 255.0).abs() < 1.0e-6);
         assert_eq!(pixel[2], 1.0);
         assert_eq!(pixel[3], 1.0);
         assert_eq!(
-            decoded.frame.rgba_f32().color_space,
+            decoded.cpu_frame().expect("CPU data texture").rgba_f32().color_space,
             color_context.working_color_space()
         );
     }
@@ -13080,6 +13169,7 @@ mod tests {
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         );
         let error = match result {
@@ -13135,6 +13225,7 @@ mod tests {
                     color_session: session.composite_scratch.color_execution_mut(),
                     decode_context: &mut session.decode_context,
                     cancellation: &cancellation,
+                    route: ExportDecodedSourceRoute::CpuWorking,
                 },
             )
             .unwrap_or_else(|error| {
@@ -13234,6 +13325,7 @@ mod tests {
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         )
         .expect_err("stale export dependency must fail before decoder setup");

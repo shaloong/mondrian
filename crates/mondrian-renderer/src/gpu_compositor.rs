@@ -14,8 +14,8 @@ use crate::gpu_composite_execution::{
     GpuCompositeRect, GpuCompositeSourceCrop,
 };
 use crate::{
-    product_gpu_working_texture_format, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
+    product_gpu_working_texture_format, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
     GpuColorFrameBindGroupCacheKeyAllocationError, GpuColorFrameHandle,
     GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameTextureFormat, GpuColorFrameUploadPlan,
@@ -3224,10 +3224,12 @@ fn single_layer_gpu_passthrough<'a>(
         return None;
     };
     let descriptor = handle.descriptor();
+    // Straight coverage must still composite over transparent black at exact zero alpha.
     let preserves_pixels = layer.opacity.clamp(0.0, 1.0) == 1.0
         && layer.blend_mode == BlendMode::Normal
         && is_identity_transform(layer.transform)
         && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
+        && descriptor.alpha == ColorFrameAlpha::Opaque
         && descriptor.width == request.width
         && descriptor.height == request.height
         && handle.texture_format() == product_gpu_working_texture_format();
@@ -3973,7 +3975,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
-                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                alpha: crate::ColorFrameAlpha::Opaque,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "passthrough-test",
@@ -3996,6 +3998,23 @@ mod tests {
             layers: &layers,
         };
         assert_eq!(single_layer_gpu_passthrough(&request), Some(&handle));
+
+        let straight = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(100),
+            ColorFrameDescriptor {
+                alpha: ColorFrameAlpha::StraightCoverage,
+                ..handle.descriptor()
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "straight-coverage-source",
+        )
+        .expect("valid straight coverage handle");
+        let straight_layers = [GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&straight),
+            ..layer
+        }];
+        let straight_request = GpuCompositeRequest { layers: &straight_layers, ..request };
+        assert_eq!(single_layer_gpu_passthrough(&straight_request), None);
 
         layer.opacity = 0.5;
         let layers = [layer];
