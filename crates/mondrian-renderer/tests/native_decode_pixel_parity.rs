@@ -63,11 +63,39 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
 #[test]
 #[ignore = "requires real Metal, explicit demux worker, and tagged HEVC 4:2:0/4:2:2/4:4:4 fixtures"]
 fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_NATIVE_FIXTURES",
+        [
+            (DecodedVideoSurfaceFormat::P010, ColorSpace::Rec709),
+            (DecodedVideoSurfaceFormat::P210, ColorSpace::Rec709),
+            (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec709),
+        ],
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker, and tagged 30 fps PQ/HLG HEVC fixtures"]
+fn cpu_and_videotoolbox_hdr_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_NATIVE_HDR_FIXTURES",
+        [
+            (DecodedVideoSurfaceFormat::P010, ColorSpace::Rec2100Pq),
+            (DecodedVideoSurfaceFormat::P210, ColorSpace::Rec2100Pq),
+            (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec2100Hlg),
+        ],
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn compare_macos_videotoolbox_fixtures(
+    fixture_env: &str,
+    cases: [(DecodedVideoSurfaceFormat, ColorSpace); 3],
+) -> Result<()> {
     mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
-    let fixtures = std::env::var_os("MONDRIAN_MACOS_NATIVE_FIXTURES")
-        .context("explicit HEVC 4:2:0, 4:2:2 and 4:4:4 fixtures")?;
+    let fixtures = std::env::var_os(fixture_env).with_context(|| fixture_env.to_owned())?;
     let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
-    anyhow::ensure!(paths.len() == 3, "expected 4:2:0, 4:2:2 and 4:4:4 fixtures");
+    anyhow::ensure!(paths.len() == cases.len(), "expected three HEVC fixtures");
     let context = pollster::block_on(GpuContext::new())?;
     anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
     let mut runtime =
@@ -75,20 +103,32 @@ fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result
     anyhow::ensure!(runtime
         .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
     let result = (|| -> Result<()> {
-        for (path, surface) in paths.into_iter().zip([
-            DecodedVideoSurfaceFormat::P010,
-            DecodedVideoSurfaceFormat::P210,
-            DecodedVideoSurfaceFormat::P410,
-        ]) {
-            let cpu = measure(&path, false, None, &context, &mut runtime)?;
-            let native = measure(&path, true, Some(surface), &context, &mut runtime)?;
+        for (path, (surface, color)) in paths.into_iter().zip(cases) {
+            let cpu = measure_with_resource_observer(
+                &path,
+                false,
+                None,
+                color,
+                &context,
+                &mut runtime,
+                |_, _, _| {},
+            )?;
+            let native = measure_with_resource_observer(
+                &path,
+                true,
+                Some(surface),
+                color,
+                &context,
+                &mut runtime,
+                |_, _, _| {},
+            )?;
             anyhow::ensure!(cpu.len() == native.len());
             for (index, (cpu, native)) in cpu.iter().zip(&native).enumerate() {
                 anyhow::ensure!(cpu.len() == native.len());
                 let max =
                     cpu.iter().zip(native).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
                 eprintln!(
-                    "{} seek sample {index}: maximum float output difference {max}",
+                    "{} {color:?} seek sample {index}: maximum float output difference {max}",
                     path.display()
                 );
                 anyhow::ensure!(
@@ -143,6 +183,7 @@ fn compact_planar_formats_agree_through_production_viewer() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn measure(
     path: &Path,
     native: bool,
@@ -154,6 +195,7 @@ fn measure(
         path,
         native,
         expected_native_surface,
+        ColorSpace::Rec709,
         context,
         runtime,
         |_, _, _| {},
@@ -180,6 +222,7 @@ fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
         Path::new(&path),
         false,
         None,
+        ColorSpace::Rec709,
         &context,
         &mut runtime,
         |width, height, diagnostics| {
@@ -207,6 +250,7 @@ fn measure_with_resource_observer(
     path: &Path,
     native: bool,
     expected_native_surface: Option<DecodedVideoSurfaceFormat>,
+    source_color: ColorSpace,
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
     mut observe: impl FnMut(u32, u32, GpuColorFrameWgpuResourcePoolDiagnostics),
@@ -229,16 +273,10 @@ fn measure_with_resource_observer(
         true,
         ColorEngine::mondrian_standard(),
     );
-    let boundary = RenderOutputColorBoundary::display(
-        ColorSpace::Rec709,
-        false,
-        ColorEngine::mondrian_standard(),
-    );
-    let monitor = RenderMonitorAdaptation::new(
-        ColorSpace::Rec709,
-        ColorSpace::Rec709,
-        ColorEngine::mondrian_standard(),
-    )?;
+    let boundary =
+        RenderOutputColorBoundary::display(source_color, false, ColorEngine::mondrian_standard());
+    let monitor =
+        RenderMonitorAdaptation::new(source_color, source_color, ColorEngine::mondrian_standard())?;
     let sequence = SequenceId::new();
     let mut samples = Vec::new();
     let (wake_tx, wake_rx) = std::sync::mpsc::channel();
@@ -253,7 +291,7 @@ fn measure_with_resource_observer(
             path,
             SourceSampleTarget::covering(TimelineTime::new(index, 30)?),
             PreviewDecodeAccessMode::PlaybackCursor,
-            PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(source_color, DecodedVideoRange::Limited),
         )
         .with_fingerprint(fingerprint)
         .with_field_processing(PreviewSourceFieldProcessing::Progressive)
@@ -291,7 +329,7 @@ fn measure_with_resource_observer(
                     f.width,
                     f.height,
                     Some(ViewerGpuNativeSource {
-                        source_color_space: ColorSpace::Rec709,
+                        source_color_space: source_color,
                         input_transform: input.clone(),
                         materialization_width: f.width,
                         materialization_height: f.height,
