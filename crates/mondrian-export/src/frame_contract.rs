@@ -210,7 +210,7 @@ impl ExportFrameContract {
         height: u32,
         padded_bytes_per_row: u32,
     ) -> Result<Vec<u8>, ExportFramePackingError> {
-        if self != Self::EncodedRgba16Unorm {
+        if self != Self::EncodedRgba16Unorm || width == 0 || height == 0 {
             return Err(ExportFramePackingError::InvalidRgba16FloatReadback);
         }
         let row_len = (width as usize)
@@ -226,16 +226,27 @@ impl ExportFrameContract {
         let output_len = row_len
             .checked_mul(height as usize)
             .ok_or(ExportFramePackingError::InvalidRgba16FloatReadback)?;
-        let mut out = Vec::with_capacity(output_len);
-        for (row_index, row) in mapped.chunks_exact(stride).take(height as usize).enumerate() {
-            for (index_in_row, half_bytes) in row[..row_len].chunks_exact(2).enumerate() {
+        let mut out = vec![0; output_len];
+        for (row_index, (source, destination)) in mapped
+            .chunks_exact(stride)
+            .zip(out.chunks_exact_mut(row_len))
+            .take(height as usize)
+            .enumerate()
+        {
+            for (index_in_row, (half_bytes, packed_bytes)) in source[..row_len]
+                .chunks_exact(2)
+                .zip(destination.chunks_exact_mut(2))
+                .enumerate()
+            {
                 let value = f16::from_le_bytes([half_bytes[0], half_bytes[1]]).to_f32();
                 if !value.is_finite() {
                     return Err(ExportFramePackingError::NonFiniteComponent {
                         component_index: row_index * (row_len / 2) + index_in_row,
                     });
                 }
-                out.extend_from_slice(&quantize_unorm16(value).to_le_bytes());
+                let bytes = quantize_unorm16(value).to_le_bytes();
+                packed_bytes[0] = bytes[0];
+                packed_bytes[1] = bytes[1];
             }
         }
         Ok(out)
@@ -544,6 +555,10 @@ mod tests {
         ));
         assert!(matches!(
             contract.pack_rgba16float_readback(&[0; 16], 2, 1, 8),
+            Err(ExportFramePackingError::InvalidRgba16FloatReadback)
+        ));
+        assert!(matches!(
+            contract.pack_rgba16float_readback(&[], 0, 1, 8),
             Err(ExportFramePackingError::InvalidRgba16FloatReadback)
         ));
         let mut mapped = vec![0; 16];
