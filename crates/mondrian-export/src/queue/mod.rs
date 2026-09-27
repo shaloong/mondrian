@@ -1001,21 +1001,32 @@ fn execute_export_gpu_output_boundary_with_backend(
             frame_contract.pack_rgba8(actual.rgba())?
         }
         GpuColorFrameTextureFormat::Rgba16Float => {
-            let mut f32_data = readback_plan
-                .unpack_mapped_rgba16float(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            if legalizer.is_active() {
-                let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
-                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
-                legalize_encoded_rgba_f32(
-                    bytemuck::cast_slice_mut(&mut f32_data),
-                    compliance,
-                    legalizer,
-                )
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            if matches!(frame_contract, ExportFrameContract::EncodedRgba16Unorm)
+                && !legalizer.is_active()
+            {
+                frame_contract.pack_rgba16float_readback(
+                    &mapped,
+                    readback_plan.extent.width,
+                    readback_plan.extent.height,
+                    readback_plan.padded_bytes_per_row,
+                )?
+            } else {
+                let mut f32_data = readback_plan
+                    .unpack_mapped_rgba16float(&mapped)
+                    .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                if legalizer.is_active() {
+                    let compliance =
+                        SignalComplianceContract::normalized_rgb(boundary.output_color_space())
+                            .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+                    legalize_encoded_rgba_f32(
+                        bytemuck::cast_slice_mut(&mut f32_data),
+                        compliance,
+                        legalizer,
+                    )
+                    .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                }
+                frame_contract.pack_rgba_f32(&f32_data)?
             }
-            frame_contract.pack_rgba_f32(&f32_data)?
         }
         GpuColorFrameTextureFormat::Rgba32Float => {
             let mut f32_data = readback_plan
