@@ -283,34 +283,75 @@ fn convert_decoded_to_encoded_unorm16_rgba(
         *scaler_color_contract = Some(color_contract);
     }
 
-    let mut rgba64 = ffmpeg::util::frame::video::Video::empty();
-    let swscale_started_at = Instant::now();
-    scaler.run(decoded, &mut rgba64).map_err(|error| MondrianError::DecodeFailed {
-        asset_id: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    let swscale_us = duration_us(swscale_started_at.elapsed());
-
-    let width = rgba64.width();
-    let height = rgba64.height();
-    let stride = rgba64.stride(0);
-    let row_bytes = width as usize * 4 * std::mem::size_of::<u16>();
-    let source = rgba64.data(0);
-    let copy_started_at = Instant::now();
-    let mut output = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        let row = source.get(row_start..row_start + row_bytes).ok_or_else(|| {
-            MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "FFmpeg RGBA64 row {y} is shorter than the declared preview extent"
-                ),
-            }
+    let width = scaler.output().width;
+    let height = scaler.output().height;
+    let row_samples =
+        (width as usize).checked_mul(4).ok_or_else(|| MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "RGBA64 preview row exceeds addressable memory".to_owned(),
         })?;
-        output.extend(row.chunks_exact(2).map(|sample| u16::from_le_bytes([sample[0], sample[1]])));
+    let row_bytes = row_samples.checked_mul(std::mem::size_of::<u16>()).ok_or_else(|| {
+        MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "RGBA64 preview row exceeds addressable memory".to_owned(),
+        }
+    })?;
+    let stride = i32::try_from(row_bytes).map_err(|_| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: "RGBA64 preview row exceeds FFmpeg stride limit".to_owned(),
+    })?;
+    let sample_count =
+        row_samples
+            .checked_mul(height as usize)
+            .ok_or_else(|| MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "RGBA64 preview extent exceeds addressable memory".to_owned(),
+            })?;
+    let swscale_started_at = Instant::now();
+    let mut output = vec![0_u16; sample_count];
+    let destination_data = [
+        output.as_mut_ptr().cast::<u8>(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    ];
+    let destination_stride = [stride, 0, 0, 0];
+    if scaler.input().format != decoded.format()
+        || scaler.input().width != decoded.width()
+        || scaler.input().height != decoded.height()
+        || scaler.output().format != ffmpeg::util::format::pixel::Pixel::RGBA64LE
+    {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "RGBA64 preview scaler format changed before materialization".to_owned(),
+        });
     }
-    let rgba_copy_us = duration_us(copy_started_at.elapsed());
+    // The ffmpeg-next wrapper calls the same sws_scale function after allocating
+    // an AVFrame. Write its RGBA64LE result into the final typed allocation so
+    // no second full-resolution pixel copy is needed. The destination is fully
+    // initialized and remains owned by Rust throughout the synchronous call.
+    let scaled_rows = unsafe {
+        let source = decoded.as_ptr();
+        ffmpeg::ffi::sws_scale(
+            scaler.as_mut_ptr(),
+            (*source).data.as_ptr().cast(),
+            (*source).linesize.as_ptr(),
+            0,
+            decoded.height() as i32,
+            destination_data.as_ptr(),
+            destination_stride.as_ptr(),
+        )
+    };
+    if scaled_rows != height as i32 {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!("RGBA64 preview scaler produced {scaled_rows} of {height} rows"),
+        });
+    }
+    for sample in &mut output {
+        *sample = u16::from_le(*sample);
+    }
+    let swscale_us = duration_us(swscale_started_at.elapsed());
 
     Ok(Unorm16RgbaFrame::new(
         width,
@@ -323,7 +364,6 @@ fn convert_decoded_to_encoded_unorm16_rgba(
     .with_decoded_video_sampling(decoded_video_sampling)
     .with_stage_durations(PreviewDecodeStageDurations {
         swscale_us,
-        rgba_copy_us,
         ..PreviewDecodeStageDurations::default()
     }))
 }
@@ -1127,5 +1167,77 @@ mod codec_chroma_tests {
                 }
             )
         ));
+    }
+}
+
+#[cfg(test)]
+mod rgba64_direct_scale_tests {
+    use super::*;
+    use crate::decoder::DecodedVideoRange;
+    use mondrian_core::ColorSpace;
+
+    #[test]
+    fn direct_rgba64_matches_ffmpeg_frame_for_odd_rows_and_straight_alpha() {
+        use ffmpeg::util::format::pixel::Pixel;
+
+        for (width, height) in [(5, 3), (64, 2), (192, 108), (3840, 2160)] {
+            let mut decoded =
+                ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, width, height);
+            decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+            decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+            for plane in 0..4 {
+                let stride = decoded.stride(plane);
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let value = match plane {
+                            0 => 256 + ((x * 191 + y * 127) % 3505) as u16,
+                            1 => ((x * 761 + y * 103) % 4096) as u16,
+                            2 => ((x * 547 + y * 331) % 4096) as u16,
+                            _ => [0, 1024, 2048, 4095][(x + y) % 4],
+                        };
+                        let start = y * stride + x * 2;
+                        decoded.data_mut(plane)[start..start + 2]
+                            .copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+
+            let mut scaler = preview_create_rgba_scaler(
+                Pixel::YUVA444P12LE,
+                Pixel::RGBA64LE,
+                width,
+                height,
+                width,
+                height,
+                Path::new("synthetic-yuva444p12le.mov"),
+            )
+            .expect("create production scaler");
+            let direct = convert_decoded_to_encoded_unorm16_rgba(
+                &decoded,
+                &mut scaler,
+                Path::new("synthetic-yuva444p12le.mov"),
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                ),
+                &mut None,
+            )
+            .expect("scale directly into the final RGBA64 allocation");
+
+            let mut reference = ffmpeg::util::frame::video::Video::empty();
+            scaler.run(&decoded, &mut reference).expect("scale into an FFmpeg frame");
+            let reference_stride = reference.stride(0);
+            for y in 0..height as usize {
+                let row = &reference.data(0)
+                    [y * reference_stride..y * reference_stride + width as usize * 8];
+                for (x, sample) in row.chunks_exact(2).enumerate() {
+                    assert_eq!(
+                        direct.rgba()[y * width as usize * 4 + x],
+                        u16::from_le_bytes([sample[0], sample[1]]),
+                        "pixel mismatch at {width}x{height} sample ({x},{y})"
+                    );
+                }
+            }
+        }
     }
 }
