@@ -844,13 +844,14 @@ impl AssetGrid {
             return EventResult::Handled;
         }
         let now = Instant::now();
-        let activate =
-            !modifiers.ctrl && !modifiers.shift && self.click_is_activation(index, position, now);
+        let activate = !modifiers.primary_down()
+            && !modifiers.shift
+            && self.click_is_activation(index, position, now);
         self.last_click = Some(AssetGridClick { index, position, time: now });
         if modifiers.shift {
             return self.extend_selection_from_input(index, ctx);
         }
-        if modifiers.ctrl {
+        if modifiers.primary_down() {
             if self.selected_indices.contains(&index) {
                 self.selected_indices.remove(&index);
                 self.selected = self.selected_indices.iter().next().copied();
@@ -1668,7 +1669,9 @@ impl Widget for AssetGrid {
                 }
                 return EventResult::Handled;
             }
-            UiEvent::KeyDown { key: KeyCode::A, modifiers } if self.focused && modifiers.ctrl => {
+            UiEvent::KeyDown { key: KeyCode::A, modifiers }
+                if self.focused && *modifiers == Modifiers::primary() =>
+            {
                 self.selected_indices = self.visible_enabled_indices().into_iter().collect();
                 self.selected = self.selected_indices.iter().next().copied();
                 self.selection_anchor = self.selected;
@@ -1913,6 +1916,10 @@ impl Widget for AssetGrid {
                     selected_count: self.selected_indices.len(),
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 }
 
@@ -2878,7 +2885,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_click_toggles_multi_selection_without_losing_primary_focus() {
+    fn primary_click_toggles_multi_selection_without_losing_primary_focus() {
         let mut grid = AssetGrid::new(
             "Assets",
             vec![item("a", "A"), item("b", "B"), item("c", "C")],
@@ -2916,7 +2923,7 @@ mod tests {
                 &UiEvent::MouseDown {
                     position: second,
                     button: MouseButton::Left,
-                    modifiers: Modifiers::ctrl(),
+                    modifiers: Modifiers::primary(),
                 },
                 &mut ctx,
             ),
@@ -2931,7 +2938,7 @@ mod tests {
                 &UiEvent::MouseDown {
                     position: first,
                     button: MouseButton::Left,
-                    modifiers: Modifiers::ctrl(),
+                    modifiers: Modifiers::primary(),
                 },
                 &mut ctx,
             ),
@@ -3025,7 +3032,7 @@ mod tests {
             &UiEvent::MouseDown {
                 position: third,
                 button: MouseButton::Left,
-                modifiers: Modifiers::ctrl(),
+                modifiers: Modifiers::primary(),
             },
             &mut ctx,
         );
@@ -3160,7 +3167,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_selects_all_visible_enabled_cards() {
+    fn primary_a_selects_all_visible_enabled_cards() {
         let mut grid = AssetGrid::new(
             "Assets",
             vec![
@@ -3187,7 +3194,7 @@ mod tests {
         let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
-                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
                 &mut ctx,
             ),
             EventResult::Handled
@@ -3780,7 +3787,7 @@ mod tests {
             &UiEvent::MouseDown {
                 position: second,
                 button: MouseButton::Left,
-                modifiers: Modifiers::ctrl(),
+                modifiers: Modifiers::primary(),
             },
             &mut ctx,
         );
@@ -3855,7 +3862,7 @@ mod tests {
             &UiEvent::MouseDown {
                 position: second,
                 button: MouseButton::Left,
-                modifiers: Modifiers::ctrl(),
+                modifiers: Modifiers::primary(),
             },
             &mut ctx,
         );
@@ -3913,7 +3920,7 @@ mod tests {
         let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         assert_eq!(
             grid.event(
-                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
                 &mut ctx,
             ),
             EventResult::Handled
@@ -4147,14 +4154,14 @@ mod tests {
             &UiEvent::MouseDown {
                 position: second,
                 button: MouseButton::Left,
-                modifiers: Modifiers::ctrl(),
+                modifiers: Modifiers::primary(),
             },
             &mut ctx,
         );
         let _ = grid.event(
             &UiEvent::MouseMove {
                 position: Point::new(second.x + 12.0, second.y),
-                modifiers: Modifiers::ctrl(),
+                modifiers: Modifiers::primary(),
             },
             &mut ctx,
         );

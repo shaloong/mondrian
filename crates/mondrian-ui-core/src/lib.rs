@@ -29,6 +29,6 @@ pub use tree::{TreeWalker, WidgetTree};
 pub use types::*;
 pub use widget::{
     collect_accessibility_nodes, AccessibilityNode, AccessibilityRole, AccessibilityState,
-    AccessibilityValue, CursorRequest, DrawCommandEncoder, EventContext, EventRequests,
-    EyedropperRequest, PaintContext, Widget,
+    AccessibilityValue, AccessibilityVirtualNode, CursorRequest, DrawCommandEncoder, EventContext,
+    EventRequests, EyedropperRequest, PaintContext, Widget,
 };

@@ -8,6 +8,8 @@
 
 const COMPOSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+use mondrian_core::types::ColorSpace;
+
 /// Validated color carrier used by one configured native surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiSurfacePresentation {
@@ -28,6 +30,10 @@ enum UiSurfacePresentationPath {
     Rec2100Pq,
     /// Linear Rec.2020 composition in 100-nit units followed by HLG OETF/OOTF.
     Rec2100Hlg,
+    /// Linear Rec.2020 composition converted to extended linear sRGB for AppKit EDR.
+    Rec2100PqEdr,
+    /// HLG Viewer code values decoded into the same AppKit EDR composition.
+    Rec2100HlgEdr,
 }
 
 /// A native surface cannot carry the requested UI/Viewer presentation contract.
@@ -40,15 +46,17 @@ pub enum UiSurfacePresentationError {
         surface_format: wgpu::TextureFormat,
         /// Configured swapchain color space.
         surface_color_space: wgpu::SurfaceColorSpace,
+        /// Logical monitor target carried by the Viewer texture.
+        output_color_space: ColorSpace,
     },
 }
 
 impl std::fmt::Display for UiSurfacePresentationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedSurfaceContract { surface_format, surface_color_space } => write!(
+            Self::UnsupportedSurfaceContract { surface_format, surface_color_space, output_color_space } => write!(
                 formatter,
-                "UI surface carrier does not support {surface_format:?} / {surface_color_space:?}"
+                "UI surface carrier does not support {surface_format:?} / {surface_color_space:?} for {output_color_space:?}"
             ),
         }
     }
@@ -61,24 +69,44 @@ impl UiSurfacePresentation {
     pub fn for_surface(
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
+        output_color_space: ColorSpace,
     ) -> Result<Self, UiSurfacePresentationError> {
-        let path = match surface_color_space {
-            wgpu::SurfaceColorSpace::Srgb if surface_format.is_srgb() => {
+        let path = match (surface_color_space, output_color_space) {
+            (wgpu::SurfaceColorSpace::Srgb, ColorSpace::Srgb | ColorSpace::Rec709)
+                if surface_format.is_srgb() =>
+            {
                 UiSurfacePresentationPath::DirectSrgb
             }
-            wgpu::SurfaceColorSpace::DisplayP3 if surface_format.is_srgb() => {
+            (wgpu::SurfaceColorSpace::DisplayP3, ColorSpace::DisplayP3)
+                if surface_format.is_srgb() =>
+            {
                 UiSurfacePresentationPath::DisplayP3
             }
-            wgpu::SurfaceColorSpace::Bt2100Pq if is_hdr_surface_format(surface_format) => {
+            (wgpu::SurfaceColorSpace::Bt2100Pq, ColorSpace::Rec2100Pq)
+                if is_hdr_surface_format(surface_format) =>
+            {
                 UiSurfacePresentationPath::Rec2100Pq
             }
-            wgpu::SurfaceColorSpace::Bt2100Hlg if is_hdr_surface_format(surface_format) => {
+            (wgpu::SurfaceColorSpace::Bt2100Hlg, ColorSpace::Rec2100Hlg)
+                if is_hdr_surface_format(surface_format) =>
+            {
                 UiSurfacePresentationPath::Rec2100Hlg
+            }
+            (wgpu::SurfaceColorSpace::ExtendedSrgbLinear, ColorSpace::Rec2100Pq)
+                if surface_format == wgpu::TextureFormat::Rgba16Float =>
+            {
+                UiSurfacePresentationPath::Rec2100PqEdr
+            }
+            (wgpu::SurfaceColorSpace::ExtendedSrgbLinear, ColorSpace::Rec2100Hlg)
+                if surface_format == wgpu::TextureFormat::Rgba16Float =>
+            {
+                UiSurfacePresentationPath::Rec2100HlgEdr
             }
             _ => {
                 return Err(UiSurfacePresentationError::UnsupportedSurfaceContract {
                     surface_format,
                     surface_color_space,
+                    output_color_space,
                 });
             }
         };
@@ -129,6 +157,8 @@ impl UiSurfacePresentation {
             UiSurfacePresentationPath::DisplayP3
                 | UiSurfacePresentationPath::Rec2100Pq
                 | UiSurfacePresentationPath::Rec2100Hlg
+                | UiSurfacePresentationPath::Rec2100PqEdr
+                | UiSurfacePresentationPath::Rec2100HlgEdr
         )
     }
 
@@ -150,7 +180,10 @@ impl UiSurfacePresentation {
                 [0.033_199_5, 0.966_783_5, 0.0],
                 [0.017_085_3, 0.072_395_7, 0.910_301_5],
             ],
-            UiSurfacePresentationPath::Rec2100Pq | UiSurfacePresentationPath::Rec2100Hlg => [
+            UiSurfacePresentationPath::Rec2100Pq
+            | UiSurfacePresentationPath::Rec2100Hlg
+            | UiSurfacePresentationPath::Rec2100PqEdr
+            | UiSurfacePresentationPath::Rec2100HlgEdr => [
                 [0.627_403_9, 0.329_283, 0.043_313_1],
                 [0.069_097_3, 0.919_540_4, 0.011_362_3],
                 [0.016_391_4, 0.088_013_3, 0.895_595_3],
@@ -163,8 +196,8 @@ impl UiSurfacePresentation {
         match self.path {
             UiSurfacePresentationPath::LinearAttachment => 3,
             UiSurfacePresentationPath::DirectSrgb | UiSurfacePresentationPath::DisplayP3 => 0,
-            UiSurfacePresentationPath::Rec2100Pq => 1,
-            UiSurfacePresentationPath::Rec2100Hlg => 2,
+            UiSurfacePresentationPath::Rec2100Pq | UiSurfacePresentationPath::Rec2100PqEdr => 1,
+            UiSurfacePresentationPath::Rec2100Hlg | UiSurfacePresentationPath::Rec2100HlgEdr => 2,
         }
     }
 
@@ -173,6 +206,9 @@ impl UiSurfacePresentation {
             UiSurfacePresentationPath::DisplayP3 => Some("fs_linear"),
             UiSurfacePresentationPath::Rec2100Pq => Some("fs_pq"),
             UiSurfacePresentationPath::Rec2100Hlg => Some("fs_hlg"),
+            UiSurfacePresentationPath::Rec2100PqEdr | UiSurfacePresentationPath::Rec2100HlgEdr => {
+                Some("fs_edr")
+            }
             UiSurfacePresentationPath::LinearAttachment | UiSurfacePresentationPath::DirectSrgb => {
                 None
             }
@@ -374,30 +410,47 @@ mod tests {
 
     #[test]
     fn production_surface_pairs_are_closed_and_typed() {
-        for (format, color_space, carrier) in [
+        for (format, color_space, output_color_space, carrier) in [
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::Srgb,
+                ColorSpace::Srgb,
                 false,
             ),
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
                 true,
             ),
             (
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
                 true,
             ),
             (
                 wgpu::TextureFormat::Rgb10a2Unorm,
                 wgpu::SurfaceColorSpace::Bt2100Hlg,
+                ColorSpace::Rec2100Hlg,
+                true,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::Rec2100Pq,
+                true,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::Rec2100Hlg,
                 true,
             ),
         ] {
             let presentation =
-                UiSurfacePresentation::for_surface(format, color_space).expect("surface pair");
+                UiSurfacePresentation::for_surface(format, color_space, output_color_space)
+                    .expect("surface pair");
             assert_eq!(presentation.requires_carrier(), carrier);
             assert_eq!(presentation.surface_format(), format);
             assert_eq!(presentation.surface_color_space(), Some(color_space));
@@ -406,21 +459,37 @@ mod tests {
 
     #[test]
     fn mismatched_surface_transfer_and_storage_fail_closed() {
-        for (format, color_space) in [
+        for (format, color_space, output_color_space) in [
             (
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
             ),
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
             ),
             (
                 wgpu::TextureFormat::Rgb10a2Unorm,
                 wgpu::SurfaceColorSpace::Srgb,
+                ColorSpace::Srgb,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::DisplayP3,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Hlg,
             ),
         ] {
-            assert!(UiSurfacePresentation::for_surface(format, color_space).is_err());
+            assert!(
+                UiSurfacePresentation::for_surface(format, color_space, output_color_space)
+                    .is_err()
+            );
         }
     }
 
@@ -430,11 +499,13 @@ mod tests {
             UiSurfacePresentation::for_surface(
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
             )
             .unwrap(),
             UiSurfacePresentation::for_surface(
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
             )
             .unwrap(),
         ] {

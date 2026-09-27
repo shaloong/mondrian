@@ -479,6 +479,10 @@ impl Widget for DockSplitter {
                 .with_value(AccessibilityValue::Number { value: self.ratio, min: 0.1, max: 0.9 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.grab_rect)
+    }
 }
 
 #[cfg(test)]

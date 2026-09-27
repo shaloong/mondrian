@@ -1144,6 +1144,10 @@ impl AppUiHost {
         TreeWalker::layout(self.active_root_mut(), bounds);
     }
 
+    pub fn has_transient_interaction(&self) -> bool {
+        widget_tree_has_transient_interaction(self.active_root())
+    }
+
     fn refresh_preview_state_without_rebuild(&mut self) {
         self.refresh_window_preview_state();
         let window_preview_state = self.window_preview_state.borrow().clone();
@@ -2368,7 +2372,8 @@ fn mode_for_app_state(state: &AppState) -> AppUiMode {
 }
 
 fn widget_tree_has_transient_interaction(widget: &dyn Widget) -> bool {
-    widget.accepts_text_input()
+    widget.has_transient_interaction()
+        || widget.accepts_text_input()
         || widget.overlay_hit_test(Point::new(-1_000_000.0, -1_000_000.0))
         || (0..widget.child_count())
             .any(|index| widget.child(index).is_some_and(widget_tree_has_transient_interaction))

@@ -1020,6 +1020,10 @@ impl Widget for ColorPicker {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 /// Configuration for [`ColorPickerTrigger`].
@@ -1377,6 +1381,10 @@ impl Widget for ColorPickerTrigger {
                     a: rgba.a,
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 }
 

@@ -29,7 +29,7 @@ impl PlatformKeymap {
     }
 
     /// Whether modifiers represent "exact primary" (primary only, no alt/shift/secondary).
-    fn is_exact_primary(&self, modifiers: Modifiers) -> bool {
+    pub(super) fn is_exact_primary(&self, modifiers: Modifiers) -> bool {
         match self {
             PlatformKeymap::Windows | PlatformKeymap::Linux => {
                 modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.meta
@@ -41,7 +41,7 @@ impl PlatformKeymap {
     }
 
     /// Word navigation modifier: Ctrl on Win/Linux, Option on macOS.
-    fn is_word_nav(&self, modifiers: Modifiers) -> bool {
+    pub(super) fn is_word_nav(&self, modifiers: Modifiers) -> bool {
         match self {
             PlatformKeymap::Windows | PlatformKeymap::Linux => {
                 modifiers.ctrl && !modifiers.alt && !modifiers.meta
@@ -51,13 +51,18 @@ impl PlatformKeymap {
     }
 
     /// Local navigation: no primary modifiers.
-    fn is_local_nav(&self, modifiers: Modifiers) -> bool {
+    pub(super) fn is_local_nav(&self, modifiers: Modifiers) -> bool {
         match self {
             PlatformKeymap::Windows | PlatformKeymap::Linux => {
                 !modifiers.ctrl && !modifiers.alt && !modifiers.meta
             }
             PlatformKeymap::MacOs => !modifiers.meta && !modifiers.ctrl && !modifiers.alt,
         }
+    }
+
+    /// Command with optional Shift selects a line or document boundary on macOS.
+    pub(super) fn is_mac_primary_nav(&self, modifiers: Modifiers) -> bool {
+        *self == PlatformKeymap::MacOs && modifiers.meta && !modifiers.ctrl && !modifiers.alt
     }
 }
 
@@ -160,7 +165,14 @@ pub(super) fn classify_key_command(
             Some(MultilineTextKeyCommand::Redo)
         }
 
-        // ── Left/Right: word nav on word_modifier, local otherwise ──
+        // ── Left/Right: Command reaches line edges on macOS ──
+        KeyCode::Left if keymap.is_mac_primary_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveLineStart { extend_selection: shift })
+        }
+        KeyCode::Right if keymap.is_mac_primary_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
+        }
+        // ── Word nav on word_modifier, local otherwise ──
         KeyCode::Left if keymap.is_word_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveLeft { word: true, extend_selection: shift })
         }
@@ -195,6 +207,13 @@ pub(super) fn classify_key_command(
             Some(MultilineTextKeyCommand::MoveLineEnd { extend_selection: shift })
         }
 
+        // ── Command+Up/Down reaches document edges on macOS ──
+        KeyCode::Up if keymap.is_mac_primary_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveDocStart { extend_selection: shift })
+        }
+        KeyCode::Down if keymap.is_mac_primary_nav(modifiers) => {
+            Some(MultilineTextKeyCommand::MoveDocEnd { extend_selection: shift })
+        }
         // ── Up/Down (local only) ──
         KeyCode::Up if keymap.is_local_nav(modifiers) => {
             Some(MultilineTextKeyCommand::MoveUp { extend_selection: shift })
@@ -369,6 +388,59 @@ mod tests {
             ),
             Some(MultilineTextKeyCommand::MoveLeft { word: true, extend_selection: false })
         );
+    }
+
+    #[test]
+    fn mac_command_arrows_reach_line_and_document_edges() {
+        let command = Modifiers { meta: true, ..Modifiers::none() };
+        let command_shift = Modifiers { meta: true, shift: true, ..Modifiers::none() };
+        for (key, expected) in [
+            (
+                KeyCode::Left,
+                MultilineTextKeyCommand::MoveLineStart { extend_selection: false },
+            ),
+            (
+                KeyCode::Right,
+                MultilineTextKeyCommand::MoveLineEnd { extend_selection: false },
+            ),
+            (
+                KeyCode::Up,
+                MultilineTextKeyCommand::MoveDocStart { extend_selection: false },
+            ),
+            (
+                KeyCode::Down,
+                MultilineTextKeyCommand::MoveDocEnd { extend_selection: false },
+            ),
+        ] {
+            assert_eq!(
+                classify_key_command(key, command, mac(), mb()),
+                Some(expected)
+            );
+            assert_eq!(classify_key_command(key, command, win(), mb()), None);
+        }
+        for (key, expected) in [
+            (
+                KeyCode::Left,
+                MultilineTextKeyCommand::MoveLineStart { extend_selection: true },
+            ),
+            (
+                KeyCode::Right,
+                MultilineTextKeyCommand::MoveLineEnd { extend_selection: true },
+            ),
+            (
+                KeyCode::Up,
+                MultilineTextKeyCommand::MoveDocStart { extend_selection: true },
+            ),
+            (
+                KeyCode::Down,
+                MultilineTextKeyCommand::MoveDocEnd { extend_selection: true },
+            ),
+        ] {
+            assert_eq!(
+                classify_key_command(key, command_shift, mac(), mb()),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

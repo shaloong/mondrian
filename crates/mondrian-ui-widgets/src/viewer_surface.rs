@@ -1364,6 +1364,10 @@ impl Widget for ViewerSurface {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 impl ViewerSurface {

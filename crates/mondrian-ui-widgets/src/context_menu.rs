@@ -659,6 +659,10 @@ impl Widget for ContextMenu {
                 })
         })
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds_rect())
+    }
 }
 
 #[cfg(test)]

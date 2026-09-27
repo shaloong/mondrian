@@ -57,3 +57,18 @@ fn fs_hlg(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let sample = composition_sample(position);
     return vec4<f32>(linear_nits_to_hlg(sample.rgb), sample.a);
 }
+
+@fragment
+fn fs_edr(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let sample = composition_sample(position);
+    // The Viewer is linear Rec.2020 in 100-nit units here. AppKit's extended
+    // linear sRGB carrier uses 1.0 for SDR white; preserve out-of-range values
+    // for display color management instead of clipping to an SDR attachment.
+    let rec2020 = sample.rgb;
+    let linear_srgb = vec3<f32>(
+        dot(vec3<f32>(1.660491, -0.587641, -0.072850), rec2020),
+        dot(vec3<f32>(-0.124550, 1.132900, -0.008349), rec2020),
+        dot(vec3<f32>(-0.018151, -0.100579, 1.118730), rec2020),
+    );
+    return vec4<f32>(linear_srgb, sample.a);
+}

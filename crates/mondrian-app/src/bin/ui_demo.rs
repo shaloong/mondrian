@@ -12,13 +12,15 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
+use mondrian_app::app_ui::accessibility::MacAccessibility;
 use mondrian_app::app_ui::icons::AppIcon;
 use mondrian_app::app_ui::rendering::{
     AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
 use mondrian_app::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
-    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_mouse_button_to_ui_button, UiWindowCoordinates, WinitUiRuntime,
 };
 use mondrian_core::Color;
 use mondrian_editor_state::state::PanelKind;
@@ -51,6 +53,19 @@ use mondrian_ui_widgets::{
     AssetGrid, AssetGridItem, NodeGraphEdge, NodeGraphNode, NodeGraphView, RasterImage,
     TimelineClip, TimelineClipRef, TimelineTrack, TimelineView, ViewerSurface,
 };
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+enum DemoUserEvent {
+    Accessibility(accesskit_winit::Event),
+}
+
+#[cfg(target_os = "macos")]
+impl From<accesskit_winit::Event> for DemoUserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(event)
+    }
+}
 
 fn demo_action(name: &str) -> Action {
     Action::Custom {
@@ -583,17 +598,22 @@ impl Widget for GalleryWidget {
         if let UiEvent::MouseDown { position, button: MouseButton::Right, .. } = event
             && self.bounds.contains(*position)
         {
+            let primary = if cfg!(target_os = "macos") {
+                "⌘"
+            } else {
+                "Ctrl+"
+            };
             let items = vec![
                 with_demo_menu_icon(
-                    MenuItem::new("剪切", Action::Cut).with_shortcut("Ctrl+X"),
+                    MenuItem::new("剪切", Action::Cut).with_shortcut(format!("{primary}X")),
                     AppIcon::Cut,
                 ),
                 with_demo_menu_icon(
-                    MenuItem::new("复制", Action::Copy).with_shortcut("Ctrl+C"),
+                    MenuItem::new("复制", Action::Copy).with_shortcut(format!("{primary}C")),
                     AppIcon::Copy,
                 ),
                 with_demo_menu_icon(
-                    MenuItem::new("粘贴", Action::Paste).with_shortcut("Ctrl+V"),
+                    MenuItem::new("粘贴", Action::Paste).with_shortcut(format!("{primary}V")),
                     AppIcon::ClipboardText,
                 ),
                 MenuItem::separator(),
@@ -1462,9 +1482,12 @@ fn route_demo_window_event(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     mondrian_platform::prepare_graphics_process()?;
-    use winit::event_loop::EventLoop;
-
-    let event_loop = EventLoop::new()?;
+    #[cfg(target_os = "macos")]
+    let event_loop = winit::event_loop::EventLoop::<DemoUserEvent>::with_user_event().build()?;
+    #[cfg(not(target_os = "macos"))]
+    let event_loop = winit::event_loop::EventLoop::new()?;
+    #[cfg(target_os = "macos")]
+    let accessibility_proxy = event_loop.create_proxy();
     let window_attrs = winit::window::Window::default_attributes()
         .with_title("Mondrian UI — 控件画廊 (Gallery)")
         .with_inner_size(winit::dpi::LogicalSize::new(1440, 860))
@@ -1498,7 +1521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut render_diagnostic_reporter = AppUiRenderDiagnosticReporter::default();
 
     let mut root = build_dock_tree();
-    let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+    let bounds = UiWindowCoordinates::from_window(&window).bounds(size);
     TreeWalker::layout(&mut root, bounds);
     let mut router = EventRouter::with_platform_and_tooltip(
         root.id(),
@@ -1511,8 +1534,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut modifiers_state = Modifiers::none();
     let mut ui_runtime = WinitUiRuntime::new();
     let mut pending_initial_redraw = true;
-    window.set_visible(true);
-    window.request_redraw();
+    #[cfg(target_os = "macos")]
+    let mut accessibility: Option<MacAccessibility> = None;
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_visible(true);
+        window.request_redraw();
+    }
 
     event_loop.run(move |event, elwt| {
         use winit::event::ElementState;
@@ -1521,7 +1549,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
 
+        #[cfg(target_os = "macos")]
+        {
+            if accessibility.is_none() {
+                accessibility = Some(MacAccessibility::new(
+                    elwt,
+                    &window,
+                    accessibility_proxy.clone(),
+                ));
+                window.set_visible(true);
+                window.request_redraw();
+            }
+            if let Event::WindowEvent { window_id, event } = &event
+                && *window_id == window.id()
+                && let Some(accessibility) = &mut accessibility
+            {
+                accessibility.process_event(&window, event);
+            }
+        }
+
         match event {
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(DemoUserEvent::Accessibility(event)) => {
+                if event.window_id == window.id()
+                    && let Some(bridge) = &mut accessibility
+                {
+                    bridge.note_user_event(&event.window_event);
+                }
+                if event.window_id == window.id()
+                    && let accesskit_winit::WindowEvent::ActionRequested(request) = event.window_event
+                    && accessibility.as_ref().is_some_and(|bridge| {
+                        bridge.route_action(
+                            &request,
+                            &window,
+                            &mut root,
+                            &mut router,
+                            &mut ui_runtime,
+                            &record_demo_action,
+                        )
+                    })
+                {
+                    window.request_redraw();
+                }
+            }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
 
             Event::WindowEvent {
@@ -1592,7 +1662,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &queue,
                     &surface,
                     &config,
-                    encoder.finish(),
+                    encoder.finish_scaled(
+                        UiWindowCoordinates::from_window(&window).pixels_per_point(),
+                    ),
                 );
                 if let Some(diagnostics) = render_diagnostic_reporter.changed_failure(frame_result)
                 {
@@ -1616,10 +1688,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.width = new_size.width;
                     config.height = new_size.height;
                     surface.configure(&device, &config);
-                    let new_bounds =
-                        Rect::new(0.0, 0.0, new_size.width as f32, new_size.height as f32);
+                    let new_bounds = UiWindowCoordinates::from_window(&window).bounds(new_size);
                     current_bounds.set(new_bounds);
                     TreeWalker::layout(&mut root, new_bounds);
+                    window.request_redraw();
+                }
+            }
+
+            Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { .. }, .. } => {
+                let size = window.inner_size();
+                if size.width > 0 && size.height > 0 {
+                    config.width = size.width;
+                    config.height = size.height;
+                    surface.configure(&device, &config);
+                    let bounds = UiWindowCoordinates::from_window(&window).bounds(size);
+                    current_bounds.set(bounds);
+                    TreeWalker::layout(&mut root, bounds);
                     window.request_redraw();
                 }
             }
@@ -1661,7 +1745,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. }, ..
             } => {
-                last_cursor = Point::new(position.x as f32, position.y as f32);
+                last_cursor = UiWindowCoordinates::from_window(&window).point(position);
 
                 ui_runtime.update_eyedropper_preview_at_window_point(&window, last_cursor);
 
@@ -1732,7 +1816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut router,
                     &mut root,
                     UiEvent::MouseWheel {
-                        delta: winit_scroll_delta_to_ui_delta(delta),
+                        delta: UiWindowCoordinates::from_window(&window).scroll_delta(delta),
                         position: last_cursor,
                         modifiers: modifiers_state,
                     },
@@ -1761,6 +1845,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ => {}
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(accessibility) = &mut accessibility {
+            accessibility.update(&window, &root, router.focused(), current_bounds.get());
         }
     })?;
 

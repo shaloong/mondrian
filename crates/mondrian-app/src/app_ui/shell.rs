@@ -432,6 +432,10 @@ impl Widget for StatusBar {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {

@@ -1823,13 +1823,14 @@ impl HeadlessViewerGpuAdapter {
     /// active semantic generation.
     pub(crate) fn retire_stale_prepared_physical_output(
         &mut self,
-        expected_output_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+        expected_prepared_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+        expected_current_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
     ) -> Option<(
         crate::app::preview_execution::PreviewOutputKey,
         HeadlessViewerGpuOutput,
     )> {
         self.physical_outputs
-            .retire_prepared_unless(expected_output_key)
+            .retire_prepared_unless(expected_prepared_key, expected_current_key)
             .map(ViewerGpuPhysicalPublication::into_key_and_artifact)
     }
 

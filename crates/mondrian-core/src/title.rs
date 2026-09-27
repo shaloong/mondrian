@@ -379,7 +379,7 @@ pub const fn default_basic_title_font_family() -> &'static str {
     if cfg!(target_os = "windows") {
         "Microsoft YaHei"
     } else if cfg!(target_os = "macos") {
-        "Helvetica"
+        "PingFang SC"
     } else if cfg!(target_os = "linux") {
         "Noto Sans CJK SC"
     } else {

@@ -635,6 +635,10 @@ impl Widget for ScrollView {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! [`UiRenderer`] 持有 wgpu 渲染管线 + glyph 纹理图集，每帧接收绘制命令。
 
 use bytemuck::Pod;
-use mondrian_core::Color;
+use mondrian_core::{Color, ColorSpace};
 use mondrian_ui_core::types::RasterImageColorSpace;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -360,10 +360,15 @@ impl UiRenderer {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
+        output_color_space: ColorSpace,
     ) -> Result<Self, UiSurfacePresentationError> {
         Ok(Self::from_presentation(
             device,
-            UiSurfacePresentation::for_surface(surface_format, surface_color_space)?,
+            UiSurfacePresentation::for_surface(
+                surface_format,
+                surface_color_space,
+                output_color_space,
+            )?,
         ))
     }
 
@@ -2058,6 +2063,59 @@ mod tests {
     }
 
     #[test]
+    fn pq_and_hlg_viewer_code_values_become_linear_appkit_edr_pixels() {
+        for (target, code) in [
+            (ColorSpace::Rec2100Pq, pq_from_linear_100_nits(2.0)),
+            (ColorSpace::Rec2100Hlg, hlg_from_linear_100_nits(2.0)),
+        ] {
+            let Some(mut harness) = OffscreenHarness::with_surface_target(
+                16,
+                16,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                target,
+            ) else {
+                return;
+            };
+            let raw = harness.render_surface_code_texture_f16([code, code, code, 1.0], 8);
+            let actual = rgba16float_pixel(&raw, 16, 8, 8);
+            for channel in &actual[..3] {
+                assert!(
+                    (channel - 2.0).abs() < 0.02,
+                    "{target:?} EDR white: {actual:?}"
+                );
+            }
+            assert!((actual[3] - 1.0).abs() < 0.001);
+        }
+
+        let Some(mut harness) = OffscreenHarness::with_surface_target(
+            16,
+            16,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+            ColorSpace::Rec2100Pq,
+        ) else {
+            return;
+        };
+        let raw = harness.render_surface_code_texture_f16(
+            [
+                pq_from_linear_100_nits(1.0),
+                pq_from_linear_100_nits(0.0),
+                pq_from_linear_100_nits(0.0),
+                1.0,
+            ],
+            8,
+        );
+        let actual = rgba16float_pixel(&raw, 16, 8, 8);
+        for (channel, expected) in actual[..3].iter().zip([1.660491, -0.124550, -0.018151]) {
+            assert!(
+                (channel - expected).abs() < 0.02,
+                "Rec.2020 red to extended linear sRGB: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
     fn offscreen_renderer_reports_missing_external_texture() {
         let Some(mut harness) = OffscreenHarness::new(32, 32) else {
             return;
@@ -2138,14 +2196,41 @@ mod tests {
             format: wgpu::TextureFormat,
             color_space: wgpu::SurfaceColorSpace,
         ) -> Option<Self> {
-            Self::with_presentation(width, height, format, Some(color_space))
+            let output_color_space = match color_space {
+                wgpu::SurfaceColorSpace::Srgb => ColorSpace::Srgb,
+                wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DisplayP3,
+                wgpu::SurfaceColorSpace::Bt2100Pq => ColorSpace::Rec2100Pq,
+                wgpu::SurfaceColorSpace::Bt2100Hlg => ColorSpace::Rec2100Hlg,
+                _ => return None,
+            };
+            Self::with_presentation(
+                width,
+                height,
+                format,
+                Some((color_space, output_color_space)),
+            )
+        }
+
+        fn with_surface_target(
+            width: u32,
+            height: u32,
+            format: wgpu::TextureFormat,
+            color_space: wgpu::SurfaceColorSpace,
+            output_color_space: ColorSpace,
+        ) -> Option<Self> {
+            Self::with_presentation(
+                width,
+                height,
+                format,
+                Some((color_space, output_color_space)),
+            )
         }
 
         fn with_presentation(
             width: u32,
             height: u32,
             format: wgpu::TextureFormat,
-            color_space: Option<wgpu::SurfaceColorSpace>,
+            presentation: Option<(wgpu::SurfaceColorSpace, ColorSpace)>,
         ) -> Option<Self> {
             let gpu_test_owner = OFFSCREEN_GPU_TEST_OWNER.lock();
             let instance = wgpu::Instance::new(
@@ -2172,9 +2257,10 @@ mod tests {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            let renderer = match color_space {
-                Some(color_space) => {
-                    UiRenderer::new_for_surface(&device, format, color_space).ok()?
+            let renderer = match presentation {
+                Some((color_space, output_color_space)) => {
+                    UiRenderer::new_for_surface(&device, format, color_space, output_color_space)
+                        .ok()?
                 }
                 None => UiRenderer::new(&device, format),
             };
@@ -2409,6 +2495,25 @@ mod tests {
             pixels[index + 2],
             pixels[index + 3],
         ]
+    }
+
+    fn rgba16float_pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 4] {
+        let index = ((y * width + x) * 8) as usize;
+        std::array::from_fn(|channel| {
+            let bits = u16::from_le_bytes(
+                pixels[index + channel * 2..index + channel * 2 + 2]
+                    .try_into()
+                    .expect("RGBA16Float pixel"),
+            );
+            let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
+            let exponent = ((bits >> 10) & 0x1f) as i32;
+            let mantissa = (bits & 0x03ff) as f32 / 1024.0;
+            match exponent {
+                0 => sign * mantissa * 2.0_f32.powi(-14),
+                31 => f32::NAN,
+                _ => sign * (1.0 + mantissa) * 2.0_f32.powi(exponent - 15),
+            }
+        })
     }
 
     fn rgb10a2_pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u16; 4] {

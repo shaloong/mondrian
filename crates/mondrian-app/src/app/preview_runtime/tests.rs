@@ -208,6 +208,21 @@ fn completed_gpu_output_survives_same_picture_pause_without_reevaluation() {
         before,
         "a completed reusable output should retain its semantic proof after releasing decoded inputs"
     );
+    match runtime.presentation(
+        state.preview_frame_execution_request(Instant::now()),
+        PreviewPresentationCarrier::ExternalGpu,
+    ) {
+        PreviewPresentationState::Ready(candidate) => assert!(matches!(
+            candidate.into_value(),
+            PreviewPresentationContent::Gpu(())
+        )),
+        other => panic!("expected retained exact GPU output, got {other:?}"),
+    }
+    assert_eq!(
+        evaluation_resolve_count(&runtime),
+        before,
+        "Window projection must reuse the exact still output after its evaluation releases decoder inputs"
+    );
 }
 
 #[test]

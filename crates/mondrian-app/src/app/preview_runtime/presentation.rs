@@ -84,15 +84,32 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ));
                 }
             };
-        self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
-            snapshot,
-            sequence,
-            frame,
-            width,
-            height,
-            display_color_space,
-            self.display_snapshot_identity.get(),
-        ));
+        let generation_binding =
+            self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
+                snapshot,
+                sequence,
+                frame,
+                width,
+                height,
+                display_color_space,
+                self.display_snapshot_identity.get(),
+            ));
+        if carrier == PreviewPresentationCarrier::ExternalGpu
+            && !transport.is_playing()
+            && matches!(generation_binding, PreviewGenerationBinding::Current(_))
+            && let Some((_, output)) = self.registered_exact_current_gpu_output_artifact()
+        {
+            // The Window already owns the final output for this exact still
+            // generation. Resolving its retired decoder inputs again would
+            // start a new media request on every UI projection.
+            self.try_release_settled_transport_media_residency();
+            return self.observe_preview_state(PreviewPresentationState::Ready(
+                PreviewPresentationCandidate::new(
+                    PreviewPresentationContent::Gpu(output),
+                    self.playback_presentation_ticket(snapshot),
+                ),
+            ));
+        }
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
         let evaluation_key = FrameEvaluationKey {

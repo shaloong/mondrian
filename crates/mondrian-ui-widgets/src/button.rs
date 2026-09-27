@@ -375,6 +375,10 @@ impl Widget for Button {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 fn paint_button_label(

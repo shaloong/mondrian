@@ -11,7 +11,9 @@ use mondrian_core::{Color, MondrianError, Result};
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityRole, AccessibilityVirtualNode, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::{RasterImage, VectorIcon};
 use std::path::PathBuf;
@@ -764,6 +766,58 @@ impl Widget for AppUiStartupScreen {
             0 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
+    }
+
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        if self.modal.is_some() {
+            return Vec::new();
+        }
+        let mut nodes = vec![
+            AccessibilityVirtualNode {
+                key: 1,
+                role: AccessibilityRole::Button,
+                name: self.text("startup-new-project"),
+                bounds: self.new_project_rect,
+                enabled: true,
+            },
+            AccessibilityVirtualNode {
+                key: 2,
+                role: AccessibilityRole::Button,
+                name: self.text("startup-open-project"),
+                bounds: self.open_project_rect,
+                enabled: true,
+            },
+            AccessibilityVirtualNode {
+                key: 3,
+                role: AccessibilityRole::Button,
+                name: self.text("about-close"),
+                bounds: self.close_rect,
+                enabled: true,
+            },
+        ];
+        nodes.extend(
+            self.recovery_rects.iter().enumerate().filter_map(|(index, bounds)| {
+                self.recovery_projects.get(index).map(|project| AccessibilityVirtualNode {
+                    key: 100 + index as u64,
+                    role: AccessibilityRole::Button,
+                    name: project.title.clone(),
+                    bounds: *bounds,
+                    enabled: true,
+                })
+            }),
+        );
+        nodes.extend(
+            self.recent_rects.iter().enumerate().filter_map(|(index, bounds)| {
+                self.recent_projects.get(index).map(|project| AccessibilityVirtualNode {
+                    key: 200 + index as u64,
+                    role: AccessibilityRole::Button,
+                    name: project.title.clone(),
+                    bounds: *bounds,
+                    enabled: true,
+                })
+            }),
+        );
+        nodes
     }
 }
 

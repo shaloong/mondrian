@@ -26,6 +26,58 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 
+/// One Window's only UI coordinate conversion: winit/surface pixels versus
+/// widget layout points. Query the Window again after a monitor-scale change.
+#[derive(Debug, Clone, Copy)]
+pub struct UiWindowCoordinates {
+    pixels_per_point: f32,
+}
+
+impl UiWindowCoordinates {
+    pub fn from_window(window: &winit::window::Window) -> Self {
+        Self::new(window.scale_factor())
+    }
+
+    pub fn new(scale_factor: f64) -> Self {
+        assert!(scale_factor.is_finite() && scale_factor > 0.0);
+        Self { pixels_per_point: scale_factor as f32 }
+    }
+
+    pub const fn pixels_per_point(self) -> f32 {
+        self.pixels_per_point
+    }
+
+    pub fn bounds(self, physical: winit::dpi::PhysicalSize<u32>) -> Rect {
+        Rect::new(
+            0.0,
+            0.0,
+            physical.width as f32 / self.pixels_per_point,
+            physical.height as f32 / self.pixels_per_point,
+        )
+    }
+
+    pub fn point(self, physical: winit::dpi::PhysicalPosition<f64>) -> Point {
+        Point::new(
+            (physical.x / f64::from(self.pixels_per_point)) as f32,
+            (physical.y / f64::from(self.pixels_per_point)) as f32,
+        )
+    }
+
+    pub fn scroll_delta(self, delta: MouseScrollDelta) -> f32 {
+        match delta {
+            MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
+            MouseScrollDelta::PixelDelta(position) => -(position.y as f32) / self.pixels_per_point,
+        }
+    }
+
+    fn physical_point(self, point: Point) -> winit::dpi::PhysicalPosition<f64> {
+        winit::dpi::PhysicalPosition::new(
+            f64::from(point.x * self.pixels_per_point),
+            f64::from(point.y * self.pixels_per_point),
+        )
+    }
+}
+
 /// Winit-backed runtime state shared by custom UI app shells.
 pub struct WinitUiRuntime {
     eyedropper: DesktopEyedropper,
@@ -92,6 +144,24 @@ impl WinitUiRuntime {
         self.apply_router_requests(window, router, tooltip_was_visible, updates_cursor);
         log_route_diagnostics(router.take_diagnostics());
         result
+    }
+
+    /// Apply a native accessibility focus request through the existing router.
+    #[cfg(target_os = "macos")]
+    pub fn focus_accessibility_widget(
+        &mut self,
+        window: &winit::window::Window,
+        router: &mut EventRouter,
+        root: &mut dyn Widget,
+        widget_id: mondrian_ui_core::types::WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) -> bool {
+        let mut tree = WidgetTreeView::new(root);
+        let focused = router.focus_widget(&mut tree, widget_id, dispatch);
+        if focused {
+            self.apply_router_requests(window, router, false, false);
+        }
+        focused
     }
 
     /// Route one winit keyboard event through the custom UI event model.
@@ -513,18 +583,6 @@ pub fn winit_key_to_keycode(key: &Key) -> Option<KeyCode> {
     }
 }
 
-/// Convert a winit scroll delta into Mondrian's UI scroll-space delta.
-///
-/// Positive returned values move scroll offsets downward/rightward. Winit
-/// reports positive line or pixel deltas for wheel-up gestures on common PC
-/// input devices, so the sign is inverted once at the shell boundary.
-pub fn winit_scroll_delta_to_ui_delta(delta: MouseScrollDelta) -> f32 {
-    match delta {
-        MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
-        MouseScrollDelta::PixelDelta(position) => -(position.y as f32),
-    }
-}
-
 /// Convert a winit mouse button into Mondrian's UI mouse button model.
 pub fn winit_mouse_button_to_ui_button(button: WinitMouseButton) -> MouseButton {
     match button {
@@ -694,33 +752,58 @@ fn apply_ime_request(window: &winit::window::Window, request: ImeRequest) {
     if request.enabled
         && let Some(area) = request.cursor_area
     {
+        let coordinates = UiWindowCoordinates::from_window(window);
+        let scale = coordinates.pixels_per_point();
         window.set_ime_cursor_area(
-            winit::dpi::PhysicalPosition::new(area.x as f64, area.y as f64),
-            winit::dpi::PhysicalSize::new(area.width.max(1.0) as u32, area.height.max(1.0) as u32),
+            coordinates.physical_point(Point::new(area.x, area.y)),
+            winit::dpi::PhysicalSize::new(
+                (area.width * scale).max(1.0).ceil() as u32,
+                (area.height * scale).max(1.0).ceil() as u32,
+            ),
         );
     }
 }
 
 fn window_to_desktop_point(window: &winit::window::Window, point: Point) -> Option<DesktopPoint> {
     let origin = window.inner_position().ok()?;
+    let physical = UiWindowCoordinates::from_window(window).physical_point(point);
     Some(DesktopPoint::new(
-        origin.x + point.x.round() as i32,
-        origin.y + point.y.round() as i32,
+        origin.x + physical.x.round() as i32,
+        origin.y + physical.y.round() as i32,
     ))
 }
 
 fn desktop_to_window_point(window: &winit::window::Window, point: DesktopPoint) -> Option<Point> {
     let origin = window.inner_position().ok()?;
-    Some(Point::new(
-        (point.x - origin.x) as f32,
-        (point.y - origin.y) as f32,
-    ))
+    Some(
+        UiWindowCoordinates::from_window(window).point(winit::dpi::PhysicalPosition::new(
+            f64::from(point.x - origin.x),
+            f64::from(point.y - origin.y),
+        )),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mondrian_ui_core::widget::DrawCommandEncoder;
+
+    #[test]
+    fn retina_window_coordinates_keep_layout_and_hit_testing_in_points() {
+        let coordinates = UiWindowCoordinates::new(2.0);
+        assert_eq!(
+            coordinates.bounds(winit::dpi::PhysicalSize::new(2880, 1720)),
+            Rect::new(0.0, 0.0, 1440.0, 860.0)
+        );
+        assert_eq!(
+            coordinates.point(winit::dpi::PhysicalPosition::new(320.0, 160.0)),
+            Point::new(160.0, 80.0)
+        );
+        assert_eq!(
+            coordinates.physical_point(Point::new(160.0, 80.0)),
+            winit::dpi::PhysicalPosition::new(320.0, 160.0)
+        );
+    }
 
     #[derive(Default)]
     struct RecordingEncoder {
@@ -981,19 +1064,26 @@ mod tests {
 
     #[test]
     fn scroll_delta_conversion_uses_pc_scroll_direction() {
+        let coordinates = UiWindowCoordinates::new(1.0);
         assert_eq!(
-            winit_scroll_delta_to_ui_delta(MouseScrollDelta::LineDelta(0.0, 1.0)),
+            coordinates.scroll_delta(MouseScrollDelta::LineDelta(0.0, 1.0)),
             -20.0
         );
         assert_eq!(
-            winit_scroll_delta_to_ui_delta(MouseScrollDelta::LineDelta(0.0, -2.0)),
+            coordinates.scroll_delta(MouseScrollDelta::LineDelta(0.0, -2.0)),
             40.0
         );
         assert_eq!(
-            winit_scroll_delta_to_ui_delta(MouseScrollDelta::PixelDelta(
+            coordinates.scroll_delta(MouseScrollDelta::PixelDelta(
                 winit::dpi::PhysicalPosition::new(0.0, 12.5)
             )),
             -12.5
+        );
+        assert_eq!(
+            UiWindowCoordinates::new(2.0).scroll_delta(MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(0.0, 12.5)
+            )),
+            -6.25
         );
     }
 

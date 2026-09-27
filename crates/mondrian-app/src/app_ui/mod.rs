@@ -5,6 +5,8 @@
 //! module instead of accumulating panel or runtime wiring.
 
 pub mod about_dialog;
+#[cfg(target_os = "macos")]
+pub mod accessibility;
 pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;

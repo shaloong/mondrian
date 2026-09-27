@@ -4,6 +4,7 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
+use mondrian_core::ColorSpace;
 use mondrian_ui_renderer::{
     DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
     GlyphUpload, UiRenderer, UiSurfacePresentationError,
@@ -343,9 +344,15 @@ impl AppUiFrameRenderer {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
+        output_color_space: ColorSpace,
     ) -> Result<Self, UiSurfacePresentationError> {
         Ok(Self {
-            ui_renderer: UiRenderer::new_for_surface(device, surface_format, surface_color_space)?,
+            ui_renderer: UiRenderer::new_for_surface(
+                device,
+                surface_format,
+                surface_color_space,
+                output_color_space,
+            )?,
             text_renderer: TextRenderer::new(),
         })
     }

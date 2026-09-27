@@ -49,7 +49,7 @@ impl CheckboxVisualTokens {
         Self {
             box_size: spacing.icon_size + spacing.border_emphasis,
             box_left_inset: spacing.border_emphasis,
-            label_gap: spacing.border_emphasis,
+            label_gap: spacing.sm,
             control_height: theme.typography.body.line_height + spacing.border_emphasis,
             label_font_size: theme.typography.body.font_size,
             border_width: spacing.border_standard,
@@ -321,6 +321,10 @@ impl Widget for Checkbox {
                     ..AccessibilityState::default()
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 }
 
@@ -649,7 +653,7 @@ mod tests {
         cb.paint(&mut ctx);
 
         assert_eq!(encoder.texts, vec!["A very long checkbox label"]);
-        assert_eq!(encoder.clips, vec![Rect::new(30.0, 20.0, 60.0, 22.0)]);
+        assert_eq!(encoder.clips, vec![Rect::new(34.0, 20.0, 56.0, 22.0)]);
         assert_eq!(encoder.clip_pops, 1);
     }
 
@@ -665,7 +669,7 @@ mod tests {
 
         let visual = CheckboxVisualTokens::from_theme(&theme);
         assert_eq!(visual.box_size, 21.0);
-        assert_eq!(visual.label_x(), 27.0);
+        assert_eq!(visual.label_x(), 30.0);
 
         let mut cb = cb;
         cb.layout(Rect::new(10.0, 20.0, 120.0, 30.0));
@@ -688,7 +692,7 @@ mod tests {
             encoder.rect_radii[0],
             theme.spacing.radius_sm + visual.border_width
         );
-        assert_eq!(encoder.clips, vec![Rect::new(37.0, 20.0, 93.0, 30.0)]);
+        assert_eq!(encoder.clips, vec![Rect::new(40.0, 20.0, 90.0, 30.0)]);
         assert_eq!(encoder.text_font_sizes, vec![15.0]);
     }
 

@@ -2302,7 +2302,7 @@ fn assets_panel_multi_selection_context_menu_dispatches_delete_selection() {
         &UiEvent::MouseDown {
             position: second,
             button: MouseButton::Left,
-            modifiers: Modifiers::ctrl(),
+            modifiers: Modifiers::primary(),
         },
         &mut ctx,
     );
@@ -2368,7 +2368,7 @@ fn assets_panel_delete_key_dispatches_delete_selection() {
     let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
     assert_eq!(
         grid.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -5605,7 +5605,7 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -5868,7 +5868,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -5967,7 +5967,7 @@ fn numeric_slider_input_control_text_input_dispatches_typed_transform_action() {
     );
     assert_eq!(
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
             &mut ctx,
         ),
         EventResult::Handled

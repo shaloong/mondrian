@@ -16,6 +16,18 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 
 use crate::VectorIcon;
 
+pub(crate) fn primary_text_modifiers() -> Modifiers {
+    Modifiers::primary()
+}
+
+pub(crate) fn word_text_modifiers() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers { alt: true, ..Modifiers::none() }
+    } else {
+        Modifiers::ctrl()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TextCommand {
     pub text: String,

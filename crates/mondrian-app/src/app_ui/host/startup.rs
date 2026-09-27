@@ -425,7 +425,7 @@ impl AppUiHostStartupOwner {
             self.preferences.as_ref().expect("preferences installed").clone();
         {
             let app_state = self.app_state.as_mut().expect("App installed");
-            let theme = mondrian_ui_theme::current_theme().clone();
+            let theme = (*mondrian_ui_theme::current_theme()).clone();
             self.original_configuration = Some(OriginalHostConfiguration {
                 audio_output: app_state.audio_output_device_selection(),
                 display: app_state.viewer_display_management().clone(),

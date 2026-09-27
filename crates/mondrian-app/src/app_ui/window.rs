@@ -80,7 +80,7 @@ use crate::app_ui::rendering::{
 };
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
-    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_mouse_button_to_ui_button, UiWindowCoordinates, WinitUiRuntime,
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
@@ -618,15 +618,26 @@ fn exact_presented_surface_picture(
     if diagnostics.external_texture_failures != 0
         || metrics.external_texture_batches == 0
         || metrics.external_texture_failures != 0
-        || session.viewer_gpu_presentation.published_output().is_none()
-        || !matches!(
-            session.viewer_gpu_output_telemetry.health_summary().status,
-            AppUiViewerGpuOutputHealthStatus::Ready | AppUiViewerGpuOutputHealthStatus::Degraded
+        || session.viewer_gpu_device_progress.generation_terminal().is_some()
+    {
+        return None;
+    }
+    // The physical publication retains the frame contract that created its
+    // move-only GPU lease. A later Current prepare can clear per-invocation
+    // telemetry before the Window becomes visible and actually presents it.
+    let published = session.viewer_gpu_presentation.published_output()?;
+    if host.exact_current_viewer_gpu_output_key().as_ref() != Some(published.output_key())
+        || !host.has_external_viewer_frame_artifact(
+            published.output_key(),
+            published.artifact().texture_key().as_str(),
         )
     {
         return None;
     }
-    let context = session.viewer_gpu_output_telemetry.last_frame_context.as_ref()?;
+    let context = published.artifact().frame_context();
+    if context.external_texture_key != published.artifact().texture_key().as_str() {
+        return None;
+    }
     let state = host.app_state();
     let sequence = state.active_sequence()?;
     if context.sequence_id != sequence.id.to_string()
@@ -706,10 +717,19 @@ enum AppUiWindowRole {
     Workspace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum AppUiUserEvent {
     PreviewWorkAvailable,
     ViewerGpuCompletionAvailable,
+    #[cfg(target_os = "macos")]
+    Accessibility(accesskit_winit::Event),
+}
+
+#[cfg(target_os = "macos")]
+impl From<accesskit_winit::Event> for AppUiUserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(event)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1507,11 +1527,16 @@ impl AppUiDisplayIssueSummary {
             desired_surface_encoding: target_display_surface_color_space(
                 blocker.output_color_space,
             )
-            .map(app_ui_surface_color_space_diagnostic_to_encoding),
+            .map(|_| {
+                app_ui_surface_encoding_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
+                    blocker.output_color_space,
+                ))
+            })
+            .map(app_ui_surface_encoding_diagnostic),
             desired_surface_hdr_mode: target_display_surface_color_space(
                 blocker.output_color_space,
             )
-            .map(app_ui_surface_hdr_mode_from_diagnostic),
+            .map(|_| app_ui_surface_hdr_mode_for_output(blocker.output_color_space)),
             payload_blocker: None,
             supported_surface_color_space_count: Some(blocker.supported_surface_color_space_count),
             target_surface_color_space_supported: Some(
@@ -1785,6 +1810,10 @@ struct AppUiWindowSession {
     viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
     surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
+    #[cfg(target_os = "macos")]
+    accessibility: Option<super::accessibility::MacAccessibility>,
+    #[cfg(target_os = "macos")]
+    accessibility_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
     window: Arc<winit::window::Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -1825,6 +1854,23 @@ struct AppUiWindowSession {
     playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling,
 }
 
+#[cfg(target_os = "macos")]
+fn attach_mac_accessibility(
+    session: &mut AppUiWindowSession,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+) {
+    let proxy = session
+        .accessibility_proxy
+        .as_ref()
+        .expect("active macOS window has an accessibility event proxy")
+        .clone();
+    session.accessibility = Some(super::accessibility::MacAccessibility::new(
+        event_loop,
+        &session.window,
+        proxy,
+    ));
+}
+
 fn synchronize_playback_thread_scheduling(host: &AppUiHost, session: &mut AppUiWindowSession) {
     if let Err(error) = session.playback_thread_scheduling.synchronize(host.is_playback_active()) {
         tracing::warn!(%error, "native playback thread scheduling unavailable");
@@ -1863,6 +1909,8 @@ fn poll_window_background_tasks(
 /// protects the physical decoder object but cannot replace those leases.
 struct WindowViewerGpuSubmissionOwner {
     frame: Box<PreviewGpuFrame>,
+    #[cfg(feature = "validation")]
+    frame_context: AppUiViewerGpuOutputFrameContext,
     terminal: Option<PreviewGpuHeterogeneousExecution>,
     texture_key: ExternalTextureKey,
     texture_registered: bool,
@@ -1882,15 +1930,32 @@ enum WindowViewerGpuDeferredCleanup {
     Reset,
 }
 
+struct WindowViewerGpuArtifact {
+    texture_key: ExternalTextureKey,
+    #[cfg(feature = "validation")]
+    frame_context: AppUiViewerGpuOutputFrameContext,
+}
+
+impl WindowViewerGpuArtifact {
+    fn texture_key(&self) -> &ExternalTextureKey {
+        &self.texture_key
+    }
+
+    #[cfg(feature = "validation")]
+    fn frame_context(&self) -> &AppUiViewerGpuOutputFrameContext {
+        &self.frame_context
+    }
+}
+
 type WindowViewerGpuPublishedOutput = ViewerGpuPhysicalPublication<
     crate::app::preview_execution::PreviewOutputKey,
-    ExternalTextureKey,
+    WindowViewerGpuArtifact,
     ViewerGpuPresentationOutputLease,
 >;
 
 type WindowViewerGpuPublicationSlots = ViewerGpuPublicationSlots<
     crate::app::preview_execution::PreviewOutputKey,
-    ExternalTextureKey,
+    WindowViewerGpuArtifact,
     ViewerGpuPresentationOutputLease,
 >;
 
@@ -2515,6 +2580,11 @@ fn reopen_window_surface_and_device(
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
     )?;
+    #[cfg(target_os = "macos")]
+    {
+        session.accessibility_proxy = retired_session.accessibility_proxy.take();
+        attach_mac_accessibility(session, elwt);
+    }
     session.window.set_visible(true);
     session.window.request_redraw();
     *device = next_device;
@@ -3827,8 +3897,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
             session.config.width,
             session.config.height
         );
-        session.window.set_visible(true);
-        session.window.request_redraw();
+        #[cfg(not(target_os = "macos"))]
+        {
+            session.window.set_visible(true);
+            session.window.request_redraw();
+        }
     })) {
         let primary = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
             payload,
@@ -3891,7 +3964,56 @@ fn run_app_ui_with_initial_state_on_event_loop(
         elwt.set_control_flow(ControlFlow::Wait);
         let dispatch_action = |action| pending_actions.push(action);
 
+        #[cfg(target_os = "macos")]
+        {
+            if session.accessibility.is_none() {
+                session.accessibility_proxy = Some(preview_work_event_proxy.clone());
+                attach_mac_accessibility(&mut session, elwt);
+                session.window.set_visible(true);
+                session.window.request_redraw();
+            }
+            if let Event::WindowEvent { window_id, event } = &event
+                && *window_id == session.window.id()
+                && let Some(accessibility) = &mut session.accessibility
+            {
+                accessibility.process_event(&session.window, event);
+            }
+        }
+
         match event {
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(AppUiUserEvent::Accessibility(event)) => {
+                if event.window_id == session.window.id()
+                    && let Some(bridge) = &mut session.accessibility
+                {
+                    bridge.note_user_event(&event.window_event);
+                }
+                if event.window_id == session.window.id()
+                    && let accesskit_winit::WindowEvent::ActionRequested(request) = event.window_event
+                    && session.accessibility.as_ref().is_some_and(|bridge| {
+                        bridge.route_action(
+                            &request,
+                            &session.window,
+                            host.active_root_mut(),
+                            &mut session.router,
+                            &mut session.ui_runtime,
+                            &dispatch_action,
+                        )
+                    })
+                {
+                    drain_actions_and_sync_window_session(
+                        &mut host,
+                        &pending_actions,
+                        &platform,
+                        elwt,
+                        &instance,
+                        &adapter,
+                        &device,
+                        &mut session,
+                    );
+                    session.window.request_redraw();
+                }
+            }
             Event::UserEvent(AppUiUserEvent::PreviewWorkAvailable) => {
                 let drain_target_revision = preview_work_watch.revision();
                 let background_tasks =
@@ -3967,6 +4089,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             host.refresh_if_dirty(session.current_bounds.get());
                         }
                         session.window.request_redraw();
+                    }
+
+                    WindowEvent::Occluded(occluded) => {
+                        tracing::debug!(occluded, "app UI window occlusion changed");
+                        if !occluded {
+                            session.window.request_redraw();
+                        }
                     }
 
                     WindowEvent::Focused(false) => {
@@ -4096,7 +4225,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &queue,
                             &session.surface,
                             &session.config,
-                            encoder.finish(),
+                            encoder.finish_scaled(
+                                UiWindowCoordinates::from_window(&session.window)
+                                    .pixels_per_point(),
+                            ),
                         );
                         if let Some(diagnostics) =
                             session.render_diagnostic_reporter.changed_failure(frame_result)
@@ -4297,7 +4429,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     }
 
                     WindowEvent::CursorMoved { position, .. } => {
-                        session.last_cursor = Point::new(position.x as f32, position.y as f32);
+                        session.last_cursor =
+                            UiWindowCoordinates::from_window(&session.window).point(position);
                         session
                             .ui_runtime
                             .update_eyedropper_preview_at_window_point(
@@ -4314,8 +4447,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             },
                             &dispatch_action,
                         );
-                        // Skip tree rebuild while pointer capture is active (drag in progress)
-                        if session.router.captured().is_none() {
+                        // Timeline keeps its widget instance during capture, so
+                        // dispatch its live seek actions while the pointer moves.
+                        if session.router.captured().is_none() || host.has_transient_interaction() {
                             drain_actions_and_sync_window_session(
                                 &mut host,
                                 &pending_actions,
@@ -4389,7 +4523,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &mut session.router,
                             host.active_root_mut(),
                             UiEvent::MouseWheel {
-                                delta: winit_scroll_delta_to_ui_delta(delta),
+                                delta: UiWindowCoordinates::from_window(&session.window)
+                                    .scroll_delta(delta),
                                 position: session.last_cursor,
                                 modifiers: session.modifiers_state,
                             },
@@ -4572,6 +4707,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
                 _ => {}
             }
+            #[cfg(target_os = "macos")]
+            if let Some(accessibility) = &mut session.accessibility {
+                accessibility.update(
+                    &session.window,
+                    host.active_root(),
+                    session.router.focused(),
+                    session.current_bounds.get(),
+                );
+            }
         })
     });
     let event_loop_result =
@@ -4750,6 +4894,7 @@ struct AppUiSurfaceColorContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiSurfaceEncoding {
     Srgb,
+    ExtendedLinear,
     Pq,
     Hlg,
 }
@@ -4800,10 +4945,8 @@ impl AppUiDisplayOutputContract {
         &self,
         output_color_space: ColorSpace,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if app_ui_surface_color_space_matches_display_output(
-            self.surface_color.color_space,
-            output_color_space,
-        ) {
+        if app_ui_surface_color_space_matches_display_output(self.surface_color, output_color_space)
+        {
             return self.display_presentation_readiness_current(output_color_space);
         }
 
@@ -4909,9 +5052,14 @@ impl AppUiDisplayOutputContract {
             desired_surface_color_space: desired_color_space
                 .map(app_ui_surface_color_space_diagnostic),
             desired_surface_encoding: desired_color_space
-                .map(app_ui_surface_encoding)
+                .map(|_| {
+                    app_ui_surface_encoding_for_intent(
+                        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+                    )
+                })
                 .map(app_ui_surface_encoding_diagnostic),
-            desired_surface_hdr_mode: desired_color_space.map(app_ui_surface_hdr_mode),
+            desired_surface_hdr_mode: desired_color_space
+                .map(|_| app_ui_surface_hdr_mode_for_output(output_color_space)),
             payload_blocker: None,
         }
     }
@@ -4946,10 +5094,8 @@ impl AppUiDisplayOutputContract {
             });
         }
 
-        if app_ui_surface_color_space_matches_display_output(
-            self.surface_color.color_space,
-            output_color_space,
-        ) {
+        if app_ui_surface_color_space_matches_display_output(self.surface_color, output_color_space)
+        {
             return None;
         }
 
@@ -5001,6 +5147,8 @@ fn display_output_contract_requires_renderer_rebuild(
 ) -> bool {
     previous.surface_color.format != next.surface_color.format
         || previous.surface_color.color_space != next.surface_color.color_space
+        || previous.surface_color.encoding != next.surface_color.encoding
+        || previous.surface_color.hdr_mode != next.surface_color.hdr_mode
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5053,6 +5201,7 @@ enum AppUiSurfaceFormatDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiSurfaceEncodingDiagnostic {
     Srgb,
+    ExtendedLinear,
     Pq,
     Hlg,
 }
@@ -5274,6 +5423,7 @@ fn app_ui_surface_encoding_diagnostic(
 ) -> AppUiSurfaceEncodingDiagnostic {
     match encoding {
         AppUiSurfaceEncoding::Srgb => AppUiSurfaceEncodingDiagnostic::Srgb,
+        AppUiSurfaceEncoding::ExtendedLinear => AppUiSurfaceEncodingDiagnostic::ExtendedLinear,
         AppUiSurfaceEncoding::Pq => AppUiSurfaceEncodingDiagnostic::Pq,
         AppUiSurfaceEncoding::Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
     }
@@ -5311,12 +5461,13 @@ fn app_ui_display_tone_map_headroom_ppm(display_hdr_info: &wgpu::DisplayHdrInfo)
 }
 
 fn app_ui_surface_color_space_matches_display_output(
-    surface_color_space: wgpu::SurfaceColorSpace,
+    surface_color: AppUiSurfaceColorContract,
     output_color_space: ColorSpace,
 ) -> bool {
     app_ui_surface_color_space_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
         output_color_space,
-    )) == Some(surface_color_space)
+    )) == Some(surface_color.color_space)
+        && surface_color.hdr_mode == app_ui_surface_hdr_mode_for_output(output_color_space)
 }
 
 fn target_display_surface_color_space(
@@ -5328,33 +5479,19 @@ fn target_display_surface_color_space(
     .map(app_ui_surface_color_space_diagnostic)
 }
 
-fn app_ui_surface_hdr_mode_from_diagnostic(
-    color_space: AppUiSurfaceColorSpaceDiagnostic,
-) -> AppUiSurfaceHdrMode {
-    match color_space {
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq => AppUiSurfaceHdrMode::HdrPq,
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
-        AppUiSurfaceColorSpaceDiagnostic::Srgb
-        | AppUiSurfaceColorSpaceDiagnostic::DisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceHdrMode::SdrOnly,
+fn app_ui_surface_encoding_for_output(output: ColorSpace) -> AppUiSurfaceEncoding {
+    match output {
+        ColorSpace::Rec2100Pq => AppUiSurfaceEncoding::Pq,
+        ColorSpace::Rec2100Hlg => AppUiSurfaceEncoding::Hlg,
+        _ => AppUiSurfaceEncoding::Srgb,
     }
 }
 
-fn app_ui_surface_color_space_diagnostic_to_encoding(
-    color_space: AppUiSurfaceColorSpaceDiagnostic,
-) -> AppUiSurfaceEncodingDiagnostic {
-    match color_space {
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq => AppUiSurfaceEncodingDiagnostic::Pq,
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
-        AppUiSurfaceColorSpaceDiagnostic::Srgb
-        | AppUiSurfaceColorSpaceDiagnostic::DisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceEncodingDiagnostic::Srgb,
+fn app_ui_surface_hdr_mode_for_output(output: ColorSpace) -> AppUiSurfaceHdrMode {
+    match output {
+        ColorSpace::Rec2100Pq => AppUiSurfaceHdrMode::HdrPq,
+        ColorSpace::Rec2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
+        _ => AppUiSurfaceHdrMode::SdrOnly,
     }
 }
 
@@ -5406,8 +5543,8 @@ fn choose_app_ui_surface_color_contract(
         return Ok(AppUiSurfaceColorContract {
             format,
             color_space: required_color_space,
-            encoding: app_ui_surface_encoding(required_color_space),
-            hdr_mode: app_ui_surface_hdr_mode(required_color_space),
+            encoding: app_ui_surface_encoding_for_intent(intent),
+            hdr_mode: app_ui_surface_hdr_mode_for_intent(intent),
         });
     }
 
@@ -5429,6 +5566,9 @@ fn app_ui_surface_color_space_for_intent(
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DisplayP3) => {
             Some(wgpu::SurfaceColorSpace::DisplayP3)
         }
+        AppUiSurfacePresentationIntent::DisplayOutput(
+            ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg,
+        ) if cfg!(target_os = "macos") => Some(wgpu::SurfaceColorSpace::ExtendedSrgbLinear),
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Pq) => {
             Some(wgpu::SurfaceColorSpace::Bt2100Pq)
         }
@@ -5526,19 +5666,41 @@ fn app_ui_surface_format_matches_color_space_encoding(
     }
 }
 
-fn app_ui_surface_encoding(color_space: wgpu::SurfaceColorSpace) -> AppUiSurfaceEncoding {
-    match color_space {
-        wgpu::SurfaceColorSpace::Bt2100Pq => AppUiSurfaceEncoding::Pq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => AppUiSurfaceEncoding::Hlg,
-        _ => AppUiSurfaceEncoding::Srgb,
+fn app_ui_surface_encoding_for_intent(
+    intent: AppUiSurfacePresentationIntent,
+) -> AppUiSurfaceEncoding {
+    match intent {
+        AppUiSurfacePresentationIntent::SdrSrgb => AppUiSurfaceEncoding::Srgb,
+        AppUiSurfacePresentationIntent::DisplayOutput(
+            ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg,
+        ) if cfg!(target_os = "macos") => AppUiSurfaceEncoding::ExtendedLinear,
+        AppUiSurfacePresentationIntent::DisplayOutput(output) => {
+            app_ui_surface_encoding_for_output(output)
+        }
     }
 }
 
-fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurfaceHdrMode {
-    match color_space {
-        wgpu::SurfaceColorSpace::Bt2100Pq => AppUiSurfaceHdrMode::HdrPq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
-        _ => AppUiSurfaceHdrMode::SdrOnly,
+fn app_ui_surface_hdr_mode_for_intent(
+    intent: AppUiSurfacePresentationIntent,
+) -> AppUiSurfaceHdrMode {
+    match intent {
+        AppUiSurfacePresentationIntent::SdrSrgb => AppUiSurfaceHdrMode::SdrOnly,
+        AppUiSurfacePresentationIntent::DisplayOutput(output) => {
+            app_ui_surface_hdr_mode_for_output(output)
+        }
+    }
+}
+
+fn app_ui_surface_output_color_space(surface: AppUiSurfaceColorContract) -> ColorSpace {
+    match surface.hdr_mode {
+        AppUiSurfaceHdrMode::HdrPq => ColorSpace::Rec2100Pq,
+        AppUiSurfaceHdrMode::HdrHlg => ColorSpace::Rec2100Hlg,
+        AppUiSurfaceHdrMode::SdrOnly
+            if surface.color_space == wgpu::SurfaceColorSpace::DisplayP3 =>
+        {
+            ColorSpace::DisplayP3
+        }
+        AppUiSurfaceHdrMode::SdrOnly => ColorSpace::Srgb,
     }
 }
 
@@ -6036,10 +6198,12 @@ fn retire_window_published_gpu_output(session: &mut AppUiWindowSession, host: &A
     let mut retired = false;
     for published in outputs.into_iter().flatten() {
         retired = true;
-        session.frame_renderer.unregister_external_texture(published.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(published.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             published.output_key(),
-            published.artifact().as_str(),
+            published.artifact().texture_key().as_str(),
         );
         drop(published);
     }
@@ -6056,10 +6220,12 @@ fn begin_window_viewer_gpu_quarantine(
         .viewer_gpu_presentation
         .take_published_output_for_submission(quarantine.submission_id)
     {
-        session.frame_renderer.unregister_external_texture(published.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(published.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             published.output_key(),
-            published.artifact().as_str(),
+            published.artifact().texture_key().as_str(),
         );
         drop(published);
     }
@@ -6134,12 +6300,18 @@ fn publish_completed_window_viewer_gpu_owner(
             let previous = session.viewer_gpu_presentation.publications.publish_current(
                 submission_id,
                 owner.frame.output_key.clone(),
-                owner.texture_key.clone(),
+                WindowViewerGpuArtifact {
+                    texture_key: owner.texture_key.clone(),
+                    #[cfg(feature = "validation")]
+                    frame_context: owner.frame_context.clone(),
+                },
                 output_lease,
             );
             owner.texture_registered = false;
             if let Some(previous) = previous {
-                session.frame_renderer.unregister_external_texture(previous.artifact());
+                session
+                    .frame_renderer
+                    .unregister_external_texture(previous.artifact().texture_key());
                 drop(previous);
             }
             session
@@ -6392,10 +6564,12 @@ fn complete_window_viewer_gpu_submission(
             .viewer_gpu_presentation
             .take_published_output_for_submission(submission_id)
         {
-            session.frame_renderer.unregister_external_texture(published.artifact());
+            session
+                .frame_renderer
+                .unregister_external_texture(published.artifact().texture_key());
             let _ = host.clear_external_viewer_frame_for_artifact(
                 published.output_key(),
-                published.artifact().as_str(),
+                published.artifact().texture_key().as_str(),
             );
             drop(published);
         }
@@ -6506,13 +6680,19 @@ fn retain_completed_window_viewer_gpu_successor(
     if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
         submission_id,
         owner.frame.output_key.clone(),
-        owner.texture_key.clone(),
+        WindowViewerGpuArtifact {
+            texture_key: owner.texture_key.clone(),
+            #[cfg(feature = "validation")]
+            frame_context: owner.frame_context.clone(),
+        },
         output_lease,
     ) {
-        session.frame_renderer.unregister_external_texture(previous.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(previous.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             previous.output_key(),
-            previous.artifact().as_str(),
+            previous.artifact().texture_key().as_str(),
         );
         drop(previous);
     }
@@ -6612,16 +6792,18 @@ fn prepare_viewer_gpu_preview(
         return;
     }
     let expected_prepared_output = host.exact_prepared_viewer_gpu_output_key();
-    if let Some(stale) = session
-        .viewer_gpu_presentation
-        .publications
-        .retire_prepared_unless(expected_prepared_output.as_ref())
-    {
+    let expected_current_output = host.exact_current_viewer_gpu_output_key();
+    if let Some(stale) = session.viewer_gpu_presentation.publications.retire_prepared_unless(
+        expected_prepared_output.as_ref(),
+        expected_current_output.as_ref(),
+    ) {
         let _ = host.clear_external_viewer_frame_for_artifact(
             stale.output_key(),
-            stale.artifact().as_str(),
+            stale.artifact().texture_key().as_str(),
         );
-        session.frame_renderer.unregister_external_texture(stale.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(stale.artifact().texture_key());
         drop(stale);
     }
     let Some(preparation) = host.viewer_gpu_preparation() else {
@@ -6721,9 +6903,11 @@ fn prepare_viewer_gpu_preview(
                     if let Some(previous) = promotion.into_retired() {
                         let _ = host.clear_external_viewer_frame_for_artifact(
                             previous.output_key(),
-                            previous.artifact().as_str(),
+                            previous.artifact().texture_key().as_str(),
                         );
-                        session.frame_renderer.unregister_external_texture(previous.artifact());
+                        session
+                            .frame_renderer
+                            .unregister_external_texture(previous.artifact().texture_key());
                         drop(previous);
                     }
                     exact_output_available
@@ -6734,7 +6918,7 @@ fn prepare_viewer_gpu_preview(
                 && session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
                     host.has_external_viewer_frame_artifact(
                         physical.output_key(),
-                        physical.artifact().as_str(),
+                        physical.artifact().texture_key().as_str(),
                     )
                 });
             if physical_is_exact
@@ -7177,12 +7361,19 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
-    session.viewer_gpu_output_telemetry.record_actual_frame_residency(
-        preview_gpu_composite_frame_residency(
-            record.residency,
-            session.viewer_gpu_execution.native_import_support(),
-        ),
+    let actual_frame_residency = preview_gpu_composite_frame_residency(
+        record.residency,
+        session.viewer_gpu_execution.native_import_support(),
     );
+    #[cfg(feature = "validation")]
+    let frame_context = AppUiViewerGpuOutputFrameContext::from_frame(
+        &frame,
+        texture_key.as_str().to_owned(),
+        actual_frame_residency.clone(),
+    );
+    session
+        .viewer_gpu_output_telemetry
+        .record_actual_frame_residency(actual_frame_residency);
     report_successful_viewer_gpu_fallbacks(&record.fallback_reasons, |reason| {
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
             reason: reason.to_owned(),
@@ -7229,6 +7420,8 @@ fn prepare_viewer_gpu_preview(
                 .unwrap_or(submitted_at);
             let owner = WindowViewerGpuSubmissionOwner {
                 frame,
+                #[cfg(feature = "validation")]
+                frame_context,
                 terminal,
                 texture_key,
                 texture_registered: false,
@@ -7285,6 +7478,8 @@ fn prepare_viewer_gpu_preview(
         .unwrap_or(submitted_at);
     let owner = WindowViewerGpuSubmissionOwner {
         frame,
+        #[cfg(feature = "validation")]
+        frame_context,
         terminal,
         texture_key,
         texture_registered: false,
@@ -7466,7 +7661,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
         );
         return;
     }
-    let Some((output_key, texture_key, presentation, output_lease)) =
+    let Some((output_key, texture_key, artifact, presentation, output_lease)) =
         session.viewer_gpu_submissions.owner_mut(submission_id).and_then(|owner| {
             if !owner.texture_registered {
                 return None;
@@ -7474,6 +7669,11 @@ fn publish_ordinary_window_viewer_gpu_submission(
             Some((
                 owner.frame.output_key.clone(),
                 owner.texture_key.clone(),
+                WindowViewerGpuArtifact {
+                    texture_key: owner.texture_key.clone(),
+                    #[cfg(feature = "validation")]
+                    frame_context: owner.frame_context.clone(),
+                },
                 owner.presentation,
                 owner.output_lease.take()?,
             ))
@@ -7517,13 +7717,15 @@ fn publish_ordinary_window_viewer_gpu_submission(
         if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
             submission_id,
             output_key,
-            texture_key,
+            artifact,
             output_lease,
         ) {
-            session.frame_renderer.unregister_external_texture(previous.artifact());
+            session
+                .frame_renderer
+                .unregister_external_texture(previous.artifact().texture_key());
             let _ = host.clear_external_viewer_frame_for_artifact(
                 previous.output_key(),
-                previous.artifact().as_str(),
+                previous.artifact().texture_key().as_str(),
             );
             drop(previous);
         }
@@ -7584,11 +7786,13 @@ fn publish_ordinary_window_viewer_gpu_submission(
             let previous = session.viewer_gpu_presentation.publications.publish_current(
                 submission_id,
                 output_key,
-                texture_key,
+                artifact,
                 output_lease,
             );
             if let Some(previous) = previous {
-                session.frame_renderer.unregister_external_texture(previous.artifact());
+                session
+                    .frame_renderer
+                    .unregister_external_texture(previous.artifact().texture_key());
                 drop(previous);
             }
             if let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) {
@@ -7832,7 +8036,10 @@ fn current_native_file_point(window: &winit::window::Window, fallback: Point) ->
     if unsafe { GetCursorPos(&mut cursor) } == 0 {
         return fallback;
     }
-    Point::new((cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32)
+    UiWindowCoordinates::from_window(window).point(winit::dpi::PhysicalPosition::new(
+        f64::from(cursor.x - origin.x),
+        f64::from(cursor.y - origin.y),
+    ))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -7902,6 +8109,7 @@ fn surface_lifecycle_update(
     reason: SurfaceLifecycleReason,
     current_size: (u32, u32),
     next_size: (u32, u32),
+    coordinates: UiWindowCoordinates,
 ) -> SurfaceLifecycleUpdate {
     if next_size.0 == 0 || next_size.1 == 0 {
         return SurfaceLifecycleUpdate {
@@ -7914,7 +8122,8 @@ fn surface_lifecycle_update(
 
     let size_changed = current_size != next_size;
     let relayout_root = size_changed || reason == SurfaceLifecycleReason::ScaleFactorChanged;
-    let bounds = relayout_root.then(|| Rect::new(0.0, 0.0, next_size.0 as f32, next_size.1 as f32));
+    let bounds = relayout_root
+        .then(|| coordinates.bounds(winit::dpi::PhysicalSize::new(next_size.0, next_size.1)));
 
     SurfaceLifecycleUpdate {
         reconfigure_surface: size_changed,
@@ -7936,6 +8145,7 @@ fn apply_surface_lifecycle_update(
         reason,
         (session.config.width, session.config.height),
         next_size,
+        UiWindowCoordinates::from_window(&session.window),
     );
     if update.reconfigure_surface {
         session.config.width = next_size.0;
@@ -7999,6 +8209,7 @@ fn refresh_display_output_contract(
             device,
             next.surface_color.format,
             next.surface_color.color_space,
+            app_ui_surface_output_color_space(next.surface_color),
         ) {
             Ok(renderer) => Some(renderer),
             Err(error) => {
@@ -8112,10 +8323,12 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     let cleanup_deferred =
         cancel_viewer_gpu_submission(session, host, WindowViewerGpuDeferredCleanup::Reset);
     for previous in session.viewer_gpu_presentation.clear().into_iter().flatten() {
-        session.frame_renderer.unregister_external_texture(previous.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(previous.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             previous.output_key(),
-            previous.artifact().as_str(),
+            previous.artifact().texture_key().as_str(),
         );
         drop(previous);
     }
@@ -8185,7 +8398,7 @@ impl AppUiPreparedWindowSession {
             "app UI surface color contract"
         );
 
-        let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        let bounds = UiWindowCoordinates::from_window(&window).bounds(size);
         let (color_engine, display_management_policy) = host.resolved_display_color_management();
         let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
             super::display_probe_impl::DisplaySnapshotTarget {
@@ -8208,8 +8421,12 @@ impl AppUiPreparedWindowSession {
         );
         let initial_snapshot = initial_display_resolution.snapshot;
         let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
-        let frame_renderer =
-            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
+        let frame_renderer = AppUiFrameRenderer::new_for_surface(
+            device,
+            config.format,
+            config.color_space,
+            app_ui_surface_output_color_space(display_output_contract.surface_color),
+        )?;
         if let Some(startup) = viewer_gpu_startup {
             let mut viewer_runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
             match host.active_program_color_context() {
@@ -8286,6 +8503,10 @@ impl AppUiPreparedWindowSession {
             viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
             surface_generation_id,
             role,
+            #[cfg(target_os = "macos")]
+            accessibility: None,
+            #[cfg(target_os = "macos")]
+            accessibility_proxy: None,
             window,
             surface,
             config: config.clone(),
@@ -8605,6 +8826,11 @@ fn replace_window_session(
             .map(ViewerGpuDeviceGenerationId::get),
         "app UI native window replaced"
     );
+    #[cfg(target_os = "macos")]
+    {
+        session.accessibility_proxy = next_session.accessibility_proxy.take();
+        attach_mac_accessibility(session, elwt);
+    }
     session.window.set_visible(true);
     session.window.request_redraw();
     drop(next_session);
@@ -9630,7 +9856,8 @@ mod tests {
                 },
                 wgpu::SurfaceFormatCapabilities {
                     format: wgpu::TextureFormat::Rgba16Float,
-                    color_spaces: wgpu::SurfaceColorSpaces::BT2100_PQ,
+                    color_spaces: wgpu::SurfaceColorSpaces::BT2100_PQ
+                        | wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR,
                 },
                 wgpu::SurfaceFormatCapabilities {
                     format: wgpu::TextureFormat::Rgb10a2Unorm,
@@ -9646,8 +9873,16 @@ mod tests {
             ),
             Ok(AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Rgba16Float,
-                color_space: wgpu::SurfaceColorSpace::Bt2100Pq,
-                encoding: AppUiSurfaceEncoding::Pq,
+                color_space: if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Pq
+                },
+                encoding: if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncoding::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncoding::Pq
+                },
                 hdr_mode: AppUiSurfaceHdrMode::HdrPq,
             })
         );
@@ -9666,6 +9901,10 @@ mod tests {
                     format: wgpu::TextureFormat::Rgb10a2Unorm,
                     color_spaces: wgpu::SurfaceColorSpaces::BT2100_HLG,
                 },
+                wgpu::SurfaceFormatCapabilities {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    color_spaces: wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR,
+                },
             ],
         );
 
@@ -9675,9 +9914,21 @@ mod tests {
                 AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Hlg),
             ),
             Ok(AppUiSurfaceColorContract {
-                format: wgpu::TextureFormat::Rgb10a2Unorm,
-                color_space: wgpu::SurfaceColorSpace::Bt2100Hlg,
-                encoding: AppUiSurfaceEncoding::Hlg,
+                format: if cfg!(target_os = "macos") {
+                    wgpu::TextureFormat::Rgba16Float
+                } else {
+                    wgpu::TextureFormat::Rgb10a2Unorm
+                },
+                color_space: if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Hlg
+                },
+                encoding: if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncoding::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncoding::Hlg
+                },
                 hdr_mode: AppUiSurfaceHdrMode::HdrHlg,
             })
         );
@@ -9700,7 +9951,11 @@ mod tests {
             ),
             Err(AppUiSurfaceColorContractError {
                 intent: AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Hlg),
-                required_color_space: Some(wgpu::SurfaceColorSpace::Bt2100Hlg),
+                required_color_space: Some(if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Hlg
+                }),
                 available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
             })
         );
@@ -9930,10 +10185,22 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_pq_boundary_on_pq_surface() {
         let mut contract = test_display_output_contract();
-        contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Pq;
-        contract.surface_color.encoding = AppUiSurfaceEncoding::Pq;
+        contract.surface_color.color_space = if cfg!(target_os = "macos") {
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+        } else {
+            wgpu::SurfaceColorSpace::Bt2100Pq
+        };
+        contract.surface_color.encoding = if cfg!(target_os = "macos") {
+            AppUiSurfaceEncoding::ExtendedLinear
+        } else {
+            AppUiSurfaceEncoding::Pq
+        };
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
-        contract.format_color_spaces[0].bt2100_pq = true;
+        if cfg!(target_os = "macos") {
+            contract.format_color_spaces[0].extended_srgb_linear = true;
+        } else {
+            contract.format_color_spaces[0].bt2100_pq = true;
+        }
         let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
@@ -9943,14 +10210,49 @@ mod tests {
         assert_eq!(contract.boundary_blocker(&boundary), None);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn switching_pq_to_hlg_on_the_same_edr_surface_rebuilds_the_ui_carrier() {
+        let mut pq = test_display_output_contract();
+        pq.surface_color.format = wgpu::TextureFormat::Rgba16Float;
+        pq.surface_color.color_space = wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
+        pq.surface_color.encoding = AppUiSurfaceEncoding::ExtendedLinear;
+        pq.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
+        let mut hlg = pq.clone();
+        hlg.surface_color.encoding = AppUiSurfaceEncoding::ExtendedLinear;
+        hlg.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
+
+        assert!(app_ui_surface_color_space_matches_display_output(
+            pq.surface_color,
+            ColorSpace::Rec2100Pq
+        ));
+        assert!(!app_ui_surface_color_space_matches_display_output(
+            pq.surface_color,
+            ColorSpace::Rec2100Hlg
+        ));
+        assert!(display_output_contract_requires_gpu_preview_invalidation(
+            &pq, &hlg
+        ));
+        assert!(display_output_contract_requires_renderer_rebuild(&pq, &hlg));
+    }
+
     #[test]
     fn display_output_contract_blocks_pq_boundary_on_hlg_surface_as_color_space_mismatch() {
         let mut contract = test_display_output_contract();
-        contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Hlg;
-        contract.surface_color.encoding = AppUiSurfaceEncoding::Hlg;
+        contract.surface_color.color_space = if cfg!(target_os = "macos") {
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+        } else {
+            wgpu::SurfaceColorSpace::Bt2100Hlg
+        };
+        contract.surface_color.encoding = if cfg!(target_os = "macos") {
+            AppUiSurfaceEncoding::ExtendedLinear
+        } else {
+            AppUiSurfaceEncoding::Hlg
+        };
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
+        contract.format_color_spaces[0].extended_srgb_linear = cfg!(target_os = "macos");
         let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
@@ -9963,11 +10265,21 @@ mod tests {
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::Rec2100Pq,
                     selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    selected_surface_color_space: wgpu::SurfaceColorSpace::Bt2100Hlg,
-                    selected_surface_encoding: AppUiSurfaceEncoding::Hlg,
+                    selected_surface_color_space: if cfg!(target_os = "macos") {
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                    } else {
+                        wgpu::SurfaceColorSpace::Bt2100Hlg
+                    },
+                    selected_surface_encoding: if cfg!(target_os = "macos") {
+                        AppUiSurfaceEncoding::ExtendedLinear
+                    } else {
+                        AppUiSurfaceEncoding::Hlg
+                    },
                     surface_hdr_mode: AppUiSurfaceHdrMode::HdrHlg,
                     supported_surface_color_spaces: vec![
                         wgpu::SurfaceColorSpace::Srgb,
+                        #[cfg(target_os = "macos")]
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
                         wgpu::SurfaceColorSpace::Bt2100Pq,
                         wgpu::SurfaceColorSpace::Bt2100Hlg,
                     ],
@@ -10361,7 +10673,11 @@ mod tests {
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 supported_surface_color_spaces: vec![
                     wgpu::SurfaceColorSpace::Srgb,
-                    wgpu::SurfaceColorSpace::Bt2100Pq,
+                    if cfg!(target_os = "macos") {
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                    } else {
+                        wgpu::SurfaceColorSpace::Bt2100Pq
+                    },
                 ],
             },
         );
@@ -10383,8 +10699,16 @@ mod tests {
                 selected_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                 desired_surface_format: None,
-                desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq),
-                desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Pq),
+                desired_surface_color_space: Some(if cfg!(target_os = "macos") {
+                    AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
+                } else {
+                    AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq
+                }),
+                desired_surface_encoding: Some(if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncodingDiagnostic::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncodingDiagnostic::Pq
+                }),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::HdrPq),
                 payload_blocker: None,
                 supported_surface_color_space_count: Some(2),
@@ -11576,7 +11900,12 @@ mod tests {
             SurfaceLifecycleReason::ScaleFactorChanged,
         ] {
             assert_eq!(
-                surface_lifecycle_update(reason, (1280, 720), (0, 720)),
+                surface_lifecycle_update(
+                    reason,
+                    (1280, 720),
+                    (0, 720),
+                    UiWindowCoordinates::new(1.0),
+                ),
                 SurfaceLifecycleUpdate {
                     reconfigure_surface: false,
                     relayout_root: false,
@@ -11585,7 +11914,12 @@ mod tests {
                 }
             );
             assert_eq!(
-                surface_lifecycle_update(reason, (1280, 720), (1280, 0)),
+                surface_lifecycle_update(
+                    reason,
+                    (1280, 720),
+                    (1280, 0),
+                    UiWindowCoordinates::new(1.0),
+                ),
                 SurfaceLifecycleUpdate {
                     reconfigure_surface: false,
                     relayout_root: false,
@@ -11599,7 +11933,12 @@ mod tests {
     #[test]
     fn surface_lifecycle_reconfigures_and_relayouts_on_real_resize() {
         assert_eq!(
-            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1600, 900)),
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::Resize,
+                (1280, 720),
+                (1600, 900),
+                UiWindowCoordinates::new(1.0),
+            ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: true,
                 relayout_root: true,
@@ -11612,7 +11951,12 @@ mod tests {
     #[test]
     fn surface_lifecycle_skips_redundant_same_size_resize() {
         assert_eq!(
-            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1280, 720)),
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::Resize,
+                (1280, 720),
+                (1280, 720),
+                UiWindowCoordinates::new(1.0),
+            ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: false,
                 relayout_root: false,
@@ -11629,6 +11973,7 @@ mod tests {
                 SurfaceLifecycleReason::ScaleFactorChanged,
                 (1280, 720),
                 (1280, 720),
+                UiWindowCoordinates::new(1.0),
             ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: false,
@@ -11646,12 +11991,31 @@ mod tests {
                 SurfaceLifecycleReason::ScaleFactorChanged,
                 (1280, 720),
                 (1920, 1080),
+                UiWindowCoordinates::new(1.0),
             ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: true,
                 relayout_root: true,
                 request_redraw: true,
                 bounds: Some(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            }
+        );
+    }
+
+    #[test]
+    fn surface_lifecycle_keeps_physical_surface_and_logical_ui_bounds_distinct() {
+        assert_eq!(
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::ScaleFactorChanged,
+                (2880, 1720),
+                (2880, 1720),
+                UiWindowCoordinates::new(2.0),
+            ),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: false,
+                relayout_root: true,
+                request_redraw: true,
+                bounds: Some(Rect::new(0.0, 0.0, 1440.0, 860.0)),
             }
         );
     }

@@ -350,6 +350,10 @@ impl Widget for SegmentedButtonGroup {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 #[cfg(test)]

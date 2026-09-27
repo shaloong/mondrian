@@ -79,10 +79,14 @@ pub enum AccessibilityRole {
     Checkbox,
     /// Numeric slider.
     Slider,
-    /// Editable single-line or multiline text field.
+    /// Editable single-line text field.
     TextInput,
+    /// Editable multiline text field.
+    MultilineTextInput,
     /// Popup or dropdown menu.
     Menu,
+    /// A selectable row within an open menu.
+    MenuItem,
     /// Scrollable viewport.
     ScrollView,
     /// Draggable splitter between panes.
@@ -108,6 +112,8 @@ pub struct AccessibilityState {
     pub focused: bool,
     /// Whether the control is disabled.
     pub disabled: bool,
+    /// Whether text can be read and selected but not changed.
+    pub read_only: bool,
     /// Optional checked state for checkboxes and similar controls.
     pub checked: Option<bool>,
     /// Optional pressed state for push buttons.
@@ -173,6 +179,20 @@ pub struct AccessibilityNode {
     pub value: Option<AccessibilityValue>,
     /// Sequential focus order assigned by [`collect_accessibility_nodes`].
     pub focus_order: Option<u32>,
+}
+
+/// Accessible action region painted and handled by a composite widget.
+///
+/// The key is stable within its parent widget. Native adapters use the parent's
+/// normal pointer event path to activate the region; no second action owner is
+/// created for controls drawn inside a single widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessibilityVirtualNode {
+    pub key: u64,
+    pub role: AccessibilityRole,
+    pub name: String,
+    pub bounds: Rect,
+    pub enabled: bool,
 }
 
 impl AccessibilityNode {
@@ -476,6 +496,12 @@ pub trait Widget {
     /// 返回 Widget 的唯一标识
     fn id(&self) -> WidgetId;
 
+    /// Whether an in-progress interaction needs this widget instance to survive
+    /// model refresh until the matching release or cancellation event arrives.
+    fn has_transient_interaction(&self) -> bool {
+        false
+    }
+
     /// Return the editor panel kind represented by this widget, if it is a
     /// panel boundary.
     ///
@@ -629,6 +655,18 @@ pub trait Widget {
     /// expose roles, names, values, state, and focus order.
     fn accessibility(&self) -> Option<AccessibilityNode> {
         None
+    }
+
+    /// Bounds of the semantic node in window logical coordinates, after layout.
+    /// A platform bridge converts these coordinates to physical pixels.
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        None
+    }
+
+    /// Accessible hit regions drawn within this widget rather than stored as
+    /// separate child widgets.
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        Vec::new()
     }
 }
 

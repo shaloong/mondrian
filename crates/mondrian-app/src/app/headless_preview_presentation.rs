@@ -272,10 +272,12 @@ fn present_headless_preview_candidate_inner(
         current_playback_intent,
         immediate_successor_intent,
     );
+    let expected_current_output = preview.registered_exact_current_gpu_output_key();
     observe_presentation_step("retire-stale-output", || {
-        if let Some((output_key, output)) =
-            gpu.retire_stale_prepared_physical_output(expected_prepared_output.as_ref())
-        {
+        if let Some((output_key, output)) = gpu.retire_stale_prepared_physical_output(
+            expected_prepared_output.as_ref(),
+            expected_current_output.as_ref(),
+        ) {
             clear_revoked_headless_gpu_output(preview, &output_key, &output);
         }
     });
