@@ -8,9 +8,9 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
-    DecodedRgbaEncoding, DecodedVideoRange, DecodedVideoRangeContract, PreviewDecodeAccessMode,
-    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewDecodeSessionContext,
-    PreviewSourceColorContract,
+    DecodedRgbaEncoding, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
+    PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewDecodeSessionContext, PreviewSourceColorContract,
 };
 use mondrian_renderer::{
     color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, SourceColorModule},
@@ -18,7 +18,8 @@ use mondrian_renderer::{
     RenderCpuColorExecutionSession,
 };
 use mondrian_timeline::sequence::{
-    MediaInputColorContext, MissingColorMetadataPolicy, ProgramColorContext, ResolvedInputColor,
+    InputColorResolutionSource, MediaInputColorContext, MissingColorMetadataPolicy,
+    ProgramColorContext, ResolvedInputColor,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -79,6 +80,7 @@ pub(super) struct ThumbnailColorContract {
     pub(super) video_stream_index: u32,
     pub(super) source_color_space: ColorSpace,
     pub(super) source_range: DecodedVideoRangeContract,
+    pub(super) yuv_matrix_fallback: Option<DecodedVideoMatrix>,
     pub(super) working_color_space: WorkingColorSpace,
     pub(super) missing_metadata_policy: MissingColorMetadataPolicy,
     pub(super) output_color_space: ColorSpace,
@@ -109,16 +111,14 @@ impl ThumbnailColorContract {
                     "video asset has no probed primary video stream",
                 )
             })?;
-        let source_color_space = match context
-            .missing_metadata_policy()
-            .resolve_asset_input_decision(
+        let input_color_resolution =
+            context.missing_metadata_policy().resolve_asset_input_decision(
                 None,
                 asset.interpretation,
                 primary_video.executable_color_space(),
                 context.working_color_space(),
-            )
-            .resolved
-        {
+            );
+        let source_color_space = match input_color_resolution.resolved {
             ResolvedInputColor::Color(color_space) => color_space,
             ResolvedInputColor::Data => {
                 return Err(failure(
@@ -173,6 +173,9 @@ impl ThumbnailColorContract {
             video_stream_index: primary_video.index,
             source_color_space,
             source_range,
+            yuv_matrix_fallback: (input_color_resolution.source
+                == InputColorResolutionSource::MissingPolicyAssumeRec709)
+                .then_some(DecodedVideoMatrix::Bt709),
             working_color_space: context.working_color_space(),
             missing_metadata_policy: context.missing_metadata_policy(),
             output_color_space,
@@ -209,14 +212,18 @@ pub(super) fn decode_thumbnail(
         media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
         PreviewDecodeAccessMode::RandomAccessStillFrame
     );
+    let mut source_color = PreviewSourceColorContract::new(
+        job.key.color.source_color_space,
+        job.key.color.source_range,
+    );
+    if let Some(matrix) = job.key.color.yuv_matrix_fallback {
+        source_color = source_color.with_yuv_matrix_fallback(matrix);
+    }
     let mut request = PreviewDecodeRequest::new(
         job.key.path.as_path(),
         mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        PreviewSourceColorContract::new(
-            job.key.color.source_color_space,
-            job.key.color.source_range,
-        ),
+        source_color,
     )
     .with_video_stream_index(job.key.color.video_stream_index)
     .with_max_size(Some(THUMBNAIL_MAX_WIDTH), Some(THUMBNAIL_MAX_HEIGHT))

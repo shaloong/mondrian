@@ -258,6 +258,7 @@ fn color_contract() -> ThumbnailColorContract {
         source_range: DecodedVideoRangeContract::Automatic {
             probed_range: DecodedVideoRange::Limited,
         },
+        yuv_matrix_fallback: None,
         camera_raw: None,
         working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
@@ -428,6 +429,52 @@ fn video_asset_with_probe(path: PathBuf, configure: impl FnOnce(&mut MediaInfo))
 
 fn video_asset(path: PathBuf) -> AssetRecord {
     video_asset_with_probe(path, |_| {})
+}
+
+#[test]
+#[ignore = "requires MONDRIAN_THUMBNAIL_EXTERNAL_MEDIA_PATH"]
+fn external_media_thumbnail_uses_production_decode_and_color() {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_THUMBNAIL_EXTERNAL_MEDIA_PATH")
+            .expect("external thumbnail media path"),
+    );
+    let path = path.canonicalize().expect("canonical external media path");
+    let probe = mondrian_media::info::probe_media_info(&path).expect("probe external media");
+    let root = std::env::temp_dir().join(format!("mondrian-external-thumbnail-{}", AssetId::new()));
+    let library = AssetLibrary::open(root.clone()).expect("external Asset Library");
+    let candidate =
+        AssetMediaProbeCandidate::new(path.clone(), MediaFileFingerprint::capture(&path), probe)
+            .expect("external media candidate");
+    let asset_id = library.commit_media_probe(candidate, None).expect("register external asset");
+    let asset = library
+        .get_asset(asset_id)
+        .expect("read external asset")
+        .expect("external asset");
+    let service = AssetThumbnailService::new();
+    service.set_color_context(Some(color_context()));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let frame = loop {
+        service.poll_finished();
+        match service.thumbnail_for_asset(&asset) {
+            ThumbnailLookupState::Ready(frame) => break frame,
+            ThumbnailLookupState::Failed(failure) => {
+                panic!("external thumbnail failed: {failure:?}")
+            }
+            ThumbnailLookupState::Loading => {
+                assert!(Instant::now() < deadline, "external thumbnail timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ThumbnailLookupState::Unavailable => panic!("external thumbnail unavailable"),
+        }
+    };
+    assert!(frame.width <= 320 && frame.height <= 180);
+    assert_eq!(frame.color_space, ThumbnailRasterColorSpace::Srgb);
+    let receipt = service
+        .shutdown_until(Instant::now() + Duration::from_secs(5))
+        .expect("shutdown");
+    assert!(receipt.all_resources_released(), "{receipt:?}");
+    drop(library);
+    std::fs::remove_dir_all(root).expect("remove external Asset Library");
 }
 
 fn missing_video_asset_with_probe(configure: impl FnOnce(&mut MediaInfo)) -> AssetRecord {
@@ -659,6 +706,21 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
     let mut asset = missing_video_asset_with_probe(|probe| {
         probe.video_streams[0].color_range = DecodedVideoRange::Unknown;
     });
+    assert_eq!(
+        ThumbnailColorContract::resolve(&asset, &context)
+            .expect("missing metadata follows the Sequence policy")
+            .yuv_matrix_fallback,
+        Some(mondrian_media::DecodedVideoMatrix::Bt709)
+    );
+    asset.interpretation.color = mondrian_core::timeline_data::MediaColorInterpretation::Override {
+        color_space: ColorSpace::Rec709,
+    };
+    assert_eq!(
+        ThumbnailColorContract::resolve(&asset, &context)
+            .expect("explicit interpretation remains authoritative")
+            .yuv_matrix_fallback,
+        None
+    );
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &context)
             .expect("unknown probe range remains frame-resolvable")
