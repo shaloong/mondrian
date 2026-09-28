@@ -2030,7 +2030,11 @@ identity releases it. The target therefore cannot slide forward one frame per
 clock tick and reopen the same physical source ahead of current-source work.
 The future-media owner also retains a bounded exact-source-to-worker map. The
 initial source defaults to Playback, each new cold activation uses the opposite
-worker from an already-owned persistent source or the next alternating lane,
+worker from an already-owned persistent source or the next alternating lane.
+That decision uses the activation's complete immutable physical closure,
+including resident/pending layers; the missing-request subset alone would
+omit a persistent layer precisely when it was already ready and could send a
+far cold open onto its active worker. Only newly missing sources are assigned,
 and all missing requests in that activation inherit the chosen owner. The map
 uses the immutable physical decode-source contract, not an authored clip or
 Asset alias, and expires with semantic-window identity or bounded LRU eviction.

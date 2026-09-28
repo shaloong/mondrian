@@ -5868,6 +5868,104 @@ fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
 }
 
 #[test]
+fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    let mut ids = Vec::new();
+    for name in ["third.mp4", "held.mp4"] {
+        let path = root.join(name);
+        std::fs::write(&path, b"not a real video").expect("invalid media");
+        ids.push(commit_preview_test_media(
+            state.asset_library().expect("library"),
+            path.clone(),
+            rec709_video_media_info(std::fs::metadata(path).expect("metadata").len()),
+        ));
+    }
+    let mut sequence = state.active_sequence().expect("sequence").clone();
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(ids[0], tt(96, tb), tt(48, tb)).expect("third clip"))
+        .expect("insert third clip");
+    let mut held = Clip::new(ids[1], tt(0, tb), tt(144, tb)).expect("persistent clip");
+    held.replace_source_time_map(mondrian_timeline::ClipSourceTimeMap::hold(
+        mondrian_core::SourceSampleTarget::covering(tt(0, tb)),
+    ))
+    .expect("hold exact video sample");
+    sequence.video_tracks[1].add_clip(held).expect("insert persistent clip");
+    state.test_set_sequence(Some(sequence));
+    state.play().expect("play");
+    let delivered =
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    synchronize_visual_program_for_state(&service, &state);
+    let sequence = state.active_sequence().expect("sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let resolution = Resolution { width, height };
+    let current_keys = future_media_prefix_keys_for_state(&service, &state, -1, 1, resolution);
+    let held_key = current_keys.iter().find(|key| key.asset_id == ids[1]).expect("held key");
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        held_key.clone(),
+        test_media_frame(4),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+    service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+        held_key.decode.source().clone(),
+        MediaPreviewWorkerLane::Playback,
+    );
+    schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+    let receiver = service.scheduler.job_receiver();
+    for lane in [
+        MediaPreviewWorkerLane::Playback,
+        MediaPreviewWorkerLane::NonPlayback,
+    ] {
+        let job = match receiver.recv_for_worker_outcome_timeout(lane, Duration::from_millis(10)) {
+            MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+            other => panic!("expected first continuation/activation on {lane:?}: {other:?}"),
+        };
+        let execution_id = job.execution_id.expect("execution lease");
+        assert!(service.scheduler.mark_execution_completed(execution_id));
+        let _ = service.scheduler.resolve_execution(execution_id, false);
+    }
+    let far_closure = service
+        .future_media_frame_keys_at_scale_for_test(
+            &snapshot,
+            &state,
+            sequence,
+            96,
+            mondrian_playback::PreviewResolutionScale::Full,
+            resolution,
+            sequence
+                .settings
+                .root_program_color_context(state.project_color_environment())
+                .expect("color context"),
+        )
+        .expect("complete far closure");
+    assert!(
+        far_closure.contains(held_key),
+        "persistent source is in the complete far closure"
+    );
+    let far_keys = future_media_prefix_keys_for_state(&service, &state, 95, 1, resolution);
+    assert_eq!(
+        far_keys.len(),
+        1,
+        "resident persistent input is absent from the new-request list"
+    );
+    let far_key = far_keys.iter().find(|key| key.asset_id == ids[0]).expect("new cold key");
+    schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+    assert!(service.scheduler.has_pending_key(far_key));
+    assert_eq!(
+        service.future_media_window.borrow_mut().playback_worker_affinity(far_key.decode.source(), 2),
+        MediaPreviewWorkerLane::NonPlayback,
+        "a resident persistent source must participate in cold affinity, even though it has no new request"
+    );
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview root");
+}
+
+#[test]
 fn decoder_residency_trim_preserves_physical_source_worker_ownership() {
     let source = test_media_key(8_001).decode.source().clone();
     let mut window = FutureMediaWindowCache::default();

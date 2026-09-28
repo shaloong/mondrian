@@ -328,8 +328,9 @@ impl FutureMediaWindowCache {
     /// same affinity. Existing source ownership wins for persistent layers at
     /// an edit. The recency index bounds this ownership to the same capacity
     /// as the semantic lookahead cache.
-    fn assign_cold_activation_worker_affinity(&mut self, requests: &[PlannedFutureMediaRequest]) {
-        let existing_lane = requests.iter().find_map(|request| {
+    fn assign_cold_activation_worker_affinity(&mut self, plan: &FutureMediaPrefixPlan) {
+        let closure = plan.first_media_frame.as_deref().unwrap_or(&[]);
+        let existing_lane = closure.iter().find_map(|request| {
             let source = request.key.decode.source();
             (!source.is_still_image())
                 .then(|| self.existing_playback_worker_affinity(source))
@@ -339,7 +340,7 @@ impl FutureMediaWindowCache {
             .map(opposite_media_preview_worker_lane)
             .unwrap_or(self.next_cold_activation_lane);
         let mut assigned = false;
-        for request in requests {
+        for request in &plan.requests {
             let source = request.key.decode.source();
             if !source.is_still_image()
                 && !self.playback_source_worker_affinity.contains_key(source)
@@ -466,6 +467,10 @@ impl FutureMediaWindowCache {
 }
 
 struct FutureMediaPrefixPlan {
+    /// The first accepted frame's complete immutable source closure, including
+    /// already resident/pending inputs. Cold Session affinity cannot be derived
+    /// from the missing-request subset alone. This Arc retains no pixel leases.
+    first_media_frame: Option<Arc<[PlannedFutureMediaRequest]>>,
     /// Physical guards that keep accepted near-term resident frames non-evictable
     /// until every planned missing request has transferred into Broker ownership.
     resident_guards: Vec<MediaPreviewFrame>,
@@ -495,6 +500,7 @@ impl FutureMediaPrefetchReadiness {
 impl Default for FutureMediaPrefixPlan {
     fn default() -> Self {
         Self {
+            first_media_frame: None,
             resident_guards: Vec::new(),
             requests: Vec::new(),
             ready_media_frames: 0,
@@ -1012,7 +1018,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             );
             self.future_media_window
                 .borrow_mut()
-                .assign_cold_activation_worker_affinity(&activation_plan.requests);
+                .assign_cold_activation_worker_affinity(&activation_plan);
             bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                 && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
             if bounded_cold_activation_ready {
@@ -1126,7 +1132,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                     self.future_media_window
                         .borrow_mut()
-                        .assign_cold_activation_worker_affinity(&activation_plan.requests);
+                        .assign_cold_activation_worker_affinity(&activation_plan);
                     bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                         && activation_plan.ready_media_frames
                             == activation_plan.preservable_media_frames;
@@ -1411,6 +1417,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // native frame must acquire every surface before nearer work
                 // can consume any of its grant.
                 break;
+            }
+            if plan.first_media_frame.is_none() {
+                plan.first_media_frame = Some(Arc::clone(&requests));
             }
             for (key, guard) in trial_resident_guards {
                 resident_recency_order.push(key);

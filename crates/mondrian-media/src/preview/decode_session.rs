@@ -471,6 +471,14 @@ impl PreviewDecodeSessionContext {
         should_cancel: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<PreviewDecodeOutcome> {
         let _execution = self.execution_observer.begin_request();
+        tracing::debug!(
+            request_sequence = self.execution_observer.snapshot().request_sequence,
+            worker_thread = std::thread::current().name(),
+            path = %request.path.display(),
+            source_sample = ?request.source_sample,
+            access_mode = ?request.access_mode,
+            "started observed Preview decoder request"
+        );
         let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
         let requested_hardware = request.hardware_decode_request;
         let quarantine_key = PreviewHardwareFailureQuarantineKey::from_request(&request);
