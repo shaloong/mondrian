@@ -2120,15 +2120,19 @@ fn prepare_source_layer<'a>(
                 cpu_yuv_source.as_ref(),
             );
             let cpu_yuv_handle = match cpu_yuv_source.as_ref() {
-                Some(source) => Some(record_cpu_yuv_video_layer(
-                    source,
-                    native_runtime,
-                    cpu_yuv_upload,
-                    runtime,
-                    device,
-                    queue,
-                    encoder,
-                )?),
+                Some(source) => {
+                    let record = record_cpu_yuv_video_layer(
+                        source,
+                        native_runtime,
+                        cpu_yuv_upload,
+                        runtime,
+                        device,
+                        queue,
+                        encoder,
+                    )?;
+                    prepared.input_stage_diagnostics.accumulate(record.stage_diagnostics);
+                    Some(record.output)
+                }
                 None => None,
             };
             let mut native_import_error = None;
@@ -2683,7 +2687,7 @@ fn record_cpu_yuv_video_layer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<GpuColorFrameHandle, ViewerGpuExecutionError> {
+) -> Result<crate::cpu_yuv::CpuYuvMaterializationRecord, ViewerGpuExecutionError> {
     crate::cpu_yuv::record_cpu_yuv_frame(
         &native_runtime.cpu_yuv_decoder,
         cpu_yuv_upload,

@@ -19,15 +19,17 @@ use crate::{
     ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
     GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
-    GpuYuvCodeAlignment, RenderGpuOutputBoundaryRuntime, RenderInputTransform,
+    GpuYuvCodeAlignment, RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntime,
+    RenderInputTransform,
 };
 
 /// Viewer-owned compact-plane upload cache.
 ///
-/// One slot is required for each compact YUV layer recorded into the same
-/// command buffer. Slots survive candidate clears so steady-state playback
-/// updates their existing textures instead of allocating two device textures
-/// per layer and frame. A bounded renderer worker copies retained media planes
+/// One slot is required for each distinct compact YUV frame recorded into the same
+/// command buffer. Repeated layers share the immutable uploaded content of
+/// their retained source frame. Slots survive candidate clears so playback
+/// updates existing textures instead of allocating per layer and frame.
+/// A bounded renderer worker copies retained media planes
 /// into reusable mapped transfer buffers before the realtime caller records a
 /// candidate. Viewer execution then records only buffer-to-texture commands;
 /// successful submissions remap the transfer buffer asynchronously and return
@@ -45,7 +47,7 @@ pub(crate) struct CpuYuvUploadRetirement {
     outcome: Option<crate::ViewerCpuYuvUploadWorkerExit>,
     _slots: Vec<CpuYuvUploadSlot>,
     _prepared: VecDeque<CpuYuvUploadWorkerResult>,
-    _recorded_uploads: Vec<(CpuYuvFrameUploadKey, CpuYuvPreparedUpload)>,
+    _recorded_uploads: Vec<RecordedCpuYuvUpload>,
 }
 
 impl CpuYuvUploadRetirement {
@@ -75,7 +77,7 @@ struct CpuYuvUploadState {
     prepared: VecDeque<CpuYuvUploadWorkerResult>,
     result_receiver: mpsc::Receiver<CpuYuvUploadWorkerResult>,
     returned_sender: mpsc::Sender<wgpu::Buffer>,
-    recorded_uploads: Vec<(CpuYuvFrameUploadKey, CpuYuvPreparedUpload)>,
+    recorded_uploads: Vec<RecordedCpuYuvUpload>,
     completion_waker: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -149,7 +151,6 @@ struct CpuYuvFrameUploadKey {
     frame_identity: usize,
 }
 
-#[derive(Clone)]
 struct CpuYuvPreparedUpload {
     frame: Arc<CpuYuvFrame>,
     buffer: wgpu::Buffer,
@@ -157,6 +158,20 @@ struct CpuYuvPreparedUpload {
     chroma: PreparedPlaneCopy,
     chroma_v: Option<PreparedPlaneCopy>,
     alpha: Option<PreparedPlaneCopy>,
+}
+
+/// Immutable plane content shared only within one command-buffer candidate.
+/// Retaining the prepared frame also prevents its pointer identity from being
+/// recycled while another layer may still request these views.
+struct RecordedCpuYuvUpload {
+    key: CpuYuvFrameUploadKey,
+    prepared: CpuYuvPreparedUpload,
+    planes: CpuYuvUploadedPlaneViews,
+}
+
+pub(crate) struct CpuYuvMaterializationRecord {
+    pub(crate) output: GpuColorFrameHandle,
+    pub(crate) stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -269,8 +284,8 @@ impl CpuYuvUploadRuntime {
                 state.returned_sender.clone(),
             )
         };
-        for (_, upload) in uploads {
-            let buffer = upload.buffer;
+        for upload in uploads {
+            let buffer = upload.prepared.buffer;
             let returned_sender = returned_sender.clone();
             let callback_buffer = buffer.clone();
             encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Write, .., move |result| {
@@ -309,8 +324,28 @@ impl CpuYuvUploadRuntime {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         frame: &Arc<CpuYuvFrame>,
-    ) -> Result<CpuYuvUploadedPlaneViews, CpuYuvMaterializationError> {
-        let prepared = self.take_or_schedule_prepared(frame)?;
+    ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
+        if !self.prepare(frame)? {
+            return Err(CpuYuvMaterializationError::UploadPending);
+        }
+        let mut state = self.state.lock();
+        let frame_key = Self::frame_key(&state, frame);
+        if let Some(upload) = state.recorded_uploads.iter().find(|upload| upload.key == frame_key) {
+            return Ok((upload.planes.clone(), false));
+        }
+        let index = state
+            .prepared
+            .iter()
+            .position(|result| result.key == frame_key)
+            .ok_or(CpuYuvMaterializationError::UploadPending)?;
+        let result = state
+            .prepared
+            .remove(index)
+            .ok_or(CpuYuvMaterializationError::UploadWorkerUnavailable)?;
+        let prepared = result.outcome.map_err(CpuYuvMaterializationError::UploadPreparation)?;
+        if !Arc::ptr_eq(&prepared.frame, frame) {
+            return Err(CpuYuvMaterializationError::UploadIdentityMismatch);
+        }
         let key = CpuYuvUploadKey {
             width: frame.width,
             height: frame.height,
@@ -322,7 +357,6 @@ impl CpuYuvUploadRuntime {
         };
         let (luma_format, interleaved_chroma_format, planar_chroma_format) =
             plane_formats(frame.sample_format);
-        let mut state = self.state.lock();
         let slot_index = state.next_slot;
         state.next_slot = state.next_slot.saturating_add(1);
         if state.slots.get(slot_index).is_none_or(|slot| slot.key != key) {
@@ -392,6 +426,9 @@ impl CpuYuvUploadRuntime {
             }
         }
         let slot = &state.slots[slot_index];
+        // CPU ownership transfers once. Repeated layers reuse these immutable
+        // textures; finish_candidate installs one remap after GPU completion.
+        prepared.buffer.unmap();
         record_prepared_plane_copy(encoder, &prepared.buffer, &slot.luma, prepared.luma);
         record_prepared_plane_copy(encoder, &prepared.buffer, &slot.chroma, prepared.chroma);
         if let Some(chroma_v_copy) = prepared.chroma_v {
@@ -408,9 +445,14 @@ impl CpuYuvUploadRuntime {
         }
         // Views describe immutable texture extent/format, not frame content.
         // Retain them with the physical slot instead of entering the native
-        // object allocator three times on every realtime candidate.
+        // object allocator for every plane on every realtime candidate.
         let views = slot.views.clone();
-        Ok(views)
+        state.recorded_uploads.push(RecordedCpuYuvUpload {
+            key: frame_key,
+            prepared,
+            planes: views.clone(),
+        });
+        Ok((views, true))
     }
 
     fn prepare_plane_pass(
@@ -486,7 +528,7 @@ impl CpuYuvUploadRuntime {
 
     fn input_is_ready(state: &CpuYuvUploadState, key: CpuYuvFrameUploadKey) -> bool {
         state.prepared.iter().any(|result| result.key == key)
-            || state.recorded_uploads.iter().any(|(recorded_key, _)| *recorded_key == key)
+            || state.recorded_uploads.iter().any(|upload| upload.key == key)
     }
 
     /// Project an already ordered owner horizon into the existing bounded
@@ -653,48 +695,6 @@ impl CpuYuvUploadRuntime {
         Ok(false)
     }
 
-    fn take_or_schedule_prepared(
-        &self,
-        frame: &Arc<CpuYuvFrame>,
-    ) -> Result<CpuYuvPreparedUpload, CpuYuvMaterializationError> {
-        {
-            let state = self.state.lock();
-            let key = Self::frame_key(&state, frame);
-            if let Some((_, upload)) =
-                state.recorded_uploads.iter().find(|(candidate, _)| *candidate == key)
-            {
-                return Ok(upload.clone());
-            }
-        }
-        if !self.prepare(frame)? {
-            return Err(CpuYuvMaterializationError::UploadPending);
-        }
-        let mut state = self.state.lock();
-        Self::drain_worker_results(&mut state);
-        let key = Self::frame_key(&state, frame);
-        let index = state
-            .prepared
-            .iter()
-            .position(|result| result.key == key)
-            .ok_or(CpuYuvMaterializationError::UploadPending)?;
-        let result = state
-            .prepared
-            .remove(index)
-            .ok_or(CpuYuvMaterializationError::UploadWorkerUnavailable)?;
-        let prepared = result.outcome.map_err(CpuYuvMaterializationError::UploadPreparation)?;
-        if !Arc::ptr_eq(&prepared.frame, frame) {
-            return Err(CpuYuvMaterializationError::UploadIdentityMismatch);
-        }
-        // Transfer CPU ownership to the command encoder exactly once. Until
-        // this point a discarded speculative result can return directly to the
-        // mapped worker pool without touching the native allocator.
-        prepared.buffer.unmap();
-        // One immutable transfer is shared by every use of this source in the
-        // candidate. Only finish_candidate installs its single remap callback.
-        state.recorded_uploads.push((key, prepared.clone()));
-        Ok(prepared)
-    }
-
     fn drain_worker_results(state: &mut CpuYuvUploadState) {
         while let Ok(result) = state.result_receiver.try_recv() {
             state.pending.retain(|pending| *pending != result.key);
@@ -725,7 +725,7 @@ pub(crate) fn record_cpu_yuv_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<GpuColorFrameHandle, CpuYuvMaterializationError> {
+) -> Result<CpuYuvMaterializationRecord, CpuYuvMaterializationError> {
     let source_color_space = frame
         .source_color
         .color_space()
@@ -807,7 +807,7 @@ pub(crate) fn record_cpu_yuv_frame(
         video_sampling,
         encoded_source.clone(),
     )?;
-    let planes = uploads.upload(device, encoder, frame)?;
+    let (planes, uploaded) = uploads.upload(device, encoder, frame)?;
     let prepared = uploads.prepare_plane_pass(decoder, device, &plan, &planes)?;
     let backend = runtime
         .prepare_fused_yuv_input(
@@ -854,7 +854,24 @@ pub(crate) fn record_cpu_yuv_frame(
         debug_assert!(displaced.is_none());
         return Err(CpuYuvMaterializationError::LiveResourceCollision);
     }
-    Ok(working)
+    Ok(CpuYuvMaterializationRecord {
+        output: working,
+        stage_diagnostics: RenderColorStageDiagnostics {
+            // An upload stage denotes one complete source picture, including
+            // every plane, rather than each buffer-to-texture copy command.
+            total_stages: 1 + u64::from(uploaded),
+            upload_stages: u64::from(uploaded),
+            gpu_color_stages: 1,
+            stage_pixels: u64::from(output_width)
+                .saturating_mul(u64::from(output_height))
+                .saturating_add(if uploaded {
+                    u64::from(frame.width).saturating_mul(u64::from(frame.height))
+                } else {
+                    0
+                }),
+            ..RenderColorStageDiagnostics::default()
+        },
+    })
 }
 
 fn plane_formats(
@@ -1308,6 +1325,160 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a real GPU"]
+    fn repeated_candidate_source_shares_upload_without_aliasing_distinct_frames() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO");
+        let context = pollster::block_on(crate::GpuContext::new()).expect("physical adapter");
+        eprintln!("shared CPU YUV adapter: {:?}", context.adapter.get_info());
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let path = fixture.path().join("distinct.y4m");
+        let codes = [64_u8, 192];
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\n".to_vec();
+        for code in codes {
+            bytes.extend_from_slice(b"FRAME\n");
+            bytes.extend_from_slice(&[code; 8]);
+            bytes.extend_from_slice(&[128; 4]);
+        }
+        std::fs::write(&path, bytes).expect("fixture");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut frames = Vec::new();
+        for index in 0..2 {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                mondrian_core::SourceSampleTarget::covering(
+                    mondrian_core::TimelineTime::new(index, 25).expect("sample time"),
+                ),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    mondrian_core::ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                )
+                .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            );
+            request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+            let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+                decoder.decode_cancellable(request, || false).expect("software frame")
+            else {
+                panic!("compact frame required")
+            };
+            frames.push(Arc::new(frame));
+        }
+        decoder.clear();
+        drop(decoder);
+        let uploads = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !uploads.prepare_candidate(&frames).expect("admit sources") {
+            assert!(std::time::Instant::now() < deadline, "prepare deadline");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let yuv = GpuNativeYuvDecoder::new(&context.device);
+        let mut color = RenderGpuOutputBoundaryRuntime::new().expect("color owner");
+        let transform = RenderInputTransform::to_working_gpu(
+            mondrian_core::WorkingColorSpace::LinearRec2020,
+            false,
+            mondrian_core::ColorEngine::mondrian_standard(),
+        );
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let mut reads = Vec::new();
+        let mut stages = RenderColorStageDiagnostics::default();
+        for (index, width, height, expected_uploads) in [(0, 4, 2, 1), (0, 2, 1, 0), (1, 4, 2, 1)] {
+            let record = record_cpu_yuv_frame(
+                &yuv,
+                &uploads,
+                &frames[index],
+                &transform,
+                width,
+                height,
+                &mut color,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+            )
+            .expect("production materialization");
+            assert_eq!(record.stage_diagnostics.upload_stages, expected_uploads);
+            assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+            stages.accumulate(record.stage_diagnostics);
+            let plan = crate::GpuColorFrameReadbackPlan::encoded_rgba32float(record.output.clone())
+                .expect("diagnostic readback");
+            let output = color.frame_table().get(&record.output).expect("working output");
+            let read = crate::GpuColorFrameReadback::record_copy(
+                &context.device,
+                &mut encoder,
+                &plan,
+                output,
+            )
+            .expect("copy working output");
+            reads.push((index, plan, read));
+        }
+        assert_eq!(stages.total_stages, 5);
+        assert_eq!(stages.upload_stages, 2);
+        assert_eq!(stages.gpu_color_stages, 3);
+        assert_eq!(stages.stage_pixels, 34);
+        assert_eq!(uploads.state.lock().slots.len(), 2);
+        uploads.finish_candidate(&encoder);
+        context.queue.submit([encoder.finish()]);
+        let mut pixels = Vec::new();
+        for (index, plan, read) in reads {
+            let (sender, receiver) = mpsc::channel();
+            read.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .expect("real completion");
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("callback")
+                .expect("map");
+            let actual = plan
+                .unpack_mapped_rgba32float(
+                    &read.slice(..).get_mapped_range().expect("mapped bytes"),
+                )
+                .expect("working pixels");
+            read.unmap();
+            pixels.push((index, actual));
+        }
+        let mut retirement = uploads.into_retirement();
+        while retirement.poll().is_none() {
+            assert!(std::time::Instant::now() < deadline, "retirement deadline");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        for (index, actual) in pixels {
+            // Independent limited-range neutral source, followed by production CPU OCIO.
+            let encoded = (f32::from(codes[index]) - 16.0) / 219.0;
+            let mut expected = [encoded, encoded, encoded, 1.0];
+            mondrian_core::ColorEngine::mondrian_standard()
+                .convert_identity_float(
+                    &mut expected,
+                    mondrian_core::ColorSpace::Rec709.into(),
+                    mondrian_core::WorkingColorSpace::LinearRec2020.into(),
+                )
+                .expect("CPU reference");
+            for pixel in actual.chunks_exact(4) {
+                for channel in 0..4 {
+                    assert!(
+                        pixel[channel].is_finite()
+                            && (pixel[channel] - expected[channel]).abs() <= 1.0e-3,
+                        "distinct source {index}: {pixel:?} vs {expected:?}"
+                    );
+                }
+            }
+        }
+        eprintln!("shared CPU YUV: working_passes=3 physical_uploads=2 slots=2 owner=returned");
+    }
+
+    #[test]
     #[ignore = "requires a real GPU and MONDRIAN_YUVA12_DECODE_FIXTURE"]
     fn yuva12_cpu_export_and_fused_gpu_input_match_for_actual_decode() {
         use mondrian_media::preview::*;
@@ -1382,7 +1553,7 @@ mod tests {
             mondrian_core::ColorEngine::mondrian_standard(),
         );
         let mut encoder = context.device.create_command_encoder(&Default::default());
-        let working = record_cpu_yuv_frame(
+        let recorded = record_cpu_yuv_frame(
             &yuv_decoder,
             &uploads,
             &frame,
@@ -1395,6 +1566,9 @@ mod tests {
             &mut encoder,
         )
         .expect("production fused YUVA/OCIO");
+        assert_eq!(recorded.stage_diagnostics.upload_stages, 1);
+        assert_eq!(recorded.stage_diagnostics.gpu_color_stages, 1);
+        let working = recorded.output;
         assert_eq!(
             working.descriptor().alpha,
             ColorFrameAlpha::StraightCoverage
@@ -1931,9 +2105,24 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             let mut encoder = context.device.create_command_encoder(&Default::default());
-            views.push(
-                runtime.upload(&context.device, &mut encoder, &frame).expect("record upload"),
+            let (planes, uploaded) =
+                runtime.upload(&context.device, &mut encoder, &frame).expect("record upload");
+            assert!(
+                uploaded,
+                "each new candidate must record its own physical upload"
             );
+            let (repeated, uploaded) =
+                runtime.upload(&context.device, &mut encoder, &frame).expect("reuse planes");
+            assert!(
+                !uploaded,
+                "repeated layer must share the candidate's plane content"
+            );
+            assert_eq!(planes.luma, repeated.luma);
+            assert_eq!(planes.chroma, repeated.chroma);
+            assert_eq!(planes.chroma_v, repeated.chroma_v);
+            assert_eq!(planes.alpha, repeated.alpha);
+            assert_eq!(runtime.state.lock().slots.len(), 1);
+            views.push(planes);
             bindings.push(
                 runtime
                     .prepare_plane_pass(

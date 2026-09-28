@@ -4207,6 +4207,20 @@ Visible strided plane slices remain the upload contract but are not allocation
 size evidence. The existing Playback ring and Preview frame store consume this
 same byte count; an image exceeding the ring's unchanged budget is rejected.
 
+Within one recorded Viewer candidate, repeated layers of the same retained
+compact frame share its immutable uploaded plane textures. A distinct retained
+frame uses a different slot even when extent and format match. Candidate finish,
+discard, and generation clear retire this content identity; reusable allocations
+do not establish content validity in the next candidate. Each distinct transfer
+buffer is remapped once after actual submission completion through the existing
+upload owner. Materialization returns stage diagnostics at the recording site:
+one upload stage covers all source-picture planes, and one GPU color stage covers
+each fused YUV/OCIO working output. Repeated layers count their separate working
+conversion but cannot count an upload they did not record. Viewer accumulates
+these records into its existing candidate evidence. Compact software input is
+therefore visible as CPU-to-GPU transfer, never inferred to be hardware-resident
+from a zero upload count.
+
 The NVIDIA Vulkan consumer publishes a CUDA ordinal only after matching CUDA and
 Vulkan device UUIDs and checking external-memory/semaphore support on the actual
 renderer device. It copies NV12/P010 planes to a Vulkan-owned storage buffer,
