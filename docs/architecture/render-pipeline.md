@@ -1786,6 +1786,19 @@ terminates the attempt, while only total-deadline expiry records
 backoff. Map, unpack, planning, admission, or recording failures remain
 route-local and cannot poison required heterogeneous execution.
 
+Export serialization borrows the completed mapped buffer under the existing
+readback lease. It does not first clone the entire mapped image into a CPU byte
+raster. The mapping view is released before unmap on success, rejection,
+cancellation or unwind; serialization cannot return a reference into that
+mapping. The caller still checks attempt cancellation before publication and
+consumes the same GPU/owner shutdown. High-depth UNORM serialization reads
+visible strided rows directly, rejects the first logical non-finite component,
+and packs fixed batches using the same single UNORM quantizer as scalar tails.
+Batch validation separates rejection from arithmetic so the compiler can
+vectorize without platform-specific intrinsics, alignment assumptions or a
+second color interpreter. Padding is not a sample. All sixteen-bit code points,
+rounding thresholds and neighboring Float32 values retain the same packed bytes.
+
 Export readback is serialized through one resolved export frame contract.
 Media-file delivery selects it from delivery sample depth: 8-bit delivery
 writes RGBA8 raw-video bytes, while

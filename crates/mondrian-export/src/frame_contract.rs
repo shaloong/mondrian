@@ -240,20 +240,51 @@ impl ExportFrameContract {
             .take(height as usize)
             .enumerate()
         {
-            for (index_in_row, (float_bytes, packed_bytes)) in source[..row_len]
+            // Validate a fixed batch before quantizing it. Separating the rare
+            // rejection branch from per-channel arithmetic lets the compiler
+            // vectorize the unchanged UNORM rule without alignment assumptions,
+            // platform-specific instructions or a full-frame float allocation.
+            const BATCH: usize = 16;
+            let source = &source[..row_len];
+            let mut source_batches = source.chunks_exact(BATCH * 4);
+            let mut destination_batches = destination.chunks_exact_mut(BATCH * 2);
+            for (batch_index, (source, destination)) in
+                source_batches.by_ref().zip(destination_batches.by_ref()).enumerate()
+            {
+                let values: [f32; BATCH] = std::array::from_fn(|lane| {
+                    let start = lane * 4;
+                    f32::from_le_bytes(
+                        source[start..start + 4].try_into().expect("complete component"),
+                    )
+                });
+                if !values.iter().fold(true, |finite, value| finite & value.is_finite()) {
+                    let lane = values
+                        .iter()
+                        .position(|value| !value.is_finite())
+                        .expect("rejected batch has a non-finite component");
+                    return Err(ExportFramePackingError::NonFiniteComponent {
+                        component_index: row_index * components_per_row
+                            + batch_index * BATCH
+                            + lane,
+                    });
+                }
+                let packed = values.map(|value| quantize_unorm16(value).to_le());
+                destination.copy_from_slice(bytemuck::cast_slice(&packed));
+            }
+            let complete_components = components_per_row / BATCH * BATCH;
+            for (tail_index, (float_bytes, packed_bytes)) in source_batches
+                .remainder()
                 .chunks_exact(4)
-                .zip(destination.chunks_exact_mut(2))
+                .zip(destination_batches.into_remainder().chunks_exact_mut(2))
                 .enumerate()
             {
-                let value = f32::from_le_bytes([
-                    float_bytes[0],
-                    float_bytes[1],
-                    float_bytes[2],
-                    float_bytes[3],
-                ]);
+                let value =
+                    f32::from_le_bytes(float_bytes.try_into().expect("complete tail component"));
                 if !value.is_finite() {
                     return Err(ExportFramePackingError::NonFiniteComponent {
-                        component_index: row_index * components_per_row + index_in_row,
+                        component_index: row_index * components_per_row
+                            + complete_components
+                            + tail_index,
                     });
                 }
                 packed_bytes.copy_from_slice(&quantize_unorm16(value).to_le_bytes());
@@ -551,7 +582,14 @@ mod tests {
     fn direct_rgba32float_readback_preserves_all_unorm16_codes_and_ignores_padding() {
         let mut samples: Vec<f32> =
             (u16::MIN..=u16::MAX).map(|code| f32::from(code) / 65_535.0).collect();
+        for code in u16::MIN..u16::MAX {
+            let threshold = (f32::from(code) + 0.5) / 65_535.0;
+            samples.extend([threshold.next_down(), threshold, threshold.next_up()]);
+        }
         samples.extend([-f32::MAX, -0.0, 1.5, f32::MAX]);
+        while !samples.len().is_multiple_of(4) {
+            samples.push(f32::from_bits(1));
+        }
         let width = (samples.len() / 4) as u32;
         let row_len = samples.len() * 4;
         let stride = row_len + 4;
@@ -599,6 +637,42 @@ mod tests {
                 contract.pack_rgba32float_readback(&mapped, 1, 2, 24),
                 Err(ExportFramePackingError::NonFiniteComponent { component_index: 5 })
             );
+        }
+    }
+
+    #[test]
+    fn direct_readback_reports_first_non_finite_component_in_every_batch_lane_and_tail() {
+        let contract = ExportFrameContract::EncodedRgba16Unorm;
+        for width in [1_u32, 3, 4, 5, 7, 8, 9] {
+            let components = width as usize * 4;
+            let stride = width as usize * 16 + 3;
+            for row in 0..2 {
+                for bad_lane in 0..components {
+                    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                        // Prefix and row padding deliberately make both rows
+                        // unaligned. Neither prefix nor padding is a sample.
+                        let mut storage = vec![0xff; 1 + stride * 2];
+                        let mapped = &mut storage[1..];
+                        for y in 0..2 {
+                            for lane in 0..components {
+                                let start = y * stride + lane * 4;
+                                mapped[start..start + 4].copy_from_slice(&0.5_f32.to_le_bytes());
+                            }
+                        }
+                        let start = row * stride + bad_lane * 4;
+                        mapped[start..start + 4].copy_from_slice(&bad.to_le_bytes());
+                        // A later rejection must not hide the first logical index.
+                        let last = stride + (components - 1) * 4;
+                        mapped[last..last + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+                        assert_eq!(
+                            contract.pack_rgba32float_readback(mapped, width, 2, stride as u32),
+                            Err(ExportFramePackingError::NonFiniteComponent {
+                                component_index: row * components + bad_lane,
+                            })
+                        );
+                    }
+                }
+            }
         }
     }
 

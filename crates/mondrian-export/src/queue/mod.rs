@@ -827,13 +827,16 @@ impl Drop for ExportGpuReadbackMapLease<'_> {
     }
 }
 
-fn map_readback_buffer_sync(
+/// Serialize while the completed GPU mapping is borrowed. The view drops
+/// before the lease unmaps on success, rejection, cancellation or unwind.
+fn with_mapped_readback<T>(
     device: &wgpu::Device,
     readback: &wgpu::Buffer,
     submission_index: &wgpu::SubmissionIndex,
     cancellation: &ExecutionCancellationToken,
     deadline: Instant,
-) -> Result<Vec<u8>, ExportGpuOutputExecutionError> {
+    serialize: impl FnOnce(&[u8]) -> Result<T, ExportGpuOutputExecutionError>,
+) -> Result<T, ExportGpuOutputExecutionError> {
     let slice = readback.slice(..);
     let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -859,12 +862,12 @@ fn map_readback_buffer_sync(
     let mapped = slice
         .get_mapped_range()
         .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
-    let bytes = mapped.to_vec();
-    drop(mapped);
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
     }
-    Ok(bytes)
+    let serialized = serialize(&mapped);
+    drop(mapped);
+    serialized
 }
 
 fn accept_export_gpu_readback_poll(
@@ -983,56 +986,59 @@ fn execute_export_gpu_output_boundary_with_backend(
     let deadline = Instant::now()
         .checked_add(EXPORT_GPU_READBACK_TIMEOUT)
         .ok_or(ExportGpuOutputExecutionError::DeviceTimedOut)?;
-    let mapped = map_readback_buffer_sync(
+    let pipe_bytes = with_mapped_readback(
         &backend.context.device,
         &readback_buffer,
         &submission_index,
         cancellation,
         deadline,
-    )?;
-    let pipe_bytes = match boundary_texture_format {
-        GpuColorFrameTextureFormat::Rgba16Unorm => {
-            return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
-        }
-        GpuColorFrameTextureFormat::Rgba8Unorm => {
-            let actual = readback_plan
-                .unpack_mapped_rgba8(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            frame_contract.pack_rgba8(actual.rgba())?
-        }
-        GpuColorFrameTextureFormat::Rgba32Float
-            if matches!(frame_contract, ExportFrameContract::EncodedRgba16Unorm)
-                && !legalizer.is_active() =>
-        {
-            frame_contract.pack_rgba32float_readback(
-                &mapped,
-                readback_plan.extent.width,
-                readback_plan.extent.height,
-                readback_plan.padded_bytes_per_row,
-            )?
-        }
-        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
-            let mut f32_data = match boundary_texture_format {
-                GpuColorFrameTextureFormat::Rgba16Float => {
-                    readback_plan.unpack_mapped_rgba16float(&mapped)
+        |mapped| {
+            Ok(match boundary_texture_format {
+                GpuColorFrameTextureFormat::Rgba16Unorm => {
+                    return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
                 }
-                _ => readback_plan.unpack_mapped_rgba32float(&mapped),
-            }
-            .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            if legalizer.is_active() {
-                let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
-                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
-                legalize_encoded_rgba_f32(
-                    bytemuck::cast_slice_mut(&mut f32_data),
-                    compliance,
-                    legalizer,
-                )
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            }
-            frame_contract.pack_rgba_f32(&f32_data)?
-        }
-    };
+                GpuColorFrameTextureFormat::Rgba8Unorm => {
+                    let actual = readback_plan
+                        .unpack_mapped_rgba8(mapped)
+                        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    frame_contract.pack_rgba8(actual.rgba())?
+                }
+                GpuColorFrameTextureFormat::Rgba32Float
+                    if matches!(frame_contract, ExportFrameContract::EncodedRgba16Unorm)
+                        && !legalizer.is_active() =>
+                {
+                    frame_contract.pack_rgba32float_readback(
+                        mapped,
+                        readback_plan.extent.width,
+                        readback_plan.extent.height,
+                        readback_plan.padded_bytes_per_row,
+                    )?
+                }
+                GpuColorFrameTextureFormat::Rgba16Float
+                | GpuColorFrameTextureFormat::Rgba32Float => {
+                    let mut f32_data = match boundary_texture_format {
+                        GpuColorFrameTextureFormat::Rgba16Float => {
+                            readback_plan.unpack_mapped_rgba16float(mapped)
+                        }
+                        _ => readback_plan.unpack_mapped_rgba32float(mapped),
+                    }
+                    .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    if legalizer.is_active() {
+                        let compliance =
+                            SignalComplianceContract::normalized_rgb(boundary.output_color_space())
+                                .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+                        legalize_encoded_rgba_f32(
+                            bytemuck::cast_slice_mut(&mut f32_data),
+                            compliance,
+                            legalizer,
+                        )
+                        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    }
+                    frame_contract.pack_rgba_f32(&f32_data)?
+                }
+            })
+        },
+    )?;
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
     }
@@ -10845,6 +10851,72 @@ mod tests {
                 ExportGpuOutputFallbackReason::ReadbackMapFailed
             ))
         );
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU"]
+    fn mapped_readback_releases_view_and_mapping_after_rejection_and_cancellation() {
+        let runtime =
+            TokioRuntimeBuilder::new_current_thread().enable_all().build().expect("runtime");
+        let context = runtime.block_on(GpuContext::new()).expect("physical adapter");
+        eprintln!(
+            "borrowed readback adapter: {:?}",
+            context.adapter.get_info()
+        );
+        let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("borrowed-export-readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let values = [1.0_f32, 0.5, f32::NAN, 1.0];
+        let bytes: Vec<_> = values.into_iter().flat_map(f32::to_le_bytes).collect();
+        context.queue.write_buffer(&buffer, 0, &bytes);
+        let submission = context.queue.submit([]);
+        let cancellation = ExecutionCancellationToken::new();
+        let error = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &cancellation,
+            Instant::now() + Duration::from_secs(30),
+            |mapped| {
+                ExportFrameContract::EncodedRgba16Unorm
+                    .pack_rgba32float_readback(mapped, 1, 1, 16)
+                    .map_err(Into::into)
+            },
+        );
+        assert_eq!(
+            error,
+            Err(ExportGpuOutputExecutionError::Packing(
+                ExportFramePackingError::NonFiniteComponent { component_index: 2 },
+            ))
+        );
+        let canceled = ExecutionCancellationToken::new();
+        canceled.cancel();
+        let error = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &canceled,
+            Instant::now() + Duration::from_secs(30),
+            |_| -> Result<(), ExportGpuOutputExecutionError> {
+                panic!("canceled mapping cannot reach serialization")
+            },
+        );
+        assert_eq!(error, Err(ExportGpuOutputExecutionError::Canceled));
+        // Remapping the same physical buffer proves both views and mapping
+        // leases have actually been released, including the canceled callback.
+        let actual = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &cancellation,
+            Instant::now() + Duration::from_secs(30),
+            |mapped| Ok(mapped.to_vec()),
+        )
+        .expect("fresh mapping after rejection and cancellation");
+        assert_eq!(actual, bytes);
     }
 
     #[test]
