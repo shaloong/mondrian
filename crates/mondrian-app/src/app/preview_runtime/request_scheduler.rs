@@ -501,9 +501,9 @@ struct FutureMediaPrefixPlan {
     ready_media_frames: usize,
     preservable_media_frames: usize,
     window_proven_blank: bool,
-    /// A missing complete picture needs more request admissions than remain.
-    /// Physical grant exhaustion independently bounds the retained window.
-    request_limit_reached: bool,
+    /// The next complete picture exceeds the remaining request or physical
+    /// grant. Farther work sharing its worker cannot cross that frontier.
+    admission_limit_reached: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,7 +532,7 @@ impl Default for FutureMediaPrefixPlan {
             ready_media_frames: 0,
             preservable_media_frames: 0,
             window_proven_blank: true,
-            request_limit_reached: false,
+            admission_limit_reached: false,
         }
     }
 }
@@ -1048,10 +1048,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 reserved_after_prefix,
             );
             let window_proven_blank = plan.window_proven_blank;
-            let request_limit_reached = plan.request_limit_reached;
+            let admission_limit_reached = plan.admission_limit_reached;
             let scheduled =
                 self.admit_future_media_prefix(plan, preroll_deadline_at, playback_direction);
-            (window_proven_blank, scheduled, request_limit_reached)
+            (window_proven_blank, scheduled, admission_limit_reached)
         };
         let mut admitted_steady_window = None;
         observation.next("prefetch-cold");
@@ -1090,14 +1090,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 let cold_reservations = activation_plan.requests.clone();
                 drop(activation_plan);
                 observation.next("prefetch-window");
-                let (window_proven_blank, scheduled, request_limit_reached) =
+                let (window_proven_blank, scheduled, admission_limit_reached) =
                     admit_steady_prefix(remaining_prefetch_jobs, &cold_reservations);
                 admitted_steady_window = Some(window_proven_blank);
                 remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
                 observation.next("prefetch-cold");
-                activation_plan = plan_activation(if request_limit_reached {
-                    // Do not give a smaller far closure the admission that
-                    // could not cover the next complete rolling picture.
+                activation_plan = plan_activation(if admission_limit_reached {
+                    // A smaller far closure cannot cross the next complete
+                    // rolling picture's request or physical grant frontier.
                     0
                 } else {
                     remaining_prefetch_jobs
@@ -1486,6 +1486,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     )
             });
             if !cold_tail_fits {
+                plan.admission_limit_reached = true;
                 break;
             }
             let prior_requests_fit = plan.requests.iter().all(|request| {
@@ -1496,6 +1497,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 )
             });
             if !prior_requests_fit {
+                plan.admission_limit_reached = true;
                 break;
             }
             let required_requests = missing.len();
@@ -1509,7 +1511,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     )
                 });
             if !complete_frame_fits {
-                plan.request_limit_reached = required_requests > remaining_jobs;
+                plan.admission_limit_reached = true;
                 // Never publish a partial physical closure. A multi-layer
                 // native frame must acquire every surface before nearer work
                 // can consume any of its grant.

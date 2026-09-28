@@ -5904,6 +5904,38 @@ fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
     assert!(service.scheduler.mark_execution_completed(held_execution));
     let _ = service.scheduler.resolve_execution(held_execution, false);
 
+    // Queue slots are now free, but a resident immediate picture leaves only
+    // one physical entry. The next rolling picture needs two new inputs. A
+    // one-input cold activation on the same worker must not cross that grant
+    // frontier just because its own smaller closure fits.
+    service.frame_store.replace(test_cpu_frame_store(3, 640 * 1024 * 1024, 6));
+    for (index, key) in immediate_keys.iter().enumerate() {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+        service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+            key.decode.source().clone(),
+            if index == 0 {
+                MediaPreviewWorkerLane::NonPlayback
+            } else {
+                MediaPreviewWorkerLane::Playback
+            },
+        );
+    }
+    schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+    assert!(
+        !service.scheduler.has_pending_key(&far_keys[0]),
+        "physical headroom rejection must protect the rolling frontier from a smaller cold open"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 0);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservations,
+        0
+    );
+
     service.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("remove preview test root");

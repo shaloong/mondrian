@@ -2035,9 +2035,12 @@ prefix. That prefix deducts the missing cold closure from the same physical
 headroom before accepting near residency; it cannot consume the entire grant
 and starve the source it must later present. Shared and already-owned keys are
 charged once. Cold work is then replanned against the remaining actual capacity.
-The next missing rolling picture retains its request-admission frontier:
-one spare admission cannot go to a smaller far closure when that nearer picture
-needs two. Physical grant exhaustion still bounds the retained near window.
+The next missing rolling picture retains one admission frontier for both queue
+slots and physical entry, byte and decoder-resource grants. One spare slot or
+physical entry cannot go to a smaller far closure when that nearer picture needs
+two. A failure to fit the reserved cold tail or previously planned near requests
+also closes this frontier; the scheduler cannot mistake physical refusal for an
+unblocked prefix and then admit the smaller cold plan independently.
 On a single-worker topology, opposite logical lanes share the same actual owner.
 These rules avoid placing a long source open ahead of the current source's next decode
 without changing worker affinity, physical grants, quality or Priming order.
