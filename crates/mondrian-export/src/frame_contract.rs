@@ -1,8 +1,8 @@
 //! Typed storage contract for frames crossing the FFmpeg raw-video pipe.
 //!
 //! Renderer execution precision and pipe sample representation are related but
-//! distinct facts. In particular, a renderer `Rgba16Float` texture may be the
-//! precision-preserving source for an encoded 16-bit UNORM pipe; that does not
+//! distinct facts. In particular, a renderer `Rgba32Float` texture preserves
+//! the precision needed for an encoded 16-bit UNORM pipe; that does not
 //! make `rgba64le` a floating-point format.
 
 use half::f16;
@@ -64,9 +64,9 @@ pub enum ExportFramePackingError {
         /// Component index in interleaved RGBA order.
         component_index: usize,
     },
-    /// A mapped RGBA16F readback does not contain every complete image row.
-    #[error("export RGBA16F readback row layout or byte count is invalid")]
-    InvalidRgba16FloatReadback,
+    /// A mapped RGBA32F readback does not contain every complete image row.
+    #[error("export RGBA32F readback row layout or byte count is invalid")]
+    InvalidRgba32FloatReadback,
 }
 
 impl ExportFrameContract {
@@ -84,15 +84,16 @@ impl ExportFrameContract {
 
     /// GPU output-boundary texture used before pipe serialization.
     ///
-    /// `EncodedRgba16Unorm` intentionally uses an `Rgba16Float` render target
-    /// so color transforms are not quantized until the explicit UNORM pack.
+    /// `EncodedRgba16Unorm` uses an `Rgba32Float` render target. Float16
+    /// cannot represent every 12- or 16-bit normalized code value; retaining
+    /// Float32 avoids that extra rounding before the explicit UNORM pack.
     pub const fn gpu_boundary_texture_format(self) -> GpuColorFrameTextureFormat {
         match self {
             Self::EncodedRgba8Unorm => GpuColorFrameTextureFormat::Rgba8Unorm,
-            Self::EncodedRgba16Unorm | Self::FloatMasterRgba16 => {
-                GpuColorFrameTextureFormat::Rgba16Float
+            Self::FloatMasterRgba16 => GpuColorFrameTextureFormat::Rgba16Float,
+            Self::EncodedRgba16Unorm | Self::FloatMasterRgba32 => {
+                GpuColorFrameTextureFormat::Rgba32Float
             }
-            Self::FloatMasterRgba32 => GpuColorFrameTextureFormat::Rgba32Float,
         }
     }
 
@@ -200,10 +201,10 @@ impl ExportFrameContract {
         }
     }
 
-    /// Serialize a padded RGBA16F GPU readback directly into an encoded
+    /// Serialize a padded RGBA32F GPU readback directly into an encoded
     /// RGBA64LE pipe frame. This uses the same finite check and single UNORM
     /// quantization as [`Self::pack_rgba_f32`] without a full-frame f32 raster.
-    pub fn pack_rgba16float_readback(
+    pub fn pack_rgba32float_readback(
         self,
         mapped: &[u8],
         width: u32,
@@ -211,42 +212,51 @@ impl ExportFrameContract {
         padded_bytes_per_row: u32,
     ) -> Result<Vec<u8>, ExportFramePackingError> {
         if self != Self::EncodedRgba16Unorm || width == 0 || height == 0 {
-            return Err(ExportFramePackingError::InvalidRgba16FloatReadback);
+            return Err(ExportFramePackingError::InvalidRgba32FloatReadback);
         }
-        let row_len = (width as usize)
-            .checked_mul(8)
-            .ok_or(ExportFramePackingError::InvalidRgba16FloatReadback)?;
+        let components_per_row = (width as usize)
+            .checked_mul(4)
+            .ok_or(ExportFramePackingError::InvalidRgba32FloatReadback)?;
+        let row_len = components_per_row
+            .checked_mul(4)
+            .ok_or(ExportFramePackingError::InvalidRgba32FloatReadback)?;
         let stride = padded_bytes_per_row as usize;
         let required = stride
             .checked_mul(height as usize)
-            .ok_or(ExportFramePackingError::InvalidRgba16FloatReadback)?;
+            .ok_or(ExportFramePackingError::InvalidRgba32FloatReadback)?;
         if stride == 0 || stride < row_len || mapped.len() < required {
-            return Err(ExportFramePackingError::InvalidRgba16FloatReadback);
+            return Err(ExportFramePackingError::InvalidRgba32FloatReadback);
         }
-        let output_len = row_len
+        let output_row_len = components_per_row
+            .checked_mul(2)
+            .ok_or(ExportFramePackingError::InvalidRgba32FloatReadback)?;
+        let output_len = output_row_len
             .checked_mul(height as usize)
-            .ok_or(ExportFramePackingError::InvalidRgba16FloatReadback)?;
+            .ok_or(ExportFramePackingError::InvalidRgba32FloatReadback)?;
         let mut out = vec![0; output_len];
         for (row_index, (source, destination)) in mapped
             .chunks_exact(stride)
-            .zip(out.chunks_exact_mut(row_len))
+            .zip(out.chunks_exact_mut(output_row_len))
             .take(height as usize)
             .enumerate()
         {
-            for (index_in_row, (half_bytes, packed_bytes)) in source[..row_len]
-                .chunks_exact(2)
+            for (index_in_row, (float_bytes, packed_bytes)) in source[..row_len]
+                .chunks_exact(4)
                 .zip(destination.chunks_exact_mut(2))
                 .enumerate()
             {
-                let value = f16::from_le_bytes([half_bytes[0], half_bytes[1]]).to_f32();
+                let value = f32::from_le_bytes([
+                    float_bytes[0],
+                    float_bytes[1],
+                    float_bytes[2],
+                    float_bytes[3],
+                ]);
                 if !value.is_finite() {
                     return Err(ExportFramePackingError::NonFiniteComponent {
-                        component_index: row_index * (row_len / 2) + index_in_row,
+                        component_index: row_index * components_per_row + index_in_row,
                     });
                 }
-                let bytes = quantize_unorm16(value).to_le_bytes();
-                packed_bytes[0] = bytes[0];
-                packed_bytes[1] = bytes[1];
+                packed_bytes.copy_from_slice(&quantize_unorm16(value).to_le_bytes());
             }
         }
         Ok(out)
@@ -507,6 +517,25 @@ mod tests {
     }
 
     #[test]
+    fn encoded_unorm16_gpu_boundary_preserves_all_pipe_codes() {
+        let contract = ExportFrameContract::EncodedRgba16Unorm;
+        let stored: Vec<f32> = (u16::MIN..=u16::MAX)
+            .map(|code| {
+                let encoded = f32::from(code) / 65_535.0;
+                match contract.gpu_boundary_texture_format() {
+                    GpuColorFrameTextureFormat::Rgba16Float => f16::from_f32(encoded).to_f32(),
+                    GpuColorFrameTextureFormat::Rgba32Float => encoded,
+                    _ => panic!("encoded high-depth output must defer integer quantization"),
+                }
+            })
+            .collect();
+        let packed = contract.pack_rgba_f32(&stored).expect("finite encoded ramp");
+        for (code, bytes) in (u16::MIN..=u16::MAX).zip(packed.chunks_exact(2)) {
+            assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), code);
+        }
+    }
+
+    #[test]
     fn unorm16_clamps_and_quantizes_normalized_float_components() {
         let packed = ExportFrameContract::EncodedRgba16Unorm
             .pack_rgba_f32(&[-0.25, 0.5, 1.0, 1.5])
@@ -519,54 +548,58 @@ mod tests {
     }
 
     #[test]
-    fn direct_rgba16float_readback_matches_float_pack_for_every_finite_half_sample() {
-        let finite_bits: Vec<u16> =
-            (u16::MIN..=u16::MAX).filter(|bits| f16::from_bits(*bits).is_finite()).collect();
-        let width = (finite_bits.len() / 4) as u32;
-        let row_len = finite_bits.len() * 2;
-        let stride = row_len + 8;
-        let mut mapped = vec![0xa5; stride * 2];
+    fn direct_rgba32float_readback_preserves_all_unorm16_codes_and_ignores_padding() {
+        let mut samples: Vec<f32> =
+            (u16::MIN..=u16::MAX).map(|code| f32::from(code) / 65_535.0).collect();
+        samples.extend([-f32::MAX, -0.0, 1.5, f32::MAX]);
+        let width = (samples.len() / 4) as u32;
+        let row_len = samples.len() * 4;
+        let stride = row_len + 4;
+        let mut mapped = vec![0; stride * 2];
         for row in 0..2 {
-            for (index, bits) in finite_bits.iter().enumerate() {
-                mapped[row * stride + index * 2..][..2].copy_from_slice(&bits.to_le_bytes());
+            for (index, sample) in samples.iter().enumerate() {
+                mapped[row * stride + index * 4..][..4].copy_from_slice(&sample.to_le_bytes());
             }
+            mapped[row * stride + row_len..][..4].copy_from_slice(&f32::NAN.to_le_bytes());
         }
-        let expected_samples: Vec<f32> = finite_bits
-            .iter()
-            .cycle()
-            .take(finite_bits.len() * 2)
-            .map(|bits| f16::from_bits(*bits).to_f32())
-            .collect();
+        let expected_samples: Vec<f32> =
+            samples.iter().copied().cycle().take(samples.len() * 2).collect();
         let contract = ExportFrameContract::EncodedRgba16Unorm;
         assert_eq!(
             contract
-                .pack_rgba16float_readback(&mapped, width, 2, stride as u32)
+                .pack_rgba32float_readback(&mapped, width, 2, stride as u32)
                 .expect("direct readback pack"),
             contract.pack_rgba_f32(&expected_samples).expect("float pack")
         );
     }
 
     #[test]
-    fn direct_rgba16float_readback_rejects_truncation_and_non_finite_samples() {
+    fn direct_rgba32float_readback_rejects_invalid_layouts_and_non_finite_samples() {
         let contract = ExportFrameContract::EncodedRgba16Unorm;
-        assert!(matches!(
-            contract.pack_rgba16float_readback(&[0; 15], 1, 2, 8),
-            Err(ExportFramePackingError::InvalidRgba16FloatReadback)
-        ));
-        assert!(matches!(
-            contract.pack_rgba16float_readback(&[0; 16], 2, 1, 8),
-            Err(ExportFramePackingError::InvalidRgba16FloatReadback)
-        ));
-        assert!(matches!(
-            contract.pack_rgba16float_readback(&[], 0, 1, 8),
-            Err(ExportFramePackingError::InvalidRgba16FloatReadback)
-        ));
-        let mut mapped = vec![0; 16];
-        mapped[10..12].copy_from_slice(&f16::INFINITY.to_le_bytes());
-        assert!(matches!(
-            contract.pack_rgba16float_readback(&mapped, 1, 2, 8),
-            Err(ExportFramePackingError::NonFiniteComponent { component_index: 5 })
-        ));
+        for (mapped, width, height, stride) in [
+            (vec![0; 31], 1, 2, 16),
+            (vec![0; 32], 2, 1, 16),
+            (vec![], 0, 1, 16),
+            (vec![], 1, 0, 16),
+            (vec![], 1, 1, 0),
+        ] {
+            assert_eq!(
+                contract.pack_rgba32float_readback(&mapped, width, height, stride),
+                Err(ExportFramePackingError::InvalidRgba32FloatReadback)
+            );
+        }
+        assert_eq!(
+            ExportFrameContract::FloatMasterRgba32.pack_rgba32float_readback(&[0; 16], 1, 1, 16),
+            Err(ExportFramePackingError::InvalidRgba32FloatReadback)
+        );
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut mapped = vec![0; 48];
+            mapped[28..32].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(
+                contract.pack_rgba32float_readback(&mapped, 1, 2, 24),
+                Err(ExportFramePackingError::NonFiniteComponent { component_index: 5 })
+            );
+        }
     }
 
     #[test]

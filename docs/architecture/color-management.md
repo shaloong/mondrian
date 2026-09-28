@@ -1255,10 +1255,11 @@ by current codecs. H.264 High requires 8-bit 4:2:0; HEVC Main/Main10 require
 8/10-bit 4:2:0 respectively; ProRes 422 profiles require 10-bit 4:2:2; ProRes
 4444 profiles require 12-bit 4:4:4. A 10/12-bit delivery uses the internal
 `EncodedRgba16Unorm` export frame contract and `rgba64le` FFmpeg pipe. Its GPU
-output boundary is `Rgba16Float` so the renderer transform is not quantized
-until the single explicit UNORM16 pack, but the pipe itself is never described
-as Float16. `ExportFrameContract` separately defines true Float16 and Float32
-master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
+output boundary is `Rgba32Float`, preserving normalized 12/16-bit code values
+until the single explicit UNORM16 pack. Float16 cannot preserve every such
+code value. Direct padded Float32 readback packing avoids a second full-frame
+Float32 raster; the pipe itself remains integer UNORM16. `ExportFrameContract`
+separately defines true Float16 and Float32 master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
 Those float seams preserve finite extended-range values without normalized
 clamping; UNORM seams validate finite input, clamp once to `[0, 1]`, and
 quantize. Non-finite samples and finite values outside Float16 range fail

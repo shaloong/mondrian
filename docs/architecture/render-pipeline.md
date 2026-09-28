@@ -1789,7 +1789,7 @@ route-local and cannot poison required heterogeneous execution.
 Export readback is serialized through one resolved export frame contract.
 Media-file delivery selects it from delivery sample depth: 8-bit delivery
 writes RGBA8 raw-video bytes, while
-10-bit and 12-bit delivery read the renderer GPU `Rgba16Float` boundary and
+10-bit and 12-bit delivery read the renderer GPU `Rgba32Float` boundary and
 pack normalized channels into the explicitly named `EncodedRgba16Unorm`
 contract and FFmpeg `rgba64le` pipe bytes. Renderer texture precision is not
 pipe sample encoding. The same deep contract module defines true
