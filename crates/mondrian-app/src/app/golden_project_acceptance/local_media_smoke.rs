@@ -1,4 +1,4 @@
-//! Bounded three-phase local software smoke over ordinary product owners.
+//! Bounded local real-media validation over ordinary production owners.
 
 #[path = "local_media_export_native.rs"]
 mod export_native;
@@ -22,6 +22,7 @@ use mondrian_core::{
 };
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
+use mondrian_timeline::sequence::SequencePreviewSettings;
 use mondrian_timeline::SequenceSettings;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -48,8 +49,9 @@ struct LocalMediaFixtureAdmissionError {
 }
 
 const MEMORY_LIMIT: u64 = 6 * 1024 * 1024 * 1024;
-const MAXIMUM_PHASE_SECONDS: u64 = 60;
-const MAXIMUM_ARTIFACTS: u64 = 8;
+const MAXIMUM_PHASE_SECONDS: u64 = 900;
+const MAXIMUM_ARTIFACTS: u64 = 256;
+const MAXIMUM_RETAINED_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MINIMUM_EXPORT_COMPLETION_GRACE_SECONDS: u64 = 90;
 const PROXY_CONTROL_EXPORT_COMPLETION_GRACE_SECONDS: u64 = 360;
 const PROXY_CONTROL_HARD_DEADLINE_SECONDS: u64 = 1_200;
@@ -57,9 +59,66 @@ const TIMELINE_SEGMENT_SECONDS: u64 = 2;
 const RECOVERY_SEEK_TARGET_FRAME: u64 = 1_800;
 const TIMELINE_TERMINAL_GUARD_SECONDS: u64 = 10;
 
-/// Execute software-only stages with no commercial-campaign admission or qualification.
-pub(super) fn run(root: PathBuf, output: PathBuf, phase_seconds: u64) -> anyhow::Result<PathBuf> {
-    run_profile(root, output, phase_seconds, false)
+/// Stages selected for the same production-linked local validation runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum LocalMediaSmokePhases {
+    /// Playback/seek/cache, Export with Playback, then cancellation/recovery.
+    All,
+    /// Only Playback/seek/cache, including the real AudioDevice clock.
+    PlaybackOnly,
+    /// The same continuous Export with Playback phase alone, for exact diagnosis.
+    ExportWithPlaybackOnly,
+    /// The same third phase alone, for exact cancellation/cut/reopen diagnosis.
+    ConcurrentRecoveryOnly,
+}
+
+/// Explicit workload; resolution and layer count never change during execution.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalMediaSmokeSettings {
+    /// Measured seconds per selected phase, excluding preparation and closure.
+    pub phase_seconds: u64,
+    /// Output resolution. Original source media remains fully decoded.
+    pub resolution: Resolution,
+    /// Production phases to execute.
+    pub phases: LocalMediaSmokePhases,
+    /// One video source, or that source plus a full-duration alpha overlay.
+    pub video_layers: u8,
+}
+
+impl LocalMediaSmokeSettings {
+    fn validate(self) -> anyhow::Result<()> {
+        let maximum_seconds = match self.phases {
+            LocalMediaSmokePhases::All
+            | LocalMediaSmokePhases::ExportWithPlaybackOnly
+            | LocalMediaSmokePhases::ConcurrentRecoveryOnly => MAXIMUM_PHASE_SECONDS,
+            LocalMediaSmokePhases::PlaybackOnly => 1_800,
+        };
+        ensure!(
+            (15..=maximum_seconds).contains(&self.phase_seconds),
+            "phase seconds must be in 15..={maximum_seconds}"
+        );
+        ensure!(
+            matches!(
+                (self.resolution.width, self.resolution.height),
+                (640, 360) | (1920, 1080)
+            ),
+            "local profile requires explicit 640x360 or 1920x1080 output"
+        );
+        ensure!(
+            (1..=2).contains(&self.video_layers),
+            "video layers must be 1 or 2"
+        );
+        Ok(())
+    }
+}
+
+/// Execute bounded stages with no commercial-campaign qualification.
+pub(super) fn run(
+    root: PathBuf,
+    output: PathBuf,
+    settings: LocalMediaSmokeSettings,
+) -> anyhow::Result<PathBuf> {
+    run_profile(root, output, settings, false)
 }
 
 pub(super) fn run_proxy_control(
@@ -67,36 +126,65 @@ pub(super) fn run_proxy_control(
     output: PathBuf,
     phase_seconds: u64,
 ) -> anyhow::Result<PathBuf> {
-    run_profile(root, output, phase_seconds, true)
+    ensure!(
+        (15..=60).contains(&phase_seconds),
+        "proxy control seconds must be in 15..=60"
+    );
+    run_profile(
+        root,
+        output,
+        LocalMediaSmokeSettings {
+            phase_seconds,
+            resolution: Resolution { width: 640, height: 360 },
+            phases: LocalMediaSmokePhases::All,
+            video_layers: 2,
+        },
+        true,
+    )
 }
 
 fn run_profile(
     root: PathBuf,
     output: PathBuf,
-    phase_seconds: u64,
+    settings: LocalMediaSmokeSettings,
     proxy_control: bool,
 ) -> anyhow::Result<PathBuf> {
-    ensure!(
-        (15..=MAXIMUM_PHASE_SECONDS).contains(&phase_seconds),
-        "phase seconds must be in 15..=60; default 30"
-    );
+    settings.validate()?;
+    let phase_seconds = settings.phase_seconds;
+    let phase_indices: &[usize] = match settings.phases {
+        LocalMediaSmokePhases::All => &[0, 1, 2],
+        LocalMediaSmokePhases::PlaybackOnly => &[0],
+        LocalMediaSmokePhases::ExportWithPlaybackOnly => &[1],
+        LocalMediaSmokePhases::ConcurrentRecoveryOnly => &[2],
+    };
+    let phase_count = phase_indices.len() as u64;
     ensure!(!output.exists(), "smoke output must be a new directory");
     std::fs::create_dir_all(&output)?;
     let output = mondrian_assets::canonical_native_path(&output)?;
     let report_path = output.join("local-media-smoke.json");
     let started = Instant::now();
-    let hard_deadline_seconds = if proxy_control {
-        PROXY_CONTROL_HARD_DEADLINE_SECONDS
+    let startup_and_close_seconds = 120 + 90;
+    let export_grace_seconds = if settings.phases == LocalMediaSmokePhases::PlaybackOnly {
+        0
+    } else if proxy_control {
+        PROXY_CONTROL_EXPORT_COMPLETION_GRACE_SECONDS
     } else {
-        900
+        MINIMUM_EXPORT_COMPLETION_GRACE_SECONDS
     };
+    let hard_deadline_seconds = (phase_count
+        * (phase_seconds + export_grace_seconds + startup_and_close_seconds))
+        .max(if proxy_control {
+            PROXY_CONTROL_HARD_DEADLINE_SECONDS
+        } else {
+            900
+        });
     let deadline = started + Duration::from_secs(hard_deadline_seconds);
     let profile = if proxy_control {
         "local-media-proxy-control-three-phase-v2"
     } else {
-        "local-media-three-phase-smoke-v1"
+        "local-media-production-profile-v2"
     };
-    let mut report = json!({"schema_version":1,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"fixtures":[],"phases":[]});
+    let mut report = json!({"schema_version":1,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
     report["program_frame_rate"] = if proxy_control {
         json!({"numerator": 24, "denominator": 1})
     } else {
@@ -203,7 +291,8 @@ fn run_profile(
         return Ok(report_path);
     }
     report["status"] = json!("Started");
-    for phase in 0..3 {
+    let mut failures = Vec::new();
+    for &phase in phase_indices {
         let phase_path = output.join(format!("phase-{}", phase + 1));
         std::fs::create_dir(&phase_path)?;
         let workload = [
@@ -216,7 +305,7 @@ fn run_profile(
             phase,
             &paths,
             &phase_path,
-            phase_seconds,
+            settings,
             deadline,
             &mut evidence,
             proxy_control,
@@ -228,21 +317,31 @@ fn run_profile(
         write_new(&phase_path.join("phase-owner-report.json"), &evidence)?;
         report["phases"].as_array_mut().context("phase history")?.push(evidence);
         if let Err(error) = result {
-            report["status"] = json!("Failed");
-            report["failure"] = json!(format!("{error:#}"));
-            report["elapsed_millis"] = json!(started.elapsed().as_millis());
-            write_new(&report_path, &report)?;
-            anyhow::bail!(
-                "local smoke failed; raw report {}: {error:#}",
-                report_path.display()
-            );
+            failures.push(format!("phase {}: {error:#}", phase + 1));
+            let closed = report["phases"]
+                .as_array()
+                .and_then(|phases| phases.last())
+                .is_some_and(|phase| phase["all_created_owners_released"] == true);
+            if !closed || Instant::now() >= deadline {
+                break;
+            }
         }
     }
     drop(leases);
-    report["status"] = json!("Completed");
+    report["status"] = json!(if failures.is_empty() {
+        "Completed"
+    } else {
+        "Failed"
+    });
+    report["failures"] = json!(failures);
     report["elapsed_millis"] = json!(started.elapsed().as_millis());
     report["device_session_recreation"] = json!("Each phase starts a fresh real Headless GPU/Preview session after the prior consuming closure. This is not a physical Window surface-reopen receipt.");
     write_new(&report_path, &report)?;
+    ensure!(
+        failures.is_empty(),
+        "local profile failed; raw report {}: {failures:?}",
+        report_path.display()
+    );
     Ok(report_path)
 }
 
@@ -250,11 +349,12 @@ fn run_phase(
     index: usize,
     paths: &[PathBuf],
     output: &Path,
-    seconds: u64,
+    settings: LocalMediaSmokeSettings,
     deadline: Instant,
     report: &mut Value,
     proxy_control: bool,
 ) -> anyhow::Result<()> {
+    let seconds = settings.phase_seconds;
     let mut app = Some(AppState::new());
     let mut runtime_cleanup = DirectoryCleanup::default();
     let mut owners = None;
@@ -270,8 +370,12 @@ fn run_phase(
                 Instant::now() < deadline,
                 "local smoke deadline elapsed before phase startup"
             );
-            let settings = SequenceSettings {
-                resolution: Resolution { width: 640, height: 360 },
+            let sequence_settings = SequenceSettings {
+                resolution: settings.resolution,
+                preview: SequencePreviewSettings {
+                    resolution_scale: 1.0,
+                    ..Default::default()
+                },
                 frame_rate: if proxy_control {
                     Rational::FPS_24
                 } else {
@@ -279,16 +383,15 @@ fn run_phase(
                 },
                 ..SequenceSettings::default()
             };
-            let mut project_settings = ProjectSettings::default();
-            if proxy_control {
-                project_settings.cache_dir = Some(
-                    output.parent().context("proxy control root")?.join("proxy-control-cache"),
-                );
-            }
+            let project_settings = ProjectSettings {
+                proxy_enabled: proxy_control,
+                cache_dir: Some(output.join("media-cache")),
+                ..ProjectSettings::default()
+            };
             state.create_new_project_with_settings_at(
                 output.join("smoke.mdp"),
                 "Local media smoke",
-                settings,
+                sequence_settings,
                 ProjectColorEnvironment::default(),
                 project_settings,
             )?;
@@ -298,7 +401,9 @@ fn run_phase(
             } else {
                 (Rational::FPS_60, 60_u64)
             };
-            let export_grace_seconds = if proxy_control {
+            let export_grace_seconds = if settings.phases == LocalMediaSmokePhases::PlaybackOnly {
+                0
+            } else if proxy_control {
                 PROXY_CONTROL_EXPORT_COMPLETION_GRACE_SECONDS
             } else {
                 MINIMUM_EXPORT_COMPLETION_GRACE_SECONDS
@@ -321,8 +426,11 @@ fn run_phase(
                 index,
                 deadline,
                 report,
-                proxy_control,
-                timeline_extent.segment_count,
+                LocalSmokeComposition {
+                    proxy_control,
+                    segment_count: timeline_extent.segment_count,
+                    video_layers: settings.video_layers,
+                },
             )?;
             if proxy_control {
                 wait_for_proxy_control(state, deadline, report)?;
@@ -346,6 +454,7 @@ fn run_phase(
                 }
             }
             let owner = owners.as_mut().context("execution owners")?;
+            report["gpu_adapter"] = serde_json::to_value(owner.gpu_adapter_info()?)?;
             playback = Some(PersistentTimelinePlaybackPhase::start_local_smoke(
                 state,
                 owner,
@@ -356,8 +465,10 @@ fn run_phase(
             )?);
             if index > 0 {
                 let mut preset = ExportPreset::h264_aac_sdr_1080p();
-                preset.resolution =
-                    Some(mondrian_export::preset::Resolution { width: 640, height: 360 });
+                preset.resolution = Some(mondrian_export::preset::Resolution {
+                    width: settings.resolution.width,
+                    height: settings.resolution.height,
+                });
                 exports = Some(FrozenRepeatedExportPhase::start_until(
                     state,
                     FrozenRepeatedExportRequest {
@@ -397,8 +508,15 @@ fn run_phase(
                 .refresh_pre_measurement_picture(state, owner, deadline)?;
             let run_started = Instant::now();
             let finish_at = run_started + Duration::from_secs(seconds);
-            let observation_deadline =
-                deadline.min(finish_at + Duration::from_secs(export_grace_seconds));
+            // A measured duration is a minimum, not the deadline for its last
+            // interval or sampler drain. Export retains its separate fixed
+            // completion grace; Playback-only closes at the measured duration
+            // under the original phase safety deadline.
+            let observation_deadline = if settings.phases == LocalMediaSmokePhases::PlaybackOnly {
+                deadline
+            } else {
+                deadline.min(finish_at + Duration::from_secs(export_grace_seconds))
+            };
             report["minimum_export_completion_grace_seconds"] = json!(export_grace_seconds);
             let memory_sampler = ProfessionalProcessMemorySampler::start(run_started)?;
             let mut memory_sample_count = 0_usize;
@@ -424,6 +542,16 @@ fn run_phase(
                     break;
                 }
                 playback.as_mut().context("playback owner")?.pump_interval(state, owner)?;
+                let execution = owner.latest_gpu_execution().context("no completed GPU execution")?;
+                ensure!(
+                    execution.output_extent() == settings.resolution
+                        && state.playback_preview_resolution_scale()
+                            == mondrian_playback::PreviewResolutionScale::Full,
+                    "local profile lost full-resolution GPU quality: requested={:?}, actual={:?}, runtime_scale={:?}",
+                    settings.resolution,
+                    execution.output_extent(),
+                    state.playback_preview_resolution_scale(),
+                );
                 poll_exports(state, &mut exports, &mut history, report, started)?;
                 if !recovery_done && run_started.elapsed() >= Duration::from_secs(5) && index != 1 {
                     let phase = playback.as_mut().context("playback owner")?;
@@ -460,7 +588,7 @@ fn run_phase(
                         owner,
                         report,
                         started,
-                        observation_deadline,
+                        deadline,
                     )?;
                     memory_sample_count = memory_sample_count.saturating_add(1);
                 }
@@ -472,7 +600,7 @@ fn run_phase(
                     owner,
                     report,
                     started,
-                    observation_deadline,
+                    deadline,
                 )?;
                 memory_sample_count = memory_sample_count.saturating_add(1);
             }
@@ -500,7 +628,19 @@ fn run_phase(
             "evidence": format!("{:?}", state.playback_evidence_report()),
         });
     }
+    report["latest_gpu_execution"] = serde_json::to_value(
+        owners.as_ref().and_then(EnduranceExecutionOwners::latest_gpu_execution),
+    )?;
+    // These are owner-local observations after measurement, not a globally
+    // atomic snapshot of the failed frame. Capture them before shutdown can
+    // consume workers, queued work and decoder leases.
+    report["preview_before_close"] = serde_json::to_value(
+        owners.as_ref().and_then(EnduranceExecutionOwners::preview_diagnostics),
+    )?;
+    report["coordinator_before_close"] =
+        serde_json::to_value(owners.as_ref().and_then(EnduranceExecutionOwners::realtime_timing))?;
     let mut close_errors = Vec::new();
+    let mut verifier_closed = true;
     if let (Some(phase), Some(state), Some(owner)) =
         (playback.as_mut(), app.as_mut(), owners.as_mut())
     {
@@ -554,7 +694,8 @@ fn run_phase(
     // Frozen phase holds the queue Arc; release it before App consumes its queue owner.
     if let Some(phase) = exports.take() {
         let raw = phase.shutdown_until(close_deadline);
-        if !raw.all_resources_released() {
+        verifier_closed = raw.all_resources_released();
+        if !verifier_closed {
             close_errors.push("phase-owned independent Export verifier did not close".to_owned());
         }
         report["export_verifier_shutdown"] = serde_json::to_value(raw)?;
@@ -584,6 +725,7 @@ fn run_phase(
     };
     report["export_job_history"] = serde_json::to_value(history.into_values().collect::<Vec<_>>())?;
     report["close_errors"] = json!(close_errors);
+    report["all_created_owners_released"] = json!(closed && verifier_closed);
     if !closed {
         runtime_cleanup.retain();
     }
@@ -606,11 +748,12 @@ fn record_local_memory_sample(
     owner: &EnduranceExecutionOwners,
     report: &mut Value,
     started: Instant,
-    observation_deadline: Instant,
+    phase_deadline: Instant,
 ) -> anyhow::Result<()> {
     let within_limit = timed.sample.inventory_complete
         && timed.sample.private_memory_bytes.is_some_and(|value| value <= MEMORY_LIMIT);
     let facts = owner.capture_facts(state)?;
+    report["latest_gpu_execution"] = serde_json::to_value(owner.latest_gpu_execution())?;
     report["samples"].as_array_mut().context("sample history")?.push(json!({
         "elapsed_millis": started.elapsed().as_millis(),
         "memory_observed_at_us": timed.observed_at_us,
@@ -622,8 +765,8 @@ fn record_local_memory_sample(
         "native process-tree memory unavailable or over 6 GiB stop limit"
     );
     ensure!(
-        Instant::now() < observation_deadline,
-        "local smoke sampling exceeded original observation deadline"
+        Instant::now() < phase_deadline,
+        "local smoke sampling exceeded original phase safety deadline"
     );
     Ok(())
 }
@@ -654,22 +797,43 @@ fn poll_exports(
 ) -> anyhow::Result<()> {
     state.poll_export_queue();
     for job in state.export_jobs_snapshot() {
+        if job.status == mondrian_export::JobStatus::Completed
+            && !history
+                .get(&job.id)
+                .is_some_and(|previous| previous.status == mondrian_export::JobStatus::Completed)
+        {
+            let bytes = std::fs::metadata(&job.output_path)?.len();
+            let retained = report["retained_artifact_bytes"]
+                .as_u64()
+                .unwrap_or(0)
+                .checked_add(bytes)
+                .context("retained artifact byte count overflow")?;
+            report["retained_artifact_bytes"] = json!(retained);
+            ensure!(
+                retained <= MAXIMUM_RETAINED_ARTIFACT_BYTES,
+                "retained Export artifacts exceeded the 2 GiB phase stop budget"
+            );
+        }
         history.insert(job.id, job);
     }
-    ensure!(history.len() <= 16, "bounded smoke job inventory exceeded");
+    ensure!(
+        history.len() <= MAXIMUM_ARTIFACTS as usize + 2,
+        "bounded smoke job inventory exceeded"
+    );
     if let Some(phase) = exports.as_mut() {
         let events = phase.poll(u64::try_from(started.elapsed().as_micros())?)?;
         let target = report["events"].as_array_mut().context("event inventory")?;
         ensure!(
-            target.len() + events.len() <= 32,
+            target.len() + events.len() <= MAXIMUM_ARTIFACTS as usize + 4,
             "bounded event inventory exceeded"
         );
         for event in events {
             target.push(serde_json::to_value(event)?);
         }
-        if phase.verified_artifacts() >= MAXIMUM_ARTIFACTS {
-            phase.begin_close();
-        }
+        ensure!(
+            phase.verified_artifacts() < MAXIMUM_ARTIFACTS,
+            "continuous Export reached its artifact stop budget before observation completed"
+        );
     }
     Ok(())
 }
@@ -713,7 +877,7 @@ fn local_smoke_timeline_extent(
         .context("local smoke terminal guard frame overflow")?;
     let segment_count = required_content_frames.div_ceil(frames_per_segment);
     ensure!(
-        segment_count > 0 && segment_count <= 512,
+        segment_count > 0 && segment_count <= 1_024,
         "local smoke Timeline segment count exceeds its fixed bound"
     );
     Ok(LocalSmokeTimelineExtent {
@@ -723,15 +887,22 @@ fn local_smoke_timeline_extent(
     })
 }
 
+#[derive(Clone, Copy)]
+struct LocalSmokeComposition {
+    proxy_control: bool,
+    segment_count: u64,
+    video_layers: u8,
+}
+
 fn author(
     state: &mut AppState,
     paths: &[PathBuf],
     index: usize,
     deadline: Instant,
     report: &mut Value,
-    proxy_control: bool,
-    segment_count: u64,
+    composition: LocalSmokeComposition,
 ) -> anyhow::Result<()> {
+    let LocalSmokeComposition { proxy_control, segment_count, video_layers } = composition;
     let import_paths = if proxy_control {
         vec![
             paths[0].clone(),
@@ -809,6 +980,30 @@ fn author(
             "proxy control requires exactly three opaque video Asset preferences"
         );
         report["proxy_mode_asset_ids"] = json!(proxy_mode_assets);
+    } else {
+        ensure!(
+            !state.project_settings().proxy_enabled,
+            "original-source validation cannot enable project proxies"
+        );
+        let mut selections = Vec::new();
+        for asset in assets.iter().filter(|asset| asset.kind == mondrian_assets::AssetKind::Video) {
+            let prefer_proxy =
+                state.project_settings().proxy_enabled && state.is_asset_proxy_mode(asset.id);
+            let resolved =
+                super::proxy_relink::resolve_media_path_for_preference(state, asset, prefer_proxy)?;
+            ensure!(
+                resolved.resolution == "source"
+                    && Some(resolved.path.as_path()) == asset.file_path(),
+                "original-source validation resolved another representation for Asset {}",
+                asset.id
+            );
+            selections.push(resolved);
+        }
+        ensure!(
+            selections.len() == 4,
+            "original-source validation requires four video sources"
+        );
+        report["original_preview_selections"] = serde_json::to_value(selections)?;
     }
     report["media_probes"]=json!(assets.iter().map(|asset|json!({"asset_id":asset.id,"path":asset.file_path(),"kind":asset.kind,"probe":asset.media_probe()})).collect::<Vec<_>>());
     let video = add_track(state, TrackAddKind::Video)?;
@@ -865,7 +1060,7 @@ fn author(
                 force_progressive,
             )?;
         }
-        if ordinal % 4 == 0 {
+        if video_layers == 2 {
             let source = if index == 2 && !proxy_control { 3 } else { 4 };
             let asset = assets
                 .iter()
@@ -1079,11 +1274,21 @@ mod tests {
         assert!(observation_complete(deadline, finish, deadline, true).is_err());
     }
 
+    fn test_settings(phase_seconds: u64) -> LocalMediaSmokeSettings {
+        LocalMediaSmokeSettings {
+            phase_seconds,
+            resolution: Resolution { width: 1920, height: 1080 },
+            phases: LocalMediaSmokePhases::All,
+            video_layers: 2,
+        }
+    }
+
     #[test]
     fn missing_real_media_is_notrun_before_any_phase_owner() {
         let root = tempfile::tempdir().expect("root");
         let output = root.path().join("run");
-        let path = run(root.path().join("missing"), output, 30).expect("durable NotRun");
+        let path =
+            run(root.path().join("missing"), output, test_settings(30)).expect("durable NotRun");
         let report: Value =
             serde_json::from_slice(&std::fs::read(path).expect("report")).expect("JSON");
         assert_eq!(report["status"], "NotRun");
@@ -1101,12 +1306,22 @@ mod tests {
     #[test]
     fn smoke_rejects_unbounded_duration_and_existing_output() {
         let root = tempfile::tempdir().expect("root");
-        for seconds in [0, 14, 61, u64::MAX] {
+        for seconds in [0, 14, 901, u64::MAX] {
             let output = root.path().join(format!("invalid-{seconds}"));
-            assert!(run(root.path().to_path_buf(), output.clone(), seconds).is_err());
+            assert!(run(
+                root.path().to_path_buf(),
+                output.clone(),
+                test_settings(seconds)
+            )
+            .is_err());
             assert!(!output.exists());
         }
-        assert!(run(root.path().to_path_buf(), root.path().to_path_buf(), 30).is_err());
+        assert!(run(
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+            test_settings(30)
+        )
+        .is_err());
     }
 
     #[test]
@@ -1137,5 +1352,14 @@ mod tests {
         );
         assert!(local_smoke_timeline_extent(u64::MAX, 24, 360, true).is_err());
         assert!(local_smoke_timeline_extent(60, u64::MAX, 360, true).is_err());
+        let regular = local_smoke_timeline_extent(900, 60, 90, true)
+            .expect("15-minute Export/recovery horizon");
+        let stability = local_smoke_timeline_extent(1_800, 60, 0, true)
+            .expect("30-minute Playback/recovery horizon");
+        for (extent, required_frame) in [(regular, 61_800), (stability, 110_400)] {
+            assert_eq!(extent.minimum_presented_frames, required_frame);
+            assert!(extent.segment_count * extent.frames_per_segment > required_frame);
+            assert!(extent.segment_count <= 1_024);
+        }
     }
 }

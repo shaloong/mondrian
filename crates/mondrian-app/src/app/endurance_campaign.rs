@@ -248,18 +248,57 @@ pub struct EnduranceExecutionOwners {
         Option<super::headless_realtime_playback::HeadlessStoppedPicturePreparation>,
     av_completions:
         std::collections::VecDeque<super::headless_av_evidence::HeadlessAvPictureCompletion>,
+    latest_gpu_execution: Option<EnduranceGpuExecutionObservation>,
 }
 
-#[derive(Default)]
-struct EnduranceRealtimeObserver;
+/// Bounded projection of the existing completed GPU callback, not a new timer.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct EnduranceGpuExecutionObservation {
+    submission_id: u64,
+    output_width: u32,
+    output_height: u32,
+    disposition: HeadlessGpuExecutionDisposition,
+    completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    gpu_completion_observed: bool,
+    record_submit_us: u64,
+    completion_wait_us: u64,
+    decode_execution: super::preview_execution::PreviewDecodeExecutionSummary,
+    stage_diagnostics: Option<mondrian_renderer::color::RenderColorStageDiagnostics>,
+}
 
-impl HeadlessGpuExecutionObserver for EnduranceRealtimeObserver {
+impl EnduranceGpuExecutionObservation {
+    #[cfg(feature = "validation")]
+    pub(crate) fn output_extent(&self) -> mondrian_core::Resolution {
+        mondrian_core::Resolution {
+            width: self.output_width,
+            height: self.output_height,
+        }
+    }
+}
+
+struct EnduranceRealtimeObserver<'a> {
+    latest: &'a mut Option<EnduranceGpuExecutionObservation>,
+}
+
+impl HeadlessGpuExecutionObserver for EnduranceRealtimeObserver<'_> {
     fn execution_completed(
         &mut self,
-        _execution: super::headless_viewer_gpu::HeadlessViewerGpuExecution,
-        _disposition: HeadlessGpuExecutionDisposition,
-        _completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+        execution: super::headless_viewer_gpu::HeadlessViewerGpuExecution,
+        disposition: HeadlessGpuExecutionDisposition,
+        completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
     ) {
+        *self.latest = Some(EnduranceGpuExecutionObservation {
+            submission_id: execution.submission_id,
+            output_width: execution.output_width,
+            output_height: execution.output_height,
+            disposition,
+            completed_demand,
+            gpu_completion_observed: execution.gpu_completion_observed,
+            record_submit_us: execution.record_submit_us,
+            completion_wait_us: execution.completion_wait_us,
+            decode_execution: execution.decode_execution,
+            stage_diagnostics: execution.stage_diagnostics,
+        });
     }
 
     fn current_output_presented(
@@ -267,7 +306,6 @@ impl HeadlessGpuExecutionObserver for EnduranceRealtimeObserver {
         _completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
     ) {
     }
-
     fn successor_preparation(&mut self, _ready: bool) {}
 }
 
@@ -327,6 +365,7 @@ impl EnduranceExecutionOwners {
         &mut self,
         deadline: Instant,
     ) -> LocalHeadlessReopenOwners {
+        self.latest_gpu_execution = None;
         let mut raw = LocalHeadlessReopenOwners::default();
         let Some(session) = self.realtime.take() else {
             raw.failure = Some("local Headless reopen has no old session".to_owned());
@@ -434,6 +473,7 @@ impl EnduranceExecutionOwners {
             realtime: Some(realtime),
             stopped_preparation: None,
             av_completions: std::collections::VecDeque::new(),
+            latest_gpu_execution: None,
             waveform: waveform.expect("completed Waveform setup"),
         })
     }
@@ -446,7 +486,7 @@ impl EnduranceExecutionOwners {
         super::headless_realtime_playback::HeadlessStoppedPicturePreparation,
         EnduranceCampaignError,
     > {
-        let mut observer = EnduranceRealtimeObserver;
+        let mut observer = EnduranceRealtimeObserver { latest: &mut self.latest_gpu_execution };
         let evidence = self
             .realtime
             .as_mut()
@@ -491,7 +531,7 @@ impl EnduranceExecutionOwners {
     ) -> Result<EnduranceRealtimeIntervalObservation, EnduranceCampaignError> {
         let before_epoch = app.playback_epoch().get();
         let before_frame = app.current_frame();
-        let mut observer = EnduranceRealtimeObserver;
+        let mut observer = EnduranceRealtimeObserver { latest: &mut self.latest_gpu_execution };
         let realtime = self.realtime.as_mut().ok_or_else(|| {
             EnduranceCampaignError::Runtime(
                 "Headless realtime execution session is missing".to_owned(),
@@ -520,7 +560,7 @@ impl EnduranceExecutionOwners {
         app: &mut AppState,
         gpu_completion_timeout: Duration,
     ) -> Result<HeadlessPreviewSample, EnduranceCampaignError> {
-        let mut observer = EnduranceRealtimeObserver;
+        let mut observer = EnduranceRealtimeObserver { latest: &mut self.latest_gpu_execution };
         self.realtime
             .as_mut()
             .ok_or_else(|| {
@@ -539,7 +579,7 @@ impl EnduranceExecutionOwners {
         timeout: Duration,
     ) -> Result<super::headless_av_evidence::HeadlessAvPictureCompletion, EnduranceCampaignError>
     {
-        let mut observer = EnduranceRealtimeObserver;
+        let mut observer = EnduranceRealtimeObserver { latest: &mut self.latest_gpu_execution };
         let completion = self
             .realtime
             .as_mut()
@@ -672,6 +712,37 @@ impl EnduranceExecutionOwners {
             .finish_realtime()
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
         Ok(())
+    }
+
+    /// Read only the last actual completed GPU callback owned by this group.
+    #[cfg(feature = "validation")]
+    pub(crate) fn latest_gpu_execution(&self) -> Option<&EnduranceGpuExecutionObservation> {
+        self.latest_gpu_execution.as_ref()
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn preview_diagnostics(&self) -> Option<super::preview_runtime::PreviewDiagnostics> {
+        self.realtime.as_ref()?.realtime_preview_diagnostics().ok()
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn realtime_timing(
+        &self,
+    ) -> Option<super::headless_realtime_playback::HeadlessRealtimeCoordinatorTiming> {
+        self.realtime.as_ref()?.realtime_timing()
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn gpu_adapter_info(
+        &self,
+    ) -> Result<&super::headless_viewer_gpu::HeadlessViewerGpuAdapterInfo, EnduranceCampaignError>
+    {
+        self.realtime
+            .as_ref()
+            .ok_or_else(|| EnduranceCampaignError::Runtime("Headless owner is missing".to_owned()))?
+            .gpu()
+            .map(|gpu| gpu.adapter_info())
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
     }
 
     /// Capture internally atomic owner gauges without pausing active realtime work.

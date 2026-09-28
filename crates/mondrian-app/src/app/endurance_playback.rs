@@ -251,8 +251,9 @@ impl PersistentTimelinePlaybackPhase {
         Self::start_bound(app, owners, binding, absolute_deadline, interval_timeout)
     }
 
-    /// Run a short local software exercise without constructing campaign admission.
-    /// The exact 60/1 Timeline and the real Audio Device clock remain mandatory.
+    /// Run a bounded local exercise without constructing campaign admission.
+    /// The caller bounds duration; this owner proves the actual Timeline extent,
+    /// exact requested program rate, terminal guard and real Audio Device clock.
     #[cfg(feature = "validation")]
     pub(crate) fn start_local_smoke(
         app: &mut AppState,
@@ -262,9 +263,9 @@ impl PersistentTimelinePlaybackPhase {
         absolute_deadline: Instant,
         interval_timeout: Duration,
     ) -> Result<Self, PersistentTimelinePlaybackError> {
-        if !(1..=20_000).contains(&minimum_frames) {
+        if minimum_frames == 0 {
             return Err(PersistentTimelinePlaybackError::InvalidPlan(
-                "local smoke extent must be within 1..=20000 frames".to_owned(),
+                "local smoke extent must be nonzero".to_owned(),
             ));
         }
         let binding = capture_fixture_binding_for_extent(app, minimum_frames, program_frame_rate)?;

@@ -49,7 +49,18 @@ pub(super) fn run(root: PathBuf, output: PathBuf) -> anyhow::Result<PathBuf> {
                 ProjectSettings::default(),
             )?;
             cleanup.track(state.project_runtime_dir().map(Path::to_path_buf));
-            author(state, &paths, 0, deadline, &mut report, false, 60)?;
+            author(
+                state,
+                &paths,
+                0,
+                deadline,
+                &mut report,
+                LocalSmokeComposition {
+                    proxy_control: false,
+                    segment_count: 60,
+                    video_layers: 2,
+                },
+            )?;
             state.stop()?;
             let save = state.request_project_save()?;
             state.wait_for_persistence_request_until(save, deadline)?;

@@ -13,17 +13,42 @@ fn main() -> anyhow::Result<()> {
         .try_init()
         .map_err(|error| anyhow::anyhow!("initialize local smoke diagnostics: {error}"))?;
     let mut args = std::env::args_os().skip(1);
-    let root =
-        PathBuf::from(args.next().context("expected real fixture root and new output directory")?);
+    let root = args.next().context("expected fixture root; use --help")?;
+    if root == "--help" {
+        println!("local_media_smoke <fixture-root> <new-output-dir> <seconds> <640x360|1920x1080> <all|playback|export|recovery> <1|2>\n\nall: three production phases, 15–900 seconds each\nplayback: real Preview/Audio with seek/cache, 15–1800 seconds\nexport: continuous Export with Playback alone, 15–900 seconds\nrecovery: the same third phase alone, 15–900 seconds\nlayers: full-duration video source count, quality remains Full\nExport remains active until observation ends; 256-artifact/2-GiB phase budgets fail closed.\nNot a commercial/HDR/physical Viewer qualification.");
+        return Ok(());
+    }
+    let root = PathBuf::from(root);
     let output = PathBuf::from(args.next().context("expected new output directory")?);
-    let seconds = args
-        .next()
-        .map(|v| v.to_string_lossy().parse::<u64>())
-        .transpose()?
-        .unwrap_or(30);
+    let seconds = args.next().context("expected seconds")?.to_string_lossy().parse::<u64>()?;
+    let resolution = match args.next().context("expected output resolution")?.to_str() {
+        Some("640x360") => mondrian_core::Resolution { width: 640, height: 360 },
+        Some("1920x1080") => mondrian_core::Resolution { width: 1920, height: 1080 },
+        _ => anyhow::bail!("expected explicit 640x360 or 1920x1080"),
+    };
+    use mondrian_app::app::golden_project_acceptance::{
+        LocalMediaSmokePhases, LocalMediaSmokeSettings,
+    };
+    let phases = match args.next().context("expected phases")?.to_str() {
+        Some("all") => LocalMediaSmokePhases::All,
+        Some("playback") => LocalMediaSmokePhases::PlaybackOnly,
+        Some("export") => LocalMediaSmokePhases::ExportWithPlaybackOnly,
+        Some("recovery") => LocalMediaSmokePhases::ConcurrentRecoveryOnly,
+        _ => anyhow::bail!("expected all, playback, export or recovery"),
+    };
+    let video_layers =
+        args.next().context("expected video layers")?.to_string_lossy().parse::<u8>()?;
     ensure!(args.next().is_none(), "unexpected argument");
-    let report =
-        mondrian_app::app::golden_project_acceptance::run_local_media_smoke(root, output, seconds)?;
+    let report = mondrian_app::app::golden_project_acceptance::run_local_media_smoke(
+        root,
+        output,
+        LocalMediaSmokeSettings {
+            phase_seconds: seconds,
+            resolution,
+            phases,
+            video_layers,
+        },
+    )?;
     println!("MONDRIAN_LOCAL_MEDIA_SMOKE={}", report.display());
     Ok(())
 }

@@ -567,3 +567,58 @@ and the single program hash across started phases. A frame outside the selected
 attachment is intentionally empty on physical output; no replay/looping of cues
 is inferred. No-device native bridge tests and software parser tests do not
 qualify the physical SDI/Genlock/caption wire or 72-hour campaign.
+
+## Bounded local production validation (not COL-047)
+
+The `local_media_smoke` validation example uses the existing production App,
+Persistent Timeline Playback, Headless Preview/GPU, CoreAudio and Frozen
+Repeated Export owners. It does not qualify physical Viewer/HDR, Reference
+Output, the 32 GiB project scale, or commercial performance/endurance gates.
+
+Build with `cargo build --locked --profile validation -p mondrian-app
+--all-features --bin mondrian --example local_media_smoke -j 2`. Read the resulting executable's
+`--help` before running. Supply explicit fixture root, create-only output,
+seconds, output resolution, selected phases and video-layer count. Source-build
+examples may use the existing `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` and
+`MONDRIAN_MEDIA_PROBE_WORKER_PATH` overrides to select that same-profile
+`mondrian` worker executable. This does not qualify a packaged sealed runtime.
+
+```text
+local_media_smoke <fixtures> <new-output> 300 1920x1080 all 2
+local_media_smoke <fixtures> <new-output> 1800 1920x1080 playback 1
+local_media_smoke <fixtures> <new-output> 300 1920x1080 export 2
+local_media_smoke <fixtures> <new-output> 300 1920x1080 recovery 2
+```
+
+`all` runs the three production phases for 15–900 measured seconds each;
+`playback` runs Preview/Audio with seek/cache for 15–1800 seconds.
+`export` runs the same second phase alone, and `recovery` runs the same third
+phase alone for focused diagnosis. One or two
+video sources contribute for the entire Timeline. The Sequence authored
+Preview scale is explicitly 1.0; completed GPU output dimensions and the
+runtime Full quality are checked after each accepted interval. Original
+source decode resolution remains unchanged; output resolution is explicit in
+the report. The exact six fixture identities and media probes are recorded.
+Derived/generator fixtures must be labelled DiagnosticOnly, not native-source
+or commercial qualification. Ordinary profiles disable project proxies, bind
+all four original video paths/hashes through the production source resolver,
+and use a phase-local media cache. Only the explicit proxy-control profile
+enables proxies. Source file names do not prove alpha or exact cadence: retain
+the actual production probe and decoded representation.
+
+Export admission continues through the measured window. Every new complete
+artifact is independently fully decoded before its successor; cancellation
+uses a distinct newer retry job and path. A 256-artifact or 2 GiB retained
+artifact budget **fails** the phase instead of ending Export early and passing
+continued Playback. The 6 GiB product process-tree memory stop remains.
+Preparations and consuming shutdown share the duration-derived outer safety
+deadline; picture/frame-period acceptance contracts are unchanged. Failed
+phases remain Failed. Later independent phases run only after all actual
+execution and verifier owners prove consuming closure.
+
+Playback-only observation has no Export completion grace. Its measured finish
+is distinct from the phase safety deadline: the final complete interval and
+queued native memory samples may close after the measured finish, while still
+bounded by that original phase deadline. Preview worker and coordinator
+diagnostics are captured once before consuming shutdown; they are separate
+owner observations, not a globally atomic failure-frame snapshot.
