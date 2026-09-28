@@ -770,6 +770,7 @@ enum ViewerGpuDeviceProgressCommand<I> {
         submission_id: ViewerGpuSubmissionId,
         submission_index: I,
         callback_observed: Arc<AtomicBool>,
+        queued_at: Instant,
         _slot: ViewerGpuDeviceProgressSlot,
     },
     DriveRendererCleanup {
@@ -819,6 +820,7 @@ impl<I> ViewerGpuDeviceProgressWorkerPermit<'_, I> {
             submission_id,
             submission_index,
             callback_observed,
+            queued_at: Instant::now(),
             _slot: slot,
         };
         send_progress_command(sender, health, wake, submission_id, command);
@@ -1213,6 +1215,9 @@ enum ViewerGpuDeviceWaitStatus {
 }
 
 trait ViewerGpuDeviceWait<I>: Send + 'static {
+    /// Drive already-ready callbacks without waiting for untracked GPU work.
+    fn poll(&mut self) -> Result<(), String>;
+
     fn wait(
         &mut self,
         submission_index: Option<&I>,
@@ -1225,6 +1230,13 @@ struct WgpuViewerGpuDeviceWait {
 }
 
 impl ViewerGpuDeviceWait<wgpu::SubmissionIndex> for WgpuViewerGpuDeviceWait {
+    fn poll(&mut self) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Poll)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn wait(
         &mut self,
         submission_index: Option<&wgpu::SubmissionIndex>,
@@ -1258,17 +1270,20 @@ where
     I: Send + 'static,
     D: ViewerGpuDeviceWait<I>,
 {
-    // Idle pacing: wgpu invokes `on_submitted_work_done` callbacks only from
-    // `Device::poll`. If a submission was registered while the worker had no
-    // pending command, the callback would otherwise stay staged forever and
-    // its completion notice would never reach the submission lifecycle. Keep
-    // polling on a bounded idle cadence so an already-completed submission
-    // still releases through its authoritative callback.
+    // Idle maintenance still drives work-done/native-import callbacks, but
+    // cannot wait on an untracked latest queue submission. Renderer recording
+    // can submit a native import before its Viewer progress command exists;
+    // an idle Wait would then strand that new command behind unrelated GPU
+    // work for a complete wait quantum. Command receipt supplies idle pacing;
+    // only owned Track/cleanup/retirement commands may wait for a fence.
     loop {
         let command = match command_receiver.recv_timeout(policy.wait_quantum) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = driver.wait(None, policy.wait_quantum);
+                if let Err(reason) = driver.poll() {
+                    health.mark_progress_failure(None, reason, Instant::now());
+                    wake.notify();
+                }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1278,17 +1293,25 @@ where
                 submission_id,
                 submission_index,
                 callback_observed,
+                queued_at,
                 _slot,
-            } => drive_viewer_gpu_submission(
-                &mut driver,
-                policy,
-                &observation_sender,
-                &wake,
-                &health,
-                submission_id,
-                submission_index,
-                callback_observed,
-            ),
+            } => {
+                tracing::debug!(
+                    submission_id = submission_id.get(),
+                    queue_wait_us = queued_at.elapsed().as_micros(),
+                    "started Viewer GPU progress command"
+                );
+                drive_viewer_gpu_submission(
+                    &mut driver,
+                    policy,
+                    &observation_sender,
+                    &wake,
+                    &health,
+                    submission_id,
+                    submission_index,
+                    callback_observed,
+                );
+            }
             ViewerGpuDeviceProgressCommand::DriveRendererCleanup { attempt_id, _slot } => {
                 drive_renderer_cleanup(
                     &mut driver,
@@ -1328,6 +1351,9 @@ fn drive_viewer_gpu_submission<I, D>(
     let mut exact_wait = true;
     let mut terminal_reported = false;
     let mut fence_satisfied = false;
+    let progress_started = Instant::now();
+    let mut poll_count = 0_u64;
+    let mut maximum_poll_us = 0_u128;
 
     loop {
         if let Some(terminal) = health.terminal() {
@@ -1355,6 +1381,8 @@ fn drive_viewer_gpu_submission<I, D>(
                 policy.wait_quantum,
             )
         }));
+        poll_count = poll_count.saturating_add(1);
+        maximum_poll_us = maximum_poll_us.max(wait_started.elapsed().as_micros());
         match wait {
             Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut)) => {}
             Ok(Ok(ViewerGpuDeviceWaitStatus::Satisfied)) => {
@@ -1435,6 +1463,15 @@ fn drive_viewer_gpu_submission<I, D>(
             // post-poll callback lets the Adapter retire its quarantined
             // lifecycle owner. Actual device loss returned above instead.
             publish_wait_satisfied(observation_sender, wake, submission_id);
+            tracing::debug!(
+                submission_id = submission_id.get(),
+                progress_us = progress_started.elapsed().as_micros(),
+                poll_count,
+                maximum_poll_us,
+                callback_observed = callback_observed.load(Ordering::Acquire),
+                fence_satisfied,
+                "observed Viewer GPU progress completion"
+            );
             return;
         }
         pace_bounded_wait(wait_started, policy.wait_quantum);
@@ -1838,6 +1875,10 @@ mod tests {
     }
 
     impl ViewerGpuDeviceWait<u64> for ScriptedWait {
+        fn poll(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn wait(
             &mut self,
             submission_index: Option<&u64>,
@@ -1857,6 +1898,10 @@ mod tests {
     }
 
     impl ViewerGpuDeviceWait<u64> for CallbackDuringWait {
+        fn poll(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn wait(
             &mut self,
             _submission_index: Option<&u64>,
@@ -1873,6 +1918,10 @@ mod tests {
     }
 
     impl ViewerGpuDeviceWait<u64> for CallbackAndDeviceLossDuringWait {
+        fn poll(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn wait(
             &mut self,
             _submission_index: Option<&u64>,
@@ -1958,6 +2007,80 @@ mod tests {
             thread::yield_now();
         }
         assert!(counter.load(Ordering::Acquire) >= minimum);
+    }
+
+    #[test]
+    fn idle_callbacks_do_not_wait_on_untracked_work_before_a_new_command() {
+        struct IdleCallbackDriver {
+            idle: Option<mpsc::Sender<()>>,
+            waits: WaitCallLog,
+            poll_error: Option<String>,
+        }
+        impl ViewerGpuDeviceWait<u64> for IdleCallbackDriver {
+            fn poll(&mut self) -> Result<(), String> {
+                if let Some(idle) = self.idle.take() {
+                    idle.send(()).expect("observe idle callback poll");
+                }
+                self.poll_error.take().map_or(Ok(()), Err)
+            }
+
+            fn wait(
+                &mut self,
+                index: Option<&u64>,
+                _: Duration,
+            ) -> Result<ViewerGpuDeviceWaitStatus, String> {
+                self.waits.lock().expect("wait log").push(index.copied());
+                Ok(ViewerGpuDeviceWaitStatus::Satisfied)
+            }
+        }
+        for poll_error in [None, Some("idle device poll failed".to_owned())] {
+            let should_fail = poll_error.is_some();
+            let (idle, observed_idle) = mpsc::channel();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let health =
+                ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+            let mut worker = ViewerGpuDeviceProgressWorker::spawn(
+                "idle-callback-progress-test",
+                IdleCallbackDriver {
+                    idle: Some(idle),
+                    waits: Arc::clone(&calls),
+                    poll_error,
+                },
+                ViewerGpuDeviceProgressPolicy::new(Duration::from_millis(1)).expect("policy"),
+                health.clone(),
+                None,
+            )
+            .expect("spawn progress");
+            observed_idle.recv_timeout(Duration::from_secs(2)).expect("idle poll");
+            if should_fail {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while health.terminal().is_none() && Instant::now() < deadline {
+                    thread::yield_now();
+                }
+                let terminal = health.terminal().expect("idle failure is not discarded");
+                assert_eq!(terminal.submission_id, None);
+                assert_eq!(terminal.reason, "idle device poll failed");
+                assert!(matches!(
+                    worker.reserve_submission(),
+                    Err(ViewerGpuDeviceProgressReserveError::GenerationTerminal { .. })
+                ));
+                assert!(calls.lock().expect("wait log").is_empty());
+            } else {
+                worker
+                    .reserve_submission()
+                    .expect("reserve")
+                    .commit(test_submission_id(98), 123);
+                let observation = worker
+                    .observation_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("exact fence");
+                assert!(matches!(observation,
+                    ViewerGpuDeviceProgressObservation::WaitSatisfied { submission_id, .. }
+                        if submission_id == test_submission_id(98)));
+                assert_eq!(*calls.lock().expect("wait log"), vec![Some(123)]);
+            }
+            worker.shutdown().expect("consume worker");
+        }
     }
 
     #[test]
@@ -2744,12 +2867,16 @@ mod tests {
     }
 
     #[test]
-    fn idle_wait_panic_quarantines_an_already_accepted_retirement() {
+    fn idle_poll_panic_quarantines_an_already_accepted_retirement() {
         struct GatedPanicWait {
             entered: mpsc::Sender<()>,
             release: mpsc::Receiver<()>,
         }
         impl ViewerGpuDeviceWait<u64> for GatedPanicWait {
+            fn poll(&mut self) -> Result<(), String> {
+                self.wait(None, Duration::ZERO).map(|_| ())
+            }
+
             fn wait(
                 &mut self,
                 _: Option<&u64>,

@@ -1846,3 +1846,17 @@ owner's CPU working-set grant, which the worker installs instead of retaining
 an unbounded default. CPU adaptation of cached working frames retains the same
 conservative complete estimate and existing cache residency contracts.
 CPU child and root limits, retained-scratch limits, and GPU budgets are unchanged.
+
+
+## Idle Viewer device progress
+
+Window and Headless share the same bounded device progress owner. An idle
+command-receive timeout drives already-ready callbacks through nonblocking
+`Device::poll(PollType::Poll)`. It cannot wait for the latest untracked GPU work:
+native input recording may submit a prefix before the exact Viewer command is
+committed, and an idle latest-submission wait would block that command's receipt.
+Command receipt retains its existing bounded cadence; tracked submissions,
+renderer cleanup and consuming device retirement retain their real fence waits.
+An idle poll failure terminalizes the same device generation and rejects new
+permits. Queue-dispatch and fence-poll host timings are diagnostics, never GPU
+execution timestamps or semantic presentation authority.
