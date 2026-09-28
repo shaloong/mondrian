@@ -536,6 +536,7 @@ impl EncodedYuvToRgbParameters {
     }
 
     /// Convert code values without quantization, clamping, or alpha association.
+    #[inline]
     pub fn decode(self, code: [f32; 3]) -> [f32; 3] {
         let y = (code[0] - self.luma[0]) * self.luma[1];
         let cb = (code[1] - self.chroma[0]) * self.chroma[1];

@@ -264,17 +264,18 @@ fn materialize_yuva12_to_encoded_float(
     ];
     let started = Instant::now();
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    let row_bytes = width as usize * 2;
     for y in 0..height as usize {
-        for x in 0..width as usize {
-            let samples = planes.map(|plane| {
-                let start = y * plane.bytes_per_row() as usize + x * 2;
-                f32::from(u16::from_le_bytes([
-                    plane.data()[start],
-                    plane.data()[start + 1],
-                ]))
-            });
-            rgba.extend(parameters.decode([samples[0], samples[1], samples[2]]));
-            rgba.push(samples[3] / 4095.0);
+        let [luma, cb, cr, alpha] = planes.map(|plane| {
+            let start = y * plane.bytes_per_row() as usize;
+            plane.data()[start..start + row_bytes].chunks_exact(2)
+        });
+        for (((luma, cb), cr), alpha) in luma.zip(cb).zip(cr).zip(alpha) {
+            let code =
+                [luma, cb, cr].map(|bytes| f32::from(u16::from_le_bytes([bytes[0], bytes[1]])));
+            let [r, g, b] = parameters.decode(code);
+            let a = f32::from(u16::from_le_bytes([alpha[0], alpha[1]])) / 4095.0;
+            rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
     Ok(FloatRgbaFrame::new(

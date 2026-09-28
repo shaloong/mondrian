@@ -5448,7 +5448,7 @@ fn compact_yuva12_retains_four_strided_planes_and_scaled_coverage() {
 #[test]
 fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
     use ffmpeg::util::format::pixel::Pixel;
-    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 3, 1);
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 3, 2);
     decoded.set_color_space(ffmpeg::util::color::Space::BT709);
     decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
     for (plane, values) in [
@@ -5460,8 +5460,14 @@ fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
     .into_iter()
     .enumerate()
     {
-        for (x, value) in values.into_iter().enumerate() {
-            decoded.data_mut(plane)[x * 2..x * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        let stride = decoded.stride(plane);
+        decoded.data_mut(plane).fill(0xff);
+        for y in 0..2 {
+            for x in 0..3 {
+                let value = values[if y == 0 { x } else { 2 - x }];
+                let start = y * stride + x * 2;
+                decoded.data_mut(plane)[start..start + 2].copy_from_slice(&value.to_le_bytes());
+            }
         }
     }
     let mut plan = PreviewHardwareDecodePlan::resolve(
@@ -5479,7 +5485,7 @@ fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
         &mut None,
         &mut None,
         3,
-        1,
+        2,
         Path::new("unbounded-yuva12.mov"),
         test_source_color(),
     )
@@ -5508,4 +5514,11 @@ fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
     assert_eq!(rgba[3], 0.0);
     assert_eq!(rgba[7], 2048.0 / 4095.0);
     assert_eq!(rgba[11], 1.0);
+    assert_eq!(rgba.len(), 3 * 2 * 4);
+    for x in 0..3 {
+        assert_eq!(
+            &rgba[(3 + x) * 4..(4 + x) * 4],
+            &rgba[(2 - x) * 4..(3 - x) * 4]
+        );
+    }
 }
