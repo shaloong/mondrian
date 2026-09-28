@@ -5446,6 +5446,54 @@ fn compact_yuva12_retains_four_strided_planes_and_scaled_coverage() {
 }
 
 #[test]
+fn compact_yuva12_rejects_invalid_visible_alpha_and_ignores_padding() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 3, 2);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for plane in 0..4 {
+        let stride = decoded.stride(plane);
+        decoded.data_mut(plane).fill(0xff);
+        for y in 0..2 {
+            for x in 0..3 {
+                let code = if plane == 3 { 4095_u16 } else { 2048_u16 };
+                let start = y * stride + x * 2;
+                decoded.data_mut(plane)[start..start + 2].copy_from_slice(&code.to_le_bytes());
+            }
+        }
+    }
+    let materialize = |decoded: &ffmpeg::util::frame::video::Video| {
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::PRORES,
+            None,
+        );
+        materialize_decoded_frame(
+            decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            3,
+            2,
+            Path::new("invalid-alpha.mov"),
+            test_source_color(),
+        )
+    };
+    materialize(&decoded).expect("padding is not coverage");
+    let start = decoded.stride(3) + 4;
+    for invalid in [4096_u16, u16::MAX] {
+        decoded.data_mut(3)[start..start + 2].copy_from_slice(&invalid.to_le_bytes());
+        let error = materialize(&decoded).expect_err("coverage must fail closed");
+        assert!(matches!(error, MondrianError::DecodeFailed { reason, .. }
+            if reason.contains("pixel 5") && reason.contains("exceeds 4095")));
+    }
+}
+
+#[test]
 fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
     use ffmpeg::util::format::pixel::Pixel;
     let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 3, 2);

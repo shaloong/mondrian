@@ -122,6 +122,36 @@ fn convert_decoded_to_compact_yuv(
         CpuYuvChromaSubsampling::Cs420 => height.div_ceil(2),
         CpuYuvChromaSubsampling::Cs422 | CpuYuvChromaSubsampling::Cs444 => height,
     };
+    if decoded.format() == ffmpeg::util::format::pixel::Pixel::YUVA444P12LE {
+        let stride = decoded.stride(3);
+        let row_bytes = width as usize * 2;
+        let alpha = decoded.data(3);
+        let required = stride
+            .checked_mul(height.saturating_sub(1) as usize)
+            .and_then(|prefix| prefix.checked_add(row_bytes));
+        if stride < row_bytes || required.is_none_or(|required| alpha.len() < required) {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "YUVA12 alpha plane layout is invalid".to_owned(),
+            });
+        }
+        // The immutable compact contract must carry normalized coverage,
+        // just as CPU RGBA admission does. Padding is not a sample.
+        for y in 0..height as usize {
+            for (x, bytes) in alpha[y * stride..][..row_bytes].chunks_exact(2).enumerate() {
+                let code = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if code > 4095 {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: format!(
+                            "YUVA12 alpha code {code} at pixel {} exceeds 4095",
+                            y * width as usize + x
+                        ),
+                    });
+                }
+            }
+        }
+    }
     // SAFETY: decoded is valid for this borrow. av_frame_clone creates an
     // independently owned AVFrame and retains each immutable AVBufferRef.
     // FFmpeg's frame wrapper is Send + Sync, so the resulting CPU plane view
