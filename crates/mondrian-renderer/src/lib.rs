@@ -22,6 +22,8 @@ mod cpu_yuv;
 mod creative_lut_gpu;
 pub mod cross_application_qualification;
 pub mod display_calibration;
+mod display_matte;
+pub use display_matte::GpuDisplayCalibrationBackdrop;
 pub mod gpu_composite_execution;
 pub mod gpu_compositor;
 pub mod gpu_memory_capacity;
@@ -418,11 +420,12 @@ pub use viewer_retirement::{
     ViewerCpuYuvUploadWorkerExit, ViewerGpuExecutionRetirement, ViewerGpuRetirementReceipt,
 };
 pub use viewer_runtime::{
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,
-    ViewerGpuExecutionRecord, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
-    ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputTakeError,
-    ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuSubmissionBatch,
+    ViewerGpuDisplayCalibration, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError,
+    ViewerGpuExecutionGpuStage, ViewerGpuExecutionRecord, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError,
+    ViewerGpuExecutionStageMarker, ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision,
+    ViewerGpuPresentationOutputTakeError, ViewerHeterogeneousGpuCompletedBatch,
+    ViewerHeterogeneousGpuSubmissionBatch,
 };
 pub use viewer_spatial::{GpuViewerSpatialRuntimeDiagnostics, ViewerSourceRect};
 pub use viewer_working_set::{

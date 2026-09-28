@@ -951,6 +951,21 @@ presentation carrier. ICC paths keep the OCIO encoded output and device output
 in `Rgba16Float`; LUT storage and interpolation math remain 32F. Uncalibrated,
 stale, or fingerprint-mismatched profiles remain fail-closed.
 
+The Viewer ICC request binds an explicit opaque canvas backdrop to the LUT.
+After Program Output, scope analysis, monitor adaptation and optional signal
+monitoring, the existing Mondrian Standard identity processors decode the
+standard monitor signal into display-linear Rec.709, then re-encode the opaque
+linear-light matte for calibration. This is a presentation operation, without a
+creative View or changes to Program Output, clean feed, Scopes or Export alpha.
+Canvas and checker colors come from the widget's paint description; logical
+crop offsets and points per output pixel keep Retina scale applied once.
+Backdrop colors and geometry participate in Window publication identity, so a
+background/theme change retires the old output and renews the existing still
+demand. The linear input and matte use `Rgba32Float`; the re-encoded ICC input
+uses `Rgba16Float`. All three allocations are admitted in the existing Viewer
+working-set budget and retained through actual GPU completion. No CPU frame
+transfer or independent color, Preview or Playback authority is introduced.
+
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
 scheduled explicitly by `RenderColorStagePlan` nodes rather than hidden inside

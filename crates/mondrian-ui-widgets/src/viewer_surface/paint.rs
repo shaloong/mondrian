@@ -11,7 +11,7 @@ use super::ViewerStatusTone;
 
 // ── Constants ────────────────────────────────────────────────────────────────────
 
-const CHECKER_TILE_SIZE: f32 = 16.0;
+const CHECKER_TILE_SIZE: f32 = super::ViewerCanvasBackground::CHECKER_TILE_SIZE;
 
 // ── Checkerboard ─────────────────────────────────────────────────────────────────
 
@@ -19,11 +19,7 @@ pub(super) fn paint_checkerboard(ctx: &mut PaintContext, canvas: Rect) {
     if canvas.width <= 0.0 || canvas.height <= 0.0 {
         return;
     }
-    let colors = &ctx.theme.colors;
-    let mut dark = colors.checkerboard_dark;
-    let mut light = colors.checkerboard_light;
-    dark.a *= 0.28;
-    light.a *= 0.28;
+    let [_, dark, light] = super::ViewerCanvasBackground::Checkerboard.paint_colors(ctx.theme);
     ctx.encoder.draw_rect(canvas, dark, 0.0);
 
     let columns = (canvas.width / CHECKER_TILE_SIZE).ceil().max(1.0) as usize;

@@ -83,6 +83,26 @@ pub enum ViewerCanvasBackground {
     Black,
 }
 
+impl ViewerCanvasBackground {
+    /// Checker size in logical canvas points, shared with ICC presentation.
+    pub const CHECKER_TILE_SIZE: f32 = 16.0;
+
+    /// sRGB canvas, dark overlay, and light overlay in their paint order.
+    /// The renderer consumes these same UI facts before device calibration.
+    pub fn paint_colors(self, theme: &Theme) -> [Color; 3] {
+        match self {
+            Self::Black => [Color::BLACK, Color::TRANSPARENT, Color::TRANSPARENT],
+            Self::Checkerboard => {
+                let mut dark = theme.colors.checkerboard_dark;
+                let mut light = theme.colors.checkerboard_light;
+                dark.a *= 0.28;
+                light.a *= 0.28;
+                [theme.colors.canvas, dark, light]
+            }
+        }
+    }
+}
+
 /// Renderer-registered GPU preview texture presented by [`ViewerSurface`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewerExternalTextureFrame {

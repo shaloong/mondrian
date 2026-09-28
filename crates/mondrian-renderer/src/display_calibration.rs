@@ -104,6 +104,7 @@ pub struct GpuDisplayCalibrationPreparedPass {
 /// Renderer-owned cache and frame resources for monitor calibration.
 pub struct GpuDisplayCalibrationRuntime {
     pipeline: Option<GpuDisplayCalibrationPipeline>,
+    pub(crate) matte: Option<crate::display_matte::GpuDisplayMattePipeline>,
     pipeline_format: Option<GpuColorFrameTextureFormat>,
     lut: Option<GpuDisplayCalibrationLut>,
     lut_contract: Option<DisplayCalibrationLutIdentity>,
@@ -136,6 +137,7 @@ impl GpuDisplayCalibrationRuntime {
     ) -> Result<Self, GpuColorFrameIdAllocationError> {
         Ok(Self {
             pipeline: None,
+            matte: None,
             pipeline_format: None,
             lut: None,
             lut_contract: None,
@@ -245,6 +247,7 @@ impl GpuDisplayCalibrationRuntime {
     pub fn clear(&mut self) {
         self.clear_frame_resources();
         self.pipeline = None;
+        self.matte = None;
         self.pipeline_format = None;
         self.lut = None;
         self.lut_contract = None;

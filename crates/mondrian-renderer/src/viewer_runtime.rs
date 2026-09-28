@@ -5,6 +5,9 @@
 //! headless Adapter that executes the same preview path.
 
 #[cfg(test)]
+#[path = "viewer_runtime/display_calibration_tests.rs"]
+mod display_calibration_tests;
+#[cfg(test)]
 #[path = "viewer_runtime/retirement_tests.rs"]
 mod retirement_tests;
 
@@ -48,6 +51,16 @@ use mondrian_core::{ProgramScopesTap, WorkingColorSpace};
 use mondrian_effects::EffectColorDomain;
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 
+/// Device calibration bound to an opaque presentation backdrop. Program Output
+/// and monitor-analysis taps remain upstream of this presentation-only matte.
+#[derive(Debug, Clone)]
+pub struct ViewerGpuDisplayCalibration {
+    /// Proven immutable display calibration LUT.
+    pub lut: Arc<DisplayCalibrationLut3d>,
+    /// Exact canvas paint and sampling identity for this output texture.
+    pub backdrop: crate::GpuDisplayCalibrationBackdrop,
+}
+
 /// Immutable renderer input for one Viewer GPU execution.
 pub struct ViewerGpuExecutionRequest<'a> {
     /// Sequence identity used only to correlate renderer diagnostics.
@@ -82,7 +95,7 @@ pub struct ViewerGpuExecutionRequest<'a> {
     /// Encoded output precision required by the presentation Adapter.
     pub output_precision: ViewerGpuOutputPrecision,
     /// Optional proven display calibration applied after the output boundary.
-    pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+    pub display_calibration: Option<ViewerGpuDisplayCalibration>,
     /// Optional demand-driven analysis of Program Output before monitor adaptation.
     pub program_scopes: Option<GpuProgramScopesRequest>,
     /// Optional fused false-color, zebra, and gamut warning pass.
@@ -502,6 +515,16 @@ impl ViewerGpuExecutionRuntime {
         &self,
         request: &ViewerGpuExecutionRequest<'_>,
     ) -> Result<crate::ViewerGpuActiveWorkingSetEstimate, ViewerGpuExecutionError> {
+        if let Some(calibration) = &request.display_calibration {
+            if calibration.lut.source_color_space()
+                != request.monitor_adaptation.monitor_color_space()
+            {
+                return Err(ViewerGpuExecutionError::Calibration(
+                    "ICC source does not match the monitor signal".to_owned(),
+                ));
+            }
+            calibration.backdrop.validate().map_err(ViewerGpuExecutionError::Calibration)?;
+        }
         let mut active_working_set =
             estimate_viewer_gpu_active_working_set(request).map_err(|error| match error {
                 ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput { reason } => {
@@ -995,7 +1018,7 @@ impl ViewerGpuExecutionRuntime {
             ViewerGpuExecutionGpuStage::ProgramScopes,
         )?;
         let signal_monitoring_started = Instant::now();
-        let (output, output_owner) = if let Some(monitoring) = request.signal_monitoring {
+        let (mut output, output_owner) = if let Some(monitoring) = request.signal_monitoring {
             let signal = match monitoring.tap {
                 ProgramScopesTap::ProgramOutput => &program_output,
                 ProgramScopesTap::MonitorOutput => &output,
@@ -1030,23 +1053,105 @@ impl ViewerGpuExecutionRuntime {
         )?;
         let calibration_started = Instant::now();
         let (output, output_owner) = if let Some(calibration) = request.display_calibration {
-            let output_resource = match output_owner {
-                ViewerGpuExecutionOutputOwner::ColorOutput => {
-                    self.color_output.frame_table().get(&output).map_err(|error| {
-                        ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
-                    })?
-                }
-                ViewerGpuExecutionOutputOwner::SignalMonitor => {
-                    self.signal_monitor.output(&output).ok_or_else(|| {
-                        ViewerGpuExecutionError::DisplayOutputMissing(
-                            "signal-monitoring output is missing".to_owned(),
-                        )
-                    })?
-                }
-                ViewerGpuExecutionOutputOwner::DisplayCalibration => {
-                    unreachable!("display calibration cannot own output before its own stage")
-                }
+            if matches!(output_owner, ViewerGpuExecutionOutputOwner::SignalMonitor) {
+                let monitored = self.signal_monitor.take_output(&output).ok_or_else(|| {
+                    ViewerGpuExecutionError::DisplayOutputMissing(
+                        "signal-monitoring output is missing".to_owned(),
+                    )
+                })?;
+                // Transfer this physical allocation into the color runtime's ID
+                // namespace; the signal-monitor owner has independent frame IDs.
+                let (handle, resource) = monitored.into_parts();
+                output = GpuColorFrameHandle::new(
+                    self.color_output
+                        .frame_ids_mut()
+                        .allocate()
+                        .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?,
+                    handle.descriptor(),
+                    handle.texture_format(),
+                    "viewer-monitored-calibration-input",
+                )
+                .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
+                let monitored = crate::GpuColorFrameResource::new(output.clone(), resource);
+                self.color_output.frame_table_mut().insert(monitored).map_err(|e| {
+                    ViewerGpuExecutionError::Calibration(format!("signal-monitor transfer: {e:?}"))
+                })?;
+            }
+            let engine = mondrian_core::types::ColorEngine::mondrian_standard();
+            let decode = crate::RenderIntermediateColorTransform {
+                output_identity: WorkingColorSpace::LinearRec709.into(),
+                output_domain: crate::ColorFrameDomain::Display,
+                output_encoding: crate::ColorFrameEncoding::LinearFloat,
+                engine: engine.clone(),
             };
+            let linear = self
+                .color_output
+                .record_wgpu_intermediate_color_transform_owned_backend(
+                    &decode,
+                    &output,
+                    GpuColorFrameTextureFormat::Rgba32Float,
+                    "viewer-display-linear",
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
+            stage_diagnostics.accumulate(linear.stage_diagnostics);
+            let matted = {
+                let (table, ids) = self.color_output.frame_table_and_ids_mut();
+                let input = table.get(&linear.materialized.output).map_err(|e| {
+                    ViewerGpuExecutionError::Calibration(format!("display-linear input: {e:?}"))
+                })?;
+                self.display_calibration
+                    .matte
+                    .get_or_insert_with(|| {
+                        crate::display_matte::GpuDisplayMattePipeline::new(device)
+                    })
+                    .record(
+                        device,
+                        encoder,
+                        ids,
+                        &self.resource_pool,
+                        input,
+                        calibration.backdrop,
+                    )
+                    .map_err(ViewerGpuExecutionError::Calibration)?
+            };
+            let matted_handle = matted.handle().clone();
+            self.color_output.frame_table_mut().insert(matted).map_err(|e| {
+                ViewerGpuExecutionError::Calibration(format!("display matte transfer: {e:?}"))
+            })?;
+            let encode = crate::RenderIntermediateColorTransform {
+                output_identity: calibration.lut.source_color_space().into(),
+                output_domain: crate::ColorFrameDomain::Display,
+                output_encoding: crate::ColorFrameEncoding::EncodedFloat,
+                engine,
+            };
+            let encoded = self
+                .color_output
+                .record_wgpu_intermediate_color_transform_owned_backend(
+                    &encode,
+                    &matted_handle,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    "viewer-display-matted-signal",
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|e| ViewerGpuExecutionError::Calibration(format!("{e:?}")))?;
+            stage_diagnostics.accumulate(encoded.stage_diagnostics);
+            let output_resource =
+                self.color_output.frame_table().get(&encoded.materialized.output).map_err(|e| {
+                    ViewerGpuExecutionError::Calibration(format!("matted signal: {e:?}"))
+                })?;
             let calibrated = self
                 .display_calibration
                 .record(
@@ -1054,7 +1159,7 @@ impl ViewerGpuExecutionRuntime {
                     queue,
                     encoder,
                     output_resource,
-                    calibration,
+                    calibration.lut,
                     GpuColorFrameTextureFormat::Rgba16Float,
                 )
                 .map_err(|error| ViewerGpuExecutionError::Calibration(error.to_string()))?;
@@ -2861,7 +2966,10 @@ mod tests {
                 output_width: 4,
                 output_height: 4,
                 output_precision,
-                display_calibration,
+                display_calibration: display_calibration.map(|lut| ViewerGpuDisplayCalibration {
+                    lut,
+                    backdrop: crate::GpuDisplayCalibrationBackdrop::solid(Color::BLACK),
+                }),
                 program_scopes: None,
                 signal_monitoring: None,
             },

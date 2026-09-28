@@ -2190,6 +2190,13 @@ pipeline survive steady frames and rebuild only on presentation-contract or
 size changes. Batch construction also resets texture authority when returning
 from an external/raster image to an ordinary UI primitive; a shape can never
 inherit the preceding Viewer pipeline.
+Because ICC device values are nonlinear and device-specific, transparent Viewer
+content is matted over the widget-owned canvas colors in display-linear light
+before ICC calibration. The UI device-code batch consumes this opaque texture.
+Canvas colors, logical crop origin and pixel step are part of the Window
+publication identity; changing the background or theme retires that texture
+and renews the existing paused still demand. This presentation matte does not
+change Program Output, clean feed, Scopes or Export coverage.
 The application-layer `PreviewRasterPresentationContract` resolves the CPU
 boundary before any Widget object exists: Rec.709, sRGB, and Display P3 SDR
 requests are monitor-adapted to an sRGB atlas payload; PQ/HLG requests fail

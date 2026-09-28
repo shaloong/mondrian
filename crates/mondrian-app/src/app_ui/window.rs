@@ -1964,6 +1964,7 @@ type WindowViewerGpuPublicationSlots = ViewerGpuPublicationSlots<
 struct WindowViewerGpuPresentationState {
     publications: WindowViewerGpuPublicationSlots,
     presentation: Option<ViewerExternalTexturePresentation>,
+    backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
 }
 
 impl WindowViewerGpuPresentationState {
@@ -1982,16 +1983,23 @@ impl WindowViewerGpuPresentationState {
         self.presentation
     }
 
-    fn set_presentation(&mut self, presentation: ViewerExternalTexturePresentation) {
+    fn set_presentation(
+        &mut self,
+        presentation: ViewerExternalTexturePresentation,
+        backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
+    ) {
         self.presentation = Some(presentation);
+        self.backdrop = backdrop;
     }
 
     fn take_presentation(&mut self) -> bool {
+        self.backdrop = None;
         self.presentation.take().is_some()
     }
 
     fn clear(&mut self) -> [Option<WindowViewerGpuPublishedOutput>; 2] {
         self.presentation = None;
+        self.backdrop = None;
         self.publications.drain()
     }
 }
@@ -6777,9 +6785,34 @@ fn prepare_viewer_gpu_preview(
         session.viewer_gpu_output_telemetry.record_unavailable_skip();
         finish_prepare!();
     };
-    if let Err(error) =
-        synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation)
-    {
+    let backdrop = session.display_calibration.as_ref().map(|_| {
+        let colors = host
+            .preferences()
+            .viewer_canvas_background
+            .paint_colors(&mondrian_ui_theme::current_theme());
+        mondrian_renderer::GpuDisplayCalibrationBackdrop {
+            canvas: colors[0],
+            dark: colors[1],
+            light: colors[2],
+            tile_size: mondrian_ui_widgets::ViewerCanvasBackground::CHECKER_TILE_SIZE,
+            offset: [
+                presentation_geometry.visible_rect.x - presentation_geometry.canvas_rect.x,
+                presentation_geometry.visible_rect.y - presentation_geometry.canvas_rect.y,
+            ],
+            pixel_step: [
+                presentation_geometry.visible_rect.width
+                    / presentation_geometry.presentation.output_width as f32,
+                presentation_geometry.visible_rect.height
+                    / presentation_geometry.presentation.output_height as f32,
+            ],
+        }
+    });
+    if let Err(error) = synchronize_viewer_spatial_presentation(
+        session,
+        host,
+        presentation_geometry.presentation,
+        backdrop,
+    ) {
         tracing::error!(%error, "Window spatial output retirement could not bind a new still ticket");
         finish_prepare!();
     }
@@ -7016,9 +7049,10 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
-        "{}:{}",
+        "{}:{}:{}",
         frame.external_texture_key(),
-        presentation_geometry.presentation.key_suffix()
+        presentation_geometry.presentation.key_suffix(),
+        backdrop.map(|background| background.key_suffix()).unwrap_or_default()
     )) else {
         session.viewer_gpu_output_telemetry.record_invalid_texture_key();
         tracing::warn!(
@@ -7249,7 +7283,12 @@ fn prepare_viewer_gpu_preview(
             output_width: presentation_geometry.presentation.output_width,
             output_height: presentation_geometry.presentation.output_height,
             output_precision,
-            display_calibration,
+            display_calibration: display_calibration.map(|lut| {
+                mondrian_renderer::ViewerGpuDisplayCalibration {
+                    lut,
+                    backdrop: backdrop.expect("ICC presentation owns its canvas backdrop"),
+                }
+            }),
             program_scopes: viewer_program_scopes_request(
                 program_scopes_requested,
                 frame.program_output_boundary.output_color_space(),
@@ -7874,8 +7913,11 @@ fn synchronize_viewer_spatial_presentation(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
     presentation: ViewerExternalTexturePresentation,
+    backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
 ) -> Result<(), mondrian_playback::PlaybackError> {
-    if session.viewer_gpu_presentation.presentation() == Some(presentation) {
+    if session.viewer_gpu_presentation.presentation() == Some(presentation)
+        && session.viewer_gpu_presentation.backdrop == backdrop
+    {
         return Ok(());
     }
     let replaced_carrier = session.viewer_gpu_presentation.presentation().is_some();
@@ -7886,7 +7928,7 @@ fn synchronize_viewer_spatial_presentation(
         // ticket; timed playback demands keep their original deadlines.
         host.renew_still_frame_demand_after_output_retirement()?;
     }
-    session.viewer_gpu_presentation.set_presentation(presentation);
+    session.viewer_gpu_presentation.set_presentation(presentation, backdrop);
     Ok(())
 }
 

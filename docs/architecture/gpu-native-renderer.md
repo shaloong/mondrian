@@ -1145,6 +1145,12 @@ by target format and LUTs by the complete fingerprint plus edge size, while
 retaining only the current device-RGB output frame. Runtime diagnostics count
 pipeline builds, LUT uploads, and records. The app combines this processor proof
 with the explicit opaque sRGB-surface code-value carrier before unblocking ICC.
+Viewer execution first composites its explicitly bound canvas backdrop in
+display-linear light using the shared OCIO identity transforms and a GPU matte.
+Its opaque re-encoded monitor signal alone enters the ICC LUT; canonical
+Program Output and scope taps keep their original coverage. The existing
+color-runtime frame table owns the three intermediate textures through GPU
+completion, and active working-set admission counts each allocation once.
 
 `OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
 uniform names, types, offsets, value counts, and copied values. The packed

@@ -983,7 +983,20 @@ fn estimate_display_calibration(
         8,
         ViewerGpuActiveWorkingSetStage::DisplayCalibration,
     )?;
-    let edge = u64::from(calibration.edge_size());
+    // Linear signal, opaque matte and re-encoded ICC input are distinct GPU
+    // allocations retained through completion, in addition to the device output.
+    for bytes_per_pixel in [16, 16, 8] {
+        demand.checked_add(
+            ViewerGpuActiveTextureDemand::checked_texture(
+                request.output_width,
+                request.output_height,
+                bytes_per_pixel,
+                ViewerGpuActiveWorkingSetStage::DisplayCalibration,
+            )?,
+            ViewerGpuActiveWorkingSetStage::DisplayCalibration,
+        )?;
+    }
+    let edge = u64::from(calibration.lut.edge_size());
     let lut_bytes = edge
         .checked_mul(edge)
         .and_then(|texels| texels.checked_mul(edge))
@@ -1530,7 +1543,14 @@ mod tests {
                     output_width: 4,
                     output_height: 4,
                     output_precision,
-                    display_calibration,
+                    display_calibration: display_calibration.map(|lut| {
+                        crate::ViewerGpuDisplayCalibration {
+                            lut,
+                            backdrop: crate::GpuDisplayCalibrationBackdrop::solid(
+                                mondrian_core::Color::BLACK,
+                            ),
+                        }
+                    }),
                     program_scopes: None,
                     signal_monitoring: None,
                 })
@@ -1582,6 +1602,12 @@ mod tests {
         );
         assert_eq!(calibrated.presentation_output.textures, 1);
         assert_eq!(calibrated.presentation_output.bytes, 4 * 4 * 8);
+        assert_eq!(calibrated.display_calibration.textures, 5);
+        assert_eq!(
+            calibrated.display_calibration.bytes,
+            4 * 4 * (16 + 16 + 8 + 8)
+                + u64::from(identity_display_calibration().edge_size()).pow(3) * 16
+        );
         assert!(
             calibrated.display_calibration.bytes > calibrated.presentation_output.bytes,
             "the persistent calibration LUT is not part of the detached output lease"
