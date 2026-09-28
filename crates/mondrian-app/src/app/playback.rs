@@ -21,6 +21,15 @@ struct PreparedTimelineAudioSource {
     sequence_id: SequenceId,
 }
 
+/// Derived execution binding, never a second authoring or clock authority.
+#[derive(Debug, PartialEq)]
+pub(super) struct AudioPlaybackAuthorBinding {
+    session_id: AuthoringSessionId,
+    closure: mondrian_audio::AudioDependencyClosure,
+    asset_library_revision: Option<u64>,
+    sample_rate: u32,
+}
+
 pub(super) enum AppAudioPlayback {
     Available(Box<AudioPlayback>),
     Unavailable { sample_rate: u32, reason: String },
@@ -1196,6 +1205,7 @@ impl AppState {
         anchor: AudioSamplePosition,
         source: Option<PreparedTimelineAudioSource>,
     ) -> mondrian_core::Result<()> {
+        let binding = self.current_audio_playback_author_binding()?;
         if let Some(source) = source {
             self.audio_playback
                 .prepare(anchor, source.renderer, source.continuity_model)
@@ -1212,7 +1222,61 @@ impl AppState {
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.clear_meter();
         }
+        self.audio_playback_author_binding = binding;
         Ok(())
+    }
+
+    fn current_audio_playback_author_binding(
+        &self,
+    ) -> mondrian_core::Result<Option<AudioPlaybackAuthorBinding>> {
+        let Some((session_id, sequence)) = self.authoring_session_id().zip(self.active_sequence())
+        else {
+            return Ok(None);
+        };
+        let output_id =
+            sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
+                transport_action_error("audio_author_binding", "Sequence has no Program Output")
+            })?;
+        let request = mondrian_audio::AudioCompileRequest {
+            output_id,
+            audition: self.audio_monitoring.audition_overlay(session_id, sequence),
+        };
+        let closure = mondrian_audio::compile_full_audio_dependency_closure(
+            sequence,
+            self.sequences(),
+            request,
+        )
+        .map_err(|error| transport_action_error("audio_author_binding", error))?;
+        let asset_library_revision = if closure.media_components().is_empty() {
+            None
+        } else {
+            self.asset_library_handle()
+                .map(|library| library.database_revision())
+                .transpose()
+                .map_err(|error| transport_action_error("audio_author_binding", error))?
+        };
+        Ok(Some(AudioPlaybackAuthorBinding {
+            session_id,
+            closure,
+            asset_library_revision,
+            sample_rate: self.audio_sample_rate,
+        }))
+    }
+
+    /// Every author transaction reaches this seam. Only changes to the compiled
+    /// audible closure retire queued PCM; opacity, visibility and author-only
+    /// metadata do not restart audio or destroy processor history.
+    pub(super) fn reconcile_audio_after_authoring_commit(&mut self) {
+        if !self.is_playing() || !self.playback_engine.snapshot().rate.supports_realtime_audio() {
+            return;
+        }
+        if self
+            .current_audio_playback_author_binding()
+            .is_ok_and(|binding| binding == self.audio_playback_author_binding)
+        {
+            return;
+        }
+        self.reconcile_audio_after_committed_authoring_change("authoring_commit");
     }
 
     fn prepare_audio_playback(&mut self, anchor: AudioSamplePosition) -> mondrian_core::Result<()> {
@@ -1243,6 +1307,7 @@ impl AppState {
     /// Sequence, then records both the primary and cleanup outcome explicitly.
     pub(super) fn reconcile_audio_after_committed_authoring_change(&mut self, context: &str) {
         if let Err(error) = self.refresh_audio_playback_after_program_change() {
+            self.audio_playback_author_binding = None;
             tracing::error!(%error, context, "failed to prepare audio after committed authoring change");
             let cleanup = self
                 .authoritative_audio_anchor(
@@ -2592,6 +2657,286 @@ mod tests {
             FrameDeliveryCandidate::for_demand(identity, kind),
             state.playback_observation_instant_anchor,
         )
+    }
+
+    fn live_audio_fixture(seconds: u32) -> (AppState, std::path::PathBuf, TrackId) {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("mondrian-live-audio-{}", ProjectId::new()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tone.wav");
+        let data_bytes = seconds * 48_000_u32 * 2 * 4;
+        let mut wave = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        wave.write_all(b"RIFF").unwrap();
+        wave.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
+        wave.write_all(b"WAVEfmt ").unwrap();
+        wave.write_all(&16_u32.to_le_bytes()).unwrap();
+        wave.write_all(&3_u16.to_le_bytes()).unwrap();
+        wave.write_all(&2_u16.to_le_bytes()).unwrap();
+        wave.write_all(&48_000_u32.to_le_bytes()).unwrap();
+        wave.write_all(&384_000_u32.to_le_bytes()).unwrap();
+        wave.write_all(&8_u16.to_le_bytes()).unwrap();
+        wave.write_all(&32_u16.to_le_bytes()).unwrap();
+        wave.write_all(b"data").unwrap();
+        wave.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for frame in 0..seconds * 48_000 {
+            let sample = 0.05 * (std::f32::consts::TAU * 440.0 * frame as f32 / 48_000.0).sin();
+            for _ in 0..2 {
+                wave.write_all(&sample.to_le_bytes()).unwrap();
+            }
+        }
+        drop(wave);
+        let library = AssetLibrary::open(root.join("library")).unwrap();
+        let asset = library
+            .commit_media_probe(
+                mondrian_assets::AssetMediaProbeCandidate::new(
+                    path.clone(),
+                    mondrian_core::MediaFileFingerprint::capture(&path),
+                    mondrian_media::probe_media_info(&path).unwrap(),
+                )
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        let mut sequence = Sequence::new("live audio");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    asset,
+                    TimelineTime::ZERO,
+                    TimelineTime::new(i64::from(seconds), 1).unwrap(),
+                )
+                .unwrap(),
+                AudioSourceComponentId::primary(),
+            )
+            .unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
+        (state, root, track_id)
+    }
+
+    fn set_live_audio_fader(state: &mut AppState, track_id: TrackId) {
+        state
+            .dispatch_action(
+                super::super::product_action::ProductAction::Audio(
+                    super::super::product_action::AudioProductAction::EditChannelStrip(
+                        mondrian_timeline::AudioChannelStripEditRequest {
+                            owner: mondrian_timeline::AudioChannelStripOwner::Track { track_id },
+                            edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb {
+                                value: -6.0,
+                            },
+                        },
+                    ),
+                )
+                .into_external_action(),
+            )
+            .expect("typed fader edit");
+    }
+
+    #[test]
+    fn committed_track_mute_replaces_running_pcm_without_restarting_transport() {
+        let (mut state, root, track_id) = live_audio_fixture(1);
+        state.play().expect("prepare running PCM");
+        let before = state.playback_engine.snapshot();
+        let generation = state.audio_playback_snapshot().generation;
+        assert!(state.active_audio_delivery_evidence().is_some());
+        state.set_track_muted(track_id, true).expect("author mute");
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert!(
+            state.audio_playback_snapshot().generation > generation,
+            "committed mute must retire old PCM rather than leave the old source prepared"
+        );
+        assert!(
+            state.active_audio_delivery_evidence().is_none(),
+            "muted Program is proven silent"
+        );
+        let muted_generation = state.audio_playback_snapshot().generation;
+        let video_track_id = state.active_sequence().unwrap().video_tracks[0].id;
+        state.set_track_visible(video_track_id, false).expect("visual-only edit");
+        assert_eq!(state.audio_playback_snapshot().generation, muted_generation);
+        state.set_track_muted(track_id, false).expect("author unmute");
+        assert_eq!(
+            state.audio_playback_snapshot().generation,
+            muted_generation + 1
+        );
+        assert!(state.active_audio_delivery_evidence().is_some());
+        let audible_generation = state.audio_playback_snapshot().generation;
+        set_live_audio_fader(&mut state, track_id);
+        assert_eq!(
+            state.audio_playback_snapshot().generation,
+            audible_generation + 1,
+            "one transaction must not rotate PCM twice through per-action refreshes"
+        );
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_audio_commit_refreshes_pcm_when_root_revision_is_unchanged() {
+        let (mut state, root, child_track) = live_audio_fixture(1);
+        let child = state.active_sequence().unwrap().clone();
+        let mut parent = Sequence::new("nested audio parent");
+        parent
+            .add_nested_audio_clip(
+                parent.audio_tracks[0].id,
+                mondrian_timeline::Clip::new_nested_sequence(
+                    child.id,
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                    None,
+                )
+                .unwrap(),
+                child.audio_program.outputs[0].id,
+            )
+            .unwrap();
+        state.test_set_sequence(Some(parent));
+        state.test_add_sequence(child.clone());
+        state.play().expect("prepare nested PCM");
+        let root_revision = state.active_sequence().unwrap().revision;
+        let before = state.playback_engine.snapshot();
+        let generation = state.audio_playback_snapshot().generation;
+        state
+            .commit_sequence_edit(child.id, "mute nested Track", |sequence| {
+                sequence
+                    .audio_tracks
+                    .iter_mut()
+                    .find(|track| track.id == child_track)
+                    .unwrap()
+                    .is_muted = true;
+                Ok(())
+            })
+            .expect("commit child author edit");
+        assert_eq!(state.active_sequence().unwrap().revision, root_revision);
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.audio_playback_snapshot().generation, generation + 1);
+        // The root still executes its nested source; the child now renders silence.
+        assert!(state.active_audio_delivery_evidence().is_some());
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_audio_edit_clears_old_pcm_when_new_source_cannot_prepare() {
+        let (mut state, root, track_id) = live_audio_fixture(1);
+        state.play().expect("prepare initial PCM");
+        let generation = state.audio_playback_snapshot().generation;
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(root.join("unbound-library")).unwrap(),
+        ));
+        set_live_audio_fader(&mut state, track_id);
+        assert_eq!(
+            mondrian_timeline::audio_channel_strip(
+                state.active_sequence().unwrap(),
+                mondrian_timeline::AudioChannelStripOwner::Track { track_id },
+            )
+            .unwrap()
+            .fader_db,
+            -6.0
+        );
+        assert!(state.audio_playback_snapshot().generation > generation);
+        assert!(state.active_audio_delivery_evidence().is_none());
+        assert!(state.latest_audio_meter_frame().is_none());
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a physical CoreAudio output device; emits a quiet test tone"]
+    fn physical_coreaudio_live_authoring_retires_pcm_and_reacquires_clock() {
+        fn wait_for_audio(state: &mut AppState, expected_peak: f32) -> serde_json::Value {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("physical Audio poll");
+                let audio = state.audio_playback_snapshot();
+                let peak = state.latest_audio_meter_frame().and_then(|frame| {
+                    frame.targets.iter().find_map(|target| {
+                        matches!(
+                            target.target,
+                            mondrian_audio::AudioMeterTarget::ProgramOutput(_)
+                        )
+                        .then(|| target.channels[0].sample_peak_linear)
+                    })
+                });
+                if let Some(output) = audio.output.filter(|output| {
+                    output.active
+                        && !output.stream_failed
+                        && output.active_callback_consumed_frames >= 4_800
+                        && state.playback_clock_master() == Some(ClockMaster::AudioDevice)
+                        && peak.is_some_and(|peak| (peak - expected_peak).abs() < 0.001)
+                }) {
+                    return serde_json::json!({
+                        "pcm_generation": audio.generation,
+                        "stream_generation": output.stream_generation,
+                        "callback_count": output.callback_count,
+                        "consumed_frames": output.active_callback_consumed_frames,
+                        "underrun_frames": output.underrun_frames,
+                        "sample_rate": output.contract.sample_rate,
+                        "channels": output.contract.channels(),
+                        "program_peak": peak,
+                        "clock_master": "AudioDevice",
+                        "device": format!("{:?}", state.latest_audio_output_device_evidence()),
+                        "snapshot": format!("{audio:?}"),
+                    });
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "physical audio did not converge: {audio:?}, peak={peak:?}, clock={:?}",
+                    state.playback_clock_master()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let (mut state, root, track_id) = live_audio_fixture(30);
+        let mut observations = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.play().expect("physical play");
+            observations.push(wait_for_audio(&mut state, 0.05));
+            let before = state.playback_engine.snapshot();
+            state.set_track_muted(track_id, true).expect("live mute");
+            assert_eq!(state.playback_engine.snapshot(), before);
+            let until = Instant::now() + Duration::from_millis(150);
+            while Instant::now() < until {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("muted poll");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(state.active_audio_delivery_evidence().is_none());
+            assert!(state.latest_audio_meter_frame().is_none());
+            let muted = state.audio_playback_snapshot();
+            assert!(muted
+                .output
+                .is_some_and(|output| !output.active && output.buffered_frames == 0));
+            observations.push(serde_json::json!({"muted": true, "snapshot": format!("{muted:?}"), "clock": format!("{:?}", state.playback_clock_master())}));
+            state.set_track_muted(track_id, false).expect("live unmute");
+            observations.push(wait_for_audio(&mut state, 0.05));
+            let before = state.playback_engine.snapshot();
+            set_live_audio_fader(&mut state, track_id);
+            assert_eq!(state.playback_engine.snapshot(), before);
+            observations.push(wait_for_audio(&mut state, 0.05 * 10_f32.powf(-6.0 / 20.0)));
+        }));
+        let shutdown = state.shutdown_audio_playback_and_wait();
+        let report = serde_json::json!({
+            "classification": "DiagnosticOnly", "passed": result.is_ok() && shutdown.all_workers_terminated(),
+            "observations": observations, "shutdown": shutdown,
+            "limitation": "short physical Audio callback/PCM/clock test, no video or commercial endurance qualification",
+        });
+        println!("{}", serde_json::to_string(&report).unwrap());
+        if let Some(path) = std::env::var_os("MONDRIAN_LIVE_AUDIO_EVIDENCE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(shutdown.all_workers_terminated(), "{shutdown:?}");
     }
 
     #[test]

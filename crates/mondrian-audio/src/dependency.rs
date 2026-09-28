@@ -1,4 +1,4 @@
-//! Range-scoped dependency selection for compiled Audio Programs.
+//! Complete and range-scoped dependency closures for compiled Audio Programs.
 //!
 //! This module is the sole interpretation of whether a compiled contribution
 //! can contribute to a public output window. Snapshot capture and mutable
@@ -16,17 +16,18 @@ use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// Closed Audio Program dependency set for one exact public output window.
+/// Closed Audio Program dependency set for a complete output or exact window.
 ///
 /// The set contains exact selected root/nested semantic Program occurrences
-/// plus routed contributions that intersect the requested half-open Sequence
-/// window. Nested output placement is resolved through the canonical compiled
+/// plus routed contributions, optionally restricted to a requested half-open
+/// Sequence window. Nested output placement is resolved through the canonical compiled
 /// source-time map; callers never inspect Tracks or Clips. Occurrences are
 /// keyed by Sequence, public Output, and exact projected window rather than a
 /// coarse Sequence identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioDependencyClosure {
     sequence_ids: BTreeSet<SequenceId>,
+    program_layouts: BTreeMap<SequenceId, mondrian_core::AudioChannelLayout>,
     media_components: BTreeMap<AssetId, BTreeSet<AudioSourceComponentId>>,
     programs: BTreeMap<AudioDependencyProgramKey, Arc<CompiledAudioProgram>>,
     root_program: Arc<CompiledAudioProgram>,
@@ -43,7 +44,7 @@ impl AudioDependencyClosure {
         &self.media_components
     }
 
-    /// Exact range-selected root Program that produced this closure.
+    /// Exact compiled root Program that produced this closure.
     ///
     /// The compiler is a pure author-to-semantic lowering seam: it performs no
     /// plugin-registry, device, filesystem, or media access.
@@ -62,7 +63,11 @@ impl AudioDependencyClosure {
         output_id: ProgramOutputId,
         window: DependencyWindow,
     ) -> Option<&Arc<CompiledAudioProgram>> {
-        self.programs.get(&AudioDependencyProgramKey { sequence_id, output_id, window })
+        self.programs.get(&AudioDependencyProgramKey {
+            sequence_id,
+            output_id,
+            window: Some(window),
+        })
     }
 }
 
@@ -70,7 +75,7 @@ impl AudioDependencyClosure {
 struct AudioDependencyProgramKey {
     sequence_id: SequenceId,
     output_id: ProgramOutputId,
-    window: DependencyWindow,
+    window: Option<DependencyWindow>,
 }
 
 /// Failure while lowering one selected Audio Program dependency closure.
@@ -128,6 +133,34 @@ pub fn compile_audio_dependency_closure(
     output_id: Option<ProgramOutputId>,
     range: TimelineTimeRange,
 ) -> Result<AudioDependencyClosure, AudioDependencyError> {
+    compile_dependency_closure(
+        root,
+        sequences,
+        output_id.map(AudioCompileRequest::program),
+        Some(DependencyWindow::from_half_open(range)?),
+    )
+}
+
+/// Compile the complete routed Signal Closure without preparing media or DSP.
+///
+/// Realtime consumers compare this immutable semantic value to decide whether
+/// an author edit invalidates their prepared PCM. Visual properties, author
+/// revisions and unrelated Sequences are absent; nested output programs and
+/// root audition retain the same compiler semantics used by execution.
+pub fn compile_full_audio_dependency_closure(
+    root: &Sequence,
+    sequences: &[Sequence],
+    request: AudioCompileRequest,
+) -> Result<AudioDependencyClosure, AudioDependencyError> {
+    compile_dependency_closure(root, sequences, Some(request), None)
+}
+
+fn compile_dependency_closure(
+    root: &Sequence,
+    sequences: &[Sequence],
+    request: Option<AudioCompileRequest>,
+    window: Option<DependencyWindow>,
+) -> Result<AudioDependencyClosure, AudioDependencyError> {
     let mut candidates = HashMap::with_capacity(sequences.len().saturating_add(1));
     candidates.insert(root.id, root);
     let mut root_candidate_seen = false;
@@ -148,8 +181,8 @@ pub fn compile_audio_dependency_closure(
     let mut stack = BTreeSet::new();
     let root_program = collect_sequence_dependencies(
         root,
-        output_id,
-        DependencyWindow::from_half_open(range)?,
+        request,
+        window,
         &candidates,
         &mut stack,
         0,
@@ -157,6 +190,7 @@ pub fn compile_audio_dependency_closure(
     )?;
     Ok(AudioDependencyClosure {
         sequence_ids: builder.sequence_ids,
+        program_layouts: builder.program_layouts,
         media_components: builder.media_components,
         programs: builder.programs,
         root_program,
@@ -166,14 +200,15 @@ pub fn compile_audio_dependency_closure(
 #[derive(Default)]
 struct AudioDependencyClosureBuilder {
     sequence_ids: BTreeSet<SequenceId>,
+    program_layouts: BTreeMap<SequenceId, mondrian_core::AudioChannelLayout>,
     media_components: BTreeMap<AssetId, BTreeSet<AudioSourceComponentId>>,
     programs: BTreeMap<AudioDependencyProgramKey, Arc<CompiledAudioProgram>>,
 }
 
 fn collect_sequence_dependencies(
     sequence: &Sequence,
-    output_id: Option<ProgramOutputId>,
-    window: DependencyWindow,
+    request: Option<AudioCompileRequest>,
+    window: Option<DependencyWindow>,
     sequences: &HashMap<SequenceId, &Sequence>,
     stack: &mut BTreeSet<SequenceId>,
     depth: usize,
@@ -189,12 +224,24 @@ fn collect_sequence_dependencies(
         return Err(AudioDependencyError::NestedCycle(sequence.id));
     }
     closure.sequence_ids.insert(sequence.id);
+    closure
+        .program_layouts
+        .insert(sequence.id, sequence.settings.audio_channel_layout);
     let result = (|| {
-        let output_id = output_id
-            .or_else(|| sequence.audio_program.outputs.first().map(|output| output.id))
+        let request = request
+            .or_else(|| {
+                sequence
+                    .audio_program
+                    .outputs
+                    .first()
+                    .map(|output| AudioCompileRequest::program(output.id))
+            })
             .ok_or(AudioDependencyError::MissingProgramOutput(sequence.id))?;
-        let mut program = compile_audio_program(sequence, AudioCompileRequest::program(output_id))?;
-        select_program_window(&mut program, window)?;
+        let output_id = request.output_id;
+        let mut program = compile_audio_program(sequence, request)?;
+        if let Some(window) = window {
+            select_program_window(&mut program, window)?;
+        }
         let key = AudioDependencyProgramKey { sequence_id: sequence.id, output_id, window };
         let compiled_program = Arc::new(program);
         let program = if let Some(existing) = closure.programs.get(&key) {
@@ -219,13 +266,16 @@ fn collect_sequence_dependencies(
                         .get(&sequence_id)
                         .copied()
                         .ok_or(AudioDependencyError::MissingNestedSequence(sequence_id))?;
-                    let child_window = selected_contribution_source_window(contribution, window)?
-                        .ok_or(AudioDependencyError::InconsistentSelection(
-                        contribution.edit_id,
-                    ))?;
+                    let child_window = window
+                        .map(|window| {
+                            selected_contribution_source_window(contribution, window)?.ok_or(
+                                AudioDependencyError::InconsistentSelection(contribution.edit_id),
+                            )
+                        })
+                        .transpose()?;
                     collect_sequence_dependencies(
                         child,
-                        Some(output_id),
+                        Some(AudioCompileRequest::program(output_id)),
                         child_window,
                         sequences,
                         stack,
@@ -362,6 +412,61 @@ mod tests {
 
     fn tt(value: i64) -> TimelineTime {
         TimelineTime::new(value, 1).expect("test TimelineTime")
+    }
+
+    #[test]
+    fn full_closure_compares_audible_semantics_across_root_and_nested_edits() {
+        let mut child = Sequence::new("child");
+        let child_track = child.audio_tracks[0].id;
+        let asset_id = AssetId::new();
+        child
+            .add_media_audio_clip(
+                child_track,
+                Clip::new(asset_id, tt(0), tt(4)).unwrap(),
+                AudioSourceComponentId::primary(),
+            )
+            .unwrap();
+        let child_output = child.audio_program.outputs[0].id;
+        let mut root = Sequence::new("root");
+        let track = root.audio_tracks[0].id;
+        root.add_nested_audio_clip(
+            track,
+            Clip::new_nested_sequence(child.id, tt(0), tt(4), None).unwrap(),
+            child_output,
+        )
+        .unwrap();
+        let request = AudioCompileRequest::program(root.audio_program.outputs[0].id);
+        let baseline =
+            compile_full_audio_dependency_closure(&root, &[child.clone()], request.clone())
+                .unwrap();
+        assert!(baseline.media_components().contains_key(&asset_id));
+        root.video_tracks[0].is_visible = false;
+        root.name = "renamed root".into();
+        child.name = "renamed child".into();
+        assert_eq!(
+            compile_full_audio_dependency_closure(&root, &[child.clone()], request.clone())
+                .unwrap(),
+            baseline
+        );
+        child.audio_tracks[0].is_muted = true;
+        let muted_child =
+            compile_full_audio_dependency_closure(&root, &[child.clone()], request.clone())
+                .unwrap();
+        assert_ne!(muted_child, baseline);
+        assert!(muted_child.media_components().is_empty());
+        child.audio_tracks[0].is_muted = false;
+        child.settings.audio_channel_layout = mondrian_core::AudioChannelLayout::Mono;
+        assert_ne!(
+            compile_full_audio_dependency_closure(&root, &[child], request.clone()).unwrap(),
+            baseline
+        );
+        root.audio_tracks[0].is_muted = true;
+        let muted_root = compile_full_audio_dependency_closure(&root, &[], request).unwrap();
+        assert!(muted_root.media_components().is_empty());
+        assert_eq!(
+            muted_root.execution_demand(),
+            AudioProgramExecutionDemand::ProvenSilent
+        );
     }
 
     #[test]

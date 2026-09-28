@@ -451,7 +451,9 @@ impl AppState {
         }
         self.synchronize_audio_idle_warmup_binding();
         self.reconcile_timeline_targeting();
-        self.synchronize_playback_authoring_binding()
+        self.synchronize_playback_authoring_binding()?;
+        self.reconcile_audio_after_authoring_commit();
+        Ok(())
     }
 
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
