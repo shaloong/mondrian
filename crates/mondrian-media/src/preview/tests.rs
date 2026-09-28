@@ -177,6 +177,50 @@ fn decoder_temporal_selection_projects_only_complete_bounded_evidence() {
         super::PreviewTemporalExtentSource::FrameDuration
     );
     assert!(!selection.temporal_approximation);
+    let target = |n, d| {
+        mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::new(n, d).unwrap())
+    };
+    assert!(
+        selection.covering_target(target(1, 50)).is_none(),
+        "unknown selection clock cannot prove reuse"
+    );
+    diagnostics.selection_clock = super::PreviewDecodeSelectionClock::new(1, 1000, 1000, 1);
+    let duration_only = diagnostics.temporal_selection().unwrap();
+    assert!(
+        duration_only.covering_target(target(1, 50)).is_none(),
+        "declared duration cannot bypass VFR successor confirmation"
+    );
+    assert_eq!(
+        duration_only.covering_target(target(0, 1)).unwrap().requested_pts,
+        1000
+    );
+    diagnostics.selected_temporal_extent_source =
+        super::PreviewTemporalExtentSource::SuccessorBoundary;
+    let selection = diagnostics.temporal_selection().unwrap();
+    assert_eq!(
+        selection.covering_target(target(1, 50)).unwrap().requested_pts,
+        1020
+    );
+    assert!(
+        selection.covering_target(target(1, 25)).is_none(),
+        "exclusive end is not covered"
+    );
+    let reverse_edge = mondrian_core::SourceSampleTarget::strict_predecessor(
+        mondrian_core::TimelineTime::new(1, 25).unwrap(),
+    );
+    assert_eq!(
+        selection.covering_target(reverse_edge).unwrap().requested_pts,
+        1039
+    );
+    let mut approximate = selection;
+    approximate.temporal_approximation = true;
+    assert!(approximate.covering_target(target(1, 50)).is_none());
+    let field_clock = super::PreviewDecodeSelectionClock::new(1, 1000, 500, 2).unwrap();
+    assert_eq!(field_clock.project(target(1, 100)), Some(1020));
+    assert!(super::PreviewDecodeSelectionClock::new(0, 1000, 0, 1).is_none());
+    assert!(super::PreviewDecodeSelectionClock::new(1, i64::MAX, 0, 2).is_none());
+    assert!(super::PreviewDecodeSelectionClock::new(1, 1000, i64::MAX, 2).is_none());
+    assert!(field_clock.project(target(-1, 100)).is_none());
 
     diagnostics.selected_temporal_extent_source = super::PreviewTemporalExtentSource::Unknown;
     assert!(diagnostics.temporal_selection().is_none());

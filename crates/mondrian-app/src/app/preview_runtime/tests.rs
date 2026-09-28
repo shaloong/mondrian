@@ -3612,6 +3612,7 @@ fn test_preview_decode_diagnostics(
         selected_pts: None,
         selected_duration_pts: None,
         selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+        selection_clock: None,
         temporal_approximation: false,
         seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
         forward_reuse_frame_window: 0,
@@ -3721,6 +3722,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             selected_pts: Some(100),
             selected_duration_pts: Some(40),
             selected_temporal_extent_source: PreviewTemporalExtentSource::FrameDuration,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
             forward_reuse_frame_window: 1,
@@ -3791,6 +3793,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             selected_pts: None,
             selected_duration_pts: None,
             selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 3,
@@ -3861,6 +3864,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             selected_pts: None,
             selected_duration_pts: None,
             selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -3931,6 +3935,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             selected_pts: None,
             selected_duration_pts: None,
             selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 3,
@@ -5862,6 +5867,43 @@ fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
         0
     );
 
+    // A resident immediate picture is not the whole rolling frontier. One
+    // in-flight Prefetch leaves only one admission, while the next missing
+    // picture needs both moving inputs on already-owned worker lanes.
+    service.frame_store.replace(test_cpu_frame_store(8, 640 * 1024 * 1024, 2));
+    for (index, key) in immediate_keys.iter().enumerate() {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+        service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+            key.decode.source().clone(),
+            if index == 0 {
+                MediaPreviewWorkerLane::NonPlayback
+            } else {
+                MediaPreviewWorkerLane::Playback
+            },
+        );
+    }
+    let held_execution = begin_test_media_execution(
+        &service,
+        test_media_key(8_101),
+        service.execution.borrow().generation(),
+        MediaPreviewRequestPriority::Prefetch,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        MediaPreviewWorkerLane::Playback,
+    );
+    schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+    assert!(
+        !service.scheduler.has_pending_key(&far_keys[0]),
+        "a farther one-input cold open cannot bypass the next missing two-input rolling picture"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 0);
+    assert!(service.scheduler.mark_execution_completed(held_execution));
+    let _ = service.scheduler.resolve_execution(held_execution, false);
+
     service.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("remove preview test root");
@@ -5953,6 +5995,42 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
         "resident persistent input is absent from the new-request list"
     );
     let far_key = far_keys.iter().find(|key| key.asset_id == ids[0]).expect("new cold key");
+    let near_keys = future_media_prefix_keys_for_state(
+        &service,
+        &state,
+        48,
+        MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+        resolution,
+    );
+    schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+    assert!(
+        !service.scheduler.has_pending_key(far_key),
+        "a farther cold open must not occupy the worker before that owner's rolling source continuation"
+    );
+    assert!(near_keys.iter().take(2).all(|key| service.scheduler.has_pending_key(key)));
+    // Complete the bounded near work through its existing Broker owner and
+    // supply the remaining rolling residency. The cold source may then use
+    // its original affinity; this does not allocate another decoder worker.
+    for _ in 0..MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT {
+        let job = match receiver.recv_for_worker_outcome_timeout(
+            MediaPreviewWorkerLane::NonPlayback,
+            Duration::from_millis(10),
+        ) {
+            MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+            other => panic!("expected rolling source continuation: {other:?}"),
+        };
+        let execution_id = job.execution_id.expect("execution lease");
+        assert!(service.scheduler.mark_execution_completed(execution_id));
+        let _ = service.scheduler.resolve_execution(execution_id, false);
+    }
+    for key in near_keys {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key,
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+    }
     schedule_media_prefetches_for_state(&service, &state, sequence, 48);
     assert!(service.scheduler.has_pending_key(far_key));
     assert_eq!(
@@ -14694,6 +14772,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         selected_pts: Some(100),
         selected_duration_pts: Some(40),
         selected_temporal_extent_source: PreviewTemporalExtentSource::FrameDuration,
+        selection_clock: None,
         temporal_approximation: false,
         seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
         forward_reuse_frame_window: 0,
@@ -16740,4 +16819,89 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
         store.media_frame(&key).is_some(),
         "GPU completion does not clear cached media"
     );
+}
+
+#[test]
+fn native_temporal_reuse_retains_one_allocation_and_exact_request_identity() {
+    let key = test_media_key(0);
+    let mut source = test_native_source_frame(320, 180);
+    let mut native = (*source.native_frame).clone();
+    native.diagnostics.requested_pts = Some(0);
+    native.diagnostics.selected_pts = Some(0);
+    native.diagnostics.selected_duration_pts = Some(1001);
+    native.diagnostics.selected_temporal_extent_source =
+        PreviewTemporalExtentSource::SuccessorBoundary;
+    native.diagnostics.selection_clock =
+        mondrian_media::PreviewDecodeSelectionClock::new(1, 24000, 0, 1);
+    source = MediaPreviewNativeSourceFrame::from_native_frame(
+        native,
+        source.source_color_space,
+        source.input_transform,
+    );
+    let frame = MediaPreviewFrame::from_native(
+        source,
+        key.source_resolution,
+        key.source_resolution,
+        test_preview_semantic_identity(81),
+        mondrian_playback::FramePresentationQuality::Ready,
+        PreviewDecodeExecutionSummary::default(),
+    );
+    let mut store = test_cpu_frame_store(8, 1024, 8);
+    assert!(admit_test_media_frame(
+        &mut store,
+        key.clone(),
+        frame,
+        MediaPreviewRequestPriority::Prefetch
+    ));
+    let target = test_media_key_with_source_time(
+        key.clone(),
+        mondrian_core::TimelineTime::new(1, 60).unwrap(),
+    );
+    let reused = store
+        .media_frame(&target)
+        .expect("one decoded picture covers another exact target");
+    assert_eq!(reused.temporal_selection().unwrap().requested_pts, 400);
+    assert_eq!(reused.temporal_selection().unwrap().selected_pts, 0);
+    assert_eq!(
+        reused.presentation_quality(),
+        mondrian_playback::FramePresentationQuality::Ready
+    );
+    let protected = store
+        .protected_media_frame(&target, test_media_work_demand(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(protected.identity(), reused.identity());
+    assert_eq!(store.diagnostics().media_entries, 1);
+    assert_eq!(store.diagnostics().media_aggregate_resource_units, 1);
+    assert_eq!(store.diagnostics().media_aggregate_entries, 1);
+    let outside = test_media_key_with_source_time(
+        key.clone(),
+        mondrian_core::TimelineTime::new(1001, 24000).unwrap(),
+    );
+    assert!(
+        store.media_frame(&outside).is_none(),
+        "exclusive successor belongs to another picture"
+    );
+    let mut incompatible = target.clone();
+    incompatible.asset_id = AssetId::new();
+    assert!(store.media_frame(&incompatible).is_none());
+    incompatible = target.clone();
+    incompatible.alpha_interpretation = AlphaInterpretation::Premultiplied;
+    assert!(store.media_frame(&incompatible).is_none());
+    let changed = test_media_key_with_physical_source(
+        target,
+        PathBuf::from("changed.mov"),
+        test_media_file_fingerprint(90, 90),
+        0,
+    );
+    assert!(store.media_frame(&changed).is_none());
+    store.clear_media_frames();
+    assert_eq!(
+        store.diagnostics().media_aggregate_resource_units,
+        1,
+        "consumers retain the original physical charge"
+    );
+    drop(reused);
+    drop(protected);
+    assert_eq!(store.diagnostics().media_aggregate_resource_units, 0);
 }

@@ -1588,7 +1588,7 @@ fn app_duration_us(duration: Duration) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum MediaPreviewDecodedFrameEvidence {
+pub(crate) enum MediaPreviewDecodedFrameEvidence {
     CpuRgba8 {
         width: u32,
         height: u32,
@@ -1635,7 +1635,7 @@ enum MediaPreviewDecodedFrameEvidence {
     },
 }
 
-fn media_preview_frame_identity(
+pub(crate) fn media_preview_frame_identity(
     key: &MediaPreviewKey,
     evidence: MediaPreviewDecodedFrameEvidence,
 ) -> PreviewSemanticIdentity {

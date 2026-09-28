@@ -354,6 +354,29 @@ impl FutureMediaWindowCache {
         }
     }
 
+    fn cold_activation_shares_near_worker(
+        &self,
+        plan: &FutureMediaPrefixPlan,
+        near_closure: &[PlannedFutureMediaRequest],
+        worker_count: usize,
+    ) -> bool {
+        plan.requests.iter().any(|cold| {
+            let cold_source = cold.key.decode.source();
+            !cold_source.is_still_image()
+                && self.playback_source_worker_affinity.get(cold_source).is_some_and(|lane| {
+                    near_closure.iter().any(|near| {
+                        let near_source = near.key.decode.source();
+                        !near_source.is_still_image()
+                            && near_source != cold_source
+                            && self
+                                .playback_source_worker_affinity
+                                .get(near_source)
+                                .is_some_and(|near_lane| worker_count == 1 || near_lane == lane)
+                    })
+                })
+        })
+    }
+
     pub(super) fn playback_worker_affinity(
         &mut self,
         source: &mondrian_media::PreviewDecodeSource,
@@ -478,6 +501,9 @@ struct FutureMediaPrefixPlan {
     ready_media_frames: usize,
     preservable_media_frames: usize,
     window_proven_blank: bool,
+    /// A missing complete picture needs more request admissions than remain.
+    /// Physical grant exhaustion independently bounds the retained window.
+    request_limit_reached: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,6 +532,7 @@ impl Default for FutureMediaPrefixPlan {
             ready_media_frames: 0,
             preservable_media_frames: 0,
             window_proven_blank: true,
+            request_limit_reached: false,
         }
     }
 }
@@ -869,6 +896,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 0,
+                &[],
             );
             let current_media_closure_ready = current_plan.window_proven_blank
                 || (current_plan.preservable_media_frames > 0
@@ -969,6 +997,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut remaining_prefetch_jobs = prefetch_slots_available;
         let prioritize_immediate = !transport.is_priming() && !cold_activation_only;
         let mut immediate_window_proven_blank = false;
+        let mut immediate_closure = None;
         if prioritize_immediate {
             let immediate_plan = self.plan_future_media_prefix(
                 snapshot,
@@ -981,8 +1010,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 remaining_prefetch_jobs,
+                &[],
             );
             immediate_window_proven_blank = immediate_plan.window_proven_blank;
+            immediate_closure = immediate_plan.first_media_frame.clone();
             let immediate_closure_planned =
                 immediate_plan.window_proven_blank || immediate_plan.preservable_media_frames > 0;
             let immediate_requests = immediate_plan.requests.len();
@@ -1002,23 +1033,76 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 };
             }
         }
-        observation.next("prefetch-cold");
-        if let Some(activation_frame) = distinct_activation_frame {
-            let mut activation_plan = self.plan_future_media_prefix(
+        let admit_steady_prefix = |slots, reserved_after_prefix: &[PlannedFutureMediaRequest]| {
+            let plan = self.plan_future_media_prefix(
                 snapshot,
                 proxy_demands,
                 sequence,
-                activation_frame.saturating_sub(1),
-                PreviewPlaybackDirection::Forward,
-                1,
-                Some(activation_frame),
+                frame,
+                playback_direction,
+                prefetch_window_frames,
+                (playback_direction == PreviewPlaybackDirection::Reverse).then_some(0),
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
-                remaining_prefetch_jobs,
+                slots,
+                reserved_after_prefix,
             );
+            let window_proven_blank = plan.window_proven_blank;
+            let request_limit_reached = plan.request_limit_reached;
+            let scheduled =
+                self.admit_future_media_prefix(plan, preroll_deadline_at, playback_direction);
+            (window_proven_blank, scheduled, request_limit_reached)
+        };
+        let mut admitted_steady_window = None;
+        observation.next("prefetch-cold");
+        if let Some(activation_frame) = distinct_activation_frame {
+            let plan_activation = |slots| {
+                self.plan_future_media_prefix(
+                    snapshot,
+                    proxy_demands,
+                    sequence,
+                    activation_frame.saturating_sub(1),
+                    PreviewPlaybackDirection::Forward,
+                    1,
+                    Some(activation_frame),
+                    Resolution { width: target_width, height: target_height },
+                    color_context.clone(),
+                    slots,
+                    &[],
+                )
+            };
+            let mut activation_plan = plan_activation(remaining_prefetch_jobs);
             self.future_media_window
                 .borrow_mut()
                 .assign_cold_activation_worker_affinity(&activation_plan);
+            let shares_near_worker = prioritize_immediate
+                && self.future_media_window.borrow().cold_activation_shares_near_worker(
+                    &activation_plan,
+                    immediate_closure.as_deref().unwrap_or(&[]),
+                    self.decode_worker_count,
+                );
+            if shares_near_worker {
+                // The next Program frame may reuse an already decoded source
+                // sample. A cold open on that source's worker can still outlast
+                // the first missing sample in the rolling prefix. Give that
+                // prefix first admission, and replan cold work against the
+                // remaining real capacity without retaining far pixel guards.
+                let cold_reservations = activation_plan.requests.clone();
+                drop(activation_plan);
+                observation.next("prefetch-window");
+                let (window_proven_blank, scheduled, request_limit_reached) =
+                    admit_steady_prefix(remaining_prefetch_jobs, &cold_reservations);
+                admitted_steady_window = Some(window_proven_blank);
+                remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                observation.next("prefetch-cold");
+                activation_plan = plan_activation(if request_limit_reached {
+                    // Do not give a smaller far closure the admission that
+                    // could not cover the next complete rolling picture.
+                    0
+                } else {
+                    remaining_prefetch_jobs
+                });
+            }
             bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                 && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
             if bounded_cold_activation_ready {
@@ -1052,6 +1136,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 remaining_prefetch_jobs,
+                &[],
             );
             let window_proven_blank = immediate_plan.window_proven_blank;
             let immediate_scheduled = self.admit_future_media_prefix(
@@ -1074,23 +1159,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             remaining_prefetch_jobs
         };
         observation.next("prefetch-window");
-        let steady_plan = self.plan_future_media_prefix(
-            snapshot,
-            proxy_demands,
-            sequence,
-            frame,
-            playback_direction,
-            prefetch_window_frames,
-            (playback_direction == PreviewPlaybackDirection::Reverse).then_some(0),
-            Resolution { width: target_width, height: target_height },
-            color_context.clone(),
-            steady_admission_slots,
-        );
-        let steady_window_proven_blank =
-            immediate_window_proven_blank && steady_plan.window_proven_blank;
-        let steady_scheduled =
-            self.admit_future_media_prefix(steady_plan, preroll_deadline_at, playback_direction);
-        remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(steady_scheduled);
+        let steady_window_proven_blank = match admitted_steady_window {
+            Some(window_proven_blank) => immediate_window_proven_blank && window_proven_blank,
+            None => {
+                let (window_proven_blank, scheduled, _) =
+                    admit_steady_prefix(steady_admission_slots, &[]);
+                remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                immediate_window_proven_blank && window_proven_blank
+            }
+        };
         if remaining_prefetch_jobs > 0
             && distinct_activation_frame.is_none()
             && cached_cold_activation.is_none()
@@ -1129,6 +1206,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         Resolution { width: target_width, height: target_height },
                         color_context,
                         remaining_prefetch_jobs,
+                        &[],
                     );
                     self.future_media_window
                         .borrow_mut()
@@ -1218,6 +1296,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Resolution { width: target_width, height: target_height },
             color_context,
             0,
+            &[],
         );
         let bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
             && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
@@ -1312,6 +1391,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_resolution: Resolution,
         color_context: ProgramColorContext,
         max_new_jobs: usize,
+        reserved_after_prefix: &[PlannedFutureMediaRequest],
     ) -> FutureMediaPrefixPlan {
         let mut plan = FutureMediaPrefixPlan::default();
         let mut accepted_keys = self.scheduler.pending_keys().into_iter().collect::<HashSet<_>>();
@@ -1392,6 +1472,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             // rejected farther frame: otherwise that frame could block a
             // previously accepted nearer missing request during admission.
             let mut headroom = self.frame_store.borrow().media_prefetch_headroom();
+            // Plan the near prefix and the discovered cold closure against
+            // one physical grant. This is a planning deduction, not a second
+            // lease or authority. Existing/pending and shared keys are already
+            // represented and must not be charged again.
+            let cold_tail_fits = reserved_after_prefix.iter().all(|cold| {
+                accepted_keys.contains(&cold.key)
+                    || requests.iter().any(|near| near.key == cold.key)
+                    || headroom.try_reserve_many(
+                        cold.reservation.entries,
+                        cold.reservation.cpu_bytes,
+                        cold.reservation.decoder_resource_units,
+                    )
+            });
+            if !cold_tail_fits {
+                break;
+            }
             let prior_requests_fit = plan.requests.iter().all(|request| {
                 headroom.try_reserve_many(
                     request.reservation.entries,
@@ -1413,6 +1509,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     )
                 });
             if !complete_frame_fits {
+                plan.request_limit_reached = required_requests > remaining_jobs;
                 // Never publish a partial physical closure. A multi-layer
                 // native frame must acquire every surface before nearer work
                 // can consume any of its grant.
@@ -1469,6 +1566,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             target_resolution,
             color_context,
             max_future_frames.saturating_mul(64).max(1),
+            &[],
         )
         .requests
         .into_iter()
@@ -1699,6 +1797,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             } else {
                 0
             },
+            &[],
         );
         let ready_media_frames = plan.ready_media_frames;
         let preservable_media_frames = plan.preservable_media_frames;

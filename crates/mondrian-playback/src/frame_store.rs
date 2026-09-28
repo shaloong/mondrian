@@ -1188,6 +1188,29 @@ where
         Some(result)
     }
 
+    /// Find a caller-proved compatible payload while retaining its one physical allocation.
+    /// The caller owns media semantics; the Store owns lookup, LRU and leases.
+    pub fn media_frame_matching(
+        &mut self,
+        mut matches: impl FnMut(&MK, &M) -> bool,
+    ) -> Option<(M, MediaFrameResourceLease)> {
+        let key = self
+            .media
+            .lru
+            .iter()
+            .rev()
+            .find_map(|key| {
+                let entry = self.media.entries.get(key)?;
+                matches(key, &entry.payload).then(|| key.clone())
+            })
+            .or_else(|| {
+                self.current_media_overflow
+                    .iter()
+                    .find_map(|(key, entry)| matches(key, &entry.payload).then(|| key.clone()))
+            })?;
+        self.media_frame(&key)
+    }
+
     /// Return and protect one decoded-media payload for current-frame execution.
     pub fn protected_media_frame(
         &mut self,

@@ -3601,7 +3601,7 @@ fn decode_preview_frame_outcome_in_sessions(
             }
         }
 
-        let outcome = match session.decode_at(
+        let mut outcome = match session.decode_at(
             source_sample,
             access_mode,
             adaptive_hints,
@@ -3619,6 +3619,23 @@ fn decode_preview_frame_outcome_in_sessions(
                 return Err(error);
             }
         };
+        let clock = PreviewDecodeSelectionClock::new(
+            i64::from(session.stream_tb.numerator()),
+            i64::from(session.stream_tb.denominator()),
+            session.stream_start_pts,
+            session.field_processor.selection_scale(),
+        );
+        let diagnostics = match &mut outcome {
+            PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::Canceled(_) => None,
+        };
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.selection_clock = clock;
+        }
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => {
                 let result_session_disposition = if frame.diagnostics.session_disposition

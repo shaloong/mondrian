@@ -2011,8 +2011,8 @@ leave the Engine holding the earlier incomplete observation until the original
 recovery deadline. Reobservation carries the unchanged active Priming demand
 identity even after its terminal Ready delivery has consumed presentation
 authority.
-When a distinct-source activation exists, Preview reserves and retains its
-exact media dependency closure before pinning the near media prefix. The Frame
+During Priming, when a distinct-source activation exists, Preview reserves and
+retains its exact media dependency closure before pinning the near media prefix. The Frame
 Store charges the actual entry, byte, and decoder-resource units, including
 multi-layer activations. Priming's rolling scheduler services the immediate
 frame and that activation but leaves remaining near admission to the preroll
@@ -2025,9 +2025,23 @@ cold-source top-up. Its complete physical closure must fit and transfer all
 new requests into Broker ownership before farther activation can use remaining
 capacity. A blocked nearest closure is a frontier even when the farther frame
 needs fewer inputs; it cannot be bypassed by the separate cold-source plan.
-The cold activation keeps the next bounded reservation,
-but cannot block a millisecond-scale reuse decode behind a source-open path at
-the current presentation boundary. A retained cold-activation owner survives
+An idle opposite worker can still open the cold source in parallel. If the
+activation instead shares a worker with a different moving source in the
+immediate closure, the existing rolling prefix gets first claim on the remaining
+bounded admissions. A resident immediate frame can cover the same decoded source
+sample as its predecessor, so it does not prove that the next physical sample is
+already available. Cold-plan pixel guards are dropped before planning that near
+prefix. That prefix deducts the missing cold closure from the same physical
+headroom before accepting near residency; it cannot consume the entire grant
+and starve the source it must later present. Shared and already-owned keys are
+charged once. Cold work is then replanned against the remaining actual capacity.
+The next missing rolling picture retains its request-admission frontier:
+one spare admission cannot go to a smaller far closure when that nearer picture
+needs two. Physical grant exhaustion still bounds the retained near window.
+On a single-worker topology, opposite logical lanes share the same actual owner.
+These rules avoid placing a long source open ahead of the current source's next decode
+without changing worker affinity, physical grants, quality or Priming order.
+A retained cold-activation owner survives
 crossing into the ordinary rolling window; only reaching its exact Timeline
 coordinate, leaving the bounded horizon, or rotating the semantic execution
 identity releases it. The target therefore cannot slide forward one frame per
@@ -2671,3 +2685,21 @@ anchors, stopped synthetic handoff and natural-end clamping preserve authored
 frame identity this way. Reverse frame exit and conservative presentation phase
 error retain their distinct floor policy; measured audio device phase is not
 replaced by an authored-frame estimate.
+
+### Decoder-proved native picture reuse
+
+The App Frame Store adapter may serve another exact source target from a resident
+native picture only when the complete physical decode and presentation contract
+is unchanged. Media retains the concrete stream origin, time base and field
+selection scale. Covering and strict-predecessor targets use the same exact
+projection as decoder selection. Interior reuse requires an observed successor
+boundary; packet duration alone cannot establish a reusable VFR interval.
+Unknown clocks, approximations, incompatible metadata and exclusive-end targets
+continue through decode admission.
+
+The Playback Frame Store remains the sole residency owner. A compatible lookup
+returns the original payload and allocation lease, touches its existing LRU entry
+and protects that allocation for the new current demand. It creates no alias
+entry, pixel transfer or additional decoder resource charge. The App rebinds the
+complete request identity and temporal receipt using the existing media identity
+function; the native surface and its original decode provenance remain shared.

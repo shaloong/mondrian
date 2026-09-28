@@ -967,6 +967,35 @@ pub enum PreviewTemporalExtentSource {
     SuccessorBoundary,
 }
 
+/// Exact projection from source-local targets onto a decoder selection clock.
+/// The clock includes the stream origin and field-processing tick scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeSelectionClock {
+    numerator: i64,
+    denominator: i64,
+    start_pts: i64,
+}
+
+impl PreviewDecodeSelectionClock {
+    /// Preserve the concrete stream clock, including field-rate selection.
+    pub fn new(numerator: i64, denominator: i64, start_pts: i64, scale: i64) -> Option<Self> {
+        if numerator <= 0 || denominator <= 0 || scale <= 0 {
+            return None;
+        }
+        Some(Self {
+            numerator,
+            denominator: denominator.checked_mul(scale)?,
+            start_pts: start_pts.checked_mul(scale)?,
+        })
+    }
+
+    fn project(self, target: SourceSampleTarget) -> Option<i64> {
+        self.start_pts.checked_add(
+            source_sample_to_time_base_ticks(target, self.numerator, self.denominator).ok()?,
+        )
+    }
+}
+
 /// Narrow immutable temporal-selection evidence retained beyond the decoder.
 ///
 /// This is the physical PTS interval actually selected for one exact source
@@ -975,6 +1004,8 @@ pub enum PreviewTemporalExtentSource {
 /// identity without depending on the complete decoder implementation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDecodeTemporalSelection {
+    /// Concrete clock required to prove coverage of another exact source target.
+    pub selection_clock: Option<PreviewDecodeSelectionClock>,
     /// Requested decode-selection PTS after exact source-target lowering.
     /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     pub requested_pts: i64,
@@ -986,6 +1017,31 @@ pub struct PreviewDecodeTemporalSelection {
     pub extent_source: PreviewTemporalExtentSource,
     /// Whether the selection deliberately approximated the request.
     pub temporal_approximation: bool,
+}
+
+impl PreviewDecodeTemporalSelection {
+    /// Retarget only within the proven half-open physical interval.
+    /// Unknown clocks, approximations, invalid extents and overflow cannot reuse.
+    pub fn covering_target(self, target: SourceSampleTarget) -> Option<Self> {
+        if self.temporal_approximation
+            || self.extent_source == PreviewTemporalExtentSource::Unknown
+            || self.selected_duration_pts <= 0
+        {
+            return None;
+        }
+        let requested_pts = self.selection_clock?.project(target)?;
+        let end = self.selected_pts.checked_add(self.selected_duration_pts)?;
+        // A packet duration alone can overlap a later VFR picture. At an
+        // exact start it proves only that point; wider reuse requires the
+        // actual successor observed by the canonical decoder selector.
+        if requested_pts != self.selected_pts
+            && self.extent_source != PreviewTemporalExtentSource::SuccessorBoundary
+        {
+            return None;
+        }
+        (self.selected_pts <= requested_pts && requested_pts < end)
+            .then_some(Self { requested_pts, ..self })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1306,6 +1362,8 @@ pub struct PreviewDecodeDiagnostics {
     /// Evidence source that established the selected frame's presentation interval.
     #[serde(default)]
     pub selected_temporal_extent_source: PreviewTemporalExtentSource,
+    /// Concrete stream/field clock used by exact temporal selection.
+    pub selection_clock: Option<PreviewDecodeSelectionClock>,
     /// Whether interactive scrubbing intentionally presented a nearby keyframe.
     #[serde(default)]
     pub temporal_approximation: bool,
@@ -1470,6 +1528,7 @@ impl PreviewDecodeDiagnostics {
             selected_pts: None,
             selected_duration_pts: None,
             selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -1548,6 +1607,7 @@ impl PreviewDecodeDiagnostics {
         (self.selected_temporal_extent_source != PreviewTemporalExtentSource::Unknown
             && selected_pts.checked_add(selected_duration_pts).is_some())
         .then_some(PreviewDecodeTemporalSelection {
+            selection_clock: self.selection_clock,
             requested_pts,
             selected_pts,
             selected_duration_pts,

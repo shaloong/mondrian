@@ -798,6 +798,13 @@ impl PreviewDecodeKey {
         self.source_sample
     }
 
+    /// Compare the complete decode contract except its exact sampling target.
+    pub fn same_configuration(&self, other: &Self) -> bool {
+        let mut retargeted = other.clone();
+        retargeted.source_sample = self.source_sample;
+        *self == retargeted
+    }
+
     /// Decode-policy representation identity (no output extent).
     pub const fn representation(&self) -> PreviewDecodeRepresentation {
         self.representation

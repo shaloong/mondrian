@@ -127,7 +127,7 @@ pub use preview::{
     PreviewDecodeExecutionProgress, PreviewDecodeExecutionStage, PreviewDecodeKey,
     PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodePayloadRequirement,
     PreviewDecodeRepresentation, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
+    PreviewDecodeSelectionClock, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
     PreviewDecodeSessionDisposition, PreviewDecodeSessionFamily,
     PreviewDecodeSessionResidencyConfig, PreviewDecodeSource, PreviewDecodeStageDurations,
     PreviewDecodeTemporalSelection, PreviewDecodeThreadingKind, PreviewDecodeWorkerResources,
