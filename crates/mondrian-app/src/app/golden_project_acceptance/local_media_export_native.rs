@@ -307,6 +307,12 @@ fn run_high_depth_alpha_export(
             Duration::from_secs(300),
         );
         export_wall_ms = Some(export_started.elapsed().as_millis());
+        if let Ok(completed) = &export_result {
+            ensure!(
+                completed.diagnostics.visual.gpu_visual_compact_yuv_sources == frame_count as u64,
+                "4K YUVA12 export did not execute every source through shared compact GPU input"
+            );
+        }
         if color_space_override.is_none()
             && let Ok(completed) = &export_result
         {

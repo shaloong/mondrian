@@ -137,7 +137,7 @@ struct CpuYuvUploadKey {
 }
 
 #[derive(Clone)]
-struct CpuYuvUploadedPlaneViews {
+pub(crate) struct CpuYuvUploadedPlaneViews {
     slot_index: usize,
     luma: wgpu::TextureView,
     chroma: wgpu::TextureView,
@@ -355,70 +355,10 @@ impl CpuYuvUploadRuntime {
             chroma_plane_layout: frame.chroma_plane_layout(),
             has_alpha: frame.alpha_plane().is_some(),
         };
-        let (luma_format, interleaved_chroma_format, planar_chroma_format) =
-            plane_formats(frame.sample_format);
         let slot_index = state.next_slot;
         state.next_slot = state.next_slot.saturating_add(1);
         if state.slots.get(slot_index).is_none_or(|slot| slot.key != key) {
-            let luma = create_plane_texture(
-                device,
-                "mondrian.cpu-yuv.luma",
-                frame.width,
-                frame.height,
-                luma_format,
-            );
-            let chroma = create_plane_texture(
-                device,
-                "mondrian.cpu-yuv.chroma",
-                frame.chroma_width,
-                frame.chroma_height,
-                match key.chroma_plane_layout {
-                    CpuYuvChromaPlaneLayout::Interleaved => interleaved_chroma_format,
-                    CpuYuvChromaPlaneLayout::Planar => planar_chroma_format,
-                },
-            );
-            let chroma_v =
-                (key.chroma_plane_layout == CpuYuvChromaPlaneLayout::Planar).then(|| {
-                    create_plane_texture(
-                        device,
-                        "mondrian.cpu-yuv.chroma-v",
-                        frame.chroma_width,
-                        frame.chroma_height,
-                        planar_chroma_format,
-                    )
-                });
-            let alpha = key.has_alpha.then(|| {
-                create_plane_texture(
-                    device,
-                    "mondrian.cpu-yuv.alpha",
-                    frame.width,
-                    frame.height,
-                    luma_format,
-                )
-            });
-            let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
-            let chroma_v_view = match &chroma_v {
-                Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                None => chroma_view.clone(),
-            };
-            let views = CpuYuvUploadedPlaneViews {
-                slot_index,
-                luma: luma.create_view(&wgpu::TextureViewDescriptor::default()),
-                chroma: chroma_view,
-                chroma_v: chroma_v_view,
-                alpha: alpha
-                    .as_ref()
-                    .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default())),
-            };
-            let slot = CpuYuvUploadSlot {
-                key,
-                luma,
-                chroma,
-                chroma_v,
-                alpha,
-                views,
-                prepared_pass: None,
-            };
+            let slot = create_upload_slot(device, slot_index, key);
             if slot_index == state.slots.len() {
                 state.slots.push(slot);
             } else {
@@ -467,30 +407,7 @@ impl CpuYuvUploadRuntime {
             .slots
             .get_mut(planes.slot_index)
             .ok_or(CpuYuvMaterializationError::UploadSlotMismatch)?;
-        if slot.views.luma != planes.luma
-            || slot.views.chroma != planes.chroma
-            || slot.views.chroma_v != planes.chroma_v
-            || slot.views.alpha != planes.alpha
-        {
-            return Err(CpuYuvMaterializationError::UploadSlotMismatch);
-        }
-        if let Some(prepared) = &slot.prepared_pass
-            && prepared.matches_texture_plan(decoder, plan)
-        {
-            return Ok(Arc::clone(prepared));
-        }
-        let prepared = Arc::new(decoder.prepare_pass(
-            device,
-            plan,
-            GpuNativeYuvPlaneViews {
-                luma: &planes.luma,
-                chroma: &planes.chroma,
-                chroma_v: &planes.chroma_v,
-                alpha: planes.alpha.as_ref(),
-            },
-        )?);
-        slot.prepared_pass = Some(Arc::clone(&prepared));
-        Ok(prepared)
+        prepare_upload_slot_pass(slot, decoder, device, plan, planes)
     }
 
     /// Protect one completely admitted candidate, independently of the worker's
@@ -714,9 +631,367 @@ impl CpuYuvUploadRuntime {
     }
 }
 
+fn create_upload_slot(
+    device: &wgpu::Device,
+    slot_index: usize,
+    key: CpuYuvUploadKey,
+) -> CpuYuvUploadSlot {
+    let (luma_format, interleaved_chroma_format, planar_chroma_format) =
+        plane_formats(key.sample_format);
+    let luma = create_plane_texture(
+        device,
+        "mondrian.cpu-yuv.luma",
+        key.width,
+        key.height,
+        luma_format,
+    );
+    let chroma = create_plane_texture(
+        device,
+        "mondrian.cpu-yuv.chroma",
+        key.chroma_width,
+        key.chroma_height,
+        match key.chroma_plane_layout {
+            CpuYuvChromaPlaneLayout::Interleaved => interleaved_chroma_format,
+            CpuYuvChromaPlaneLayout::Planar => planar_chroma_format,
+        },
+    );
+    let chroma_v = (key.chroma_plane_layout == CpuYuvChromaPlaneLayout::Planar).then(|| {
+        create_plane_texture(
+            device,
+            "mondrian.cpu-yuv.chroma-v",
+            key.chroma_width,
+            key.chroma_height,
+            planar_chroma_format,
+        )
+    });
+    let alpha = key.has_alpha.then(|| {
+        create_plane_texture(
+            device,
+            "mondrian.cpu-yuv.alpha",
+            key.width,
+            key.height,
+            luma_format,
+        )
+    });
+    let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
+    let chroma_v_view = match &chroma_v {
+        Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        None => chroma_view.clone(),
+    };
+    let views = CpuYuvUploadedPlaneViews {
+        slot_index,
+        luma: luma.create_view(&wgpu::TextureViewDescriptor::default()),
+        chroma: chroma_view,
+        chroma_v: chroma_v_view,
+        alpha: alpha
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default())),
+    };
+    CpuYuvUploadSlot {
+        key,
+        luma,
+        chroma,
+        chroma_v,
+        alpha,
+        views,
+        prepared_pass: None,
+    }
+}
+
+fn prepare_upload_slot_pass(
+    slot: &mut CpuYuvUploadSlot,
+    decoder: &GpuNativeYuvDecoder,
+    device: &wgpu::Device,
+    plan: &GpuNativeYuvDecodePlan,
+    planes: &CpuYuvUploadedPlaneViews,
+) -> Result<Arc<crate::GpuNativeYuvPreparedPass>, CpuYuvMaterializationError> {
+    if slot.views.luma != planes.luma
+        || slot.views.chroma != planes.chroma
+        || slot.views.chroma_v != planes.chroma_v
+        || slot.views.alpha != planes.alpha
+    {
+        return Err(CpuYuvMaterializationError::UploadSlotMismatch);
+    }
+    if let Some(prepared) = &slot.prepared_pass
+        && prepared.matches_texture_plan(decoder, plan)
+    {
+        return Ok(Arc::clone(prepared));
+    }
+    let prepared = Arc::new(decoder.prepare_pass(
+        device,
+        plan,
+        GpuNativeYuvPlaneViews {
+            luma: &planes.luma,
+            chroma: &planes.chroma,
+            chroma_v: &planes.chroma_v,
+            alpha: planes.alpha.as_ref(),
+        },
+    )?);
+    slot.prepared_pass = Some(Arc::clone(&prepared));
+    Ok(prepared)
+}
+
+/// Transport seam only: reconstruction, range, alpha and OCIO remain in
+/// `record_cpu_yuv_frame` for both realtime worker and ordered Export queues.
+pub(crate) trait CpuYuvPlaneUpload {
+    fn upload_planes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &Arc<CpuYuvFrame>,
+    ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError>;
+    fn prepare_planes(
+        &self,
+        decoder: &GpuNativeYuvDecoder,
+        device: &wgpu::Device,
+        plan: &GpuNativeYuvDecodePlan,
+        planes: &CpuYuvUploadedPlaneViews,
+    ) -> Result<Arc<crate::GpuNativeYuvPreparedPass>, CpuYuvMaterializationError>;
+}
+
+impl CpuYuvPlaneUpload for CpuYuvUploadRuntime {
+    fn upload_planes(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &Arc<CpuYuvFrame>,
+    ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
+        self.upload(device, encoder, frame)
+    }
+    fn prepare_planes(
+        &self,
+        decoder: &GpuNativeYuvDecoder,
+        device: &wgpu::Device,
+        plan: &GpuNativeYuvDecodePlan,
+        planes: &CpuYuvUploadedPlaneViews,
+    ) -> Result<Arc<crate::GpuNativeYuvPreparedPass>, CpuYuvMaterializationError> {
+        self.prepare_plane_pass(decoder, device, plan, planes)
+    }
+}
+
+/// CPU-addressable plane transfer for a non-realtime, ordered GPU visual owner.
+/// Queue writes copy host bytes before returning and run before that queue's
+/// next submission. A source retains its immutable slot through the whole
+/// visual closure; no worker, playback clock or color interpreter is created.
+#[derive(Default)]
+pub(crate) struct QueueCpuYuvUploadRuntime {
+    state: Mutex<QueueCpuYuvUploadState>,
+}
+#[derive(Default)]
+struct QueueCpuYuvUploadState {
+    slots: Vec<CpuYuvUploadSlot>,
+    frames: Vec<Arc<CpuYuvFrame>>,
+}
+impl QueueCpuYuvUploadRuntime {
+    pub(crate) fn clear_frame(&self) {
+        let mut state = self.state.lock();
+        let used = state.frames.len();
+        if used > 0 {
+            state.slots.truncate(used);
+        }
+        state.frames.clear();
+    }
+    pub(crate) fn retained_plane_demand(&self) -> Result<(u64, u64), CpuYuvMaterializationError> {
+        let state = self.state.lock();
+        let mut bytes = 0_u64;
+        let mut textures = 0_u64;
+        for (index, slot) in state.slots.iter().enumerate() {
+            let demand = if let Some(frame) = state.frames.get(index) {
+                queue_plane_demand(frame)?
+            } else {
+                // Cached allocations survive content invalidation. They remain
+                // resident even when a later visual closure uses fewer sources.
+                let mut bytes = 0_u64;
+                let mut textures = 0_u64;
+                for texture in [
+                    Some(&slot.luma),
+                    Some(&slot.chroma),
+                    slot.chroma_v.as_ref(),
+                    slot.alpha.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let size = texture.size();
+                    let block_bytes = texture
+                        .format()
+                        .block_copy_size(None)
+                        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+                    let allocation = u64::from(size.width)
+                        .checked_mul(u64::from(size.height))
+                        .and_then(|pixels| pixels.checked_mul(u64::from(block_bytes)))
+                        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+                    bytes = bytes
+                        .checked_add(allocation)
+                        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+                    textures += 1;
+                }
+                if slot.prepared_pass.is_some() {
+                    bytes = bytes
+                        .checked_add(crate::GpuNativeYuvPreparedPass::uniform_byte_count())
+                        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+                }
+                (bytes, textures)
+            };
+            bytes = bytes
+                .checked_add(demand.0)
+                .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+            textures = textures
+                .checked_add(demand.1)
+                .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+        }
+        Ok((bytes, textures))
+    }
+}
+/// Plane textures and conservatively retained queue transfer storage are
+/// distinct allocations. Count each once, including odd extents/padded rows.
+pub(crate) fn queue_plane_demand(
+    frame: &CpuYuvFrame,
+) -> Result<(u64, u64), CpuYuvMaterializationError> {
+    let bytes = cpu_yuv_upload_byte_count(frame)?
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(crate::GpuNativeYuvPreparedPass::uniform_byte_count()))
+        .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+    let textures = match frame.chroma_plane_layout() {
+        CpuYuvChromaPlaneLayout::Interleaved => 2,
+        CpuYuvChromaPlaneLayout::Planar => 3,
+    } + u64::from(frame.alpha_plane().is_some());
+    Ok((bytes, textures))
+}
+impl CpuYuvPlaneUpload for QueueCpuYuvUploadRuntime {
+    fn upload_planes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        frame: &Arc<CpuYuvFrame>,
+    ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
+        let mut state = self.state.lock();
+        if let Some(index) = state.frames.iter().position(|old| Arc::ptr_eq(old, frame)) {
+            return Ok((state.slots[index].views.clone(), false));
+        }
+        let index = state.frames.len();
+        let key = CpuYuvUploadKey {
+            width: frame.width,
+            height: frame.height,
+            chroma_width: frame.chroma_width,
+            chroma_height: frame.chroma_height,
+            sample_format: frame.sample_format,
+            chroma_plane_layout: frame.chroma_plane_layout(),
+            has_alpha: frame.alpha_plane().is_some(),
+        };
+        if state.slots.get(index).is_none_or(|slot| slot.key != key) {
+            let slot = create_upload_slot(device, index, key);
+            if index == state.slots.len() {
+                state.slots.push(slot);
+            } else {
+                state.slots[index] = slot;
+            }
+        }
+        let slot = &state.slots[index];
+        let component_bytes = match frame.sample_format {
+            CpuYuvSampleFormat::Unorm8 => 1,
+            _ => 2,
+        };
+        write_plane(
+            queue,
+            &slot.luma,
+            frame.luma_plane(),
+            frame.width,
+            frame.height,
+            component_bytes,
+        )?;
+        match frame.chroma_planes() {
+            CpuYuvChromaPlanes::Interleaved(plane) => write_plane(
+                queue,
+                &slot.chroma,
+                plane,
+                frame.chroma_width,
+                frame.chroma_height,
+                component_bytes * 2,
+            )?,
+            CpuYuvChromaPlanes::Planar { cb, cr } => {
+                write_plane(
+                    queue,
+                    &slot.chroma,
+                    cb,
+                    frame.chroma_width,
+                    frame.chroma_height,
+                    component_bytes,
+                )?;
+                write_plane(
+                    queue,
+                    slot.chroma_v
+                        .as_ref()
+                        .ok_or(CpuYuvMaterializationError::MissingPlanarChromaTexture)?,
+                    cr,
+                    frame.chroma_width,
+                    frame.chroma_height,
+                    component_bytes,
+                )?;
+            }
+        }
+        if let Some(alpha) = frame.alpha_plane() {
+            write_plane(
+                queue,
+                slot.alpha.as_ref().ok_or(CpuYuvMaterializationError::MissingAlphaTexture)?,
+                alpha,
+                frame.width,
+                frame.height,
+                component_bytes,
+            )?;
+        }
+        let views = slot.views.clone();
+        state.frames.push(Arc::clone(frame));
+        Ok((views, true))
+    }
+    fn prepare_planes(
+        &self,
+        decoder: &GpuNativeYuvDecoder,
+        device: &wgpu::Device,
+        plan: &GpuNativeYuvDecodePlan,
+        planes: &CpuYuvUploadedPlaneViews,
+    ) -> Result<Arc<crate::GpuNativeYuvPreparedPass>, CpuYuvMaterializationError> {
+        let mut state = self.state.lock();
+        let slot = state
+            .slots
+            .get_mut(planes.slot_index)
+            .ok_or(CpuYuvMaterializationError::UploadSlotMismatch)?;
+        prepare_upload_slot_pass(slot, decoder, device, plan, planes)
+    }
+}
+fn write_plane(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    plane: CpuYuvPlane<'_>,
+    width: u32,
+    height: u32,
+    bytes_per_texel: u32,
+) -> Result<(), CpuYuvMaterializationError> {
+    validate_plane_bytes(width, height, bytes_per_texel, plane)?;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        plane.data(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(plane.bytes_per_row()),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    Ok(())
+}
+
 pub(crate) fn record_cpu_yuv_frame(
     decoder: &GpuNativeYuvDecoder,
-    uploads: &CpuYuvUploadRuntime,
+    uploads: &impl CpuYuvPlaneUpload,
     frame: &Arc<CpuYuvFrame>,
     input_transform: &RenderInputTransform,
     output_width: u32,
@@ -807,8 +1082,8 @@ pub(crate) fn record_cpu_yuv_frame(
         video_sampling,
         encoded_source.clone(),
     )?;
-    let (planes, uploaded) = uploads.upload(device, encoder, frame)?;
-    let prepared = uploads.prepare_plane_pass(decoder, device, &plan, &planes)?;
+    let (planes, uploaded) = uploads.upload_planes(device, queue, encoder, frame)?;
+    let prepared = uploads.prepare_planes(decoder, device, &plan, &planes)?;
     let backend = runtime
         .prepare_fused_yuv_input(
             input_transform,

@@ -34,6 +34,14 @@ pub enum GpuVisualFrameSource {
         /// Frozen source-to-working interpretation.
         transform: RenderInputTransform,
     },
+    /// Immutable Media YUV planes interpreted by the same native-video/OCIO
+    /// shader as Viewer compact input. Coverage remains straight.
+    CompactYuv {
+        /// Retained decoder planes, strides, bit depth and sampling metadata.
+        frame: Arc<mondrian_media::CpuYuvFrame>,
+        /// Frozen source-to-working interpretation.
+        transform: RenderInputTransform,
+    },
     /// CPU working-linear color pixels uploaded without another color transform.
     Working(Arc<CpuColorFrame>),
     /// CPU RGBA numeric channels uploaded with `NonColorData + DataTexture` identity.
@@ -54,6 +62,7 @@ impl GpuVisualFrameSource {
                 let descriptor = source.descriptor();
                 (descriptor.width, descriptor.height)
             }
+            Self::CompactYuv { frame, .. } => (frame.width, frame.height),
             Self::Working(frame) | Self::DataTexture(frame) => {
                 let descriptor = frame.descriptor();
                 (descriptor.width, descriptor.height)
@@ -293,6 +302,8 @@ pub struct GpuVisualFrameRequest<'a> {
 pub struct GpuVisualFrameRecord {
     /// GPU-resident working result retained in the shared frame table.
     pub output: GpuColorFrameHandle,
+    /// Compact source branches that completed shared YUV/OCIO materialization.
+    pub compact_yuv_sources: u64,
     /// Product working-format decision shared with Viewer execution.
     pub working_float_decision: GpuWorkingFloatDecision,
     /// GPU compositor path evidence.
@@ -314,6 +325,9 @@ pub enum GpuVisualFrameExecutionError {
     /// Source/transition working compositing failed.
     #[error("GPU visual source composite failed: {0}")]
     Composite(#[from] GpuCompositeError),
+    /// Compact decoded planes failed the shared video/color materialization contract.
+    #[error("GPU visual compact YUV materialization failed: {0}")]
+    CompactYuv(String),
     /// Shared GPU source-to-working input transform failed.
     #[error("GPU visual input color stage failed: {0:?}")]
     InputColor(Box<RenderGpuInputStageRuntimeRecordError>),
@@ -341,6 +355,12 @@ pub enum GpuVisualFrameExecutionError {
 pub struct GpuVisualFrameExecutor {
     compositor: GpuFrameCompositor,
     resource_grant: GpuVisualFrameExecutionResourceGrant,
+    cpu_yuv: parking_lot::Mutex<
+        Option<(
+            crate::GpuNativeYuvDecoder,
+            crate::cpu_yuv::QueueCpuYuvUploadRuntime,
+        )>,
+    >,
 }
 
 impl GpuVisualFrameExecutor {
@@ -359,6 +379,7 @@ impl GpuVisualFrameExecutor {
         Ok(Self {
             compositor: GpuFrameCompositor::new(device)?,
             resource_grant,
+            cpu_yuv: parking_lot::Mutex::new(None),
         })
     }
 
@@ -366,6 +387,9 @@ impl GpuVisualFrameExecutor {
     /// commands that reference them.
     pub fn clear_frame_resources(&self) {
         self.compositor.clear_frame_resources();
+        if let Some((_, uploads)) = self.cpu_yuv.lock().as_ref() {
+            uploads.clear_frame();
+        }
     }
 
     /// Record a complete working-space visual graph without readback.
@@ -378,16 +402,29 @@ impl GpuVisualFrameExecutor {
         request: GpuVisualFrameRequest<'_>,
     ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
         let runtime = session.runtime_mut();
-        let retained_textures = u64::try_from(runtime.frame_table().len()).map_err(|_| {
+        let mut retained_textures = u64::try_from(runtime.frame_table().len()).map_err(|_| {
             GpuVisualFrameActiveWorkingSetAdmissionError::Estimate(
                 GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow,
             )
         })?;
-        let retained_bytes = runtime.frame_table().logical_texture_bytes().ok_or(
+        let mut retained_bytes = runtime.frame_table().logical_texture_bytes().ok_or(
             GpuVisualFrameActiveWorkingSetAdmissionError::Estimate(
                 GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow,
             ),
         )?;
+        if let Some((_, uploads)) = self.cpu_yuv.lock().as_ref() {
+            let (bytes, textures) = uploads
+                .retained_plane_demand()
+                .map_err(|error| GpuVisualFrameExecutionError::CompactYuv(error.to_string()))?;
+            retained_bytes = retained_bytes
+                .checked_add(bytes)
+                .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow)
+                .map_err(GpuVisualFrameActiveWorkingSetAdmissionError::from)?;
+            retained_textures = retained_textures
+                .checked_add(textures)
+                .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow)
+                .map_err(GpuVisualFrameActiveWorkingSetAdmissionError::from)?;
+        }
         let active_working_set = estimate_gpu_visual_frame_active_working_set(
             &request,
             GpuVisualFrameActiveTextureDemand {
@@ -504,6 +541,27 @@ impl GpuVisualFrameExecutor {
         }
         Ok(GpuVisualFrameRecord {
             output: graph.output,
+            compact_yuv_sources: request
+                .elements
+                .iter()
+                .map(|element| match element {
+                    GpuVisualFrameElement::Source(source) => u64::from(matches!(
+                        source.source,
+                        GpuVisualFrameSource::CompactYuv { .. }
+                    )),
+                    GpuVisualFrameElement::CrossDissolve { left, right, .. } => [left, right]
+                        .iter()
+                        .map(|input| match input {
+                            GpuVisualTransitionInput::Source(source) => u64::from(matches!(
+                                source.source,
+                                GpuVisualFrameSource::CompactYuv { .. }
+                            )),
+                            GpuVisualTransitionInput::Transparent => 0,
+                        })
+                        .sum(),
+                    GpuVisualFrameElement::Adjustment { .. } => 0,
+                })
+                .sum(),
             working_float_decision: PRODUCT_GPU_WORKING_FLOAT_DECISION,
             compositing_diagnostics,
             color_stage_diagnostics,
@@ -541,6 +599,30 @@ impl GpuVisualFrameExecutor {
                     .map_err(|error| GpuVisualFrameExecutionError::InputColor(Box::new(error)))?;
                 color_stage_diagnostics.accumulate(record.stage_diagnostics);
                 GpuVisualFrameSource::GpuWorking(record.materialized.output)
+            }
+            GpuVisualFrameSource::CompactYuv { frame, transform } => {
+                let mut owner = self.cpu_yuv.lock();
+                let (decoder, uploads) = owner.get_or_insert_with(|| {
+                    (
+                        crate::GpuNativeYuvDecoder::new(device),
+                        crate::cpu_yuv::QueueCpuYuvUploadRuntime::default(),
+                    )
+                });
+                let record = crate::cpu_yuv::record_cpu_yuv_frame(
+                    decoder,
+                    uploads,
+                    frame,
+                    transform,
+                    frame.width,
+                    frame.height,
+                    runtime,
+                    device,
+                    queue,
+                    encoder,
+                )
+                .map_err(|error| GpuVisualFrameExecutionError::CompactYuv(error.to_string()))?;
+                color_stage_diagnostics.accumulate(record.stage_diagnostics);
+                GpuVisualFrameSource::GpuWorking(record.output)
             }
             other => other.clone(),
         };
@@ -771,6 +853,7 @@ fn estimate_visual_source(
     let (width, height) = source.source.extent(request.width, request.height);
     let upload_textures = match source.source {
         GpuVisualFrameSource::ColorManaged { .. } => 2,
+        GpuVisualFrameSource::CompactYuv { .. } => 1,
         GpuVisualFrameSource::Working(_) | GpuVisualFrameSource::DataTexture(_) => 1,
         GpuVisualFrameSource::GpuWorking(_) | GpuVisualFrameSource::Solid(_) => 0,
     };
@@ -782,6 +865,17 @@ fn estimate_visual_source(
                 upload_textures,
                 GpuVisualFrameActiveWorkingSetStage::SourceUploads,
             )?,
+            GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+        )?;
+    }
+    if let GpuVisualFrameSource::CompactYuv { frame, .. } = &source.source {
+        let (bytes, textures) = crate::cpu_yuv::queue_plane_demand(frame).map_err(|_| {
+            GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow {
+                stage: GpuVisualFrameActiveWorkingSetStage::SourceUploads,
+            }
+        })?;
+        estimate.source_uploads.checked_add(
+            GpuVisualFrameActiveTextureDemand { bytes, textures },
             GpuVisualFrameActiveWorkingSetStage::SourceUploads,
         )?;
     }
@@ -862,7 +956,8 @@ impl PreparedSourceLayer {
     fn as_composite_layer(&self) -> GpuCompositeLayer<'_> {
         GpuCompositeLayer {
             source: match &self.source {
-                GpuVisualFrameSource::ColorManaged { .. } => {
+                GpuVisualFrameSource::ColorManaged { .. }
+                | GpuVisualFrameSource::CompactYuv { .. } => {
                     unreachable!("encoded source must cross GPU input color before compositing")
                 }
                 GpuVisualFrameSource::Working(frame) => GpuCompositeLayerSource::CpuFrame(frame),

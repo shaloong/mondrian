@@ -145,6 +145,25 @@ pub enum PreviewCompactCpuYuvHint {
 }
 
 impl PreviewCompactCpuYuvHint {
+    /// Resolve the single Media-owned compact CPU plane admission from a probed format.
+    pub const fn from_pixel_format(pixel_format: PixelFormat) -> Option<PreviewCompactCpuYuvHint> {
+        match pixel_format {
+            PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
+            PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
+            PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
+            PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+            PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
+            PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
+            PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
+            PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
+            PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
+            PixelFormat::Yuva444p12le => Some(PreviewCompactCpuYuvHint::Yuva444p12le),
+            PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+            PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
+            _ => None,
+        }
+    }
+
     /// Upper bound on tightly packed bytes per luma pixel for even extents.
     ///
     /// Fractional ratios round up. Use `retained_bytes_for_extent` for physical
@@ -297,7 +316,7 @@ impl PreviewDecodeSource {
             stream.index,
             alpha_presence,
             native_surface_hint_from_stream(stream, sampling.pixel_format),
-            compact_cpu_yuv_hint_from_pixel_format(sampling.pixel_format),
+            PreviewCompactCpuYuvHint::from_pixel_format(sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
         )?;
         source.cpu_component_bit_depth = Some(sampling.bit_depth);
@@ -1043,26 +1062,6 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::BayerBggr16le
         | PixelFormat::BayerGbrg16le
         | PixelFormat::BayerGrbg16le => None,
-    }
-}
-
-const fn compact_cpu_yuv_hint_from_pixel_format(
-    pixel_format: PixelFormat,
-) -> Option<PreviewCompactCpuYuvHint> {
-    match pixel_format {
-        PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
-        PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
-        PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
-        PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
-        PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
-        PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
-        PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
-        PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
-        PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
-        PixelFormat::Yuva444p12le => Some(PreviewCompactCpuYuvHint::Yuva444p12le),
-        PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
-        PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
-        _ => None,
     }
 }
 

@@ -4193,7 +4193,7 @@ bytes, and the physical texture count. An absent alpha plane cannot prepare a
 straight-coverage pass, and an unexpected alpha plane cannot prepare an opaque
 pass. Ignore/Premultiplied author overrides keep the shared CPU normalization
 path; scene-linear and CPU RGB consumers retain their separate contracts.
-For CPU-addressable YUVA12 (including Export and author alpha overrides), the
+For CPU-addressable YUVA12 (including CPU Export and author alpha overrides), the
 materializer emits source-encoded Float32 rather than clipping through RGBA16
 UNORM. CPU and GPU resolve the same `EncodedYuvToRgbParameters` from Core;
 Media retains matrix/range provenance and Renderer owns only texture-code
@@ -4225,6 +4225,28 @@ conversion but cannot count an upload they did not record. Viewer accumulates
 these records into its existing candidate evidence. Compact software input is
 therefore visible as CPU-to-GPU transfer, never inferred to be hardware-resident
 from a zero upload count.
+
+The offline Export visual owner requests the same full-resolution compact
+representation for progressive, straight-alpha, non-RAW encoded YUV sources
+admitted by Media's single format table. `GpuVisualFrameSource::CompactYuv`
+enters the existing fused YUV/OCIO input, Effect, composite and Program Output
+path. CPU consumers, interlaced processing, scene-linear/data sources and author
+alpha overrides retain their typed CPU normalization contracts. Visible YUVA12
+coverage codes above 4095 fail admission; row padding is not a sample.
+
+Export uses ordered queue writes of the retained planes, sharing the Viewer
+plane texture factory, binding cache and shader. It starts no upload worker and
+creates no second Preview, Playback, Export or color authority. Distinct source
+identities retain distinct slots through the complete visual closure; repeated
+identities share one recorded transfer. Queue submission orders those writes
+before sampling, and consuming GPU completion precedes reuse in the next frame.
+Admission includes plane textures, separate conservative queue transfer storage,
+fused working outputs and cached plane residency after content invalidation.
+These are distinct allocations in unified memory; the original retained CPU
+image is not charged again as a full RGB GPU allocation. Completed Export
+diagnostics expose compact source records and the actual upload/color stages.
+This route is software decode followed by CPU-to-GPU plane transfer, and does
+not claim hardware decode, native residency or resident encoding.
 
 The NVIDIA Vulkan consumer publishes a CUDA ordinal only after matching CUDA and
 Vulkan device UUIDs and checking external-memory/semaphore support on the actual

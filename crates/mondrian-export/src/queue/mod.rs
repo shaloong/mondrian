@@ -1242,6 +1242,8 @@ impl ExportHeterogeneousCompletionEvidence {
 pub struct ExportJobVisualDiagnostics {
     /// Prepared visual nodes completed as GPU-resident working frames.
     pub gpu_visual_nodes_completed: u64,
+    /// Compact YUV source branches completed by the shared Renderer input shader.
+    pub gpu_visual_compact_yuv_sources: u64,
     /// Non-root Sequence outputs handed to their parent without CPU readback.
     pub gpu_visual_nested_outputs: u64,
     /// Typed non-color DataTexture uploads consumed by the GPU numeric bypass.
@@ -3979,19 +3981,28 @@ enum DecodedVideoLayerPixels {
         is_data_texture: bool,
     },
     GpuInput(PreparedSourceFrame),
+    GpuYuv {
+        frame: Arc<mondrian_media::CpuYuvFrame>,
+        transform: mondrian_renderer::RenderInputTransform,
+    },
 }
 
 impl DecodedVideoLayer {
     fn route(&self) -> ExportDecodedSourceRoute {
         match self.pixels {
             DecodedVideoLayerPixels::CpuWorking { .. } => ExportDecodedSourceRoute::CpuWorking,
-            DecodedVideoLayerPixels::GpuInput(_) => ExportDecodedSourceRoute::GpuInput,
+            DecodedVideoLayerPixels::GpuInput(_) | DecodedVideoLayerPixels::GpuYuv { .. } => {
+                ExportDecodedSourceRoute::GpuInput
+            }
         }
     }
 
     fn extent(&self) -> Resolution {
         match &self.pixels {
             DecodedVideoLayerPixels::CpuWorking { frame, .. } => decoded_frame_resolution(frame),
+            DecodedVideoLayerPixels::GpuYuv { frame, .. } => {
+                Resolution { width: frame.width, height: frame.height }
+            }
             DecodedVideoLayerPixels::GpuInput(source) => {
                 let (width, height) = source.extent();
                 Resolution { width, height }
@@ -4002,7 +4013,7 @@ impl DecodedVideoLayer {
     fn cpu_frame(&self) -> Result<&CpuColorFrame, String> {
         match &self.pixels {
             DecodedVideoLayerPixels::CpuWorking { frame, .. } => Ok(frame),
-            DecodedVideoLayerPixels::GpuInput(_) => {
+            DecodedVideoLayerPixels::GpuInput(_) | DecodedVideoLayerPixels::GpuYuv { .. } => {
                 Err("GPU input source reached the CPU Export visual route".to_owned())
             }
         }
@@ -4012,6 +4023,12 @@ impl DecodedVideoLayer {
         match &self.pixels {
             DecodedVideoLayerPixels::CpuWorking { frame, is_data_texture } => {
                 Ok(export_gpu_cpu_source(frame, *is_data_texture))
+            }
+            DecodedVideoLayerPixels::GpuYuv { frame, transform } => {
+                Ok(GpuVisualFrameSource::CompactYuv {
+                    frame: Arc::clone(frame),
+                    transform: transform.clone(),
+                })
             }
             DecodedVideoLayerPixels::GpuInput(source) => {
                 if let Some((source, transform)) = source.color_managed_gpu_input() {
@@ -8388,6 +8405,11 @@ fn render_prepared_visual_node_gpu(
         .visual_diagnostics
         .gpu_visual_nodes_completed
         .saturating_add(1);
+    context.visual_session.visual_diagnostics.gpu_visual_compact_yuv_sources = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_compact_yuv_sources
+        .saturating_add(record.compact_yuv_sources);
     if !inputs.is_root() {
         context.visual_session.visual_diagnostics.gpu_visual_nested_outputs = context
             .visual_session
@@ -10298,6 +10320,19 @@ fn decode_video_layer_scaled(
         })?;
         media_request = media_request.with_camera_raw(intent);
     }
+    if route == ExportDecodedSourceRoute::GpuInput
+        && alpha_interpretation == AlphaInterpretation::Straight
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture()
+        && picture_geometry.scan() == mondrian_core::PictureScan::Progressive
+        && dependency.source_video_stream.as_ref().is_some_and(|stream| {
+            stream.camera_raw.is_none()
+                && mondrian_media::PreviewCompactCpuYuvHint::from_pixel_format(stream.pixel_format)
+                    .is_some()
+        })
+    {
+        media_request.representation = mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv;
+    }
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
@@ -10323,12 +10358,27 @@ fn decode_video_layer_scaled(
                 diagnostics,
             )
         }
-        Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
-            return Err(format!(
-                    "asset={} path={} err=export CPU decode requires CPU-addressable RGB, got compact GPU-materialization YUV",
-                    asset_id,
-                    path.display()
-                ));
+        Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+            if route != ExportDecodedSourceRoute::GpuInput
+                || alpha_interpretation != AlphaInterpretation::Straight
+            {
+                return Err(
+                    "compact source reached a CPU/alpha-normalizing Export route".to_owned(),
+                );
+            }
+            let SourceFramePreparationIntent::ColorManaged(transform) = preparation_intent else {
+                return Err("compact color source cannot enter DataTexture bypass".to_owned());
+            };
+            let diagnostics = frame.diagnostics;
+            return Ok(Arc::new(DecodedVideoLayer {
+                pixels: DecodedVideoLayerPixels::GpuYuv { frame: Arc::new(frame), transform },
+                source_resolution,
+                picture_geometry,
+                source_fingerprint: dependency.source_fingerprint,
+                video_stream_index,
+                decode_diagnostics: Some(diagnostics),
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            }));
         }
         Ok(PreviewDecodeOutcome::Canceled(_)) => {
             return Err(format!(
@@ -12819,8 +12869,18 @@ mod tests {
         bytes.extend_from_slice(&codes);
         bytes.extend_from_slice(&[128; 4]);
         std::fs::write(&source, bytes).expect("untagged neutral source");
-        let dependency =
-            test_media_dependency(source, None, AssetMediaInterpretation::default(), None);
+        let mut dependency = test_media_dependency(
+            source.clone(),
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.source_video_stream = Some(
+            mondrian_media::probe_media_info(&source)
+                .expect("physical YUV stream")
+                .video_streams[0]
+                .clone(),
+        );
         let mut sequence = Sequence::new("assumed Rec.709 export");
         sequence.settings.color.input.missing_metadata_policy =
             MissingColorMetadataPolicy::AssumeRec709;
@@ -12845,51 +12905,86 @@ mod tests {
             preparation.resolution_source,
             InputColorResolutionSource::MissingPolicyAssumeRec709
         );
-        let mut decoder = PreviewDecodeSessionContext::new();
-        let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
-        let cancellation = ExecutionCancellationToken::new();
-        let decoded = decode_video_layer_scaled(
-            ExportVideoLayerDecodeRequest {
-                asset_id: AssetId::new(),
-                dependency: &dependency,
-                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-                decode_resolution: Resolution { width: 4, height: 2 },
-                source_resolution: Resolution { width: 4, height: 2 },
-                picture_geometry: square_picture_geometry(Resolution { width: 4, height: 2 }),
-                source_color: preparation.source_contract,
-                alpha_interpretation: AlphaInterpretation::Straight,
-                preparation_intent: preparation.preparation_intent,
-            },
-            ExportVideoLayerDecodeExecutionContext {
-                color_session: &mut color_session,
-                decode_context: &mut decoder,
-                cancellation: &cancellation,
-                route: ExportDecodedSourceRoute::CpuWorking,
-            },
-        );
-        // Close the real decode session even when reproducing a decode rejection.
-        decoder.clear();
-        drop(decoder);
-        let decoded = decoded.expect("assumed Rec.709 must authorize missing YUV matrix");
-        let frame = decoded.cpu_frame().expect("CPU working frame").rgba_f32();
-        assert_eq!(frame.color_space, color_context.working_color_space());
-        assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 1);
-        for (pixel, code) in frame.data.iter().zip(codes) {
-            let encoded = (f32::from(code) - 16.0) / 219.0;
-            let mut reference = [encoded, encoded, encoded, 1.0];
-            color_context
-                .engine()
-                .convert_identity_float(
-                    &mut reference,
-                    ColorSpace::Rec709.into(),
-                    color_context.working_color_space().into(),
-                )
-                .expect("independent working reference");
-            for channel in 0..4 {
-                assert!(
-                    (pixel[channel] - reference[channel]).abs() <= 1.0e-3,
-                    "working pixel {pixel:?}, reference {reference:?}"
+        for (route, alpha) in [
+            (
+                ExportDecodedSourceRoute::CpuWorking,
+                AlphaInterpretation::Straight,
+            ),
+            (
+                ExportDecodedSourceRoute::GpuInput,
+                AlphaInterpretation::Straight,
+            ),
+            (
+                ExportDecodedSourceRoute::GpuInput,
+                AlphaInterpretation::Premultiplied,
+            ),
+        ] {
+            let mut decoder = PreviewDecodeSessionContext::new();
+            let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+            let cancellation = ExecutionCancellationToken::new();
+            let decoded = decode_video_layer_scaled(
+                ExportVideoLayerDecodeRequest {
+                    asset_id: AssetId::new(),
+                    dependency: &dependency,
+                    source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                    decode_resolution: Resolution { width: 4, height: 2 },
+                    source_resolution: Resolution { width: 4, height: 2 },
+                    picture_geometry: square_picture_geometry(Resolution { width: 4, height: 2 }),
+                    source_color: preparation.source_contract,
+                    alpha_interpretation: alpha,
+                    preparation_intent: preparation.preparation_intent.clone(),
+                },
+                ExportVideoLayerDecodeExecutionContext {
+                    color_session: &mut color_session,
+                    decode_context: &mut decoder,
+                    cancellation: &cancellation,
+                    route,
+                },
+            );
+            // Close the real decode session even when reproducing a decode rejection.
+            decoder.clear();
+            drop(decoder);
+            let decoded = decoded.expect("assumed Rec.709 must authorize missing YUV matrix");
+            if route == ExportDecodedSourceRoute::GpuInput && alpha == AlphaInterpretation::Straight
+            {
+                assert_eq!(
+                    decoded.decode_diagnostics.as_ref().expect("decode receipt").path,
+                    mondrian_media::PreviewDecodePath::InProcessFfmpegCpuYuv
                 );
+                assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 0);
+                continue;
+            }
+            if route == ExportDecodedSourceRoute::GpuInput {
+                assert_ne!(
+                    decoded.decode_diagnostics.as_ref().expect("decode receipt").path,
+                    mondrian_media::PreviewDecodePath::InProcessFfmpegCpuYuv
+                );
+                assert!(matches!(
+                    decoded.pixels,
+                    DecodedVideoLayerPixels::GpuInput(_)
+                ));
+                continue;
+            }
+            let frame = decoded.cpu_frame().expect("CPU working frame").rgba_f32();
+            assert_eq!(frame.color_space, color_context.working_color_space());
+            assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 1);
+            for (pixel, code) in frame.data.iter().zip(codes) {
+                let encoded = (f32::from(code) - 16.0) / 219.0;
+                let mut reference = [encoded, encoded, encoded, 1.0];
+                color_context
+                    .engine()
+                    .convert_identity_float(
+                        &mut reference,
+                        ColorSpace::Rec709.into(),
+                        color_context.working_color_space().into(),
+                    )
+                    .expect("independent working reference");
+                for channel in 0..4 {
+                    assert!(
+                        (pixel[channel] - reference[channel]).abs() <= 1.0e-3,
+                        "working pixel {pixel:?}, reference {reference:?}"
+                    );
+                }
             }
         }
         let explicit = resolve_export_source_preparation(
