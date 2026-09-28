@@ -802,6 +802,9 @@ pub enum PlaybackError {
     /// A transport position was expressed on a different grid than its binding.
     #[error("transport position time base does not match its timeline binding")]
     MismatchedTimelineTimeBase,
+    /// Revision updates cannot silently switch the bound Sequence.
+    #[error("timeline revision update must retain the bound Sequence identity")]
+    MismatchedTimelineSequence,
     /// A delivery targeted a different timeline frame than the current demand.
     #[error("frame delivery does not match the active target")]
     MismatchedFrameDelivery,
@@ -1043,6 +1046,45 @@ impl PlaybackEngine {
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.commit_candidate(move |candidate| {
             candidate.seek_timeline_in_place(binding, position, now)
+        })
+    }
+
+    /// Bind committed author content without restarting transport.
+    ///
+    /// The caller supplies the same Sequence and evaluation grid. A new demand
+    /// invalidates both pending and consumed pictures, including edits to nested
+    /// content whose root revision is unchanged. Timed demands retain their
+    /// original deadline; author edits cannot buy another playback budget.
+    /// Sequence/grid changes and positions outside the new extent require an
+    /// explicit transport transition instead.
+    pub fn revise_timeline(
+        &mut self,
+        binding: PlaybackTimelineBinding,
+        now: MonotonicTimestamp,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
+        self.commit_candidate(move |candidate| {
+            binding.validate_position(candidate.position)?;
+            if binding.sequence_id != candidate.sequence_id {
+                return Err(PlaybackError::MismatchedTimelineSequence);
+            }
+            if candidate.position.frame > binding.end_frame {
+                return Err(PlaybackError::InvalidTimelineExtent);
+            }
+            candidate.accept_timestamp(now)?;
+            candidate.apply_timeline_binding(binding);
+            candidate.priming_current_presentable = false;
+            candidate.video_preroll_observation = None;
+            if candidate.transport_intends_playback() {
+                if let Some(deadline) = candidate.active_playback_demand().and_then(|d| d.deadline)
+                {
+                    candidate.refresh_frame_demand_with_deadline(deadline)?;
+                } else {
+                    candidate.refresh_frame_demand(now)?;
+                }
+            } else {
+                candidate.refresh_untimed_frame_demand()?;
+            }
+            Ok(candidate.snapshot())
         })
     }
 

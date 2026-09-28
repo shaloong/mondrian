@@ -138,6 +138,43 @@ fn sequence_commit_publishes_one_canonical_invalidation() {
 }
 
 #[test]
+fn author_commit_rebinds_nested_and_project_wide_stills_from_the_owner_snapshot() {
+    let mut state = create_state_with_sequence();
+    let parent_id = state.active_sequence_id().unwrap();
+    state.new_sequence("child").expect("new child");
+    let child_id = state.active_sequence_id().unwrap();
+    state.switch_active_sequence(parent_id).expect("return to parent");
+    let tb = state.active_sequence().unwrap().time_base();
+    state.active_sequence_mut_uncommitted().unwrap().video_tracks[0]
+        .add_clip(Clip::new_nested_sequence(child_id, tt(0, tb), tt(10, tb), None).unwrap())
+        .unwrap();
+    state.seek(4).unwrap();
+    let snapshot = state.playback_engine.snapshot();
+    let root_revision = state.active_sequence().unwrap().revision;
+    let old = state.playback_engine.frame_demand().unwrap();
+    state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready);
+
+    state.rename_sequence(child_id, "edited child").expect("commit child edit");
+    let nested = state.playback_engine.pending_frame_demand().expect("nested replacement");
+    assert_ne!(nested.identity(), old.identity());
+    assert_eq!(state.active_sequence().unwrap().revision, root_revision);
+    assert_eq!(nested.timeline_revision, root_revision.get());
+    assert_eq!(state.playback_engine.snapshot(), snapshot);
+
+    state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready);
+    let mut settings = state.new_sequence_defaults().clone();
+    settings.resolution.width += 2;
+    state.update_new_sequence_defaults(settings).expect("commit project semantics");
+    let project = state.playback_engine.pending_frame_demand().expect("project replacement");
+    assert_ne!(project.identity(), nested.identity());
+    assert_eq!(project.timeline_revision, root_revision.get());
+    assert_eq!(state.playback_engine.snapshot(), snapshot);
+
+    state.rename_sequence(child_id, "edited child").expect("author no-op");
+    assert_eq!(state.playback_engine.pending_frame_demand(), Some(project));
+}
+
+#[test]
 fn project_commit_invalidates_every_sequence_through_the_same_receipt_adapter() {
     let mut state = create_state_with_sequence();
     let secondary = Sequence::new("secondary");
@@ -174,7 +211,7 @@ fn commit_receipt_reports_an_unretained_project_edit() {
     };
     commit.undo_retained = false;
 
-    state.consume_authoring_commit(commit);
+    state.consume_authoring_commit(commit).expect("consume committed author state");
 
     assert!(
         state.status_hint.as_ref().is_some_and(|(message, is_error)| {

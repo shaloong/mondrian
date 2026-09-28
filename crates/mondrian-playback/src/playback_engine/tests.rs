@@ -809,6 +809,122 @@ fn slower_audio_device_does_not_accumulate_wall_clock_phase_correction() {
 }
 
 #[test]
+fn author_revision_replaces_pending_and_consumed_stills_at_the_same_coordinate() {
+    for completed in [false, true] {
+        let mut engine = engine();
+        engine
+            .seek_timeline(
+                timeline_binding(100),
+                FramePosition::new(4, Rational::new(1, 25)),
+                ts(0),
+            )
+            .unwrap();
+        let old = engine.frame_demand().unwrap();
+        if completed {
+            engine
+                .observe_frame_delivery(current_delivery(&engine, FrameDeliveryKind::Ready, ts(0)))
+                .unwrap();
+        }
+        let snapshot = engine.snapshot();
+        let binding = PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 100).unwrap();
+        assert_eq!(engine.revise_timeline(binding, ts(1)).unwrap(), snapshot);
+        let new = engine.pending_frame_demand().unwrap();
+        assert_eq!(new.timeline_revision, 2);
+        assert_eq!(new.target, old.target);
+        assert_eq!(new.deadline, None);
+        assert_ne!(new.identity(), old.identity());
+        assert!(!engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                    .complete_at(ts(2))
+            )
+            .unwrap()
+            .accepted());
+        assert_eq!(engine.pending_frame_demand(), Some(new));
+    }
+}
+
+#[test]
+fn author_revision_preserves_running_clock_phase_and_never_extends_deadlines() {
+    for priming in [false, true] {
+        let mut engine = engine();
+        engine
+            .play_timeline(
+                timeline_binding(100),
+                FramePosition::new(0, Rational::new(1, 25)),
+                ts(0),
+            )
+            .unwrap();
+        if !priming {
+            engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        }
+        let mut control = engine.clone();
+        let old = engine.frame_demand().unwrap();
+        let before = engine.snapshot();
+        let binding = PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 100).unwrap();
+        assert_eq!(engine.revise_timeline(binding, ts(10)).unwrap(), before);
+        let new = engine.pending_frame_demand().unwrap();
+        assert_eq!(new.deadline, old.deadline);
+        assert_eq!(new.timeline_revision, 2);
+        assert_ne!(new.identity(), old.identity());
+        let later = if priming { ts(500) } else { ts(45) };
+        assert_eq!(engine.tick(later).unwrap(), control.tick(later).unwrap());
+    }
+}
+
+#[test]
+fn dependency_edit_with_unchanged_root_revision_still_invalidates_picture() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(4, Rational::new(1, 25)),
+            ts(0),
+        )
+        .unwrap();
+    let old = engine.frame_demand().unwrap();
+    engine.revise_timeline(timeline_binding(100), ts(1)).unwrap();
+    let new = engine.pending_frame_demand().unwrap();
+    assert_eq!(new.timeline_revision, old.timeline_revision);
+    assert_ne!(new.identity(), old.identity());
+}
+
+#[test]
+fn invalid_author_binding_preserves_entire_current_demand_and_clock() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(4, Rational::new(1, 25)),
+            ts(0),
+        )
+        .unwrap();
+    let before = engine.snapshot();
+    let demand = engine.frame_demand();
+    for (binding, expected) in [
+        (
+            PlaybackTimelineBinding::new(Some(SequenceId::new()), 2, Rational::new(1, 25), 100)
+                .unwrap(),
+            PlaybackError::MismatchedTimelineSequence,
+        ),
+        (
+            PlaybackTimelineBinding::new(None, 2, Rational::new(1, 30), 100).unwrap(),
+            PlaybackError::MismatchedTimelineTimeBase,
+        ),
+        (
+            PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 3).unwrap(),
+            PlaybackError::InvalidTimelineExtent,
+        ),
+    ] {
+        assert_eq!(engine.revise_timeline(binding, ts(1)), Err(expected));
+        assert_eq!(engine.snapshot(), before);
+        assert_eq!(engine.frame_demand(), demand);
+        assert_eq!(engine.monotonic_high_water(), ts(0));
+        assert_eq!(engine.timeline_revision(), 1);
+    }
+}
+
+#[test]
 fn output_retirement_renews_pending_and_consumed_still_tickets_without_seeking() {
     for completed in [false, true] {
         let mut engine = engine();

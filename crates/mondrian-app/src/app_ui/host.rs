@@ -3447,6 +3447,62 @@ mod tests {
     }
 
     #[test]
+    fn author_edit_replaces_consumed_paused_picture_without_seeking() {
+        use crate::app::product_action::{
+            TrackAuthorControl, TrackProductAction, TrackSetAuthorControlPayload,
+        };
+
+        let mut state = workspace_app_state_with_timed_solid();
+        state.seek(4).expect("bind still picture");
+        let old = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("still ticket");
+        let before = state.playback_diagnostic_snapshot();
+        let track_id = state.active_sequence().expect("Sequence").video_tracks[0].id;
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("paused-author-edit"),
+        );
+        assert!(matches!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.dispatch_editor_action(
+            ProductAction::Track(TrackProductAction::SetAuthorControl(
+                TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Visibility,
+                    enabled: false,
+                },
+            ))
+            .into_external_action(),
+        )
+        .expect("commit author edit");
+        let state = host.app_state.borrow();
+        let new = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("author edit must issue a new current picture");
+        assert_ne!(new.identity(), old.identity());
+        assert_eq!(state.playback_diagnostic_snapshot(), before);
+        drop(state);
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Current)
+        );
+        assert_eq!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::LostAuthority
+        );
+    }
+
+    #[test]
     fn retired_paused_carrier_rebinds_without_reviving_its_consumed_ticket() {
         let mut state = workspace_app_state_with_timed_solid();
         state.seek(4).expect("seek still picture");

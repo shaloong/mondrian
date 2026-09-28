@@ -1272,7 +1272,14 @@ impl AppState {
             .map(|session| session.set_asset_proxy_mode(asset_id, enabled))
         {
             match result {
-                Ok(Some(commit)) => self.consume_authoring_commit(commit),
+                Ok(Some(commit)) => {
+                    if let Err(error) = self.consume_authoring_commit(commit) {
+                        self.set_status_hint(
+                            format!("代理模式已修改，但播放绑定失败：{error}"),
+                            true,
+                        );
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => {
                     self.set_status_hint(format!("切换代理模式失败：{error}"), true);

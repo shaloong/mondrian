@@ -110,7 +110,7 @@ impl AppState {
                 (clip_id, start_frame, commit)
             },
         )?;
-        self.consume_authoring_commit(commit);
+        self.consume_authoring_commit(commit)?;
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
         self.event_bus

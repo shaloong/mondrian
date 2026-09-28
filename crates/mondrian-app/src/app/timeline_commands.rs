@@ -189,7 +189,7 @@ impl AppState {
         after.sequences.default_sequence_id = sequence_id;
         if let Some(commit) = session.commit_project_snapshot("设置默认序列", before, after)?
         {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(())
     }
@@ -254,7 +254,7 @@ impl AppState {
         let commit = session.commit_project_snapshot("复制序列", before, after)?;
         session.switch_active_sequence(duplicated_id, SequenceNavigationIntent::ReplaceRoot)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         self.settle_preview_access_source();
         Ok(duplicated_id)
@@ -314,7 +314,7 @@ impl AppState {
             }
         })?;
         if let Some(commit) = session.commit_project_snapshot("删除序列", before, after)? {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         if active_changed {
             self.settle_preview_access_source();
@@ -386,7 +386,7 @@ impl AppState {
             })?
             .edit_sequence(sequence_id, description, edit)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(value)
     }
@@ -405,7 +405,7 @@ impl AppState {
             })?
             .edit_active_sequence(description, edit)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(value)
     }
@@ -425,7 +425,7 @@ impl AppState {
             })?
             .commit_project_snapshot(description, before, after)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(())
     }
@@ -433,7 +433,7 @@ impl AppState {
     pub(super) fn consume_authoring_commit(
         &mut self,
         commit: mondrian_editor_state::AuthoringCommit,
-    ) {
+    ) -> mondrian_core::Result<()> {
         if !commit.undo_retained {
             self.set_status_hint(
                 "编辑已提交但未保留撤销记录；此前撤销段已清除以避免跨越未记录状态",
@@ -451,6 +451,7 @@ impl AppState {
         }
         self.synchronize_audio_idle_warmup_binding();
         self.reconcile_timeline_targeting();
+        self.synchronize_playback_authoring_binding()
     }
 
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
@@ -462,7 +463,7 @@ impl AppState {
         let Some(commit) = commit else {
             return Ok(false);
         };
-        self.consume_authoring_commit(commit);
+        self.consume_authoring_commit(commit)?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -476,7 +477,7 @@ impl AppState {
         let Some(commit) = commit else {
             return Ok(false);
         };
-        self.consume_authoring_commit(commit);
+        self.consume_authoring_commit(commit)?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -1282,7 +1283,7 @@ impl AppState {
             session.switch_active_sequence(sequence_id, SequenceNavigationIntent::ReplaceRoot)?;
             commit
         };
-        self.consume_authoring_commit(commit);
+        self.consume_authoring_commit(commit)?;
         self.settle_preview_access_source();
         tracing::info!(%sequence_id, "新建序列: {name}");
         Ok(sequence_id)

@@ -419,6 +419,40 @@ impl AppState {
         self.active_sequence().map(Sequence::time_base).unwrap_or(Rational::new(1, 25))
     }
 
+    /// Project author generation changes invalidate execution snapshots, even
+    /// when the active root revision is unchanged (nested edits or proxy mode).
+    /// Playback alone issues the replacement presentation authority.
+    pub(super) fn synchronize_playback_authoring_binding(&mut self) -> mondrian_core::Result<()> {
+        if self.active_sequence().is_none() {
+            return Ok(());
+        }
+        let end_frame = self.last_content_frame()?;
+        let snapshot = self.playback_engine.snapshot();
+        if self.playback_engine.sequence_id() != self.active_sequence_id()
+            || snapshot.position.time_base != self.playback_time_base()
+            || snapshot.position.frame > end_frame
+        {
+            return self.seek_with_source(
+                snapshot.position.frame.min(end_frame),
+                TimelineSeekSource::Settled,
+            );
+        }
+        let observed_at = Instant::now();
+        let now = self
+            .playback_timestamp_for_observation(observed_at)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?
+            .max(self.playback_engine.monotonic_high_water());
+        let binding = self
+            .playback_timeline_binding(end_frame)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?;
+        self.playback_engine
+            .revise_timeline(binding, now)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?;
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        Ok(())
+    }
+
     fn authoritative_audio_anchor(
         &self,
         engine: &PlaybackEngine,
