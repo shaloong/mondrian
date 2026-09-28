@@ -1236,9 +1236,9 @@ fn validate_interval_transition(
         ));
     }
     if !observation.sample.current_gpu_ready || observation.sample.unavailable {
-        return Err(
-            "persistent Timeline interval did not prove its exact picture ready".to_owned(),
-        );
+        return Err(format!(
+            "persistent Timeline interval did not prove its exact picture ready: observation={observation:?}, clock_master={clock_master:?}"
+        ));
     }
     if clock_master != Some(ClockMaster::AudioDevice) {
         return Err(
