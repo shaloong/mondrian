@@ -3269,6 +3269,14 @@ codec CPU cost. This codec-specific default adds no conversion, decoder, queue,
 or fallback; explicit qualification overrides and the EXR shutdown policy remain
 intact. These short generated-source results are not physical HDR qualification
 or a general machine/codec throughput guarantee.
+Threading is selected for each concrete decoder context. VideoToolbox defaults
+to slice threading to avoid a second FFmpeg coded-picture pipeline in front of
+its asynchronous native decoder; intrinsic codec reordering remains intact.
+Software geometry probes and fallbacks retain the software codec's policy, and
+every hardware candidate retry resolves its own backend. The existing per-worker
+thread budget, explicit qualification overrides and EXR shutdown policy still
+apply. Native output and actual threading diagnostics do not prove Apple's
+`UsingHardwareAcceleratedVideoDecoder` property or commercial realtime cadence.
 Output resolution pressure (Full -> Half -> Quarter) reduces renderer work but
 does not falsely claim to reduce codec work; a source that still cannot meet
 cadence requires hardware decode or a separately admitted proxy/optimized-media

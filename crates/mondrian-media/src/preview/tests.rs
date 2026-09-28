@@ -1095,33 +1095,29 @@ fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
 }
 
 #[test]
-fn long_gop_decode_threading_defaults_to_frame_pipelining_for_every_access_mode() {
-    let playback = super::PreviewDecodeAccessMode::PlaybackCursor;
-    let scrub = super::PreviewDecodeAccessMode::ScrubCursor;
-    assert_eq!(
-        super::default_threading_kind_for_software_decode(
-            ffmpeg::codec::Id::H264,
-            playback,
-            3_840 * 2_160
-        ),
-        super::PreviewDecodeThreadingKind::Frame
-    );
-    assert_eq!(
-        super::default_threading_kind_for_software_decode(
-            ffmpeg::codec::Id::H264,
-            playback,
-            1_920 * 1_080
-        ),
-        super::PreviewDecodeThreadingKind::Frame
-    );
-    assert_eq!(
-        super::default_threading_kind_for_software_decode(
-            ffmpeg::codec::Id::H264,
-            scrub,
-            3_840 * 2_160
-        ),
-        super::PreviewDecodeThreadingKind::Frame
-    );
+fn decoder_threading_policy_preserves_software_fallback_and_other_backends() {
+    use super::{default_decoder_threading_kind, HwAccelBackend, PreviewDecodeThreadingKind};
+    for codec in [ffmpeg::codec::Id::H264, ffmpeg::codec::Id::HEVC] {
+        for backend in [
+            HwAccelBackend::None,
+            HwAccelBackend::Cuda,
+            HwAccelBackend::D3D12VA,
+            HwAccelBackend::D3D11VA,
+            HwAccelBackend::Dxva2,
+            HwAccelBackend::Vaapi,
+            HwAccelBackend::Vdpau,
+        ] {
+            assert_eq!(
+                default_decoder_threading_kind(codec, backend),
+                PreviewDecodeThreadingKind::Frame,
+                "{codec:?} fallback/other backend {backend:?} must retain its pipeline"
+            );
+        }
+        assert_eq!(
+            default_decoder_threading_kind(codec, HwAccelBackend::VideoToolbox),
+            PreviewDecodeThreadingKind::Slice
+        );
+    }
 }
 
 #[test]

@@ -1758,15 +1758,13 @@ fn preview_trace(message: String) {
 
 fn preview_decode_threading_config(
     codec_id: ffmpeg::codec::Id,
+    backend: HwAccelBackend,
     access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
 ) -> PreviewDecodeThreadingConfig {
     let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
-        .unwrap_or_else(|| {
-            default_threading_kind_for_software_decode(codec_id, access_mode, decode_pixels)
-        });
+        .unwrap_or_else(|| default_decoder_threading_kind(codec_id, backend));
     let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
@@ -1776,7 +1774,7 @@ fn preview_decode_threading_config(
     PreviewDecodeThreadingConfig { kind, count }
 }
 
-/// Default software-decode threading kind.
+/// Default threading kind for the concrete decoder context being opened.
 ///
 /// Frame threading pipelines coded pictures and therefore provides stable
 /// throughput independently of how many slices the bitstream author placed in
@@ -1789,12 +1787,15 @@ fn preview_decode_threading_config(
 /// ProRes instead parallelizes slices within the requested intra picture:
 /// frame threading unnecessarily retains future pictures across seek/EOF and
 /// increases residency without improving measured native decode throughput.
-fn default_threading_kind_for_software_decode(
+/// VideoToolbox owns asynchronous native picture decode. FFmpeg frame threading
+/// adds another coded-picture pipeline in front of that owner; slice threading
+/// avoids that additional pipeline without changing native codec reordering.
+/// A software fallback still uses the software codec's policy.
+fn default_decoder_threading_kind(
     codec_id: ffmpeg::codec::Id,
-    _access_mode: PreviewDecodeAccessMode,
-    _decode_pixels: u64,
+    backend: HwAccelBackend,
 ) -> PreviewDecodeThreadingKind {
-    if codec_id == ffmpeg::codec::Id::PRORES {
+    if backend == HwAccelBackend::VideoToolbox || codec_id == ffmpeg::codec::Id::PRORES {
         PreviewDecodeThreadingKind::Slice
     } else {
         PreviewDecodeThreadingKind::Frame
@@ -1814,11 +1815,11 @@ fn default_decoder_threads_for_access_mode(
 
 fn preview_decode_threading_config_for_codec(
     codec_id: ffmpeg::codec::Id,
+    backend: HwAccelBackend,
     access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
     worker_thread_limit: Option<usize>,
 ) -> PreviewDecodeThreadingConfig {
-    let requested = preview_decode_threading_config(codec_id, access_mode, decode_pixels);
+    let requested = preview_decode_threading_config(codec_id, backend, access_mode);
     let requested = cap_preview_decode_threading_config(requested, worker_thread_limit);
     apply_preview_codec_threading_policy(codec_id, requested)
 }

@@ -1813,20 +1813,13 @@ impl PreviewDecodeSession {
             ffmpeg::codec::Profile::from((codec_id, (*parameters.as_ptr()).profile))
         };
         hardware_decode_plan.apply_stream_profile(stream_profile);
-        let decode_pixels = unsafe {
-            // `parameters` owns a valid AVCodecParameters allocation for this
-            // Session open; FFmpeg fills coded width/height during demux probe.
-            let raw = parameters.as_ptr();
-            u64::from((*raw).width.max(0) as u32)
-                .saturating_mul(u64::from((*raw).height.max(0) as u32))
-        };
         let requested_threading = preview_decode_threading_config_for_codec(
             codec_id,
+            HwAccelBackend::None,
             access_mode,
-            decode_pixels,
             decoder_thread_limit,
         );
-        let ffmpeg_threading = ffmpeg::codec::threading::Config {
+        let software_threading = ffmpeg::codec::threading::Config {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
         };
@@ -1840,8 +1833,11 @@ impl PreviewDecodeSession {
                 stream_profile,
             )
         {
-            let probe_context =
-                preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
+            let probe_context = preview_decode_context_from_parameters(
+                parameters.clone(),
+                software_threading,
+                path,
+            )?;
             let probe_decoder =
                 probe_context.decoder().video().map_err(|error| MondrianError::DecodeFailed {
                     asset_id: path.display().to_string(),
@@ -1885,9 +1881,19 @@ impl PreviewDecodeSession {
             && backend != PreviewDecodeBackend::Software
         {
             loop {
+                let requested_threading = preview_decode_threading_config_for_codec(
+                    codec_id,
+                    hardware_decode_plan.probe.candidate_backend.unwrap_or(HwAccelBackend::None),
+                    access_mode,
+                    decoder_thread_limit,
+                );
+                let hardware_threading = ffmpeg::codec::threading::Config {
+                    kind: requested_threading.kind.to_ffmpeg(),
+                    count: requested_threading.count,
+                };
                 let mut context = preview_decode_context_from_parameters(
                     parameters.clone(),
-                    ffmpeg_threading,
+                    hardware_threading,
                     path,
                 )?;
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
@@ -1972,15 +1978,17 @@ impl PreviewDecodeSession {
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
                 match preopened_software_decoder {
                     Some(decoder) => decoder,
-                    None => {
-                        preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
-                            .decoder()
-                            .video()
-                            .map_err(|error| MondrianError::DecodeFailed {
-                                asset_id: path.display().to_string(),
-                                reason: error.to_string(),
-                            })?
-                    }
+                    None => preview_decode_context_from_parameters(
+                        parameters,
+                        software_threading,
+                        path,
+                    )?
+                    .decoder()
+                    .video()
+                    .map_err(|error| MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason: error.to_string(),
+                    })?,
                 }
             }
         };
@@ -3876,10 +3884,9 @@ mod session_topology_tests {
         ensure_ffmpeg_initialized(&path).expect("initialize FFmpeg");
         let mut input = ffmpeg::format::input(&path).expect("open fixture");
         let parameters = input.stream(0).expect("video stream").parameters();
-        let kind = super::super::default_threading_kind_for_software_decode(
+        let kind = super::super::default_decoder_threading_kind(
             ffmpeg::codec::Id::PRORES,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            128 * 64,
+            HwAccelBackend::None,
         );
         let mut decoder = preview_decode_context_from_parameters(
             parameters.clone(),
