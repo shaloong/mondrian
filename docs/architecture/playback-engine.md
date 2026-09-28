@@ -2017,7 +2017,11 @@ completed cold frame and the last near frame; the reported preservable prefix
 reflects the capacity left after the cold owner is fixed. Playing retains its
 ordinary time-derived rolling window. Within that running window, the exact
 immediate source continuation enters the Playback worker before any retained
-cold-source top-up. The cold activation keeps the next bounded reservation,
+cold-source top-up. Its complete physical closure must fit and transfer all
+new requests into Broker ownership before farther activation can use remaining
+capacity. A blocked nearest closure is a frontier even when the farther frame
+needs fewer inputs; it cannot be bypassed by the separate cold-source plan.
+The cold activation keeps the next bounded reservation,
 but cannot block a millisecond-scale reuse decode behind a source-open path at
 the current presentation boundary. A retained cold-activation owner survives
 crossing into the ordinary rolling window; only reaching its exact Timeline

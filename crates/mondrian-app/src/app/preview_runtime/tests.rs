@@ -5790,6 +5790,84 @@ fn steady_prefetch_reserves_immediate_picture_then_cold_source_transition() {
 }
 
 #[test]
+fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    let upper_path = root.join("upper.mp4");
+    std::fs::write(&upper_path, b"not a real video").expect("invalid upper media");
+    let upper_asset = commit_preview_test_media(
+        state.asset_library().expect("asset library"),
+        upper_path.clone(),
+        rec709_video_media_info(std::fs::metadata(upper_path).expect("metadata").len()),
+    );
+    let mut sequence = state.active_sequence().expect("sequence").clone();
+    let tb = sequence.time_base();
+    sequence.video_tracks[1]
+        .add_clip(Clip::new(upper_asset, tt(0, tb), tt(24, tb)).expect("upper clip"))
+        .expect("insert upper clip");
+    state.test_set_sequence(Some(sequence));
+    state.play().expect("play");
+    let delivered =
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
+    assert_eq!(
+        state.playback_engine.snapshot().state,
+        mondrian_playback::TransportState::Playing
+    );
+
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let sequence = state.active_sequence().expect("sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let resolution = Resolution { width, height };
+    let immediate_keys = future_media_prefix_keys_for_state(&service, &state, 0, 1, resolution);
+    assert_eq!(
+        immediate_keys.len(),
+        2,
+        "nearest picture needs two distinct inputs"
+    );
+    let far_keys = future_media_prefix_keys_for_state(&service, &state, 47, 1, resolution);
+    assert_eq!(
+        far_keys.len(),
+        1,
+        "farther cold activation needs only one input"
+    );
+    assert!(immediate_keys
+        .iter()
+        .all(|key| key.decode.source() != far_keys[0].decode.source()));
+
+    // One speculative entry cannot own the nearest two-input closure. The
+    // smaller far closure must not consume it and delay that nearest frontier.
+    service.frame_store.replace(PreviewFrameStoreAdapter::new(
+        PreviewFrameStoreAdapterConfig {
+            media_entry_capacity: 1,
+            media_byte_budget: 640 * 1024 * 1024,
+            media_resource_unit_budget: 6,
+            current_media_working_set_entry_limit: 6,
+            current_media_working_set_byte_limit: 640 * 1024 * 1024,
+            current_media_working_set_resource_unit_limit: 6,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 256 * 1024 * 1024,
+            failure_entry_capacity: 2,
+        },
+    ));
+    schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+    assert!(immediate_keys.iter().all(|key| !service.scheduler.has_pending_key(key)));
+    assert!(
+        !service.scheduler.has_pending_key(&far_keys[0]),
+        "farther cold work cannot bypass the blocked nearest physical closure"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 0);
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_work_reservations,
+        0
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
 fn decoder_residency_trim_preserves_physical_source_worker_ownership() {
     let source = test_media_key(8_001).decode.source().clone();
     let mut window = FutureMediaWindowCache::default();

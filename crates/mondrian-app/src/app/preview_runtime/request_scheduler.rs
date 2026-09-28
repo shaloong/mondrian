@@ -977,12 +977,24 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 remaining_prefetch_jobs,
             );
             immediate_window_proven_blank = immediate_plan.window_proven_blank;
+            let immediate_closure_planned =
+                immediate_plan.window_proven_blank || immediate_plan.preservable_media_frames > 0;
+            let immediate_requests = immediate_plan.requests.len();
             let immediate_scheduled = self.admit_future_media_prefix(
                 immediate_plan,
                 preroll_deadline_at,
                 playback_direction,
             );
             remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(immediate_scheduled);
+            if !immediate_closure_planned || immediate_scheduled < immediate_requests {
+                // Planning is atomic per picture, but a blocked nearest closure
+                // must also form a frontier across the separate cold-source
+                // plan. Farther work cannot spend its unclaimed capacity.
+                return FutureMediaPrefetchReadiness {
+                    bounded_cold_activation_ready: distinct_activation_frame.is_none(),
+                    bounded_cold_activation_frame: distinct_activation_frame,
+                };
+            }
         }
         observation.next("prefetch-cold");
         if let Some(activation_frame) = distinct_activation_frame {
