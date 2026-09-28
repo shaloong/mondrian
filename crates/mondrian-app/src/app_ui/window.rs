@@ -7519,7 +7519,7 @@ fn prepare_viewer_gpu_preview(
                         if session.display_calibration.is_some() {
                             ExternalTextureTransfer::DeviceCodeValuesOpaque
                         } else {
-                            ExternalTextureTransfer::SurfaceCodeValuesOpaque
+                            ExternalTextureTransfer::SurfaceCodeValues
                         },
                     )
                     .map_err(|error| error.to_string())

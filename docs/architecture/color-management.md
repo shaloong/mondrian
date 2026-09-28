@@ -1885,8 +1885,12 @@ The native Viewer presentation seam never blends machine UI in PQ/HLG code
 space. Renderer output remains encoded target code values, while the UI carrier
 decodes it into target-primary display-linear values using a 100-nit reference
 white, composites linearized UI there, and applies the final PQ/HLG encoding at
-the swapchain store. Display P3 follows the same target-primary linear rule with
-the sRGB transfer. ICC-calibrated output is not relabelled as one of these
+the swapchain store. Straight coverage survives this seam: bilinear sampling
+associates RGB with Alpha in display-linear light before interpolation, then
+restores straight RGB for coverage blending over the Viewer canvas. Transparent
+pixels cannot expose hidden RGB or obscure the checkerboard/black background.
+Display P3 follows the same target-primary linear rule with the sRGB transfer.
+ICC-calibrated output is not relabelled as one of these
 standard targets; it uses the separately typed opaque device-code carrier.
 ## OCIO Engine Identity Contract
 
