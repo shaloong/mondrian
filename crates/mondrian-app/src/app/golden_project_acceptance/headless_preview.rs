@@ -216,8 +216,12 @@ impl GoldenHeadlessPreview {
                 gpu,
                 HeadlessGpuCompletionDeadline::at(deadline),
             )? {
-                HeadlessPreviewCandidate::Ready { output, completed_demand } => {
-                    let demand_completed = completed_demand.is_some();
+                HeadlessPreviewCandidate::Presented { output, completed_presentation } => {
+                    ensure!(
+                        completed_presentation.is_none_or(|receipt| receipt.delivery().kind() == mondrian_playback::FrameDeliveryKind::Ready),
+                        "Golden Viewer publication completed a non-Ready Frame Demand: {completed_presentation:?}"
+                    );
+                    let demand_completed = completed_presentation.is_some();
                     if matches!(&output, HeadlessPresentedOutput::QueuedGpu) {
                         ensure!(
                             demand_completed,
@@ -297,8 +301,14 @@ impl GoldenHeadlessPreview {
                         "Golden Viewer received a completed GPU disposition without exact completion evidence"
                     );
                     match disposition {
-                        HeadlessCompletedGpuDisposition::PublishedCurrent { completed_demand } => {
-                            queued_demand_completed |= completed_demand.is_some();
+                        HeadlessCompletedGpuDisposition::PublishedCurrent {
+                            completed_presentation,
+                        } => {
+                            ensure!(
+                                completed_presentation.is_none_or(|receipt| receipt.delivery().kind() == mondrian_playback::FrameDeliveryKind::Ready),
+                                "Golden Viewer callback retained a non-Ready publication: {completed_presentation:?}"
+                            );
+                            queued_demand_completed |= completed_presentation.is_some();
                         }
                         HeadlessCompletedGpuDisposition::PreparedSuccessor => {}
                         HeadlessCompletedGpuDisposition::Released => {}

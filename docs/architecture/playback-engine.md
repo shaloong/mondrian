@@ -1047,7 +1047,11 @@ lease, or a candidate that has not completed canonical Timeline evaluation.
 Fresh candidates still run deadline preflight before recording GPU commands.
 
 A bounded Headless observation must close the exact sampled demand, not merely
-wait for `Ready`. If preflight or completion consumes that demand as `Late`,
+wait for `Ready`. Ordinary and callback-completed publication carry the accepted
+Playback presentation receipt, including its delivery kind and completion time.
+Publishing a usable output does not promote an accepted `Degraded` delivery to
+`Ready`; realtime observations and Golden capture retain that distinction. If
+preflight or completion consumes that demand as `Late`,
 the gate records a non-ready terminal sample and applies its unchanged quality
 threshold; it must not wait for an impossible no-ticket retry or relabel the
 sample as ready. Initial/preroll and paused-still probes still require an exact

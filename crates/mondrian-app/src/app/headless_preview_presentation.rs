@@ -10,6 +10,7 @@ use super::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuCompletionPoll,
     HeadlessViewerGpuError, HeadlessViewerGpuExecution, HeadlessViewerGpuOutput,
 };
+use super::playback::FramePresentationCompletion;
 use super::playback_preview::{
     observe_playback_video_preroll, observe_playback_video_preroll_with_presentation_readiness,
     pump_playback_preview, PlaybackPreviewAdapter,
@@ -102,12 +103,12 @@ pub(crate) enum HeadlessPresentedOutput {
 /// Result of one bounded Headless presentation attempt.
 #[derive(Debug)]
 pub(crate) enum HeadlessPreviewCandidate {
-    /// An exact current output is now usable.
-    Ready {
+    /// Output was published; its exact delivery quality remains owner-authenticated.
+    Presented {
         /// Concrete output path used for this presentation.
         output: HeadlessPresentedOutput,
-        /// Exact Playback demand consumed by this publication, when any.
-        completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+        /// Accepted Playback presentation receipt, including quality and completion time.
+        completed_presentation: Option<FramePresentationCompletion>,
     },
     /// Required Preview work remains pending.
     Loading,
@@ -137,7 +138,7 @@ pub(crate) enum HeadlessCompletedGpuDisposition {
     /// completion supplies physical execution evidence without rewriting that
     /// historical publication classification.
     PublishedCurrent {
-        completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+        completed_presentation: Option<FramePresentationCompletion>,
     },
     /// Ticketless successor execution completed and remains retained off-screen.
     PreparedSuccessor,
@@ -302,9 +303,9 @@ fn present_headless_preview_candidate_inner(
             gpu.promote_prepared_successor(&output_key)
         });
         if headless_gpu_output_is_exact_current(preview, gpu, &output_key) {
-            return Ok(HeadlessPreviewCandidate::Ready {
+            return Ok(HeadlessPreviewCandidate::Presented {
                 output: HeadlessPresentedOutput::CurrentGpu,
-                completed_demand: None,
+                completed_presentation: None,
             });
         }
         clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
@@ -355,18 +356,19 @@ fn present_headless_preview_candidate_inner(
                     visible_at,
                     FramePresentationPublication::prepared(|| {}),
                 );
-                let Some(completed_demand) = observe_presentation_step("complete-demand", || {
-                    headless_published_demand_completion(preview, presentation)
-                })?
+                let Some(completed_presentation) =
+                    observe_presentation_step("complete-demand", || {
+                        headless_published_presentation_completion(preview, presentation)
+                    })?
                 else {
                     return Ok(HeadlessPreviewCandidate::DroppedLate);
                 };
                 observe_presentation_step("observe-video-preroll", || {
                     observe_playback_video_preroll(state, preview)
                 });
-                return Ok(HeadlessPreviewCandidate::Ready {
+                return Ok(HeadlessPreviewCandidate::Presented {
                     output: HeadlessPresentedOutput::CurrentGpu,
-                    completed_demand,
+                    completed_presentation,
                 });
             }
             let presentation_ticket = frame.presentation_ticket();
@@ -425,10 +427,8 @@ fn present_headless_preview_candidate_inner(
                         ),
                         "ordinary Headless publication committed semantic metadata without its physical output lease"
                     );
-                    let completed_demand = match presentation {
-                        FramePresentationDisposition::Presented(completion) => {
-                            Some(completion.delivery().identity())
-                        }
+                    let completed_presentation = match presentation {
+                        FramePresentationDisposition::Presented(completion) => Some(completion),
                         FramePresentationDisposition::NoDemand => None,
                         _ => unreachable!("matched presentable disposition"),
                     };
@@ -447,9 +447,9 @@ fn present_headless_preview_candidate_inner(
                     observe_presentation_step("observe-video-preroll", || {
                         observe_playback_video_preroll(state, preview)
                     });
-                    Ok(HeadlessPreviewCandidate::Ready {
+                    Ok(HeadlessPreviewCandidate::Presented {
                         output: HeadlessPresentedOutput::QueuedGpu,
-                        completed_demand,
+                        completed_presentation,
                     })
                 }
                 FramePresentationDisposition::DroppedLate(_) => {
@@ -517,18 +517,19 @@ fn present_headless_preview_candidate_inner(
                     FramePresentationPublication::prepared(|| {}),
                 )
             };
-            let Some(completed_demand) = observe_presentation_step("complete-demand", || {
-                headless_published_demand_completion(preview, presentation)
-            })?
+            let Some(completed_presentation) =
+                observe_presentation_step("complete-demand", || {
+                    headless_published_presentation_completion(preview, presentation)
+                })?
             else {
                 return Ok(HeadlessPreviewCandidate::DroppedLate);
             };
             observe_presentation_step("observe-video-preroll", || {
                 observe_playback_video_preroll(state, preview)
             });
-            Ok(HeadlessPreviewCandidate::Ready {
+            Ok(HeadlessPreviewCandidate::Presented {
                 output: HeadlessPresentedOutput::CurrentGpu,
-                completed_demand,
+                completed_presentation,
             })
         }
         PreviewGpuFrameState::Prepared => Ok(HeadlessPreviewCandidate::Loading),
@@ -540,18 +541,19 @@ fn present_headless_preview_candidate_inner(
                     preview.clear_external_viewer_frame();
                 }),
             );
-            let Some(completed_demand) = observe_presentation_step("complete-demand", || {
-                headless_published_demand_completion(preview, presentation)
-            })?
+            let Some(completed_presentation) =
+                observe_presentation_step("complete-demand", || {
+                    headless_published_presentation_completion(preview, presentation)
+                })?
             else {
                 return Ok(HeadlessPreviewCandidate::DroppedLate);
             };
             observe_presentation_step("observe-video-preroll", || {
                 observe_playback_video_preroll(state, preview)
             });
-            Ok(HeadlessPreviewCandidate::Ready {
+            Ok(HeadlessPreviewCandidate::Presented {
                 output: HeadlessPresentedOutput::Transparent,
-                completed_demand,
+                completed_presentation,
             })
         }
         PreviewGpuFrameState::Loading => Ok(HeadlessPreviewCandidate::Loading),
@@ -933,9 +935,9 @@ pub(crate) fn drive_headless_gpu_submission(
                     state.pending_playback_frame_demand_identity(),
                 );
                 let candidate = if output_key.filter(|_| exact_intent).is_some() {
-                    HeadlessPreviewCandidate::Ready {
+                    HeadlessPreviewCandidate::Presented {
                         output: HeadlessPresentedOutput::CurrentGpu,
-                        completed_demand: None,
+                        completed_presentation: None,
                     }
                 } else {
                     HeadlessPreviewCandidate::Loading
@@ -1086,11 +1088,11 @@ pub(crate) fn drive_headless_gpu_submission(
                     // exact visible current output. Its callback retires the
                     // submitted owner; it must not demote the consumer back to
                     // Loading merely because the work originated off-screen.
-                    return Ok(Some(HeadlessPreviewCandidate::Ready {
+                    return Ok(Some(HeadlessPreviewCandidate::Presented {
                         output: HeadlessPresentedOutput::Gpu {
                             execution: Box::new(completed.execution),
                         },
-                        completed_demand: None,
+                        completed_presentation: None,
                     }));
                 }
                 return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
@@ -1121,23 +1123,23 @@ pub(crate) fn drive_headless_gpu_submission(
                                 },
                             );
                         if remains_current {
-                            let completed_demand = match publication {
+                            let completed_presentation = match publication {
                                 FramePresentationDisposition::Presented(completion) => {
-                                    Some(completion.delivery().identity())
+                                    Some(completion)
                                 }
                                 FramePresentationDisposition::NoDemand => None,
                                 _ => unreachable!("matched published disposition"),
                             };
-                            HeadlessPreviewCandidate::Ready {
+                            HeadlessPreviewCandidate::Presented {
                                 output: HeadlessPresentedOutput::Gpu {
                                     execution: Box::new(completed.execution),
                                 },
-                                completed_demand,
+                                completed_presentation,
                             }
                         } else {
-                            let completed_demand = match publication {
+                            let completed_presentation = match publication {
                                 FramePresentationDisposition::Presented(completion) => {
-                                    Some(completion.delivery().identity())
+                                    Some(completion)
                                 }
                                 FramePresentationDisposition::NoDemand => None,
                                 _ => unreachable!("matched published disposition"),
@@ -1145,7 +1147,7 @@ pub(crate) fn drive_headless_gpu_submission(
                             HeadlessPreviewCandidate::CompletedGpu {
                                 execution: Box::new(completed.execution),
                                 disposition: HeadlessCompletedGpuDisposition::PublishedCurrent {
-                                    completed_demand,
+                                    completed_presentation,
                                 },
                             }
                         }
@@ -1228,9 +1230,9 @@ pub(crate) fn drive_headless_gpu_submission(
                                 }),
                             )
                         })?;
-                    let Some(completed_demand) =
+                    let Some(completed_presentation) =
                         observe_presentation_step("complete-demand", || {
-                            headless_published_demand_completion(preview, presentation)
+                            headless_published_presentation_completion(preview, presentation)
                         })?
                     else {
                         return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
@@ -1251,11 +1253,11 @@ pub(crate) fn drive_headless_gpu_submission(
                     observe_presentation_step("observe-video-preroll", || {
                         observe_playback_video_preroll(state, preview)
                     });
-                    Ok(Some(HeadlessPreviewCandidate::Ready {
+                    Ok(Some(HeadlessPreviewCandidate::Presented {
                         output: HeadlessPresentedOutput::Gpu {
                             execution: Box::new(completed.execution),
                         },
-                        completed_demand,
+                        completed_presentation,
                     }))
                 }
                 PreviewVisualGpuCompletionDisposition::Release => {
@@ -1359,9 +1361,12 @@ pub(crate) fn present_headless_preview_output(
                                     preview.clear_external_viewer_frame();
                                 }),
                             );
-                            let Some(completed_demand) =
+                            let Some(completed_presentation) =
                                 observe_presentation_step("complete-demand", || {
-                                    headless_published_demand_completion(preview, presentation)
+                                    headless_published_presentation_completion(
+                                        preview,
+                                        presentation,
+                                    )
                                 })?
                             else {
                                 return Ok(HeadlessPreviewCandidate::DroppedLate);
@@ -1369,9 +1374,9 @@ pub(crate) fn present_headless_preview_output(
                             observe_presentation_step("observe-video-preroll", || {
                                 observe_playback_video_preroll(state, preview)
                             });
-                            Ok(HeadlessPreviewCandidate::Ready {
+                            Ok(HeadlessPreviewCandidate::Presented {
                                 output: HeadlessPresentedOutput::Raster(frame),
-                                completed_demand,
+                                completed_presentation,
                             })
                         }
                         PreviewPresentationContent::Gpu(_) => {
@@ -1386,9 +1391,12 @@ pub(crate) fn present_headless_preview_output(
                                 ticket,
                                 FramePresentationPublication::prepared(|| {}),
                             );
-                            let Some(completed_demand) =
+                            let Some(completed_presentation) =
                                 observe_presentation_step("complete-demand", || {
-                                    headless_published_demand_completion(preview, presentation)
+                                    headless_published_presentation_completion(
+                                        preview,
+                                        presentation,
+                                    )
                                 })?
                             else {
                                 return Ok(HeadlessPreviewCandidate::DroppedLate);
@@ -1396,9 +1404,9 @@ pub(crate) fn present_headless_preview_output(
                             observe_presentation_step("observe-video-preroll", || {
                                 observe_playback_video_preroll(state, preview)
                             });
-                            Ok(HeadlessPreviewCandidate::Ready {
+                            Ok(HeadlessPreviewCandidate::Presented {
                                 output: HeadlessPresentedOutput::CurrentGpu,
-                                completed_demand,
+                                completed_presentation,
                             })
                         }
                     }
@@ -1411,9 +1419,9 @@ pub(crate) fn present_headless_preview_output(
                             preview.clear_external_viewer_frame();
                         }),
                     );
-                    let Some(completed_demand) =
+                    let Some(completed_presentation) =
                         observe_presentation_step("complete-demand", || {
-                            headless_published_demand_completion(preview, presentation)
+                            headless_published_presentation_completion(preview, presentation)
                         })?
                     else {
                         return Ok(HeadlessPreviewCandidate::DroppedLate);
@@ -1421,9 +1429,9 @@ pub(crate) fn present_headless_preview_output(
                     observe_presentation_step("observe-video-preroll", || {
                         observe_playback_video_preroll(state, preview)
                     });
-                    Ok(HeadlessPreviewCandidate::Ready {
+                    Ok(HeadlessPreviewCandidate::Presented {
                         output: HeadlessPresentedOutput::Transparent,
-                        completed_demand,
+                        completed_presentation,
                     })
                 }
                 PreviewPresentationState::Loading | PreviewPresentationState::Stale(_) => {
@@ -1438,14 +1446,14 @@ pub(crate) fn present_headless_preview_output(
     }
 }
 
-fn headless_published_demand_completion(
+fn headless_published_presentation_completion(
     preview: &HeadlessPreviewRuntime,
     disposition: FramePresentationDisposition,
-) -> anyhow::Result<Option<Option<mondrian_playback::FrameDemandIdentity>>> {
+) -> anyhow::Result<Option<Option<FramePresentationCompletion>>> {
     match disposition {
         FramePresentationDisposition::Presented(completion) => {
             preview.try_release_settled_transport_media_residency();
-            Ok(Some(Some(completion.delivery().identity())))
+            Ok(Some(Some(completion)))
         }
         FramePresentationDisposition::NoDemand => {
             preview.try_release_settled_transport_media_residency();

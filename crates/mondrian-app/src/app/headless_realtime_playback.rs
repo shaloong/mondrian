@@ -2250,6 +2250,18 @@ fn pump_headless_boundary_preview(
     (outcome, terminal)
 }
 
+/// Output publication alone is not a Ready outcome. Preserve the accepted
+/// ticket's classification through both ordinary and callback-completed paths.
+fn headless_published_candidate_status(
+    otherwise_ready: HeadlessGpuCandidateStatus,
+    completed: Option<super::playback::FramePresentationCompletion>,
+) -> HeadlessGpuCandidateStatus {
+    match completed.map(|receipt| receipt.delivery().kind()) {
+        None | Some(mondrian_playback::FrameDeliveryKind::Ready) => otherwise_ready,
+        Some(kind) => headless_terminal_delivery_status(kind),
+    }
+}
+
 fn headless_terminal_delivery_status(
     kind: mondrian_playback::FrameDeliveryKind,
 ) -> HeadlessGpuCandidateStatus {
@@ -3137,10 +3149,10 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
             gpu_completion_deadline,
         )?
     };
-    // The adapter has finalized Presented/NoDemand before returning Ready.
+    // The adapter has finalized Presented/NoDemand before returning its output.
     // Queue-published outputs still keep their CPU reuse owner until the real
     // submission retires; registration alone cannot release that protection.
-    if matches!(&candidate, HeadlessPreviewCandidate::Ready { .. })
+    if matches!(&candidate, HeadlessPreviewCandidate::Presented { .. })
         && !gpu_adapter.has_submission_in_flight()
         && gpu_adapter.device_generation_terminal().is_none()
         && let Some(key) = preview_service.registered_exact_current_gpu_output_key()
@@ -3155,7 +3167,9 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
         Some(gpu_adapter.retire_released_native_import_sources(gpu_completion_deadline)?)
     };
     match candidate {
-        HeadlessPreviewCandidate::Ready { output, completed_demand } => {
+        HeadlessPreviewCandidate::Presented { output, completed_presentation } => {
+            let completed_demand =
+                completed_presentation.map(|receipt| receipt.delivery().identity());
             let ready_binding =
                 ready_headless_candidate_binding(attempted_intent, completed_demand);
             let (status, binding, output_binding) = match output {
@@ -3213,6 +3227,7 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
                     HeadlessGpuCandidateOutputBindingUpdate::NonGpu,
                 ),
             };
+            let status = headless_published_candidate_status(status, completed_presentation);
             Ok(HeadlessGpuCandidateAttempt { status, binding, output_binding, completed_demand })
         }
         HeadlessPreviewCandidate::CompletedGpu { execution, disposition } => {
@@ -3224,14 +3239,20 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
                 HeadlessCompletedGpuDisposition::TerminalDelivery(kind) => {
                     Some(headless_terminal_delivery_status(kind))
                 }
-                HeadlessCompletedGpuDisposition::PublishedCurrent { .. }
-                | HeadlessCompletedGpuDisposition::PreparedSuccessor
+                HeadlessCompletedGpuDisposition::PublishedCurrent { completed_presentation } => {
+                    let status = headless_published_candidate_status(
+                        HeadlessGpuCandidateStatus::Ready,
+                        completed_presentation,
+                    );
+                    (!matches!(status, HeadlessGpuCandidateStatus::Ready)).then_some(status)
+                }
+                HeadlessCompletedGpuDisposition::PreparedSuccessor
                 | HeadlessCompletedGpuDisposition::Released => None,
             };
             let (publication, completed_demand) = match disposition {
-                HeadlessCompletedGpuDisposition::PublishedCurrent { completed_demand } => (
+                HeadlessCompletedGpuDisposition::PublishedCurrent { completed_presentation } => (
                     HeadlessGpuExecutionDisposition::PublishedCurrent,
-                    completed_demand,
+                    completed_presentation.map(|receipt| receipt.delivery().identity()),
                 ),
                 HeadlessCompletedGpuDisposition::PreparedSuccessor => {
                     (HeadlessGpuExecutionDisposition::PreparedSuccessor, None)
@@ -3489,6 +3510,50 @@ mod tests {
             Some(observed_at + HEADLESS_PREVIEW_CLOCK_TICK_MAX_WAIT),
             "zero-grace policies retain only the coordinator's bounded poll quantum"
         );
+    }
+
+    #[test]
+    fn published_degraded_ticket_cannot_become_a_ready_interval_fact() {
+        use mondrian_playback::FramePresentationQuality;
+        for quality in [
+            FramePresentationQuality::Ready,
+            FramePresentationQuality::Degraded,
+        ] {
+            let mut state = AppState::new();
+            state.set_playback_frame_running(4);
+            let intent = HeadlessGpuCandidateIntent::from_state(&state);
+            let ticket = state.playback_frame_presentation_ticket(quality).expect("ticket");
+            let publication = state.finalize_frame_presentation(
+                Some(ticket),
+                super::super::playback::FramePresentationPublication::prepared(|| {}),
+            );
+            let super::super::playback::FramePresentationDisposition::Presented(receipt) =
+                publication
+            else {
+                panic!("expected an accepted presentable ticket: {publication:?}");
+            };
+            assert_eq!(
+                receipt.delivery().identity(),
+                intent.pending_demand.expect("demand")
+            );
+            let mut binding = None;
+            apply_headless_candidate_binding(
+                &mut binding,
+                intent,
+                ready_headless_candidate_binding(intent, Some(receipt.delivery().identity())),
+            );
+            for output in [
+                HeadlessGpuCandidateStatus::Ready,
+                HeadlessGpuCandidateStatus::QueuedReady,
+            ] {
+                let status = headless_published_candidate_status(output, Some(receipt));
+                assert_eq!(
+                    headless_candidate_is_ready_for_sample(status, binding, intent, true),
+                    quality == FramePresentationQuality::Ready,
+                    "ordinary/queue publication must preserve the Engine's actual delivery kind"
+                );
+            }
+        }
     }
 
     #[test]
