@@ -4986,6 +4986,71 @@ mod tests {
 
     #[cfg(feature = "validation")]
     #[test]
+    fn returned_app_owner_needs_a_new_still_ticket_for_its_next_window() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = workspace_app_state_with_timed_solid();
+        state.seek(4).expect("seek still picture");
+        let before = state.playback_diagnostic_snapshot();
+        let old = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("first Window ticket");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("returned-window-ticket-first"),
+        );
+        assert!(matches!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::Presented(_)
+        ));
+        let deadline = Instant::now() + VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT;
+        let (state, first_shutdown) = host.into_app_state_until(deadline);
+        assert!(
+            first_shutdown.all_resources_released(),
+            "{first_shutdown:#?}"
+        );
+        assert!(state.pending_playback_frame_demand_identity().is_none());
+
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("returned-window-ticket-second"),
+        );
+        assert_eq!(host.viewer_gpu_preparation(), None);
+        host.renew_still_frame_demand_after_output_retirement()
+            .expect("bind the next physical Window carrier");
+        let new = host.app_state().pending_playback_frame_demand_identity().expect("new ticket");
+        assert_ne!(new, old.identity());
+        assert_eq!(host.app_state().playback_diagnostic_snapshot(), before);
+        assert_eq!(
+            host.viewer_gpu_preparation(),
+            Some(ViewerGpuPreparation::Current)
+        );
+        assert_eq!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert_eq!(
+            host.app_state().pending_playback_frame_demand_identity(),
+            Some(new)
+        );
+        let (state, second_shutdown) = host.into_app_state_until(deadline);
+        assert!(
+            second_shutdown.all_resources_released(),
+            "{second_shutdown:#?}"
+        );
+        let app_shutdown = state.shutdown_for_endurance(deadline);
+        assert!(app_shutdown.all_resources_released(), "{app_shutdown:#?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
     fn validation_host_returns_app_owner_after_closing_ui_services() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let host = AppUiHost::new(AppState::new());

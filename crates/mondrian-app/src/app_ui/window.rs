@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Mondrian app UI winit/wgpu product window.
 //!
 //! Binary entrypoints stay thin and call this module. The product shell owns
@@ -2259,7 +2258,8 @@ struct AppUiInitialWindowCandidate {
 }
 
 fn prepare_initial_window_candidate(
-    event_loop: &winit::event_loop::EventLoop<AppUiUserEvent>,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
     host: &AppUiHost,
     deadline: Instant,
 ) -> Result<AppUiInitialWindowCandidate, AppUiPreActiveWindowStartupFailure> {
@@ -2267,7 +2267,6 @@ fn prepare_initial_window_candidate(
     // An opened Project must not allocate and immediately replace a Startup surface.
     let role = window_role_for_mode(host.mode());
     catch_pre_active_window_construction(deadline, |last_stage, viewer_gpu_startup| {
-        let preview_work_event_proxy = event_loop.create_proxy();
         let startup_window = Arc::new(
             event_loop
                 .create_window(window_attributes_for_role(role))
@@ -2387,6 +2386,42 @@ fn prepare_initial_window_candidate(
             session_bounds,
         })
     })
+}
+
+fn publish_initial_window_candidate(
+    host: &mut AppUiHost,
+    candidate: &AppUiInitialWindowCandidate,
+) -> Result<(), String> {
+    let session = &candidate.session;
+    let session_bounds = candidate.session_bounds;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_active_window_session(host, session, session_bounds)
+            .map_err(|error| error.to_string())?;
+        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+        tracing::info!(
+            surface_generation = session.surface_generation_id.get(),
+            device_generation = session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            "UI initialized — {}x{}",
+            session.config.width,
+            session.config.height
+        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            session.window.set_visible(true);
+            session.window.request_redraw();
+        }
+        Ok::<_, String>(())
+    }))
+    .map_err(|payload| {
+        crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+            payload,
+            "initial Window Host publication",
+        )
+        .to_string()
+    })?
 }
 
 fn catch_pre_active_window_construction<T>(
@@ -2583,8 +2618,7 @@ fn reopen_window_surface_and_device(
                 device_generation_before,
             )?;
             retired_session.window.set_visible(false);
-            host.renew_still_frame_demand_after_output_retirement()?;
-            publish_active_window_session(host, active_session, bounds);
+            publish_active_window_session(host, active_session, bounds)?;
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
     )?;
@@ -3831,128 +3865,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
             .into());
         }
     };
-    let mut host = host;
-
     tracing::info!("Mondrian app UI starting");
 
-    let initial_candidate = match prepare_initial_window_candidate(
-        event_loop,
-        &host,
-        host_startup_deadline,
-    ) {
-        Ok(candidate) => candidate,
-        Err(failure) => {
-            let native_cleanup_released = failure.shutdown.all_created_resources_released();
-            let native_cleanup = *failure.shutdown;
-            let primary = failure.primary;
-            let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
-            let ui_failure = (!ui_shutdown.all_resources_released())
-                .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
-            drop(background_runtime_guard);
-            let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
-            let runtime_failure = runtime_shutdown.qualification_failure();
-            #[cfg(feature = "validation")]
-            if let Some(return_slot) = validation_return.as_ref() {
-                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
-                    app_state,
-                    shutdown: AppUiValidationWindowShutdown::Complete(
-                        AppUiWindowOuterShutdownEvidence::pre_active_failed(
-                            runtime_shutdown,
-                            ui_shutdown,
-                            native_cleanup.clone(),
-                        ),
-                    ),
-                });
-            }
-            #[cfg(not(feature = "validation"))]
-            drop(app_state);
-            let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
-            let native_context = format!(
-                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
-            );
-            return match cleanup_failure {
-                Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
-                None => Err(format!("{primary}; {native_context}").into()),
-            };
-        }
-    };
-    let AppUiInitialWindowCandidate {
-        preview_work_event_proxy,
-        preview_work_watch,
-        preview_work_event_pending,
-        instance,
-        adapter,
-        device: initial_device,
-        queue: initial_queue,
-        mut session,
-        session_bounds,
-    } = initial_candidate;
-    #[cfg(feature = "validation")]
-    let (mut device, mut queue) = (initial_device, initial_queue);
-    #[cfg(not(feature = "validation"))]
-    let (device, queue) = (initial_device, initial_queue);
+    // Native Window/Surface creation must run while winit owns its callback.
+    // macOS can emit focus/resize events as soon as a Window is constructed.
+    let preview_work_event_proxy = event_loop.create_proxy();
+    let mut initial_candidate: Option<AppUiInitialWindowCandidate> = None;
+    let mut startup_failure: Option<AppUiPreActiveWindowStartupFailure> = None;
+    let mut publication_failure: Option<String> = None;
     let pending_actions = PendingUiActions::default();
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        publish_active_window_session(&mut host, &session, session_bounds);
-        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
-        tracing::info!(
-            surface_generation = session.surface_generation_id.get(),
-            device_generation = session
-                .viewer_gpu_device_progress
-                .generation_id()
-                .map(ViewerGpuDeviceGenerationId::get),
-            "UI initialized — {}x{}",
-            session.config.width,
-            session.config.height
-        );
-        #[cfg(not(target_os = "macos"))]
-        {
-            session.window.set_visible(true);
-            session.window.request_redraw();
-        }
-    })) {
-        let primary = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
-            payload,
-            "initial Window Host publication",
-        )
-        .to_string();
-        let gpu_shutdown =
-            catch_window_viewer_gpu_shutdown(&mut session, &host, host_startup_deadline);
-        let gpu_failure = gpu_shutdown.qualification_failure();
-        let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
-        let ui_failure = (!ui_shutdown.all_resources_released())
-            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
-        drop(background_runtime_guard);
-        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
-        let runtime_failure = runtime_shutdown.qualification_failure();
-        #[cfg(feature = "validation")]
-        if let Some(return_slot) = validation_return.as_ref() {
-            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
-                app_state,
-                shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
-                    runtime: runtime_shutdown,
-                    host: ui_shutdown,
-                    gpu: gpu_shutdown,
-                },
-            });
-        }
-        #[cfg(not(feature = "validation"))]
-        {
-            drop(app_state);
-            drop(gpu_shutdown);
-        }
-        let cleanup_failure = merge_window_cleanup_failures(
-            merge_window_cleanup_failures(gpu_failure, ui_failure),
-            runtime_failure,
-        );
-        return match cleanup_failure {
-            Some(cleanup) => Err(format!(
-                "{primary}; initial Window publication cleanup also failed: {cleanup}"
-            )
-            .into()),
-            None => Err(primary.into()),
-        };
-    }
 
     let mut host = AppUiHostSessionOwner::new(
         host,
@@ -3970,13 +3891,52 @@ fn run_app_ui_with_initial_state_on_event_loop(
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
+        if startup_failure.is_some() || publication_failure.is_some() {
+            elwt.exit();
+            return;
+        }
+        if initial_candidate.is_none() {
+            if !matches!(event, Event::Resumed) {
+                return;
+            }
+            let candidate = match prepare_initial_window_candidate(
+                elwt, preview_work_event_proxy.clone(), &host, host_startup_deadline,
+            ) {
+                Ok(candidate) => candidate,
+                Err(failure) => {
+                    startup_failure = Some(failure);
+                    elwt.exit();
+                    return;
+                }
+            };
+            // Install the activated native owner before any fallible Host publication.
+            initial_candidate = Some(candidate);
+            publication_failure = publish_initial_window_candidate(
+                &mut host, initial_candidate.as_ref().expect("installed Window candidate"),
+            ).err();
+            if publication_failure.is_some() {
+                elwt.exit();
+                return;
+            }
+        }
+        let AppUiInitialWindowCandidate {
+            preview_work_event_proxy,
+            preview_work_watch,
+            preview_work_event_pending,
+            instance,
+            adapter,
+            device,
+            queue,
+            session,
+            ..
+        } = initial_candidate.as_mut().expect("resumed Window candidate");
         let dispatch_action = |action| pending_actions.push(action);
 
         #[cfg(target_os = "macos")]
         {
             if session.accessibility.is_none() {
                 session.accessibility_proxy = Some(preview_work_event_proxy.clone());
-                attach_mac_accessibility(&mut session, elwt);
+                attach_mac_accessibility(session, elwt);
                 session.window.set_visible(true);
                 session.window.request_redraw();
             }
@@ -4014,10 +3974,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         &pending_actions,
                         &platform,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4025,14 +3985,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
             Event::UserEvent(AppUiUserEvent::PreviewWorkAvailable) => {
                 let drain_target_revision = preview_work_watch.revision();
                 let background_tasks =
-                    poll_window_background_tasks(&mut host, &mut session);
+                    poll_window_background_tasks(&mut host, session);
                 if background_tasks.quit_requested {
                     elwt.exit();
                 }
                 rearm_preview_work_event(
-                    &preview_work_event_pending,
+                    preview_work_event_pending,
                     drain_target_revision,
-                    &preview_work_watch,
+                    preview_work_watch,
                     || {
                         preview_work_event_proxy
                             .send_event(AppUiUserEvent::PreviewWorkAvailable)
@@ -4043,10 +4003,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4055,16 +4015,16 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 }
             }
             Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
-                if poll_viewer_heterogeneous_completion(&device, &mut session, &host)
+                if poll_viewer_heterogeneous_completion(device, session, &host)
                     == ViewerHeterogeneousCompletionPoll::TerminalChange
                 {
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4078,10 +4038,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if should_redraw {
                             session.window.request_redraw();
@@ -4122,10 +4082,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                             host.sync_workspace_layout_from_root();
                         } else {
@@ -4148,10 +4108,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if result == EventResult::Ignored
                             && should_exit_on_ignored_keyboard_input(
@@ -4161,7 +4121,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         {
                             elwt.exit();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                         session.window.request_redraw();
                     }
 
@@ -4178,10 +4138,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         session.window.request_redraw();
                     }
@@ -4191,16 +4151,16 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         sync_window_session_role(
                             &mut host,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         let prepare_started = Instant::now();
                         prepare_viewer_gpu_preview(
-                            &device,
-                            &queue,
-                            &mut session,
+                            device,
+                            queue,
+                            session,
                             &host,
                         );
                         session.event_loop_telemetry.record_stage_duration(
@@ -4229,8 +4189,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &session.router,
                         );
                         let frame_result = session.frame_renderer.render_draw_commands(
-                            &device,
-                            &queue,
+                            device,
+                            queue,
                             &session.surface,
                             &session.config,
                             encoder.finish_scaled(
@@ -4283,13 +4243,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 validation,
                                 frame_result,
                                 elwt,
-                                &instance,
-                                &adapter,
-                                &mut device,
-                                &mut queue,
+                                instance,
+                                adapter,
+                                device,
+                                queue,
                                 &mut host,
-                                &mut session,
-                                &preview_work_event_proxy,
+                                session,
+                                preview_work_event_proxy,
                             ) {
                                 Ok(true) => {
                                     elwt.exit();
@@ -4333,9 +4293,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::Resize,
                             (new_size.width, new_size.height),
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4351,9 +4311,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::ScaleFactorChanged,
                             (size.width, size.height),
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4366,9 +4326,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         );
                         refresh_display_output_contract(
                             DisplayOutputContractRefreshReason::WindowMoved,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4428,10 +4388,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                         }
                     }
@@ -4463,15 +4423,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &instance,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                         } else {
                             session.window.request_redraw();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
@@ -4513,15 +4473,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if sync_workspace_layout {
                             host.sync_workspace_layout_from_root();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                         session.window.request_redraw();
                     }
 
@@ -4543,10 +4503,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &instance,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         session.window.request_redraw();
                     }
@@ -4605,22 +4565,22 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 ) {
                     false
                 } else {
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     let changed = host.advance_playback_clock(
                         Instant::now(),
                         session.current_bounds.get(),
                     );
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     changed
                 };
                 #[cfg(not(feature = "validation"))]
                 let playback_changed = {
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     let changed = host.advance_playback_clock(
                         Instant::now(),
                         session.current_bounds.get(),
                     );
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     changed
                 };
                 session.event_loop_telemetry.record_stage_duration(
@@ -4628,7 +4588,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     playback_clock_started.elapsed(),
                 );
                 let background_tasks =
-                    poll_window_background_tasks(&mut host, &mut session);
+                    poll_window_background_tasks(&mut host, session);
                 if background_tasks.quit_requested {
                     elwt.exit();
                 }
@@ -4636,10 +4596,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4647,8 +4607,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
                 let heterogeneous_completion = drive_viewer_heterogeneous_completion(
-                    &device,
-                    &mut session,
+                    device,
+                    session,
                     &host,
                     Instant::now(),
                 );
@@ -4656,10 +4616,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4693,10 +4653,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         &pending_actions,
                         &platform,
                         elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
@@ -4726,6 +4686,101 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
         })
     });
+    let Some(mut initial_candidate) = initial_candidate else {
+        let mut failure = startup_failure.unwrap_or_else(|| {
+            close_pre_active_native_construction(
+                "event loop returned before the initial Window was created".to_owned(),
+                AppUiPreActiveWindowStartupStage::HostOwned,
+                None,
+                host_startup_deadline,
+            )
+        });
+        if let Err(error) = &event_loop_result {
+            failure.primary = format!("{}; {error}", failure.primary);
+        }
+        let native_cleanup_released = failure.shutdown.all_created_resources_released();
+        let native_cleanup = *failure.shutdown;
+        let primary = failure.primary;
+        let (app_state, ui_shutdown) = host
+            .host
+            .take()
+            .expect("pre-active Host owner")
+            .into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+        drop(background_runtime_guard);
+        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+        let runtime_failure = runtime_shutdown.qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = host.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown: AppUiValidationWindowShutdown::Complete(
+                    AppUiWindowOuterShutdownEvidence::pre_active_failed(
+                        runtime_shutdown,
+                        ui_shutdown,
+                        native_cleanup.clone(),
+                    ),
+                ),
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        drop(app_state);
+        let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
+        let native_context = format!(
+                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
+            );
+        return match cleanup_failure {
+            Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
+            None => Err(format!("{primary}; {native_context}").into()),
+        };
+    };
+    let session = &mut initial_candidate.session;
+    if let Some(mut primary) = publication_failure {
+        if let Err(error) = &event_loop_result {
+            primary = format!("{primary}; {error}");
+        }
+        let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, host_startup_deadline);
+        let gpu_failure = gpu_shutdown.qualification_failure();
+        let (app_state, ui_shutdown) = host
+            .host
+            .take()
+            .expect("publication Host owner")
+            .into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+        drop(background_runtime_guard);
+        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+        let runtime_failure = runtime_shutdown.qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = host.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
+                    runtime: runtime_shutdown,
+                    host: ui_shutdown,
+                    gpu: gpu_shutdown,
+                },
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            drop(app_state);
+            drop(gpu_shutdown);
+        }
+        let cleanup_failure = merge_window_cleanup_failures(
+            merge_window_cleanup_failures(gpu_failure, ui_failure),
+            runtime_failure,
+        );
+        return match cleanup_failure {
+            Some(cleanup) => Err(format!(
+                "{primary}; initial Window publication cleanup also failed: {cleanup}"
+            )
+            .into()),
+            None => Err(primary.into()),
+        };
+    }
+
     let event_loop_result =
         merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
     let product_shutdown_deadline = || {
@@ -4737,7 +4792,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(product_shutdown_deadline);
     #[cfg(not(feature = "validation"))]
     let shutdown_deadline = product_shutdown_deadline();
-    let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
+    let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
         Ok(evidence) if evidence.all_resources_released() => None,
@@ -8610,7 +8665,11 @@ impl AppUiActivatedWindowSession {
     }
 }
 
-fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSession, bounds: Rect) {
+fn publish_active_window_session(
+    host: &mut AppUiHost,
+    session: &AppUiWindowSession,
+    bounds: Rect,
+) -> Result<(), mondrian_playback::PlaybackError> {
     // These are the only Host-visible candidate mutations. Callers first place
     // an activated GPU generation in an outer active-session owner so a panic
     // here cannot strand it in a temporary candidate Drop.
@@ -8623,6 +8682,12 @@ fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSess
             session.viewer_gpu_execution.native_decode_device_root(),
         );
     }
+    // A new native carrier has no surviving picture from the previous Window.
+    // Only Playback may renew its persistent obligation; timed demands retain
+    // their original deadlines. This also covers a returned App owner whose
+    // former Window already consumed the still ticket before closing.
+    host.renew_still_frame_demand_after_output_retirement()?;
+    Ok(())
 }
 
 impl AppUiWindowSession {
@@ -8852,9 +8917,7 @@ fn replace_window_session(
         session,
         &mut next_session,
         |active_session, _retired_session| {
-            host.renew_still_frame_demand_after_output_retirement()?;
-            publish_active_window_session(host, active_session, bounds);
-            Ok::<_, mondrian_playback::PlaybackError>(())
+            publish_active_window_session(host, active_session, bounds)
         },
     )?;
     tracing::info!(
@@ -8994,7 +9057,7 @@ fn apply_window_corner_preference(
 fn update_window_cursor_icon(host: &AppUiHost, session: &mut AppUiWindowSession) {
     let next = window_cursor_icon(host, session);
     if session.last_window_cursor_icon != Some(next) {
-        session.window.set_cursor_icon(next);
+        session.window.set_cursor(next);
         session.last_window_cursor_icon = Some(next);
     }
 }

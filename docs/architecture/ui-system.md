@@ -2439,10 +2439,21 @@ explicitly closeable. A normal role-replacement error is retained as an
 event-loop failure. Partially mutated Host state is not rolled back and may not
 resume; the Window fails closed and exits.
 
-Initial Window native/GPU construction now runs inside one caught, stage-ledger
-scope after Runtime and Host startup. The raw complete Host is retained outside
-that scope and is wrapped as an active `AppUiHostSessionOwner` only after Host
-publication succeeds. Window, Surface, Adapter, Device/Queue, Viewer progress,
+Every active Window publication binds its new physical carrier through the
+Playback Engine's existing persistent-still renewal seam. This includes initial
+startup with an App returned by a previous Window: its consumed picture ticket
+cannot authorize the new carrier. The renewal preserves the Timeline coordinate,
+transport state and quality, invalidates the old ticket, and leaves timed demands
+at their original deadlines. Initial publication, role replacement and Device
+reopen share this boundary rather than depending on validation-only seeks.
+
+Initial Window native/GPU construction runs inside the first `Resumed` callback,
+after Runtime and Host startup, in one caught, stage-ledger scope. Creating a
+Window before winit installs its handler can lose macOS focus/resize events.
+The existing `AppUiHostSessionOwner` retains the complete Host outside that scope;
+Window state is published only after the candidate is activated. Repeated
+`Resumed` events reuse that same native candidate rather than creating another
+Window, Surface or Device. Window, Surface, Adapter, Device/Queue, Viewer progress,
 Preview waker, Prepared Window, and Activated Window checkpoints feed one failure
 path. That path first consumes any partial Viewer GPU owner, then hands the exact
 App back through complete Host closure, then consumes the background Runtime
