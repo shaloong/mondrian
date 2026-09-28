@@ -667,7 +667,7 @@ fn estimate_source(
                         textures: match source.frame.chroma_plane_layout() {
                             mondrian_media::CpuYuvChromaPlaneLayout::Interleaved => 3,
                             mondrian_media::CpuYuvChromaPlaneLayout::Planar => 4,
-                        },
+                        } + u64::from(source.frame.alpha_plane().is_some()),
                         bytes,
                     },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,

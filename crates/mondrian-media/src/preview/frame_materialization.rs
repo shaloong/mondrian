@@ -72,7 +72,7 @@ fn compact_yuv_layout(
             CpuYuvSampleFormat::Unorm16Lsb10,
             CpuYuvChromaPlaneLayout::Planar,
         ),
-        Pixel::YUV444P12LE => (
+        Pixel::YUV444P12LE | Pixel::YUVA444P12LE => (
             CpuYuvChromaSubsampling::Cs444,
             CpuYuvSampleFormat::Unorm16Lsb12,
             CpuYuvChromaPlaneLayout::Planar,
@@ -207,6 +207,89 @@ fn materialize_decoded_to_compact_yuv(
             })
         })
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_yuva12_to_encoded_float(
+    decoded: &ffmpeg::util::frame::video::Video,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler_format_contract: &mut Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
+    width: u32,
+    height: u32,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+) -> Result<FloatRgbaFrame> {
+    let frame = materialize_decoded_to_compact_yuv(
+        decoded,
+        scaler,
+        scaler_format_contract,
+        width,
+        height,
+        path,
+        source_color,
+    )?
+    .expect("YUVA12 is a supported compact layout");
+    let contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
+    use crate::DecodedVideoMatrix;
+    use mondrian_core::ColorMatrixCoefficients;
+    let matrix = match contract.applied_matrix {
+        DecodedVideoMatrix::Bt709 => ColorMatrixCoefficients::Bt709,
+        DecodedVideoMatrix::Fcc => ColorMatrixCoefficients::Fcc,
+        DecodedVideoMatrix::Bt470Bg => ColorMatrixCoefficients::Bt470Bg,
+        DecodedVideoMatrix::Smpte170M => ColorMatrixCoefficients::Smpte170M,
+        DecodedVideoMatrix::Smpte240M => ColorMatrixCoefficients::Smpte240M,
+        DecodedVideoMatrix::Bt2020NonConstant => ColorMatrixCoefficients::Bt2020NonConstant,
+        _ => {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "YUVA12 requires supported nonconstant YCbCr matrix coefficients"
+                    .to_owned(),
+            })
+        }
+    };
+    let parameters =
+        mondrian_core::EncodedYuvToRgbParameters::new(matrix, contract.applied_range, 12)
+            .expect("resolved YUVA12 matrix/range is supported");
+    let super::CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+        unreachable!("YUVA12 retains planar chroma")
+    };
+    let planes = [
+        frame.luma_plane(),
+        cb,
+        cr,
+        frame.alpha_plane().expect("YUVA12 alpha"),
+    ];
+    let started = Instant::now();
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let samples = planes.map(|plane| {
+                let start = y * plane.bytes_per_row() as usize + x * 2;
+                f32::from(u16::from_le_bytes([
+                    plane.data()[start],
+                    plane.data()[start + 1],
+                ]))
+            });
+            rgba.extend(parameters.decode([samples[0], samples[1], samples[2]]));
+            rgba.push(samples[3] / 4095.0);
+        }
+    }
+    Ok(FloatRgbaFrame::new(
+        width,
+        height,
+        rgba,
+        contract,
+        PreviewDecodePath::InProcessFfmpegCpuFloat,
+    )
+    .with_decoded_surface_format(frame.surface_format())
+    .with_decoded_video_sampling(frame.video_sampling)
+    .with_stage_durations(PreviewDecodeStageDurations {
+        rgba_copy_us: duration_us(started.elapsed()),
+        ..frame.diagnostics.stage_durations
+    }))
 }
 
 pub(super) fn convert_decoded_to_rgba(
@@ -937,6 +1020,21 @@ fn materialize_decoded_to_cpu(
                 |frame| Ok(PreviewDecodedFramePayload::CpuYuv(frame)),
             );
         }
+        if decoded.format() == ffmpeg::util::format::pixel::Pixel::YUVA444P12LE
+            && !source_color.is_scene_linear()
+            && !source_color.is_data_texture()
+        {
+            return materialize_yuva12_to_encoded_float(
+                decoded,
+                scaler,
+                scaler_format_contract,
+                target_width,
+                target_height,
+                path,
+                source_color,
+            )
+            .map(PreviewDecodedFramePayload::CpuFloat);
+        }
         if source_color.is_scene_linear() || planar_float_layout(decoded.format()).is_some() {
             return convert_decoded_to_float_rgba(
                 decoded,
@@ -1024,6 +1122,28 @@ fn materialize_decoded_to_cpu(
                 )))
             },
         );
+    }
+    if transferred.format() == ffmpeg::util::format::pixel::Pixel::YUVA444P12LE
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture()
+    {
+        return materialize_yuva12_to_encoded_float(
+            &transferred,
+            scaler,
+            scaler_format_contract,
+            target_width,
+            target_height,
+            path,
+            source_color,
+        )
+        .map(|frame| {
+            PreviewDecodedFramePayload::CpuFloat(frame.with_stage_durations(
+                PreviewDecodeStageDurations {
+                    hardware_transfer_us,
+                    ..PreviewDecodeStageDurations::default()
+                },
+            ))
+        });
     }
     if source_color.is_scene_linear() || planar_float_layout(transferred.format()).is_some() {
         return convert_decoded_to_float_rgba(

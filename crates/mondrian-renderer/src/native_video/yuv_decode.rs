@@ -30,7 +30,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
-fn sample_luma(source_center: vec2<f32>) -> f32 {
+fn sample_luma(source_center: vec2<f32>) -> vec2<f32> {
     let sample_coordinate = source_center - vec2<f32>(0.5);
     let base = vec2<i32>(floor(sample_coordinate));
     let weight = fract(sample_coordinate);
@@ -60,7 +60,8 @@ fn decode_encoded_rgb(position: vec4<f32>) -> vec4<f32> {
     let source_extent = vec2<f32>(uniforms.extent.xy);
     let output_extent = vec2<f32>(uniforms.extent.zw);
     let source_center = position.xy * source_extent / output_extent;
-    let y_code = sample_luma(source_center) * uniforms.code_range.x;
+    let luma_alpha = sample_luma(source_center);
+    let y_code = luma_alpha.x * uniforms.code_range.x;
     let chroma_code = sample_chroma(source_center) * uniforms.code_range.x;
     let y = (y_code - uniforms.code_range.y) * uniforms.code_range.z;
     let chroma = (chroma_code - vec2<f32>(uniforms.code_range.w))
@@ -72,7 +73,7 @@ fn decode_encoded_rgb(position: vec4<f32>) -> vec4<f32> {
         y + uniforms.matrix1.x * cb + uniforms.matrix1.y * cr,
         y + uniforms.matrix1.z * cb,
     );
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(rgb, luma_alpha.y);
 }
 "#;
 const YUV_DECODE_ENTRY: &str = r#"
@@ -84,6 +85,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 const YUV_TEXTURE_SOURCE: &str = r#"@group(0) @binding(0) var luma_texture: texture_2d<f32>;
 @group(0) @binding(1) var chroma_texture: texture_2d<f32>;
 @group(0) @binding(2) var chroma_v_texture: texture_2d<f32>;
+@group(0) @binding(5) var alpha_texture: texture_2d<f32>;
 
 fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
@@ -96,9 +98,14 @@ fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     return textureLoad(chroma_texture, clamped, 0).rg;
 }
 
-fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
+fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
-    return textureLoad(luma_texture, clamped, 0).r;
+    var alpha = 1.0;
+    if uniforms.plane_layout.z != 0u {
+        alpha = textureLoad(alpha_texture, clamped, 0).r
+            * uniforms.code_range.x / f32(uniforms.plane_layout.w);
+    }
+    return vec2<f32>(textureLoad(luma_texture, clamped, 0).r, alpha);
 }
 
 fn luma_dimensions() -> vec2<u32> {
@@ -120,9 +127,9 @@ fn load_component(byte_offset: u32) -> f32 {
     if storage_layout.z == 2u { return f32(value & 65535u) / 65535.0; }
     return f32(value & 255u) / 255.0;
 }
-fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> f32 {
+fn load_luma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     let c = vec2<u32>(clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1)));
-    return load_component(c.y * storage_layout.x + c.x * storage_layout.z);
+    return vec2<f32>(load_component(c.y * storage_layout.x + c.x * storage_layout.z), 1.0);
 }
 fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     let c = vec2<u32>(clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1)));
@@ -149,6 +156,8 @@ pub struct GpuNativeYuvPlaneViews<'a> {
     pub chroma: &'a wgpu::TextureView,
     /// Separate Cr plane for planar input; aliases `chroma` for interleaved input.
     pub chroma_v: &'a wgpu::TextureView,
+    /// Full-resolution straight coverage; absent for opaque input.
+    pub alpha: Option<&'a wgpu::TextureView>,
 }
 
 /// Physical chroma texture layout consumed by the YUV shader.
@@ -449,6 +458,7 @@ impl GpuNativeYuvDecodePlan {
             || descriptor.domain != ColorFrameDomain::Source
             || descriptor.encoding != ColorFrameEncoding::EncodedFloat
             || descriptor.residency != ColorFrameResidency::Gpu
+            || !descriptor.alpha.is_straight_compatible()
             || output.texture_format() != product_gpu_working_texture_format()
         {
             return Err(GpuNativeYuvDecodePlanError::InvalidOutputContract {
@@ -490,6 +500,7 @@ impl GpuNativeYuvDecodePlan {
             output_extent: self.output_extent,
             storage_extent: self.storage_extent,
             video_sampling: self.video_sampling,
+            alpha: self.output.descriptor().alpha,
         }
     }
 }
@@ -578,6 +589,7 @@ struct GpuNativeYuvSamplingContract {
     output_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
     video_sampling: GpuNativeDecodedFrameVideoSampling,
+    alpha: crate::ColorFrameAlpha,
 }
 
 #[repr(C)]
@@ -592,7 +604,15 @@ struct GpuNativeYuvDecodeUniforms {
 
 impl GpuNativeYuvDecodeUniforms {
     fn from_plan(plan: &GpuNativeYuvDecodePlan) -> Self {
-        let bit_scale = (1u32 << (plan.video_sampling.bit_depth - 8)) as f32;
+        let parameters = mondrian_core::EncodedYuvToRgbParameters::new(
+            plan.video_sampling.matrix,
+            match plan.video_sampling.range {
+                GpuVideoRange::Limited => mondrian_core::DecodedVideoRange::Limited,
+                GpuVideoRange::Full => mondrian_core::DecodedVideoRange::Full,
+            },
+            plan.video_sampling.bit_depth,
+        )
+        .expect("validated YUV plan has supported code-value parameters");
         let max_code = ((1u32 << plan.video_sampling.bit_depth) - 1) as f32;
         let code_scale = if plan.video_sampling.bit_depth == 8 {
             255.0
@@ -604,15 +624,8 @@ impl GpuNativeYuvDecodeUniforms {
                 GpuYuvCodeAlignment::LeastSignificant => 65_535.0,
             }
         };
-        let (y_offset, y_scale, chroma_offset, chroma_scale) = match plan.video_sampling.range {
-            GpuVideoRange::Limited => (
-                16.0 * bit_scale,
-                1.0 / (219.0 * bit_scale),
-                128.0 * bit_scale,
-                1.0 / (224.0 * bit_scale),
-            ),
-            GpuVideoRange::Full => (0.0, 1.0 / max_code, 128.0 * bit_scale, 1.0 / max_code),
-        };
+        let [y_offset, y_scale] = parameters.luma;
+        let [chroma_offset, chroma_scale] = parameters.chroma;
         let mut chroma_origin = match (plan.chroma_subsampling, plan.video_sampling.chroma_location)
         {
             (GpuYuvChromaSubsampling::Cs444, _) => [0.5, 0.5],
@@ -626,19 +639,7 @@ impl GpuNativeYuvDecodeUniforms {
         if plan.chroma_subsampling == GpuYuvChromaSubsampling::Cs422 {
             chroma_origin[1] = 0.5;
         }
-        let (kr, kb) = match plan.video_sampling.matrix {
-            ColorMatrixCoefficients::Bt709 => (0.2126, 0.0722),
-            ColorMatrixCoefficients::Fcc => (0.30, 0.11),
-            ColorMatrixCoefficients::Bt470Bg | ColorMatrixCoefficients::Smpte170M => (0.299, 0.114),
-            ColorMatrixCoefficients::Smpte240M => (0.212, 0.087),
-            ColorMatrixCoefficients::Bt2020NonConstant => (0.2627, 0.0593),
-            _ => unreachable!("plan validation restricts native YUV matrices"),
-        };
-        let kg = 1.0 - kr - kb;
-        let r_cr = 2.0 * (1.0 - kr);
-        let b_cb = 2.0 * (1.0 - kb);
-        let g_cb = -2.0 * kb * (1.0 - kb) / kg;
-        let g_cr = -2.0 * kr * (1.0 - kr) / kg;
+        let [r_cr, g_cb, g_cr, b_cb] = parameters.rgb_chroma;
         Self {
             extent: [
                 plan.source_visible_extent.width,
@@ -652,8 +653,10 @@ impl GpuNativeYuvDecodeUniforms {
                     GpuYuvChromaSubsampling::Cs420 | GpuYuvChromaSubsampling::Cs422 => 2,
                     GpuYuvChromaSubsampling::Cs444 => 1,
                 },
-                0,
-                0,
+                u32::from(
+                    plan.output.descriptor().alpha == crate::ColorFrameAlpha::StraightCoverage,
+                ),
+                max_code as u32,
             ],
             code_range: [code_scale, y_offset, y_scale, chroma_offset],
             chroma_matrix0: [chroma_scale, chroma_origin[0], chroma_origin[1], r_cr],
@@ -768,6 +771,7 @@ impl GpuNativeYuvDecoder {
                     texture_binding(1),
                     texture_binding(2),
                     buffer_binding(3, true),
+                    texture_binding(5),
                 ]
             },
         });
@@ -868,7 +872,12 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         device: &wgpu::Device,
         plan: &GpuNativeYuvDecodePlan,
         planes: GpuNativeYuvPlaneViews<'_>,
-    ) -> GpuNativeYuvPreparedPass {
+    ) -> Result<GpuNativeYuvPreparedPass, GpuNativeYuvDecodeRecordError> {
+        if planes.alpha.is_some()
+            != (plan.output.descriptor().alpha == crate::ColorFrameAlpha::StraightCoverage)
+        {
+            return Err(GpuNativeYuvDecodeRecordError::PreparedPassMismatch);
+        }
         let uniforms = GpuNativeYuvDecodeUniforms::from_plan(plan);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mondrian.native-video.yuv-decode.uniforms"),
@@ -895,15 +904,21 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                     binding: 3,
                     resource: uniform_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        planes.alpha.unwrap_or(planes.luma),
+                    ),
+                },
             ],
         });
-        GpuNativeYuvPreparedPass {
+        Ok(GpuNativeYuvPreparedPass {
             contract: plan.sampling_contract(),
             layout: self.texture.bind_group_layout.clone(),
             bind_group,
             _uniform_buffer: uniform_buffer,
             buffer_source: false,
-        }
+        })
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -915,6 +930,9 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         row_pitch: u32,
         chroma_offset: u32,
     ) -> Result<GpuNativeYuvPreparedPass, GpuNativeYuvDecodeRecordError> {
+        if plan.output.descriptor().alpha != crate::ColorFrameAlpha::Opaque {
+            return Err(GpuNativeYuvDecodeRecordError::BufferLayout);
+        }
         let pipeline = self
             .buffer
             .as_ref()
@@ -1537,11 +1555,18 @@ mod tests {
                     }
                     let y = planes[0].create_view(&Default::default());
                     let uv = planes[1].create_view(&Default::default());
-                    let texture_pass = decoder.prepare_pass(
-                        &context.device,
-                        &plan,
-                        GpuNativeYuvPlaneViews { luma: &y, chroma: &uv, chroma_v: &uv },
-                    );
+                    let texture_pass = decoder
+                        .prepare_pass(
+                            &context.device,
+                            &plan,
+                            GpuNativeYuvPlaneViews {
+                                luma: &y,
+                                chroma: &uv,
+                                chroma_v: &uv,
+                                alpha: None,
+                            },
+                        )
+                        .expect("opaque YUV plane contract");
                     let buffer_pass = decoder
                         .prepare_buffer_pass(
                             &context.device,
@@ -1675,15 +1700,18 @@ mod tests {
         let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
         let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
         let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
-        let prepared = decoder.prepare_pass(
-            &context.device,
-            &plan,
-            GpuNativeYuvPlaneViews {
-                luma: &luma_view,
-                chroma: &chroma_view,
-                chroma_v: &chroma_view,
-            },
-        );
+        let prepared = decoder
+            .prepare_pass(
+                &context.device,
+                &plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma_view,
+                    chroma: &chroma_view,
+                    chroma_v: &chroma_view,
+                    alpha: None,
+                },
+            )
+            .expect("opaque YUV plane contract");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-decode"),
         });
@@ -1837,15 +1865,18 @@ mod tests {
         let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
         let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
         let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
-        let prepared = decoder.prepare_pass(
-            &context.device,
-            &plan,
-            GpuNativeYuvPlaneViews {
-                luma: &luma_view,
-                chroma: &chroma_view,
-                chroma_v: &chroma_view,
-            },
-        );
+        let prepared = decoder
+            .prepare_pass(
+                &context.device,
+                &plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma_view,
+                    chroma: &chroma_view,
+                    chroma_v: &chroma_view,
+                    alpha: None,
+                },
+            )
+            .expect("opaque YUV plane contract");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-scale"),
         });
@@ -1948,15 +1979,18 @@ mod tests {
         let encoded = GpuNativeYuvDecoder::allocate_output(&context.device, &decode_plan);
         let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
         let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
-        let prepared = decoder.prepare_pass(
-            &context.device,
-            &decode_plan,
-            GpuNativeYuvPlaneViews {
-                luma: &luma_view,
-                chroma: &chroma_view,
-                chroma_v: &chroma_view,
-            },
-        );
+        let prepared = decoder
+            .prepare_pass(
+                &context.device,
+                &decode_plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma_view,
+                    chroma: &chroma_view,
+                    chroma_v: &chroma_view,
+                    alpha: None,
+                },
+            )
+            .expect("opaque YUV plane contract");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-ocio"),
         });
@@ -2145,15 +2179,18 @@ mod tests {
             let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
             let luma_view = luma.create_view(&Default::default());
             let chroma_view = chroma.create_view(&Default::default());
-            let prepared = decoder.prepare_pass(
-                &context.device,
-                &plan,
-                GpuNativeYuvPlaneViews {
-                    luma: &luma_view,
-                    chroma: &chroma_view,
-                    chroma_v: &chroma_view,
-                },
-            );
+            let prepared = decoder
+                .prepare_pass(
+                    &context.device,
+                    &plan,
+                    GpuNativeYuvPlaneViews {
+                        luma: &luma_view,
+                        chroma: &chroma_view,
+                        chroma_v: &chroma_view,
+                        alpha: None,
+                    },
+                )
+                .expect("opaque YUV plane contract");
             let mut encoder = context.device.create_command_encoder(&Default::default());
             decoder
                 .record(&mut encoder, &plan, &prepared, &output)
@@ -2187,6 +2224,192 @@ mod tests {
                     pixel[3]
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn planar_yuva12_preserves_straight_alpha_and_unbounded_encoded_rgb() {
+        let policy =
+            crate::GpuColorQualificationExecutionPolicy::from_environment().expect("policy");
+        let Some(context) = policy
+            .admit_adapter("planar-yuva12", crate::GpuContext::new().await)
+            .expect("GPU admission")
+        else {
+            return;
+        };
+        eprintln!("YUVA12 adapter: {:?}", context.adapter.get_info());
+        let codes: [[u16; 4]; 6] = [
+            [2001, 4095, 0, 0],
+            [2001, 2049, 2047, 2048],
+            [3761, 2048, 2048, 4095],
+            [0, 2048, 2048, 1],
+            [4095, 2048, 2048, 4094],
+            [257, 3001, 1103, 1025],
+        ];
+        let textures = (0..4)
+            .map(|plane| {
+                let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("YUVA12 component"),
+                    size: wgpu::Extent3d { width: 3, height: 2, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R16Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let bytes =
+                    codes.iter().flat_map(|pixel| pixel[plane].to_le_bytes()).collect::<Vec<_>>();
+                write_test_texture(&context.queue, &texture, 3, 2, 6, &bytes);
+                texture
+            })
+            .collect::<Vec<_>>();
+        let views = textures
+            .iter()
+            .map(|texture| texture.create_view(&Default::default()))
+            .collect::<Vec<_>>();
+        let decoder = GpuNativeYuvDecoder::new(&context.device);
+        for range in [GpuVideoRange::Limited, GpuVideoRange::Full] {
+            let handle = GpuColorFrameHandle::new(
+                GpuColorFrameId::from_raw(1202),
+                ColorFrameDescriptor {
+                    width: 3,
+                    height: 2,
+                    color_space: ColorSpace::Rec709.into(),
+                    domain: ColorFrameDomain::Source,
+                    encoding: ColorFrameEncoding::EncodedFloat,
+                    residency: ColorFrameResidency::Gpu,
+                    alpha: crate::ColorFrameAlpha::StraightCoverage,
+                },
+                product_gpu_working_texture_format(),
+                "straight YUVA12 source",
+            )
+            .expect("straight source");
+            let plan = GpuNativeYuvDecodePlan::new_with_plane_layout(
+                GpuNativeDecodedFrameTextureFormat::P012,
+                GpuYuvChromaSubsampling::Cs444,
+                GpuYuvChromaPlaneLayout::Planar,
+                GpuYuvCodeAlignment::LeastSignificant,
+                GpuNativeVideoExtent { width: 3, height: 2 },
+                GpuNativeVideoExtent { width: 3, height: 2 },
+                GpuNativeVideoExtent { width: 3, height: 2 },
+                GpuNativeDecodedFrameVideoSampling {
+                    range,
+                    matrix: ColorMatrixCoefficients::Bt709,
+                    transfer: ColorTransferCharacteristic::Bt709,
+                    bit_depth: 12,
+                    chroma_location: GpuVideoChromaLocation::Unspecified,
+                },
+                handle,
+            )
+            .expect("planar straight YUVA12 plan");
+            assert!(
+                matches!(
+                    decoder.prepare_pass(
+                        &context.device,
+                        &plan,
+                        GpuNativeYuvPlaneViews {
+                            luma: &views[0],
+                            chroma: &views[1],
+                            chroma_v: &views[2],
+                            alpha: None,
+                        }
+                    ),
+                    Err(GpuNativeYuvDecodeRecordError::PreparedPassMismatch)
+                ),
+                "missing alpha must fail closed"
+            );
+            let mut opaque_plan = plan.clone();
+            let mut opaque_descriptor = plan.output.descriptor();
+            opaque_descriptor.alpha = crate::ColorFrameAlpha::Opaque;
+            opaque_plan.output = GpuColorFrameHandle::new(
+                GpuColorFrameId::from_raw(1203),
+                opaque_descriptor,
+                product_gpu_working_texture_format(),
+                "opaque YUV source",
+            )
+            .expect("opaque source");
+            assert!(
+                matches!(
+                    decoder.prepare_pass(
+                        &context.device,
+                        &opaque_plan,
+                        GpuNativeYuvPlaneViews {
+                            luma: &views[0],
+                            chroma: &views[1],
+                            chroma_v: &views[2],
+                            alpha: Some(&views[3]),
+                        }
+                    ),
+                    Err(GpuNativeYuvDecodeRecordError::PreparedPassMismatch)
+                ),
+                "unexpected alpha must fail closed"
+            );
+            let prepared = decoder
+                .prepare_pass(
+                    &context.device,
+                    &plan,
+                    GpuNativeYuvPlaneViews {
+                        luma: &views[0],
+                        chroma: &views[1],
+                        chroma_v: &views[2],
+                        alpha: Some(&views[3]),
+                    },
+                )
+                .expect("physical alpha present");
+            let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            decoder.record(&mut encoder, &plan, &prepared, &output).expect("record YUVA12");
+            let read_plan =
+                crate::GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
+                    .expect("diagnostic readback plan");
+            let read = crate::GpuColorFrameReadback::record_copy(
+                &context.device,
+                &mut encoder,
+                &read_plan,
+                &output,
+            )
+            .expect("diagnostic copy");
+            context.queue.submit([encoder.finish()]);
+            let mapped = map_readback_buffer(&context.device, &read);
+            let actual = read_plan.unpack_mapped_rgba32float(&mapped).expect("pixels");
+            read.unmap();
+            for (index, (pixel, code)) in actual.chunks_exact(4).zip(codes).enumerate() {
+                // Independent BT.709 code-value reference. Coverage never uses video range.
+                let (y, cb, cr) = if range == GpuVideoRange::Limited {
+                    (
+                        (f64::from(code[0]) - 256.0) / 3504.0,
+                        (f64::from(code[1]) - 2048.0) / 3584.0,
+                        (f64::from(code[2]) - 2048.0) / 3584.0,
+                    )
+                } else {
+                    (
+                        f64::from(code[0]) / 4095.0,
+                        (f64::from(code[1]) - 2048.0) / 4095.0,
+                        (f64::from(code[2]) - 2048.0) / 4095.0,
+                    )
+                };
+                let expected = [
+                    y + 1.5748 * cr,
+                    y - 0.18732427 * cb - 0.46812427 * cr,
+                    y + 1.8556 * cb,
+                    f64::from(code[3]) / 4095.0,
+                ];
+                for channel in 0..4 {
+                    assert!(
+                        pixel[channel].is_finite()
+                            && (f64::from(pixel[channel]) - expected[channel]).abs() < 0.0015,
+                        "{range:?} ({index},{channel}): {} vs {}",
+                        pixel[channel],
+                        expected[channel]
+                    );
+                }
+            }
+            assert_eq!(actual[3], 0.0);
+            assert!(
+                actual[0] < 0.0 && actual[2] > 1.0,
+                "transparent straight RGB must remain unbounded"
+            );
         }
     }
 

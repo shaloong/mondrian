@@ -2601,8 +2601,8 @@ fn prores_4444_yuva12_preserves_straight_color_at_zero_alpha() {
         Path::new("synthetic-prores-4444.mov"),
         test_source_color(),
     )
-    .expect("YUVA 4:4:4 12-bit materializes through RGBA64");
-    let PreviewDecodedFramePayload::CpuUnorm16(frame) = payload else {
+    .expect("YUVA 4:4:4 12-bit materializes through source-encoded Float32");
+    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
         panic!("12-bit YUVA must retain high-depth color and alpha");
     };
     assert_eq!(
@@ -2619,15 +2619,15 @@ fn prores_4444_yuva12_preserves_straight_color_at_zero_alpha() {
     );
     assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 12);
     let rgba = frame.rgba();
-    assert_eq!(rgba[3], 0);
-    assert!(rgba[..3].iter().all(|component| *component > u16::MAX / 2));
+    assert_eq!(rgba[3], 0.0);
+    assert!(rgba[..3].iter().all(|component| *component > 0.5));
     assert!(
-        rgba[7] > u16::MAX - 64,
+        rgba[7] == 1.0,
         "12-bit opaque alpha was not retained: {}",
         rgba[7]
     );
     for channel in 0..3 {
-        assert!(rgba[channel].abs_diff(rgba[4 + channel]) < 66);
+        assert!(rgba[channel] == rgba[4 + channel]);
     }
 }
 
@@ -2686,24 +2686,24 @@ fn prores_4444_yuva12_cpu_float_retains_full_horizontal_chroma() {
         test_source_color(),
     )
     .expect("12-bit 4:4:4 alpha frame materializes without chroma loss");
-    let PreviewDecodedFramePayload::CpuUnorm16(frame) = payload else {
+    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
         panic!("high-depth 4:4:4 must retain encoded float color");
     };
     let rgba = frame.rgba();
     assert!(
-        u32::from(rgba[128]) > u32::from(rgba[132]) + u32::from(u16::MAX / 2),
+        rgba[128] > rgba[132] + 0.5,
         "red chroma was reused: {:?} {:?}",
         &rgba[128..132],
         &rgba[132..136]
     );
     assert!(
-        u32::from(rgba[134]) > u32::from(rgba[130]) + u32::from(u16::MAX / 2),
+        rgba[134] > rgba[130] + 0.5,
         "blue chroma was reused: {:?} {:?}",
         &rgba[128..132],
         &rgba[132..136]
     );
-    assert!(rgba[3].abs_diff(u16::MAX / 2) < 656);
-    assert!(rgba[7].abs_diff(u16::MAX / 2) < 656);
+    assert!((rgba[3] - 2048.0 / 4095.0).abs() < 1.0e-6);
+    assert!((rgba[7] - 2048.0 / 4095.0).abs() < 1.0e-6);
 }
 
 #[test]
@@ -5359,4 +5359,149 @@ fn full_and_reduced_representations_decode_independently_from_the_same_source() 
             "representation {index} materialized the wrong raster"
         );
     }
+}
+
+#[test]
+fn compact_yuva12_retains_four_strided_planes_and_scaled_coverage() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 5, 3);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for plane in 0..4 {
+        let stride = decoded.stride(plane);
+        for y in 0..3 {
+            for x in 0..5 {
+                let code = if plane == 3 {
+                    2048u16
+                } else {
+                    257 + (plane * 901 + y * 13 + x) as u16
+                };
+                decoded.data_mut(plane)[y * stride + x * 2..y * stride + x * 2 + 2]
+                    .copy_from_slice(&code.to_le_bytes());
+            }
+        }
+    }
+    let luma_pointer = decoded.data(0).as_ptr();
+    for (width, height) in [(5, 3), (3, 2)] {
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::PRORES,
+            None,
+        );
+        let frame = materialize_decoded_frame(
+            &decoded,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            &mut plan,
+            &mut None,
+            &mut None,
+            &mut None,
+            width,
+            height,
+            Path::new("synthetic-yuva12.mov"),
+            test_source_color(),
+        )
+        .expect("retain YUVA planes without an RGB conversion");
+        let PreviewDecodedFramePayload::CpuYuv(frame) = frame else {
+            panic!("compact YUVA")
+        };
+        assert_eq!(
+            frame.surface_format(),
+            DecodedVideoSurfaceFormat::Yuva444p12le
+        );
+        assert_eq!(frame.sample_format, crate::CpuYuvSampleFormat::Unorm16Lsb12);
+        assert_eq!((frame.chroma_width, frame.chroma_height), (width, height));
+        if width == 5 {
+            assert_eq!(
+                frame.luma_plane().data().as_ptr(),
+                luma_pointer,
+                "retain decoder storage"
+            );
+        }
+        let alpha = frame.alpha_plane().expect("straight alpha plane");
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let start = y * alpha.bytes_per_row() as usize + x * 2;
+                assert_eq!(
+                    u16::from_le_bytes(alpha.data()[start..start + 2].try_into().unwrap()),
+                    2048
+                );
+            }
+        }
+        let visible_plane_bytes = width as usize * height as usize * 2;
+        assert!(
+            frame.retained_bytes() >= 4 * visible_plane_bytes,
+            "charge all retained allocations"
+        );
+        assert_eq!(frame.diagnostics.stage_durations.rgba_copy_us, 0);
+        if width == 5 {
+            assert_eq!(frame.diagnostics.stage_durations.swscale_us, 0);
+        }
+    }
+}
+
+#[test]
+fn cpu_yuva12_uses_encoded_float_without_clipping_transparent_color() {
+    use ffmpeg::util::format::pixel::Pixel;
+    let mut decoded = ffmpeg::util::frame::video::Video::new(Pixel::YUVA444P12LE, 3, 1);
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    for (plane, values) in [
+        [2001_u16, 2001, 3761],
+        [4095, 2049, 2048],
+        [0, 2047, 2048],
+        [0, 2048, 4095],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (x, value) in values.into_iter().enumerate() {
+            decoded.data_mut(plane)[x * 2..x * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::PRORES,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        3,
+        1,
+        Path::new("unbounded-yuva12.mov"),
+        test_source_color(),
+    )
+    .expect("CPU consumer retains source-encoded Float32");
+    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+        panic!("encoded Float32")
+    };
+    assert_eq!(
+        frame.color_contract.encoding,
+        DecodedRgbaEncoding::SourceEncodedRgb
+    );
+    let rgba = frame.rgba();
+    // Independent limited-range BT.709 reference for [2001,4095,0].
+    let y = (2001.0_f64 - 256.0) / 3504.0;
+    let cb = (4095.0_f64 - 2048.0) / 3584.0;
+    let cr = -2048.0_f64 / 3584.0;
+    let expected = [
+        y + 1.5748 * cr,
+        y - 0.18732427 * cb - 0.46812427 * cr,
+        y + 1.8556 * cb,
+    ];
+    for (actual, expected) in rgba[..3].iter().zip(expected) {
+        assert!((f64::from(*actual) - expected).abs() < 1.0e-6);
+    }
+    assert!(rgba[0] < 0.0 && rgba[2] > 1.0);
+    assert_eq!(rgba[3], 0.0);
+    assert_eq!(rgba[7], 2048.0 / 4095.0);
+    assert_eq!(rgba[11], 1.0);
 }

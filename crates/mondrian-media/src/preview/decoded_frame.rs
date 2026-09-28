@@ -97,7 +97,7 @@ impl CpuYuvSampleFormat {
 /// Compact CPU-decoded YUV payload consumed directly by the renderer's GPU
 /// video-materialization path.
 ///
-/// FFmpeg's immutable luma, Cb, and Cr plane allocations are retained with
+/// FFmpeg's immutable luma, Cb, Cr, and optional straight-alpha allocations are retained with
 /// explicit row strides so the renderer can upload them without an RGBA
 /// expansion, chroma interleave, or full-frame CPU copy. Ten-bit planar samples
 /// retain least-significant alignment; P010 retains most-significant alignment
@@ -667,6 +667,15 @@ impl CpuYuvFrame {
         }
     }
 
+    /// Borrow full-resolution straight coverage, when the physical surface carries alpha.
+    /// Alpha retains the component depth and alignment; it always uses full range.
+    pub fn alpha_plane(&self) -> Option<CpuYuvPlane<'_>> {
+        (self.surface_format() == DecodedVideoSurfaceFormat::Yuva444p12le).then(|| CpuYuvPlane {
+            bytes: self.frame.data(3),
+            bytes_per_row: self.frame.stride(3).min(u32::MAX as usize) as u32,
+        })
+    }
+
     /// Physical chroma storage layout.
     pub const fn chroma_plane_layout(&self) -> CpuYuvChromaPlaneLayout {
         self.chroma_plane_layout
@@ -680,7 +689,7 @@ impl CpuYuvFrame {
     pub fn retained_bytes(&self) -> usize {
         // SAFETY: the immutable Arc-owned Video retains this AVFrame and every
         // populated image AVBufferRef for the complete borrow. Supported video
-        // layouts use at most three planes; extended_buf is audio-only.
+        // layouts use at most four planes; extended_buf is audio-only.
         let frame = unsafe { &*self.frame.as_ptr() };
         frame.buf.iter().filter(|buffer| !buffer.is_null()).fold(0, |bytes, buffer| {
             // SAFETY: each non-null buffer reference is retained by frame.

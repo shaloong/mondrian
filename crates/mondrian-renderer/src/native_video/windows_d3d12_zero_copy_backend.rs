@@ -615,11 +615,19 @@ impl D3D12NativeVideoImportBackend {
         let (texture, luma, chroma) =
             adopt_wgpu_video_texture(&self.device, source.texture.clone(), source.inspection)
                 .map_err(native_texture_error)?;
-        let prepared_yuv = self.yuv_decoder.prepare_pass(
-            &self.device,
-            &yuv_plan,
-            GpuNativeYuvPlaneViews { luma: &luma, chroma: &chroma, chroma_v: &chroma },
-        );
+        let prepared_yuv = self
+            .yuv_decoder
+            .prepare_pass(
+                &self.device,
+                &yuv_plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma,
+                    chroma: &chroma,
+                    chroma_v: &chroma,
+                    alpha: None,
+                },
+            )
+            .map_err(|error| rejected(error.to_string()))?;
         let backend = self
             .color_runtime
             .prepare_fused_yuv_input(

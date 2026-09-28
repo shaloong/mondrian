@@ -1180,3 +1180,56 @@ fn changed_source_revision_is_rejected_before_decode_uses_stale_probe_facts() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn alpha_override_uses_shared_normalization_while_straight_yuva_keeps_compact_planes() {
+    let root = tempfile::tempdir().expect("source root");
+    let source = root.path().join("alpha.mov");
+    std::fs::write(&source, b"source revision").expect("source");
+    let asset = video_asset_with_physical_stream(
+        source,
+        Some(ColorSpace::Rec709),
+        0,
+        PixelFormat::Yuva444p12le,
+        true,
+        12,
+        true,
+    );
+    let config = proxy_config(root.path().join("proxy"));
+    let context = color_context();
+    for (interpretation, expected) in [
+        (
+            AlphaInterpretation::Straight,
+            mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv,
+        ),
+        (
+            AlphaInterpretation::Ignore,
+            mondrian_media::PreviewDecodeRepresentation::NativeCpu,
+        ),
+        (
+            AlphaInterpretation::Premultiplied,
+            mondrian_media::PreviewDecodeRepresentation::NativeCpu,
+        ),
+    ] {
+        let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {
+            asset: &asset,
+            color_space_override: None,
+            alpha_interpretation: interpretation,
+            picture_overrides: Default::default(),
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            input_color: &context,
+            prefer_proxy: false,
+            request_missing_proxy_generation: false,
+            proxy_config: &config,
+            proxy_color: None,
+            hardware_admission: gpu_admission(),
+            cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+        });
+        let PreviewMediaSourceOutcome::Ready(resolved) = outcome else {
+            panic!("alpha source admitted")
+        };
+        assert_eq!(resolved.key.decode.representation(), expected);
+        assert_eq!(resolved.key.alpha_interpretation, interpretation);
+    }
+}

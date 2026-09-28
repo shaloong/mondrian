@@ -479,6 +479,75 @@ impl ColorMatrixCoefficients {
     }
 }
 
+/// Unclamped nonconstant-luminance YCbCr code values to source-encoded RGB.
+/// CPU materialization and GPU uniforms consume these same parameters;
+/// transfer functions and primaries remain the configured OCIO processor's job.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EncodedYuvToRgbParameters {
+    /// Luma code offset and reciprocal span.
+    pub luma: [f32; 2],
+    /// Chroma code midpoint and reciprocal span.
+    pub chroma: [f32; 2],
+    /// R/Cr, G/Cb, G/Cr, and B/Cb coefficients.
+    pub rgb_chroma: [f32; 4],
+}
+
+impl EncodedYuvToRgbParameters {
+    /// Resolve supported matrix/range/depth facts, rejecting unspecified inputs.
+    pub fn new(
+        matrix: ColorMatrixCoefficients,
+        range: crate::DecodedVideoRange,
+        bit_depth: u8,
+    ) -> Option<Self> {
+        if !(8..=16).contains(&bit_depth) {
+            return None;
+        }
+        let (kr, kb) = match matrix {
+            ColorMatrixCoefficients::Bt709 => (0.2126, 0.0722),
+            ColorMatrixCoefficients::Fcc => (0.30, 0.11),
+            ColorMatrixCoefficients::Bt470Bg | ColorMatrixCoefficients::Smpte170M => (0.299, 0.114),
+            ColorMatrixCoefficients::Smpte240M => (0.212, 0.087),
+            ColorMatrixCoefficients::Bt2020NonConstant => (0.2627, 0.0593),
+            ColorMatrixCoefficients::Rgb | ColorMatrixCoefficients::Unspecified => return None,
+        };
+        let kg = 1.0 - kr - kb;
+        let bit_scale = (1u32 << (bit_depth - 8)) as f32;
+        let max_code = ((1u32 << bit_depth) - 1) as f32;
+        let (luma, chroma) = match range {
+            crate::DecodedVideoRange::Limited => (
+                [16.0 * bit_scale, 1.0 / (219.0 * bit_scale)],
+                [128.0 * bit_scale, 1.0 / (224.0 * bit_scale)],
+            ),
+            crate::DecodedVideoRange::Full => {
+                ([0.0, 1.0 / max_code], [128.0 * bit_scale, 1.0 / max_code])
+            }
+            crate::DecodedVideoRange::Unknown => return None,
+        };
+        Some(Self {
+            luma,
+            chroma,
+            rgb_chroma: [
+                2.0 * (1.0 - kr),
+                -2.0 * kb * (1.0 - kb) / kg,
+                -2.0 * kr * (1.0 - kr) / kg,
+                2.0 * (1.0 - kb),
+            ],
+        })
+    }
+
+    /// Convert code values without quantization, clamping, or alpha association.
+    pub fn decode(self, code: [f32; 3]) -> [f32; 3] {
+        let y = (code[0] - self.luma[0]) * self.luma[1];
+        let cb = (code[1] - self.chroma[0]) * self.chroma[1];
+        let cr = (code[2] - self.chroma[0]) * self.chroma[1];
+        [
+            y + self.rgb_chroma[0] * cr,
+            y + self.rgb_chroma[1] * cb + self.rgb_chroma[2] * cr,
+            y + self.rgb_chroma[3] * cb,
+        ]
+    }
+}
+
 /// FFmpeg color tag triplet for standardized delivery spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FfmpegColorTags {
@@ -1352,6 +1421,48 @@ fn scope_bin(v: f32, bins: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_yuv_parameters_reject_unknown_contracts_and_preserve_excursions() {
+        use crate::DecodedVideoRange;
+        for depth in [0, 7, 17, 255] {
+            assert!(EncodedYuvToRgbParameters::new(
+                ColorMatrixCoefficients::Bt709,
+                DecodedVideoRange::Full,
+                depth
+            )
+            .is_none());
+        }
+        for matrix in [
+            ColorMatrixCoefficients::Rgb,
+            ColorMatrixCoefficients::Unspecified,
+        ] {
+            assert!(
+                EncodedYuvToRgbParameters::new(matrix, DecodedVideoRange::Limited, 12).is_none()
+            );
+        }
+        assert!(EncodedYuvToRgbParameters::new(
+            ColorMatrixCoefficients::Bt709,
+            DecodedVideoRange::Unknown,
+            12
+        )
+        .is_none());
+        for depth in [8, 10, 12, 16] {
+            let scale = (1u32 << (depth - 8)) as f32;
+            let parameters = EncodedYuvToRgbParameters::new(
+                ColorMatrixCoefficients::Bt709,
+                DecodedVideoRange::Limited,
+                depth,
+            )
+            .unwrap();
+            let black = parameters.decode([16.0 * scale, 128.0 * scale, 128.0 * scale]);
+            let white = parameters.decode([235.0 * scale, 128.0 * scale, 128.0 * scale]);
+            assert!(black.into_iter().all(|value| value == 0.0));
+            assert!(white.into_iter().all(|value| (value - 1.0).abs() < 1.0e-6));
+            let excursion = parameters.decode([255.0 * scale, 128.0 * scale, 128.0 * scale]);
+            assert!(excursion.into_iter().all(|value| value > 1.0));
+        }
+    }
 
     #[test]
     fn standard_engine_pins_its_versioned_working_space() {

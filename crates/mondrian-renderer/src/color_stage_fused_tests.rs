@@ -67,11 +67,18 @@ fn fused_yuv_input_matches_two_pass_sdr_pq_hlg() {
                 );
                 let y = luma.create_view(&Default::default());
                 let uv = chroma.create_view(&Default::default());
-                let prepared = decoder.prepare_pass(
-                    &context.device,
-                    &plan,
-                    GpuNativeYuvPlaneViews { luma: &y, chroma: &uv, chroma_v: &uv },
-                );
+                let prepared = decoder
+                    .prepare_pass(
+                        &context.device,
+                        &plan,
+                        GpuNativeYuvPlaneViews {
+                            luma: &y,
+                            chroma: &uv,
+                            chroma_v: &uv,
+                            alpha: None,
+                        },
+                    )
+                    .expect("opaque YUV plane contract");
                 let mut encoder = context.device.create_command_encoder(&Default::default());
                 let encoded = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
                 decoder

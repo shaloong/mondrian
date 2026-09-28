@@ -118,6 +118,7 @@ struct CpuYuvUploadSlot {
     luma: wgpu::Texture,
     chroma: wgpu::Texture,
     chroma_v: Option<wgpu::Texture>,
+    alpha: Option<wgpu::Texture>,
     views: CpuYuvUploadedPlaneViews,
     prepared_pass: Option<Arc<crate::GpuNativeYuvPreparedPass>>,
 }
@@ -130,6 +131,7 @@ struct CpuYuvUploadKey {
     chroma_height: u32,
     sample_format: CpuYuvSampleFormat,
     chroma_plane_layout: CpuYuvChromaPlaneLayout,
+    has_alpha: bool,
 }
 
 #[derive(Clone)]
@@ -138,6 +140,7 @@ struct CpuYuvUploadedPlaneViews {
     luma: wgpu::TextureView,
     chroma: wgpu::TextureView,
     chroma_v: wgpu::TextureView,
+    alpha: Option<wgpu::TextureView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +156,7 @@ struct CpuYuvPreparedUpload {
     luma: PreparedPlaneCopy,
     chroma: PreparedPlaneCopy,
     chroma_v: Option<PreparedPlaneCopy>,
+    alpha: Option<PreparedPlaneCopy>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -314,6 +318,7 @@ impl CpuYuvUploadRuntime {
             chroma_height: frame.chroma_height,
             sample_format: frame.sample_format,
             chroma_plane_layout: frame.chroma_plane_layout(),
+            has_alpha: frame.alpha_plane().is_some(),
         };
         let (luma_format, interleaved_chroma_format, planar_chroma_format) =
             plane_formats(frame.sample_format);
@@ -348,6 +353,15 @@ impl CpuYuvUploadRuntime {
                         planar_chroma_format,
                     )
                 });
+            let alpha = key.has_alpha.then(|| {
+                create_plane_texture(
+                    device,
+                    "mondrian.cpu-yuv.alpha",
+                    frame.width,
+                    frame.height,
+                    luma_format,
+                )
+            });
             let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
             let chroma_v_view = match &chroma_v {
                 Some(texture) => texture.create_view(&wgpu::TextureViewDescriptor::default()),
@@ -358,12 +372,16 @@ impl CpuYuvUploadRuntime {
                 luma: luma.create_view(&wgpu::TextureViewDescriptor::default()),
                 chroma: chroma_view,
                 chroma_v: chroma_v_view,
+                alpha: alpha
+                    .as_ref()
+                    .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default())),
             };
             let slot = CpuYuvUploadSlot {
                 key,
                 luma,
                 chroma,
                 chroma_v,
+                alpha,
                 views,
                 prepared_pass: None,
             };
@@ -382,6 +400,11 @@ impl CpuYuvUploadRuntime {
                 .as_ref()
                 .ok_or(CpuYuvMaterializationError::MissingPlanarChromaTexture)?;
             record_prepared_plane_copy(encoder, &prepared.buffer, chroma_v, chroma_v_copy);
+        }
+        if let Some(alpha_copy) = prepared.alpha {
+            let alpha =
+                slot.alpha.as_ref().ok_or(CpuYuvMaterializationError::MissingAlphaTexture)?;
+            record_prepared_plane_copy(encoder, &prepared.buffer, alpha, alpha_copy);
         }
         // Views describe immutable texture extent/format, not frame content.
         // Retain them with the physical slot instead of entering the native
@@ -405,6 +428,7 @@ impl CpuYuvUploadRuntime {
         if slot.views.luma != planes.luma
             || slot.views.chroma != planes.chroma
             || slot.views.chroma_v != planes.chroma_v
+            || slot.views.alpha != planes.alpha
         {
             return Err(CpuYuvMaterializationError::UploadSlotMismatch);
         }
@@ -420,8 +444,9 @@ impl CpuYuvUploadRuntime {
                 luma: &planes.luma,
                 chroma: &planes.chroma,
                 chroma_v: &planes.chroma_v,
+                alpha: planes.alpha.as_ref(),
             },
-        ));
+        )?);
         slot.prepared_pass = Some(Arc::clone(&prepared));
         Ok(prepared)
     }
@@ -721,6 +746,11 @@ pub(crate) fn record_cpu_yuv_frame(
         frame.video_sampling,
     )
     .ok_or(CpuYuvMaterializationError::InvalidVideoSampling)?;
+    let alpha = if frame.alpha_plane().is_some() {
+        ColorFrameAlpha::StraightCoverage
+    } else {
+        ColorFrameAlpha::Opaque
+    };
     let encoded_source = GpuColorFrameHandle::new(
         runtime.frame_ids_mut().allocate()?,
         ColorFrameDescriptor {
@@ -730,7 +760,7 @@ pub(crate) fn record_cpu_yuv_frame(
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::Opaque,
+            alpha,
         },
         product_gpu_working_texture_format(),
         "viewer-cpu-yuv-encoded-source",
@@ -744,7 +774,7 @@ pub(crate) fn record_cpu_yuv_frame(
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::Opaque,
+            alpha,
         },
         product_gpu_working_texture_format(),
         "viewer-cpu-yuv-working",
@@ -950,6 +980,13 @@ pub(crate) fn cpu_yuv_upload_byte_count(
             .checked_mul(chroma_planes)
             .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?,
     )
+    .and_then(|bytes| {
+        bytes.checked_add(if frame.alpha_plane().is_some() {
+            luma
+        } else {
+            0
+        })
+    })
     .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)
 }
 
@@ -1087,6 +1124,25 @@ fn prepare_cpu_yuv_upload(
     } else {
         (None, None)
     };
+    let (alpha, alpha_layout, alpha_plane) = if let Some(plane) = frame.alpha_plane() {
+        validate_plane_bytes(frame.width, frame.height, bytes_per_component, plane)?;
+        let layout = plane_upload_layout(frame.width, frame.height, bytes_per_component)?;
+        let offset = chroma_v_offset
+            .checked_add(chroma_v_layout.map_or(0, |layout| layout.upload_byte_count))
+            .ok_or(CpuYuvMaterializationError::PlaneExtentOverflow)?;
+        (
+            Some(PreparedPlaneCopy {
+                offset,
+                bytes_per_row: layout.upload_bytes_per_row,
+                width: frame.width,
+                height: frame.height,
+            }),
+            Some(layout),
+            Some(plane),
+        )
+    } else {
+        (None, None, None)
+    };
     let total_bytes = cpu_yuv_upload_byte_count(&frame)?;
     let buffer = pool
         .iter()
@@ -1111,10 +1167,13 @@ fn prepare_cpu_yuv_upload(
         {
             copy_plane_to_mapped(&mut mapped, copy.offset, layout, plane)?;
         }
+        if let (Some(copy), Some(layout), Some(plane)) = (alpha, alpha_layout, alpha_plane) {
+            copy_plane_to_mapped(&mut mapped, copy.offset, layout, plane)?;
+        }
     }
     // Keep unsubmitted storage mapped. Actual recording consumes that mapping;
     // speculative replacement can instead return it directly to the worker.
-    Ok(CpuYuvPreparedUpload { frame, buffer, luma, chroma, chroma_v })
+    Ok(CpuYuvPreparedUpload { frame, buffer, luma, chroma, chroma_v, alpha })
 }
 
 fn copy_plane_to_mapped(
@@ -1218,6 +1277,8 @@ pub(crate) enum CpuYuvMaterializationError {
     PlaneStride { minimum: u32, actual: u32 },
     #[error("compact planar CPU YUV upload slot is missing its Cr texture")]
     MissingPlanarChromaTexture,
+    #[error("compact CPU YUVA upload slot is missing its alpha texture")]
+    MissingAlphaTexture,
     #[error("compact CPU YUV materialization collided with a live renderer resource")]
     LiveResourceCollision,
     #[error(transparent)]
@@ -1245,6 +1306,152 @@ mod retirement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a real GPU and MONDRIAN_YUVA12_DECODE_FIXTURE"]
+    fn yuva12_cpu_export_and_fused_gpu_input_match_for_actual_decode() {
+        use mondrian_media::preview::*;
+        use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_YUVA12_DECODE_FIXTURE").expect("explicit YUVA12 fixture"),
+        );
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO");
+        let context =
+            pollster::block_on(crate::GpuContext::new()).expect("required physical adapter");
+        eprintln!("YUVA12 CPU/GPU adapter: {:?}", context.adapter.get_info());
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let request = |representation| {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    mondrian_core::ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                )
+                .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+            );
+            request.representation = representation;
+            request
+        };
+        let PreviewDecodeOutcome::FloatFrame(cpu) = decoder
+            .decode_cancellable(request(PreviewDecodeRepresentation::NativeCpu), || false)
+            .expect("Export CPU-addressable decode")
+        else {
+            panic!("unclamped CPU Float32 required")
+        };
+        let PreviewDecodeOutcome::CpuYuvFrame(compact) = decoder
+            .decode_cancellable(request(PreviewDecodeRepresentation::CompactCpuYuv), || {
+                false
+            })
+            .expect("Preview compact decode")
+        else {
+            panic!("compact YUVA required")
+        };
+        assert_eq!(
+            compact.surface_format(),
+            mondrian_media::DecodedVideoSurfaceFormat::Yuva444p12le
+        );
+        assert_eq!(
+            compact.decode_execution,
+            PreviewDecodeExecutionPath::SoftwareCpu
+        );
+        assert_eq!((cpu.width, cpu.height), (compact.width, compact.height));
+        decoder.clear();
+        drop(decoder);
+        let mut expected = cpu.rgba().to_vec();
+        mondrian_core::ColorEngine::mondrian_standard()
+            .convert_identity_float(
+                &mut expected,
+                mondrian_core::ColorSpace::Rec709.into(),
+                mondrian_core::WorkingColorSpace::LinearRec2020.into(),
+            )
+            .expect("shared CPU OCIO input");
+        let frame = Arc::new(compact);
+        let uploads = CpuYuvUploadRuntime::new(&context.device).expect("upload owner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !uploads.prepare_candidate(&[Arc::clone(&frame)]).expect("admission") {
+            assert!(std::time::Instant::now() < deadline, "upload deadline");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let yuv_decoder = GpuNativeYuvDecoder::new(&context.device);
+        let mut color = RenderGpuOutputBoundaryRuntime::new().expect("color owner");
+        let transform = RenderInputTransform::to_working_gpu(
+            mondrian_core::WorkingColorSpace::LinearRec2020,
+            false,
+            mondrian_core::ColorEngine::mondrian_standard(),
+        );
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let working = record_cpu_yuv_frame(
+            &yuv_decoder,
+            &uploads,
+            &frame,
+            &transform,
+            frame.width,
+            frame.height,
+            &mut color,
+            &context.device,
+            &context.queue,
+            &mut encoder,
+        )
+        .expect("production fused YUVA/OCIO");
+        assert_eq!(
+            working.descriptor().alpha,
+            ColorFrameAlpha::StraightCoverage
+        );
+        let plan = crate::GpuColorFrameReadbackPlan::encoded_rgba32float(working.clone())
+            .expect("diagnostic readback");
+        let output = color.frame_table().get(&working).expect("working frame");
+        let read =
+            crate::GpuColorFrameReadback::record_copy(&context.device, &mut encoder, &plan, output)
+                .expect("diagnostic copy");
+        uploads.finish_candidate(&encoder);
+        context.queue.submit([encoder.finish()]);
+        let (sender, receiver) = mpsc::channel();
+        read.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        context
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .expect("GPU completion");
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("callback")
+            .expect("map");
+        let actual = plan
+            .unpack_mapped_rgba32float(&read.slice(..).get_mapped_range().expect("mapped bytes"))
+            .expect("float pixels");
+        read.unmap();
+        let max_delta =
+            actual.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        let all_finite = actual.iter().chain(&expected).all(|value| value.is_finite());
+        let mut retirement = uploads.into_retirement();
+        while retirement.poll().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "upload shutdown deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            retirement.poll(),
+            Some(crate::ViewerCpuYuvUploadWorkerExit::Returned)
+        );
+        drop(retirement);
+        eprintln!(
+            "YUVA12 CPU/GPU pixels={} max_delta={max_delta} upload_owner=returned",
+            actual.len() / 4
+        );
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            all_finite && max_delta <= 1.0e-3,
+            "existing CPU/GPU working-space parity budget: {max_delta}"
+        );
+    }
 
     #[test]
     #[ignore = "requires an explicitly available GPU adapter"]

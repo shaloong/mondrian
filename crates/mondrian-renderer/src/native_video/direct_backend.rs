@@ -295,15 +295,18 @@ where
                 let luma_view = textures.luma.create_view(&wgpu::TextureViewDescriptor::default());
                 let chroma_view =
                     textures.chroma.create_view(&wgpu::TextureViewDescriptor::default());
-                self.yuv_decoder.prepare_pass(
-                    &self.device,
-                    &yuv_plan,
-                    GpuNativeYuvPlaneViews {
-                        luma: &luma_view,
-                        chroma: &chroma_view,
-                        chroma_v: &chroma_view,
-                    },
-                )
+                self.yuv_decoder
+                    .prepare_pass(
+                        &self.device,
+                        &yuv_plan,
+                        GpuNativeYuvPlaneViews {
+                            luma: &luma_view,
+                            chroma: &chroma_view,
+                            chroma_v: &chroma_view,
+                            alpha: None,
+                        },
+                    )
+                    .map_err(|error| backend_rejected(error.to_string()))?
             }
             #[cfg(target_os = "linux")]
             DirectNativeYuvInput::Buffer(source) => self

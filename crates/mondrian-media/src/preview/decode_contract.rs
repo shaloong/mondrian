@@ -140,6 +140,8 @@ pub enum PreviewCompactCpuYuvHint {
     Yuv444p10le,
     /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
     Yuv444p12le,
+    /// Planar twelve-bit 4:4:4 color and full-resolution straight alpha.
+    Yuva444p12le,
 }
 
 impl PreviewCompactCpuYuvHint {
@@ -153,6 +155,7 @@ impl PreviewCompactCpuYuvHint {
             Self::Yuv420p10le | Self::Yuv420p12le | Self::P010 | Self::Yuv444p => 3,
             Self::Yuv422p10le | Self::Yuv422p12le => 4,
             Self::Yuv444p10le | Self::Yuv444p12le => 6,
+            Self::Yuva444p12le => 8,
         }
     }
 
@@ -164,6 +167,11 @@ impl PreviewCompactCpuYuvHint {
     /// merely to make the allocation tightly packed.
     pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
         match self {
+            Self::Yuva444p12le => {
+                align_up_saturating((extent.width as usize).saturating_mul(2), 256)
+                    .saturating_mul(4)
+                    .saturating_mul(extent.height as usize)
+            }
             Self::Yuv420p | Self::Yuv420p10le | Self::Yuv420p12le | Self::Nv12 | Self::P010 => {
                 let component_bytes = match self {
                     Self::Yuv420p | Self::Nv12 => 1,
@@ -460,11 +468,14 @@ impl PreviewDecodeSource {
 
     /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
     ///
-    /// Proven 9–16-bit encoded sources retain packed RGBA16. Scene-linear,
+    /// Proven 9–16-bit encoded sources retain packed RGBA16, except YUVA12
+    /// which retains unclamped encoded Float32 for CPU/Export parity. Scene-linear,
     /// floating-point, and unproven sources reserve float capacity. Compact
     /// YUV and native surfaces have separate representation-specific accounting.
     pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
-        if color.is_scene_linear() {
+        if color.is_scene_linear()
+            || self.compact_cpu_yuv_hint == Some(PreviewCompactCpuYuvHint::Yuva444p12le)
+        {
             return 4 * std::mem::size_of::<f32>();
         }
         match self.cpu_component_bit_depth {
@@ -1048,6 +1059,7 @@ const fn compact_cpu_yuv_hint_from_pixel_format(
         PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
         PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
         PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
+        PixelFormat::Yuva444p12le => Some(PreviewCompactCpuYuvHint::Yuva444p12le),
         PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
         PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
         _ => None,
@@ -1269,6 +1281,20 @@ mod tests {
         assert_eq!(source.alpha_presence(), PreviewDecodeAlphaPresence::Present);
         assert_eq!(source.native_surface_hint(), None);
         assert!(!source.permits_native_output());
+        let hint = source.compact_cpu_yuv_hint().expect("compact straight-alpha CPU carrier");
+        assert_eq!(hint, PreviewCompactCpuYuvHint::Yuva444p12le);
+        assert_eq!(hint.retained_bytes_per_pixel(), 8);
+        assert_eq!(
+            source.cpu_rgba_retained_bytes_per_pixel(PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited
+            )),
+            16
+        );
+        assert_eq!(
+            hint.retained_bytes_for_extent(Resolution { width: 5, height: 3 }),
+            4 * 256 * 3
+        );
     }
 
     #[test]

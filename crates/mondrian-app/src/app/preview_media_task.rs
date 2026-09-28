@@ -1228,7 +1228,7 @@ fn decode_media_preview_inner(
         ) => media_preview_cpu_result(job, queue_wait_us, decode_elapsed_us, cpu),
         Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
-            if job.key.source_has_alpha() {
+            if job.key.source_has_alpha() && frame.alpha_plane().is_none() {
                 return media_preview_alpha_failure(
                     job,
                     queue_wait_us,

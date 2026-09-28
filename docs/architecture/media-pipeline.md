@@ -16,8 +16,9 @@ Preview distinguishes CPU RGB consumers from CPU field processing whose output
 can remain compact YUV. BWDIF still belongs to the existing decode Session and
 runs before scaling/color/composition; its CPU requirement excludes native GPU
 surfaces without forcing RGB expansion. The canonical representation selector
-uses the existing compact CPU YUV representation only for proved supported opaque
-encoded layouts. CPU working/data consumers retain RGB, and required GPU
+uses the existing compact CPU YUV representation for proved supported opaque
+encoded layouts and straight-alpha `Yuva444p12le`. CPU working/data consumers
+and author alpha overrides retain RGB, and required GPU
 residency still fails when field processing needs CPU access.
 
 Media selects the FFmpeg binding features explicitly: codec, format, filter,
@@ -4176,8 +4177,26 @@ surface validation agree on these layouts. Full-resolution 4:4:4 chroma does
 not acquire an invented subsampled chroma location. Planning charges each
 aligned plane row and its actual chroma extent; retained allocation accounting
 remains authoritative. These CPU layouts do not advertise native GPU residency
-or hardware codec support. Alpha and scene-linear inputs retain their existing
-separate contracts. Twelve-bit planar samples retain their original right-aligned
+or hardware codec support. Straight-alpha `Yuva444p12le` retains a fourth
+full-resolution, right-aligned twelve-bit plane. Coverage is normalized by 4095
+independently of the video range, and uses the same source-grid interpolation as
+luma. The shared YUV shader produces unbounded encoded-float RGB before the sole
+OCIO input stage; transparent pixels retain their independent RGB. The existing
+upload worker, slot cache, GPU completion lifetime, and working-set estimate own
+this fourth plane. It is included in aligned upload storage, retained allocation
+bytes, and the physical texture count. An absent alpha plane cannot prepare a
+straight-coverage pass, and an unexpected alpha plane cannot prepare an opaque
+pass. Ignore/Premultiplied author overrides keep the shared CPU normalization
+path; scene-linear and CPU RGB consumers retain their separate contracts.
+For CPU-addressable YUVA12 (including Export and author alpha overrides), the
+materializer emits source-encoded Float32 rather than clipping through RGBA16
+UNORM. CPU and GPU resolve the same `EncodedYuvToRgbParameters` from Core;
+Media retains matrix/range provenance and Renderer owns only texture-code
+recovery and sampling. CPU scaling uses the same planar materializer before
+conversion. CPU payload admission reserves sixteen bytes per pixel, while
+compact admission accounts for four two-byte planes. This preserves Preview /
+Export input semantics without adding another color interpreter.
+Twelve-bit planar samples retain their original right-aligned
 16-bit words, including ProRes 4444 decoder output. The source hint, physical
 surface descriptor, and compact payload agree on the effective twelve-bit depth;
 no ten-bit quantization or CPU RGBA conversion is introduced.
@@ -4232,3 +4251,18 @@ CUDA handle validation, Vulkan allocation/adoption, and the device-to-device
 plane copy; this work must not be recorded as source-contract validation or as
 a zero-cost bridge. A generated fixture proves this software route and timing
 only, not original-native-media qualification.
+
+### macOS ProRes 4444 admission evidence
+
+Native ProRes 4444 remains inadmissible until pixel parity is demonstrated.
+On an Apple M4/macOS 26.4.1 snapshot, a diagnostic using public
+`VTDecompressionSession` APIs directly (without FFmpeg hardware download or
+Mondrian materialization) observed hardware decoding and an IOSurface-backed
+Metal texture, but reproduced large localized Cb/Cr differences against software
+decode. Requesting RGBA Half did not eliminate the differences. API availability,
+requested hardware decoding, and successful texture creation cannot replace
+pixel parity. This single-frame observation narrows the producer boundary; it
+does not establish a universal driver defect or a performance qualification.
+The provisional probe and hashes remain external evidence under the macOS audit
+scratch directory. Production continues to report software CPU YUV decoding and
+an explicit upload for this source family.
