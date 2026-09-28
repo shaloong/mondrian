@@ -312,8 +312,9 @@ pub(crate) fn playback_hardware_decode_requested(request: PreviewHardwareDecodeR
     )
 }
 
-/// Whether real decode evidence proves hardware execution for this frame.
-pub(crate) fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagnostics) -> bool {
+/// Whether the decoder produced native backend output for this frame.
+/// This physical-path recovery signal does not prove hardware computation.
+pub(crate) fn preview_native_decode_effective(diagnostics: &PreviewDecodeDiagnostics) -> bool {
     diagnostics.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
         || diagnostics.hardware_decode_cpu_transfer_observed
 }
@@ -342,7 +343,7 @@ pub(crate) fn preview_decode_presentation_quality(
 pub(crate) struct PlaybackDecodeExecution {
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
-    pub(crate) hardware_decode_effective: bool,
+    pub(crate) native_decode_effective: bool,
 }
 
 impl From<&PreviewDecodeDiagnostics> for PlaybackDecodeExecution {
@@ -350,7 +351,7 @@ impl From<&PreviewDecodeDiagnostics> for PlaybackDecodeExecution {
         Self {
             access_mode: diagnostics.access_mode,
             hardware_decode_request: diagnostics.hardware_decode_request,
-            hardware_decode_effective: preview_hardware_decode_effective(diagnostics),
+            native_decode_effective: preview_native_decode_effective(diagnostics),
         }
     }
 }
@@ -387,7 +388,7 @@ pub(crate) fn playback_hardware_recovery_signals(
             && !native_import_admission_ready,
         hardware_fallback_not_engaged: playback_hardware_decode_requested(
             execution.hardware_decode_request,
-        ) && !execution.hardware_decode_effective,
+        ) && !execution.native_decode_effective,
     }
 }
 
@@ -421,7 +422,7 @@ mod tests {
         PlaybackDecodeExecution {
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
             hardware_decode_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
-            hardware_decode_effective: false,
+            native_decode_effective: false,
         }
     }
 
@@ -728,7 +729,7 @@ mod tests {
     #[test]
     fn actual_hardware_cpu_transfer_is_ready_not_degraded() {
         let mut execution = software_fallback_execution();
-        execution.hardware_decode_effective = true;
+        execution.native_decode_effective = true;
 
         assert_eq!(
             playback_frame_delivery_kind(

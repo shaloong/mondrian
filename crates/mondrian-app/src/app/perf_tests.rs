@@ -6480,6 +6480,7 @@ fn professional_presented_decode_evidence(
     PresentedDecodeExecutionEvidence {
         media_layers: summary.media_layers,
         software_cpu_layers: summary.software_cpu_layers,
+        unobserved_hardware_layers: summary.unobserved_hardware_layers,
         hardware_cpu_transfer_layers: summary.hardware_cpu_transfer_layers,
         hardware_native_layers: summary.hardware_native_layers,
         p010_10_bit_hardware_layers: summary.p010_10_bit_hardware_layers,

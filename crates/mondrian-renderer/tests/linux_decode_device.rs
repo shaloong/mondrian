@@ -114,14 +114,14 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
                 PreviewDecodeOutcome::NativeGpuFrame(frame) => frame,
                 other => panic!("required native route returned {other:?}"),
             };
-            assert!(frame.diagnostics.hardware_decode_active);
+            assert!(frame.diagnostics.native_decoder_active);
             assert!(
                 !frame.diagnostics.zero_copy_active,
                 "FFmpeg safe CUDA output performs a GPU copy"
             );
             assert!(matches!(
                 frame.diagnostics.execution_path(),
-                PreviewDecodeExecutionPath::HardwareNative { .. }
+                PreviewDecodeExecutionPath::NativeSurface { .. }
             ));
             assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
             assert!(!frame.diagnostics.temporal_approximation);
@@ -378,7 +378,7 @@ fn cuda_production_decode_import_perf_smoke() {
         };
         decode_samples_us
             .push(u64::try_from(decode_started.elapsed().as_micros()).unwrap_or(u64::MAX));
-        assert!(frame.diagnostics.hardware_decode_active);
+        assert!(frame.diagnostics.native_decoder_active);
         assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
         let import_started = Instant::now();
         runtime

@@ -859,7 +859,7 @@ fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
         PreviewHardwareDecodeDecision::GpuResidentNative
     );
     assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
-    assert!(!plan.probe.hardware_decode_active);
+    assert!(!plan.probe.native_decoder_active);
     assert!(!plan.probe.zero_copy_active);
     let expected_adapter_available = match plan.ffmpeg_codec_config.hw_pixel_format {
         Some(
@@ -1040,7 +1040,7 @@ fn hardware_decode_cpu_transfer_is_active_but_not_gpu_resident() {
         plan.hardware_cpu_transfer_status,
         PreviewHardwareDecodeCpuTransferStatus::ConfiguredAwaitingFrame
     );
-    assert!(!plan.probe.hardware_decode_active);
+    assert!(!plan.probe.native_decoder_active);
     assert!(!plan.probe.zero_copy_active);
     assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
     assert_eq!(
@@ -1062,7 +1062,7 @@ fn hardware_decode_cpu_transfer_is_active_but_not_gpu_resident() {
         plan.probe.selected_backend,
         plan.probe.candidate_backend.unwrap_or(HwAccelBackend::None)
     );
-    assert!(plan.probe.hardware_decode_active);
+    assert!(plan.probe.native_decoder_active);
     assert!(!plan.probe.zero_copy_active);
 }
 
@@ -1721,7 +1721,7 @@ fn rgba_frame_diagnostics_record_hw_accel_probe_fail_closed() {
     frame.diagnostics = frame.diagnostics.with_hw_accel_probe(&probe);
 
     assert_eq!(frame.diagnostics.hw_accel_backend, HwAccelBackend::None);
-    assert!(!frame.diagnostics.hardware_decode_active);
+    assert!(!frame.diagnostics.native_decoder_active);
     assert!(!frame.diagnostics.zero_copy_active);
     assert_eq!(
         frame.diagnostics.decoded_frame_residency,
@@ -2144,14 +2144,16 @@ fn hardware_execution_provenance_survives_playback_ring_reuse() {
         test_rgba_contract(),
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     );
-    frame.diagnostics.hardware_decode_active = true;
+    frame.diagnostics.native_decoder_active = true;
+    frame.diagnostics.hardware_decode_observed = Some(true);
     frame.diagnostics.hardware_decode_cpu_transfer_observed = true;
     frame.diagnostics.hw_accel_backend = HwAccelBackend::D3D11VA;
     frame.diagnostics.decoded_surface_format = DecodedVideoSurfaceFormat::P010;
     frame.diagnostics.decoded_video_sampling.bit_depth = 10;
     let frame = frame.with_decode_execution();
-    let expected = PreviewDecodeExecutionPath::HardwareCpuTransfer {
+    let expected = PreviewDecodeExecutionPath::NativeCpuTransfer {
         backend: HwAccelBackend::D3D11VA,
+        hardware_decode_observed: Some(true),
         surface: DecodedVideoSurfaceFormat::P010,
         sampling: frame.diagnostics.decoded_video_sampling,
     };
@@ -2160,6 +2162,70 @@ fn hardware_execution_provenance_survives_playback_ring_reuse() {
     let ring_hit = frame.into_playback_ring_hit(std::time::Duration::from_micros(2));
     assert_eq!(ring_hit.decode_execution, expected);
     assert!(!ring_hit.diagnostics.hardware_decode_cpu_transfer_observed);
+    assert_eq!(ring_hit.diagnostics.hardware_decode_observed, None);
+}
+
+#[test]
+fn videotoolbox_cpu_transfer_preserves_unobserved_execution_through_ring_reuse() {
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    plan.mark_hardware_cpu_transfer_configured(HwAccelBackend::VideoToolbox);
+    plan.mark_hardware_cpu_transfer_observed();
+    assert!(plan.probe.native_decoder_active);
+    assert_eq!(plan.probe.hardware_decode_observed, None);
+
+    let mut frame = RgbaFrame::new(
+        2,
+        1,
+        vec![0; 8],
+        test_rgba_contract(),
+        PreviewDecodePath::InProcessFfmpegCpuRgba,
+    );
+    frame.diagnostics = frame.diagnostics.with_hardware_decode_plan(&plan);
+    let frame = frame.with_decode_execution();
+    let expected = frame.decode_execution;
+    assert!(matches!(
+        expected,
+        PreviewDecodeExecutionPath::NativeCpuTransfer {
+            backend: HwAccelBackend::VideoToolbox,
+            hardware_decode_observed: None,
+            ..
+        }
+    ));
+    let ring_hit = frame.into_playback_ring_hit(std::time::Duration::from_micros(2));
+    assert_eq!(ring_hit.decode_execution, expected);
+    assert_eq!(ring_hit.diagnostics.hardware_decode_observed, None);
+}
+
+#[test]
+fn videotoolbox_native_surface_keeps_execution_observation_unavailable() {
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    plan.probe.candidate_backend = Some(HwAccelBackend::VideoToolbox);
+    plan.mark_gpu_resident_native_observed(DecodedGpuFrameHandleKind::CVPixelBuffer);
+    let diagnostics = PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegNative)
+        .with_hardware_decode_plan(&plan);
+    assert!(diagnostics.native_decoder_active);
+    assert!(diagnostics.zero_copy_active);
+    assert_eq!(diagnostics.hardware_decode_observed, None);
+    assert!(matches!(
+        diagnostics.execution_path(),
+        PreviewDecodeExecutionPath::NativeSurface {
+            backend: HwAccelBackend::VideoToolbox,
+            hardware_decode_observed: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -3362,7 +3428,7 @@ fn preferred_native_software_fallback_keeps_supported_yuv_compact() {
         matches!(payload, PreviewDecodedFramePayload::CpuYuv(_)),
         "GPU consumers must not pay for an unnecessary CPU float expansion"
     );
-    assert!(!plan.probe.hardware_decode_active);
+    assert!(!plan.probe.native_decoder_active);
     assert!(!plan.probe.zero_copy_active);
     plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
     assert!(

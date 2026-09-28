@@ -2485,16 +2485,16 @@ decoder actually produces a native surface admitted by the caller's exact media
 facts and device-scoped Renderer capability check.
 `HardwareDecodeCpuTransfer` means in-process FFmpeg hardware decode was
 configured and hardware frames are transferred back to CPU before RGBA preview;
-it is active hardware decode, but it is not zero-copy, GPU texture residency, or
+it is native decoder backend output, but it is not zero-copy, GPU texture residency, or
 a native renderer import contract. `GpuResidentNative` is valid only when the
-decoder probe reports active hardware decode, GPU texture residency, and a
+decoder probe reports native decoder activity, GPU texture residency, and a
 native handle kind. Whether Renderer consumption is zero-copy or uses one GPU
 bridge copy comes only from the device-scoped Renderer support contract.
 Renderer readiness is a separate app
 admission fact. External FFmpeg CPU RGBA
 is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
-`hardware_decode_active`, `zero_copy_active`, optional
+`native_decoder_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, and a stable reason string. It also reports the
 platform candidate backend list in priority order,
 the candidate backend selected for the current stream plan, the candidate native
@@ -2510,7 +2510,7 @@ VideoToolbox, VA-API, VDPAU, DXVA2, or CUDA/NVDEC hardware frames are actually
 exported through a concrete media adapter and imported through the renderer
 native decoded-frame import contract,
 `HwAccelBackend::probe()` must keep `selected_backend=None`,
-`decoder_adapter_available=false`, `hardware_decode_active=false`,
+`decoder_adapter_available=false`, `native_decoder_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind. Platform preference alone is
 not a valid hardware decode signal. The media Module now has concrete retained
@@ -3161,7 +3161,7 @@ The same diagnostics carry the current hardware decode contract:
 `hardware_decode_ffmpeg_device_context_created`,
 `hardware_decode_ffmpeg_device_context_error_code`,
 `hardware_decode_cpu_transfer_configured`,
-`hardware_decode_cpu_transfer_observed`, `hardware_decode_active`,
+`hardware_decode_cpu_transfer_observed`, `native_decoder_active`,
 `zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
 `hardware_decode_blocker`, and `native_decode_fallback`, plus
 `decoded_surface_format` for the decoder output
@@ -4315,3 +4315,26 @@ does not establish a universal driver defect or a performance qualification.
 The provisional probe and hashes remain external evidence under the macOS audit
 scratch directory. Production continues to report software CPU YUV decoding and
 an explicit upload for this source family.
+
+### Native decoder output and observed hardware execution
+
+`native_decoder_active` proves output through the selected FFmpeg native decoder
+backend. `hardware_decode_observed` independently records `Some(true)` for
+observed hardware execution, `Some(false)` for observed software execution, or
+`None` when execution has not been observed. Neither requested acceleration nor
+GPU residency converts an unobserved execution into hardware proof. The explicit
+hardware-only FFmpeg acceleration backends establish hardware work from their
+decoder output; VideoToolbox can also output CVPixelBuffer from software decode.
+Its current AVHWDeviceContext adapter therefore retains `None`: the supported
+FFmpeg hardware-device interface does not expose the owning session's public
+UsingHardware property. The adapter must not inspect private decoder storage to
+obtain that property.
+
+`PreviewDecodeExecutionPath::NativeSurface` and `NativeCpuTransfer` preserve this
+observation with the original physical frame, including cache/ring reuse. Viewer
+provenance counts native surface/transfer layers independently of observed hardware
+layers. Only `Some(true)` contributes to hardware coverage or P010 hardware coverage;
+unobserved native output produces `hardware_execution_unobserved` at the existing
+hardware qualification gate. Backend-path recovery still uses native output and
+import readiness, so an observation gap does not invent a CPU transfer or change
+Preview quality. Alpha diagnostic names change directly, with no legacy aliases.

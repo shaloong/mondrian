@@ -316,7 +316,7 @@ fn measure_with_resource_observer(
         let outcome = decoder.decode_cancellable(request, move || Instant::now() >= deadline)?;
         let (width, height, native_source, cpu_yuv_source) = match outcome {
             PreviewDecodeOutcome::NativeGpuFrame(f) if native => {
-                assert!(f.diagnostics.hardware_decode_active);
+                assert!(f.diagnostics.native_decoder_active);
                 assert!(!f.diagnostics.hardware_decode_cpu_transfer_observed);
                 assert!(!f.diagnostics.temporal_approximation);
                 assert_eq!(f.diagnostics.zero_copy_active, cfg!(target_os = "macos"));
@@ -340,7 +340,7 @@ fn measure_with_resource_observer(
             }
             PreviewDecodeOutcome::CpuYuvFrame(f) if !native => {
                 assert!(
-                    !f.diagnostics.hardware_decode_active && !f.diagnostics.temporal_approximation
+                    !f.diagnostics.native_decoder_active && !f.diagnostics.temporal_approximation
                 );
                 (
                     f.width,

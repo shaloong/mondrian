@@ -480,7 +480,7 @@ pub enum PreviewNativeDecodeFallback {
 
 impl PreviewHardwareDecodeBlocker {
     fn from_probe(probe: &HwAccelProbe) -> Self {
-        if probe.hardware_decode_active
+        if probe.native_decoder_active
             && probe.frame_residency == DecodedFrameResidency::GpuTexture
             && probe.gpu_frame_handle_kind.is_some()
         {
@@ -1465,9 +1465,13 @@ pub struct PreviewDecodeDiagnostics {
     /// Hardware decode backend reported by the media decode boundary.
     #[serde(default)]
     pub hw_accel_backend: HwAccelBackend,
-    /// Whether the media decode boundary actively used hardware decode.
+    /// Whether a native decoder backend produced this frame. This is separate
+    /// from hardware execution and from the frame's final residency.
     #[serde(default)]
-    pub hardware_decode_active: bool,
+    pub native_decoder_active: bool,
+    /// Hardware/software execution observed by the decoder; None is unobserved.
+    /// VideoToolbox output alone cannot establish its UsingHardware property.
+    pub hardware_decode_observed: Option<bool>,
     /// Whether decoded frames stayed GPU-resident through the media boundary.
     #[serde(default)]
     pub zero_copy_active: bool,
@@ -1501,13 +1505,15 @@ pub struct PreviewDecodeDiagnostics {
 pub enum PreviewDecodeExecutionPath {
     #[default]
     SoftwareCpu,
-    HardwareCpuTransfer {
+    NativeCpuTransfer {
         backend: HwAccelBackend,
+        hardware_decode_observed: Option<bool>,
         surface: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,
     },
-    HardwareNative {
+    NativeSurface {
         backend: HwAccelBackend,
+        hardware_decode_observed: Option<bool>,
         handle_kind: DecodedGpuFrameHandleKind,
         surface: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,
@@ -1563,7 +1569,13 @@ impl PreviewDecodeDiagnostics {
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations::default(),
             hw_accel_backend: HwAccelBackend::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: (!matches!(
+                path,
+                PreviewDecodePath::InProcessFfmpegNative
+                    | PreviewDecodePath::PlaybackSessionRingHit
+            ))
+            .then_some(false),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -1574,24 +1586,27 @@ impl PreviewDecodeDiagnostics {
         }
     }
 
-    /// Return only execution facts that prove actual hardware frame work.
+    /// Return frame-local backend/residency and hardware-execution observations.
+    /// A native surface is not itself proof of hardware decoder execution.
     pub fn execution_path(&self) -> PreviewDecodeExecutionPath {
         let native_handle = self.gpu_frame_handle_kind.filter(|_| {
             self.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
-                && self.hardware_decode_active
+                && self.native_decoder_active
                 && self.decoded_frame_residency == DecodedFrameResidency::GpuTexture
         });
         if let Some(handle_kind) = native_handle {
-            return PreviewDecodeExecutionPath::HardwareNative {
+            return PreviewDecodeExecutionPath::NativeSurface {
                 backend: self.hw_accel_backend,
+                hardware_decode_observed: self.hardware_decode_observed,
                 handle_kind,
                 surface: self.decoded_surface_format,
                 sampling: self.decoded_video_sampling,
             };
         }
-        if self.hardware_decode_cpu_transfer_observed && self.hardware_decode_active {
-            return PreviewDecodeExecutionPath::HardwareCpuTransfer {
+        if self.hardware_decode_cpu_transfer_observed && self.native_decoder_active {
+            return PreviewDecodeExecutionPath::NativeCpuTransfer {
                 backend: self.hw_accel_backend,
+                hardware_decode_observed: self.hardware_decode_observed,
                 surface: self.decoded_surface_format,
                 sampling: self.decoded_video_sampling,
             };
@@ -1670,7 +1685,12 @@ impl PreviewDecodeDiagnostics {
         self.hardware_decode_candidate_backend = probe.candidate_backend;
         self.hardware_decode_candidate_handle_kind = probe.candidate_handle_kind;
         self.hardware_decode_adapter_available = probe.decoder_adapter_available;
-        self.hardware_decode_active = probe.hardware_decode_active;
+        self.native_decoder_active = probe.native_decoder_active;
+        self.hardware_decode_observed = if probe.native_decoder_active {
+            probe.hardware_decode_observed
+        } else {
+            Some(false)
+        };
         self.zero_copy_active = probe.zero_copy_active;
         self.decoded_frame_residency = probe.frame_residency;
         self.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;

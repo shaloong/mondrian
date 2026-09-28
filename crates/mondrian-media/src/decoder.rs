@@ -1800,8 +1800,12 @@ pub struct HwAccelProbe {
     pub decoder_adapter_available: bool,
     /// Backend that is actually active for the media decode boundary.
     pub selected_backend: HwAccelBackend,
-    /// Whether the media decode boundary currently uses a hardware decoder.
-    pub hardware_decode_active: bool,
+    /// Whether the decoder produced a frame through the selected native backend.
+    /// Backend activity and surface residency do not imply hardware execution.
+    pub native_decoder_active: bool,
+    /// Observed hardware execution: true for hardware, false for software,
+    /// None when the selected decoder cannot expose that observation.
+    pub hardware_decode_observed: Option<bool>,
     /// Whether decoded frames currently remain GPU-resident through the media boundary.
     pub zero_copy_active: bool,
     /// Residency produced by the active decode path.
@@ -1836,7 +1840,8 @@ impl HwAccelBackend {
                 .unwrap_or_default(),
             decoder_adapter_available: false,
             selected_backend: Self::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: None,
             zero_copy_active: false,
             frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -2425,7 +2430,7 @@ mod tests {
         );
         assert!(!probe.decoder_adapter_available);
         assert_eq!(probe.selected_backend, HwAccelBackend::None);
-        assert!(!probe.hardware_decode_active);
+        assert!(!probe.native_decoder_active);
         assert!(!probe.zero_copy_active);
         assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
         assert_eq!(probe.gpu_frame_handle_kind, None);

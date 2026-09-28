@@ -3646,7 +3646,8 @@ fn test_preview_decode_diagnostics(
         threading_count: 4,
         stage_durations: PreviewDecodeStageDurations::default(),
         hw_accel_backend: HwAccelBackend::D3D11VA,
-        hardware_decode_active: false,
+        native_decoder_active: false,
+        hardware_decode_observed: Some(false),
         zero_copy_active: false,
         decoded_frame_residency: DecodedFrameResidency::CpuRgba,
         gpu_frame_handle_kind: None,
@@ -3767,7 +3768,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
                 external_process_us: 0,
             },
             hw_accel_backend: HwAccelBackend::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: Some(false),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -3838,7 +3840,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
                 external_process_us: 2_450,
             },
             hw_accel_backend: HwAccelBackend::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: Some(false),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -3909,7 +3912,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
                 external_process_us: 0,
             },
             hw_accel_backend: HwAccelBackend::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: Some(false),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -3979,7 +3983,8 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
                 external_process_us: 0,
             },
             hw_accel_backend: HwAccelBackend::D3D11VA,
-            hardware_decode_active: true,
+            native_decoder_active: true,
+            hardware_decode_observed: Some(true),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -4187,7 +4192,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(playback_profile.seek_index_available_frames, 1);
     assert_eq!(playback_profile.seek_index_probe_backed_frames, 1);
     assert_eq!(playback_profile.seek_index_session_observed_frames, 0);
-    assert_eq!(playback_profile.hardware_decode_active_frames, 1);
+    assert_eq!(playback_profile.native_decoder_active_frames, 1);
     assert_eq!(playback_profile.zero_copy_active_frames, 0);
     assert_eq!(playback_profile.gpu_texture_resident_frames, 0);
     assert_eq!(playback_profile.decoded_nv12_surface_frames, 1);
@@ -7341,7 +7346,7 @@ fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback(
         root.code == "preview_decode_playback_hardware_fallback_not_engaged"
             && root.area == PreviewDecodePerformanceArea::CodecDecode
             && root.evidence.contains("requested_frames=3")
-            && root.evidence.contains("effective_frames=0")
+            && root.evidence.contains("effective_native_backend_frames=0")
             && root.evidence.contains("not_engaged_frames=3")
             && root.evidence.contains("backend_unavailable_frames=1")
             && root.evidence.contains("codec_unsupported_frames=1")
@@ -14838,7 +14843,8 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         threading_count: 0,
         stage_durations: PreviewDecodeStageDurations::default(),
         hw_accel_backend: HwAccelBackend::None,
-        hardware_decode_active: false,
+        native_decoder_active: false,
+        hardware_decode_observed: Some(false),
         zero_copy_active: false,
         decoded_frame_residency: DecodedFrameResidency::CpuRgba,
         gpu_frame_handle_kind: None,

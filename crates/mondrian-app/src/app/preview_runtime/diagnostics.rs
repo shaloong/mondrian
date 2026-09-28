@@ -1224,8 +1224,14 @@ pub struct PreviewDecodeAccessModeProfile {
     pub seek_index_probe_backed_frames: u64,
     /// Decode results whose keyframe index was learned from packets decoded in-session.
     pub seek_index_session_observed_frames: u64,
-    /// Decode results that reported active hardware decode at the media boundary.
-    pub hardware_decode_active_frames: u64,
+    /// Decode results that reported active native decoder output at the media boundary.
+    pub native_decoder_active_frames: u64,
+    /// Frames whose decoder established actual hardware execution.
+    pub hardware_decode_observed_frames: u64,
+    /// Native decoder frames without hardware/software execution observation.
+    pub hardware_decode_unobserved_frames: u64,
+    /// Native decoder frames whose decoder established software execution.
+    pub software_native_decode_observed_frames: u64,
     /// Decode results that reported zero-copy decoded-frame residency.
     pub zero_copy_active_frames: u64,
     /// Decode results whose media frame residency was GPU texture backed.
@@ -1398,14 +1404,14 @@ impl PreviewDecodeAccessModeProfile {
             .saturating_add(self.hardware_decode_require_gpu_requested_frames)
     }
 
-    fn hardware_decode_effective_frames(self) -> u64 {
+    fn native_decode_effective_frames(self) -> u64 {
         self.hardware_decode_cpu_transfer_observed_frames
             .saturating_add(self.hardware_decode_gpu_resident_native_frames)
     }
 
     fn hardware_decode_fallback_not_engaged_frames(self) -> u64 {
         self.hardware_decode_requested_frames()
-            .saturating_sub(self.hardware_decode_effective_frames())
+            .saturating_sub(self.native_decode_effective_frames())
     }
 
     pub(super) fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
@@ -1512,9 +1518,22 @@ impl PreviewDecodeAccessModeProfile {
                     self.seek_index_session_observed_frames.saturating_add(1);
             }
         }
-        if diagnostics.hardware_decode_active {
-            self.hardware_decode_active_frames =
-                self.hardware_decode_active_frames.saturating_add(1);
+        if diagnostics.native_decoder_active {
+            self.native_decoder_active_frames = self.native_decoder_active_frames.saturating_add(1);
+            match diagnostics.hardware_decode_observed {
+                Some(true) => {
+                    self.hardware_decode_observed_frames =
+                        self.hardware_decode_observed_frames.saturating_add(1)
+                }
+                None => {
+                    self.hardware_decode_unobserved_frames =
+                        self.hardware_decode_unobserved_frames.saturating_add(1)
+                }
+                Some(false) => {
+                    self.software_native_decode_observed_frames =
+                        self.software_native_decode_observed_frames.saturating_add(1)
+                }
+            }
         }
         if diagnostics.zero_copy_active {
             self.zero_copy_active_frames = self.zero_copy_active_frames.saturating_add(1);

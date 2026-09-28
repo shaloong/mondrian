@@ -415,12 +415,13 @@ impl PreviewHardwareDecodePlan {
             self.decision = PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer;
             let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
             self.probe.selected_backend = backend;
-            self.probe.hardware_decode_active = true;
+            self.probe.native_decoder_active = true;
+            self.probe.hardware_decode_observed = backend_hardware_execution_observation(backend);
             self.probe.zero_copy_active = false;
             self.probe.frame_residency = DecodedFrameResidency::CpuRgba;
             self.probe.gpu_frame_handle_kind = None;
             self.probe.reason = format!(
-                "{} FFmpeg hardware decode is active; this request permits transfer to the CPU RGBA boundary",
+                "{} FFmpeg native decoder output was transferred to the CPU RGBA boundary",
                 backend.as_str()
             );
         }
@@ -439,12 +440,13 @@ impl PreviewHardwareDecodePlan {
         let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
         self.probe.selected_backend = backend;
         self.probe.decoder_adapter_available = true;
-        self.probe.hardware_decode_active = true;
+        self.probe.native_decoder_active = true;
+        self.probe.hardware_decode_observed = backend_hardware_execution_observation(backend);
         self.probe.zero_copy_active = kind != DecodedGpuFrameHandleKind::CudaDeviceMemory;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
         self.probe.reason = format!(
-            "{} FFmpeg hardware decode produced a retained native decoder surface",
+            "{} FFmpeg decoder produced a retained native surface",
             backend.as_str()
         );
     }
@@ -513,7 +515,7 @@ impl PreviewHardwareDecodePlan {
         if !probe.decoder_adapter_available {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
         }
-        if !probe.hardware_decode_active
+        if !probe.native_decoder_active
             || probe.frame_residency != DecodedFrameResidency::GpuTexture
         {
             return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
@@ -647,5 +649,21 @@ mod stream_capability_tests {
                 Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected)
             );
         }
+    }
+}
+
+/// An FFmpeg hardware-acceleration frame proves execution on the explicit
+/// hardware-only backends. VideoToolbox can also use a software decoder while
+/// exporting CVPixelBuffer; the current AVHWDeviceContext adapter cannot expose
+/// that session's public UsingHardware property through its supported interface.
+fn backend_hardware_execution_observation(backend: HwAccelBackend) -> Option<bool> {
+    match backend {
+        HwAccelBackend::None | HwAccelBackend::VideoToolbox => None,
+        HwAccelBackend::Cuda
+        | HwAccelBackend::D3D12VA
+        | HwAccelBackend::D3D11VA
+        | HwAccelBackend::Dxva2
+        | HwAccelBackend::Vaapi
+        | HwAccelBackend::Vdpau => Some(true),
     }
 }

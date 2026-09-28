@@ -344,7 +344,7 @@ current bounded-any seek window could not use the known anchors; inspect
 `seek_us`, `packet_decode_us`, and the seek-window policy before increasing
 worker counts.
 Access-mode profiles also aggregate the hardware decode contract:
-`hardware_decode_active_frames`, `zero_copy_active_frames`,
+`native_decoder_active_frames`, `zero_copy_active_frames`,
 `gpu_texture_resident_frames`, `decoded_nv12_surface_frames`,
 `decoded_p010_surface_frames`, and
 `hardware_decode_texture_residency_blocker_frames`. Renderer/platform native
@@ -860,3 +860,11 @@ an attested fixture is `unqualified`; an attempted gate that fails is
 The current development machine must not be described as qualified merely
 because the contract and test targets compile. Physical execution evidence is
 produced only by the supervisor on a machine satisfying the sealed profile.
+
+Native decoder activity and hardware execution are separate observations.
+`native_decoder_active_frames` counts frames from the selected native backend;
+`hardware_decode_observed_frames`, `hardware_decode_unobserved_frames`, and
+`software_native_decode_observed_frames` distinguish its execution evidence.
+VideoToolbox CVPixelBuffer/P010 residency is valid native-path evidence while its
+current execution observation remains unavailable. Native-frame counts must not
+be reported as observed hardware decode counts.

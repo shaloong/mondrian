@@ -626,6 +626,7 @@ pub(crate) struct PreviewAcceptanceFailure {
 pub(crate) struct PresentedDecodeExecutionEvidence {
     pub(crate) media_layers: u32,
     pub(crate) software_cpu_layers: u32,
+    pub(crate) unobserved_hardware_layers: u32,
     pub(crate) hardware_cpu_transfer_layers: u32,
     pub(crate) hardware_native_layers: u32,
     pub(crate) p010_10_bit_hardware_layers: u32,
@@ -658,6 +659,15 @@ fn evaluate_presented_main10_hardware(
         presented_p010_10_bit_hardware_layers,
         presented_media_layers,
     );
+    if execution.unobserved_hardware_layers > 0 {
+        push_failure(
+            failures,
+            "hardware_execution_unobserved",
+            "observed decoder hardware execution for presented native layers",
+            format!("{} unobserved layers", execution.unobserved_hardware_layers),
+            "native surfaces and backend selection do not establish hardware execution",
+        );
+    }
     if presented_media_layers == 0 {
         push_failure(
             failures,
@@ -1947,6 +1957,26 @@ mod tests {
                 "native_video_gpu_timing_published_samples_exceed_observed",
             ]
         );
+    }
+
+    #[test]
+    fn native_surface_without_execution_observation_cannot_pass_hardware_gate() {
+        let mut failures = Vec::new();
+        let evidence = evaluate_presented_main10_hardware(
+            PresentedDecodeExecutionEvidence {
+                media_layers: 1,
+                unobserved_hardware_layers: 1,
+                ..Default::default()
+            },
+            0,
+            &[],
+            &mut failures,
+        );
+        assert_eq!(evidence.presented_hardware_layers, 0);
+        assert!(failures.iter().any(|failure| failure.code == "hardware_execution_unobserved"));
+        assert!(failures
+            .iter()
+            .any(|failure| failure.code == "hardware_decode_coverage_below_minimum"));
     }
 
     #[test]
