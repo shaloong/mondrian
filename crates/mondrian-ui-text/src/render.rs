@@ -338,6 +338,33 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a physical GPU and installed emoji fonts"]
+    fn gpu_emoji_glyph_coverage_reaches_the_render_target() {
+        let mut harness = OffscreenHarness::new(128, 128).expect("physical GPU required");
+        for text in ["🙂", "➕", "📂"] {
+            let mut renderer = TextRenderer::new();
+            let resolved = renderer.layout_and_render_with_stats(
+                text,
+                48.0,
+                Point::new(12.0, 12.0),
+                Color::WHITE,
+                None,
+                true,
+            );
+            assert_eq!(resolved.stats.missing_glyphs, 0, "text: {text:?}");
+            let uploads = renderer_glyph_uploads(renderer.take_pending_uploads());
+            harness.renderer.upload_glyphs(&harness.queue, &uploads);
+            let pixels = harness.render(resolved.commands);
+            let visible = pixels.chunks_exact(4).filter(|px| px[3] >= 24).count();
+            assert!(
+                visible > 24,
+                "emoji mask must reach the target: {text:?}: {visible}"
+            );
+            eprintln!("emoji coverage: {text:?}: {visible} visible pixels");
+        }
+    }
+
+    #[test]
     fn resolve_text_commands_restarts_frame_after_atlas_page_reset() {
         let mut text_renderer = TextRenderer::new();
         text_renderer.atlas.fill_page_for_test();
@@ -902,6 +929,29 @@ mod tests {
     }
 
     #[test]
+    fn emoji_font_rasterization_uploads_visible_coverage() {
+        for text in ["🙂", "➕", "📂"] {
+            let mut renderer = TextRenderer::new();
+            let resolved = renderer.layout_and_render_with_stats(
+                text,
+                24.0,
+                Point::ZERO,
+                Color::WHITE,
+                None,
+                true,
+            );
+            assert_eq!(resolved.stats.missing_glyphs, 0, "text: {text:?}");
+            assert!(!resolved.commands.is_empty(), "text: {text:?}");
+            let uploads = renderer.take_pending_uploads();
+            assert!(!uploads.is_empty(), "text: {text:?}");
+            assert!(
+                uploads.iter().all(|image| image.data.iter().any(|&a| a != 0)),
+                "resolved emoji must contain visible alpha coverage: {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn small_mixed_script_and_emoji_text_resolves_without_missing_glyphs() {
         let mut r = TextRenderer::new();
         let text = "A你🙂B";
@@ -1186,6 +1236,7 @@ mod tests {
                     apply_limit_buckets: false,
                 }))
                 .ok()?;
+            eprintln!("UI text GPU adapter: {:?}", adapter.get_info());
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                     .ok()?;

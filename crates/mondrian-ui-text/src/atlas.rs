@@ -229,18 +229,21 @@ fn swash_to_alpha(image: &cosmic_text::SwashImage) -> (u32, u32, i32, i32, Vec<u
         cosmic_text::SwashContent::SubpixelMask => {
             let pixel_count = (w * h) as usize;
             let mut alpha = Vec::with_capacity(pixel_count);
-            for chunk in image.data.chunks(3) {
-                let gray = if chunk.len() >= 3 {
-                    (chunk[0] as u32 + chunk[1] as u32 + chunk[2] as u32) / 3
-                } else {
-                    0
-                };
+            // Swash subpixel masks store RGBA, even though coverage uses RGB.
+            for chunk in image.data.chunks_exact(4) {
+                let gray = (chunk[0] as u32 + chunk[1] as u32 + chunk[2] as u32) / 3;
                 alpha.push(gray as u8);
             }
             alpha.resize(pixel_count, 0);
             (w, h, top, left, alpha)
         }
-        _ => (w, h, top, left, vec![0u8; (w * h) as usize]),
+        cosmic_text::SwashContent::Color => {
+            // The UI glyph atlas is a tintable R8 mask. Retain coverage from
+            // color fonts instead of treating their successful images as blank.
+            let mut alpha: Vec<u8> = image.data.chunks_exact(4).map(|rgba| rgba[3]).collect();
+            alpha.resize((w * h) as usize, 0);
+            (w, h, top, left, alpha)
+        }
     }
 }
 
@@ -255,6 +258,28 @@ mod tests {
         assert!(!atlas.has_pending());
         assert_eq!(atlas.size(), (1024, 1024));
         assert_eq!(atlas.stats().entries, 0);
+    }
+
+    #[test]
+    fn color_rgba_bitmap_preserves_alpha_coverage() {
+        let mut image = cosmic_text::SwashImage::new();
+        image.content = cosmic_text::SwashContent::Color;
+        image.placement.width = 3;
+        image.placement.height = 1;
+        image.data = vec![255, 0, 0, 0, 0, 0, 0, 128, 0, 255, 0, 255];
+        let (_, _, _, _, alpha) = swash_to_alpha(&image);
+        assert_eq!(alpha, [0, 128, 255]);
+    }
+
+    #[test]
+    fn subpixel_rgba_mask_preserves_pixel_boundaries() {
+        let mut image = cosmic_text::SwashImage::new();
+        image.content = cosmic_text::SwashContent::SubpixelMask;
+        image.placement.width = 3;
+        image.placement.height = 1;
+        image.data = vec![30, 60, 90, 255, 0, 0, 0, 255, 150, 180, 210, 0];
+        let (_, _, _, _, alpha) = swash_to_alpha(&image);
+        assert_eq!(alpha, [60, 0, 180]);
     }
 
     #[test]
