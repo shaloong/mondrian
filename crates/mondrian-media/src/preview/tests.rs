@@ -1946,8 +1946,12 @@ fn swscale_expands_bt709_limited_range_to_full_rgba() {
     )
     .expect("convert limited white");
 
-    assert!(black.rgba()[..3].iter().all(|channel| *channel <= 2));
-    assert!(white.rgba()[..3].iter().all(|channel| *channel >= 253));
+    for pixel in black.rgba().chunks_exact(4) {
+        assert_eq!(pixel, &[0, 0, 0, 255]);
+    }
+    for pixel in white.rgba().chunks_exact(4) {
+        assert_eq!(pixel, &[255, 255, 255, 255]);
+    }
     assert_eq!(black.rgba()[3], 255);
     assert_eq!(white.rgba()[3], 255);
 }
