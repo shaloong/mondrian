@@ -180,6 +180,20 @@ fn native_repeated_export_cancel_retry_retains_independent_artifacts_and_closure
 #[test]
 #[ignore = "requires an external 4K ProRes 4444 source and a create-only /tmp evidence directory"]
 fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result<()> {
+    run_high_depth_alpha_export(Some(mondrian_core::ColorSpace::Rec709))
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires an untagged 4K ProRes 4444 source and a create-only /tmp evidence directory"]
+fn native_untagged_high_depth_export_uses_sequence_missing_metadata_policy() -> anyhow::Result<()> {
+    run_high_depth_alpha_export(None)
+}
+
+#[cfg(test)]
+fn run_high_depth_alpha_export(
+    color_space_override: Option<mondrian_core::ColorSpace>,
+) -> anyhow::Result<()> {
     let frame_count = std::env::var("MONDRIAN_HIGH_DEPTH_EXPORT_FRAMES")
         .ok()
         .map(|value| value.parse::<i64>())
@@ -240,6 +254,12 @@ fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result
                 && stream.bit_depth == 12,
             "source is not the required full-resolution 12-bit 4:4:4 alpha media"
         );
+        if color_space_override.is_none() {
+            ensure!(
+                stream.executable_color_space().is_none(),
+                "missing-metadata policy test requires no executable source color identity"
+            );
+        }
         let track = add_track(&mut state, TrackAddKind::Video)?;
         place(&mut state, asset.id, track, 0, frame_count, true)?;
         let clip_id = state
@@ -251,20 +271,31 @@ fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result
             .and_then(|track| track.clips.first())
             .context("placed source clip")?
             .id;
+        let interpretation = mondrian_timeline::clip::MediaInterpretation {
+            color_space_override,
+            field_order_override: Some(FieldOrder::Progressive),
+            ..Default::default()
+        };
+        state.set_clip_media_interpretation(
+            crate::app::selection::SelectedClipRef {
+                track_id: track,
+                is_video_track: true,
+                clip_id,
+            },
+            interpretation.clone(),
+        )?;
+        let authored = state
+            .active_sequence()
+            .context("sequence")?
+            .video_tracks
+            .iter()
+            .find(|candidate| candidate.id == track)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .and_then(|clip| clip.media_interpretation())
+            .context("authored source interpretation")?;
         ensure!(
-            state.set_clip_media_interpretation(
-                crate::app::selection::SelectedClipRef {
-                    track_id: track,
-                    is_video_track: true,
-                    clip_id,
-                },
-                mondrian_timeline::clip::MediaInterpretation {
-                    color_space_override: Some(mondrian_core::ColorSpace::Rec709),
-                    field_order_override: Some(FieldOrder::Progressive),
-                    ..Default::default()
-                },
-            )?,
-            "explicit Rec.709 and progressive source interpretation was not authored"
+            authored == &interpretation,
+            "requested source interpretation does not match the Timeline owner"
         );
         let export_started = Instant::now();
         let export_result = super::super::harness::execute_export_job(
@@ -276,6 +307,17 @@ fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result
             Duration::from_secs(300),
         );
         export_wall_ms = Some(export_started.elapsed().as_millis());
+        if color_space_override.is_none()
+            && let Ok(completed) = &export_result
+        {
+            let counts = completed.diagnostics.color.input_resolution_source_counts;
+            ensure!(
+                counts.missing_assume_rec709 == frame_count as u64
+                    && counts.override_count == 0
+                    && counts.detected_metadata == 0,
+                "export did not execute every frame through the Sequence missing-metadata policy: {counts:?}"
+            );
+        }
         export_result
     })();
     let shutdown = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(90));
@@ -289,6 +331,7 @@ fn native_high_depth_alpha_export_uses_product_app_and_queue() -> anyhow::Result
         "schema_version": 1,
         "profile": "single-source-high-depth-alpha-export-v1",
         "requested_frames": frame_count,
+        "color_space_override": color_space_override,
         "export_wall_ms": export_wall_ms,
         "source": source,
         "source_sha256": sha256_file(&source)?,

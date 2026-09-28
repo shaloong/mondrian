@@ -1483,12 +1483,16 @@ unavailability.
 When executable media color identity is missing, `MissingColorMetadataPolicy` resolves it as:
 
 - Assume Rec.709
-- Assume sequence working space
 - Reject media
 
 Clip-level `MediaInterpretation.color_space_override` takes precedence over executable metadata.
 Preview and export both follow override -> executable metadata -> missing-policy
 resolution through `MissingColorMetadataPolicy::resolve_input_decision(...)`.
+Their resolved color inputs share `SourceColorModule::decode_contract` when
+lowered for Media: only `MissingPolicyAssumeRec709` binds a BT.709 fallback for a
+missing decoded YCbCr matrix. An RGB color-space override does not authorize a
+matrix; present decoder matrix metadata remains authoritative. Range is resolved
+independently and remains part of the same immutable decode/cache contract.
 The returned `InputColorResolution` is the shared diagnostic record for the
 decision branch, including override, executable metadata, policy, sequence working
 space, and whether the media was rejected. Each Export

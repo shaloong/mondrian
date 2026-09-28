@@ -3931,8 +3931,13 @@ with one separate precedence rule: explicit asset range override, then probed
 range, otherwise `Unknown`. `Unknown` continues to fail closed at YUV conversion
 or proxy-generation boundaries.
 YUV matrix authority is likewise independent: the decoded frame must carry an
-explicit supported matrix. Source `ColorSpace` is never used to infer a missing
-matrix; proven RGB sampling has no YCbCr matrix requirement.
+explicit supported matrix, or the decode contract must carry the Sequence's
+explicit `MissingPolicyAssumeRec709` BT.709 fallback. Preview and Export lower
+the resolved decision through `SourceColorModule::decode_contract`, which binds
+that fallback into the existing decode/cache identity. Explicit decoded matrix
+metadata wins; unsupported or contradictory frame metadata still fails closed.
+Source `ColorSpace`, including an RGB color-space override, never independently
+authorizes a missing matrix; proven RGB sampling has no YCbCr matrix requirement.
 
 Unknown/missing metadata policy is resolved from the Sequence input-color
 settings, not by UI panels. A nested Sequence keeps its own media

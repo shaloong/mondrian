@@ -9434,7 +9434,11 @@ fn resolve_export_source_preparation(
     }
     let (source_contract, preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
-            PreviewSourceColorContract::new(color_space, input_video_range),
+            SourceColorModule::decode_contract(
+                color_space,
+                input_video_range,
+                input_color_resolution.source,
+            ),
             SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
                 &color_context.media_input(auto_tone_map),
             )),
@@ -12814,6 +12818,126 @@ mod tests {
             payload: AssetColorPayload::NonColorData,
             ..AssetMediaInterpretation::default()
         }
+    }
+
+    #[test]
+    fn export_assumed_rec709_decodes_untagged_yuv_into_working_color() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO");
+        let root = tempfile::tempdir().expect("untagged YUV source directory");
+        let source = root.path().join("untagged.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        // Limited-range endpoints have exact 8-bit RGB carriers, independent
+        // of swscale's integer rounding at intermediate luma values.
+        let codes = [16, 235, 16, 235, 16, 235, 16, 235];
+        bytes.extend_from_slice(&codes);
+        bytes.extend_from_slice(&[128; 4]);
+        std::fs::write(&source, bytes).expect("untagged neutral source");
+        let dependency =
+            test_media_dependency(source, None, AssetMediaInterpretation::default(), None);
+        let mut sequence = Sequence::new("assumed Rec.709 export");
+        sequence.settings.color.input.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeRec709;
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid context");
+        let preparation = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: None,
+                auto_tone_map: false,
+                dependency: &dependency,
+                // Range is independently authorized; the test isolates matrix policy.
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("missing metadata policy resolves input");
+        assert_eq!(
+            preparation.resolution_source,
+            InputColorResolutionSource::MissingPolicyAssumeRec709
+        );
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+        let cancellation = ExecutionCancellationToken::new();
+        let decoded = decode_video_layer_scaled(
+            ExportVideoLayerDecodeRequest {
+                asset_id: AssetId::new(),
+                dependency: &dependency,
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                decode_resolution: Resolution { width: 4, height: 2 },
+                source_resolution: Resolution { width: 4, height: 2 },
+                picture_geometry: square_picture_geometry(Resolution { width: 4, height: 2 }),
+                source_color: preparation.source_contract,
+                alpha_interpretation: AlphaInterpretation::Straight,
+                preparation_intent: preparation.preparation_intent,
+            },
+            ExportVideoLayerDecodeExecutionContext {
+                color_session: &mut color_session,
+                decode_context: &mut decoder,
+                cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
+            },
+        );
+        // Close the real decode session even when reproducing a decode rejection.
+        decoder.clear();
+        drop(decoder);
+        let decoded = decoded.expect("assumed Rec.709 must authorize missing YUV matrix");
+        let frame = decoded.cpu_frame().expect("CPU working frame").rgba_f32();
+        assert_eq!(frame.color_space, color_context.working_color_space());
+        assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 1);
+        for (pixel, code) in frame.data.iter().zip(codes) {
+            let encoded = (f32::from(code) - 16.0) / 219.0;
+            let mut reference = [encoded, encoded, encoded, 1.0];
+            color_context
+                .engine()
+                .convert_identity_float(
+                    &mut reference,
+                    ColorSpace::Rec709.into(),
+                    color_context.working_color_space().into(),
+                )
+                .expect("independent working reference");
+            for channel in 0..4 {
+                assert!(
+                    (pixel[channel] - reference[channel]).abs() <= 1.0e-3,
+                    "working pixel {pixel:?}, reference {reference:?}"
+                );
+            }
+        }
+        let explicit = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: Some(ColorSpace::Rec709),
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("RGB override resolves color but not missing matrix");
+        assert_eq!(
+            explicit.resolution_source,
+            InputColorResolutionSource::Override
+        );
+        assert_ne!(explicit.source_contract, preparation.source_contract);
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let rejected = decoder.decode_cancellable(
+            PreviewDecodeRequest::new(
+                &dependency.path,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                explicit.source_contract,
+            ),
+            || false,
+        );
+        decoder.clear();
+        drop(decoder);
+        assert!(rejected
+            .expect_err("RGB override cannot infer matrix")
+            .to_string()
+            .contains("YUV matrix is unspecified"));
     }
 
     #[test]

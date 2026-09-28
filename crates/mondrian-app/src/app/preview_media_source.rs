@@ -16,14 +16,14 @@ use mondrian_core::{
     PictureInterpretationOverrides, Resolution, ResolvedPictureGeometry, TimelineTime,
 };
 use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
-    PreviewDecodeSource, PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract,
-    ProxyConfig, ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
+    DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
+    PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
+    ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
 use mondrian_renderer::{color::SourceColorModule, SourceFramePreparationIntent};
 use mondrian_timeline::sequence::{
-    InputColorResolution, InputColorResolutionSource, MediaInputColorContext, ResolvedInputColor,
+    InputColorResolution, MediaInputColorContext, ResolvedInputColor,
 };
 
 use super::preview_access_mode::MediaPreviewKey;
@@ -211,9 +211,13 @@ pub(crate) fn resolve_preview_media_source(
             primary_video.color_range,
         )
     };
-    let (mut source_color, mut preparation_intent) = match input_color_resolution.resolved {
+    let (source_color, mut preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
-            PreviewSourceColorContract::new(color_space, input_video_range),
+            SourceColorModule::decode_contract(
+                color_space,
+                input_video_range,
+                input_color_resolution.source,
+            ),
             SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
                 request.input_color,
             )),
@@ -241,12 +245,6 @@ pub(crate) fn resolve_preview_media_source(
             });
         }
     };
-    if input_color_resolution.source == InputColorResolutionSource::MissingPolicyAssumeRec709 {
-        // "Assume Rec.709" must authorize the complete YUV-to-RGB
-        // interpretation. Binding BT.709 here makes the fallback explicit in
-        // the decode/cache identity instead of relying on swscale defaults.
-        source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
-    }
     let source_has_alpha = proven_sampling.has_alpha;
     let source_resolution = Resolution {
         width: primary_video.width,

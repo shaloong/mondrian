@@ -7,10 +7,11 @@ use mondrian_core::types::{ColorSpace, Rational};
 use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
-    DecodedVideoRange, DetectedColorInterpretation, MediaInfo, PreviewHardwareDecodeRequest,
-    PreviewNativeSurfaceHint, VideoCodecProfile, VideoColorDetectionMethod,
-    VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
-    VideoColorMetadataHintScope, VideoColorSpaceSource, VideoStreamInfo,
+    DecodedVideoMatrix, DecodedVideoRange, DetectedColorInterpretation, MediaInfo,
+    PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint, VideoCodecProfile,
+    VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    VideoColorInterpretationEvidence, VideoColorMetadataHintScope, VideoColorSpaceSource,
+    VideoStreamInfo,
 };
 use mondrian_timeline::sequence::{MissingColorMetadataPolicy, Sequence};
 
