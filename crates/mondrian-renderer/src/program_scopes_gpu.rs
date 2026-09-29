@@ -1154,8 +1154,13 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_atomic_histograms_match_cpu_reference_without_frame_readback() {
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping GPU scopes test: no adapter available");
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU scopes qualification policy");
+        let Some(context) = policy
+            .admit_adapter("gpu-program-scopes", GpuContext::new().await)
+            .expect("GPU scopes adapter admission")
+        else {
+            eprintln!("skipping diagnostic GPU scopes test: no adapter available");
             return;
         };
         let pixels = vec![
@@ -1305,8 +1310,13 @@ mod tests {
 
     #[tokio::test]
     async fn grouped_global_atomics_preserve_exact_high_entropy_counts() {
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping GPU scopes test: no adapter available");
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU scopes qualification policy");
+        let Some(context) = policy
+            .admit_adapter("gpu-program-scopes", GpuContext::new().await)
+            .expect("GPU scopes adapter admission")
+        else {
+            eprintln!("skipping diagnostic GPU scopes test: no adapter available");
             return;
         };
         const WIDTH: u32 = 256;
@@ -1428,8 +1438,13 @@ mod tests {
     }
     #[tokio::test]
     async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping GPU scopes test: no adapter available");
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("GPU scopes qualification policy");
+        let Some(context) = policy
+            .admit_adapter("gpu-program-scopes", GpuContext::new().await)
+            .expect("GPU scopes adapter admission")
+        else {
+            eprintln!("skipping diagnostic GPU scopes test: no adapter available");
             return;
         };
         let pixels = [
