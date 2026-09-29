@@ -150,7 +150,9 @@ struct FutureMediaColdActivationMemo {
 struct FutureMediaColdActivationResidency {
     activation_frame: i64,
     frames: Vec<MediaPreviewFrame>,
-    preparation_guards: Vec<MediaPreviewFrame>,
+    preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
+    source_coverage_guards: Vec<MediaPreviewFrame>,
+    preparation_work_keys: Vec<MediaPreviewKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -320,24 +322,85 @@ impl FutureMediaWindowCache {
             activation_frame,
             frames,
             preparation_guards: Vec::new(),
+            source_coverage_guards: Vec::new(),
+            preparation_work_keys: Vec::new(),
         });
     }
 
     fn retain_cold_preparation(
         &mut self,
         activation_frame: i64,
-        preparation_guards: Vec<MediaPreviewFrame>,
+        preparation_guards: Vec<(MediaPreviewKey, MediaPreviewFrame)>,
+        source_coverage_guards: Vec<MediaPreviewFrame>,
+        preparation_work_keys: Vec<MediaPreviewKey>,
     ) {
-        if preparation_guards.is_empty()
+        if (preparation_guards.is_empty()
+            && source_coverage_guards.is_empty()
+            && preparation_work_keys.is_empty())
             || self.cold_activation.and_then(|memo| memo.activation_frame) != Some(activation_frame)
         {
             return;
         }
-        self.cold_activation_residency = Some(FutureMediaColdActivationResidency {
-            activation_frame,
-            frames: Vec::new(),
-            preparation_guards,
+        let residency = self.cold_activation_residency.get_or_insert_with(|| {
+            FutureMediaColdActivationResidency {
+                activation_frame,
+                frames: Vec::new(),
+                preparation_guards: Vec::new(),
+                source_coverage_guards: Vec::new(),
+                preparation_work_keys: Vec::new(),
+            }
         });
+        debug_assert_eq!(residency.activation_frame, activation_frame);
+        residency.frames.clear();
+        // An independent input can enter while an earlier cold request still
+        // owns its worker. Extend that same preparation instead of replacing
+        // the earlier producer's coverage or completed inputs.
+        for (key, frame) in preparation_guards {
+            if !residency.preparation_guards.iter().any(|(held, _)| *held == key) {
+                residency.preparation_guards.push((key, frame));
+            }
+        }
+        for key in preparation_work_keys {
+            if !residency.preparation_work_keys.contains(&key) {
+                residency.preparation_work_keys.push(key);
+            }
+        }
+        residency.source_coverage_guards.extend(source_coverage_guards);
+        if residency.preparation_work_keys.is_empty() {
+            residency.source_coverage_guards.clear();
+        }
+    }
+
+    fn reconcile_cold_preparation(
+        &mut self,
+        active_work_keys: impl FnOnce() -> Vec<MediaPreviewKey>,
+        mut resident_frame: impl FnMut(&MediaPreviewKey) -> Option<MediaPreviewFrame>,
+    ) {
+        let Some(residency) = self.cold_activation_residency.as_mut() else {
+            return;
+        };
+        if residency.preparation_work_keys.is_empty() {
+            return;
+        }
+        let active_work_keys = active_work_keys();
+        residency.preparation_work_keys.retain(|key| {
+            if active_work_keys.contains(key) {
+                return true;
+            }
+            // The Broker's actual lease return ends worker coverage, including
+            // canceled attempts whose publication binding is already gone. Capture a
+            // successful cold input before releasing that coverage, so nearer
+            // rolling admission cannot evict the newly completed source.
+            if !residency.preparation_guards.iter().any(|(held, _)| held == key)
+                && let Some(frame) = resident_frame(key)
+            {
+                residency.preparation_guards.push((key.clone(), frame));
+            }
+            false
+        });
+        if residency.preparation_work_keys.is_empty() {
+            residency.source_coverage_guards.clear();
+        }
     }
 
     /// Bind newly discovered cold sources to the worker that will open them.
@@ -523,10 +586,12 @@ impl FutureMediaWindowCache {
                 .cold_activation_residency
                 .as_ref()
                 .map_or(0, |residency| residency.frames.len()),
-            retained_cold_preparation_media_frames: self
-                .cold_activation_residency
-                .as_ref()
-                .map_or(0, |residency| residency.preparation_guards.len()),
+            retained_cold_preparation_media_frames: self.cold_activation_residency.as_ref().map_or(
+                0,
+                |residency| {
+                    residency.preparation_guards.len() + residency.source_coverage_guards.len()
+                },
+            ),
         }
     }
 }
@@ -916,6 +981,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             // prefetch owner.
             return FutureMediaPrefetchReadiness::READY;
         }
+        self.future_media_window.borrow_mut().reconcile_cold_preparation(
+            || self.scheduler.active_keys(),
+            |key| self.frame_store.borrow_mut().media_frame(key),
+        );
         let mut future_admission_allowed = transport.allows_future_media_admission(Instant::now());
         if self.playback_sustained_pressure_active() {
             bump(&self.metrics.playback_prefetch_skipped_sustained_pressure);
@@ -1140,7 +1209,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 )
             };
             let mut activation_plan = plan_activation(remaining_prefetch_jobs);
-            let mut preparation_guards = Vec::new();
+            let mut source_coverage_guards = Vec::new();
             let mut nearest_guards = Vec::new();
             self.future_media_window
                 .borrow_mut()
@@ -1223,7 +1292,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         );
                         let resident_coverage = coverage.ready_media_frames == coverage_frames
                             && coverage.preservable_media_frames == coverage_frames;
-                        preparation_guards = std::mem::take(&mut coverage.resident_guards);
+                        source_coverage_guards = std::mem::take(&mut coverage.resident_guards);
                         let scheduled = self.admit_future_media_prefix(
                             coverage,
                             preroll_deadline_at,
@@ -1261,26 +1330,50 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                 && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
+            let preparation_guards = if bounded_cold_activation_ready {
+                Vec::new()
+            } else {
+                activation_plan
+                    .first_media_frame
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|request| {
+                        self.frame_store
+                            .borrow_mut()
+                            .media_frame(&request.key)
+                            .map(|frame| (request.key.clone(), frame))
+                    })
+                    .collect()
+            };
             if bounded_cold_activation_ready {
                 self.future_media_window.borrow_mut().retain_cold_activation_residency(
                     activation_frame,
                     std::mem::take(&mut activation_plan.resident_guards),
                 );
-            } else {
-                // Completed cold inputs must survive the remaining activation
-                // work, even when their decoder no longer needs near coverage.
-                preparation_guards.extend(std::mem::take(&mut activation_plan.resident_guards));
             }
+            let preparation_work_keys = activation_plan
+                .requests
+                .iter()
+                .map(|request| request.key.clone())
+                .collect::<Vec<_>>();
             let activation_scheduled = self.admit_future_media_prefix(
                 activation_plan,
                 preroll_deadline_at,
                 PreviewPlaybackDirection::Forward,
             );
             remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(activation_scheduled);
-            if activation_scheduled > 0 && !preparation_guards.is_empty() {
-                self.future_media_window
-                    .borrow_mut()
-                    .retain_cold_preparation(activation_frame, preparation_guards);
+            if activation_scheduled > 0 {
+                let active_work_keys = self.scheduler.active_keys();
+                self.future_media_window.borrow_mut().retain_cold_preparation(
+                    activation_frame,
+                    preparation_guards,
+                    source_coverage_guards,
+                    preparation_work_keys
+                        .into_iter()
+                        .filter(|key| active_work_keys.contains(key))
+                        .collect(),
+                );
             }
             // Keep complete-picture guards through both actual admissions;
             // only the blocked owner's coverage survives this turn.

@@ -2071,9 +2071,15 @@ presentation boundary. It remains within the existing temporal ceiling. Unknown
 cost, missing period, an open-ended latency bucket, or coverage beyond that
 ceiling retains conservative complete-window protection. This prediction neither
 renews a demand deadline nor guarantees that an unobserved future open meets it.
-Only resident coverage permits a cold admission. Its actual pixel guards and
-already-resident cold inputs survive through the existing cold-activation owner
-until the complete cold picture becomes resident or decoded residency is trimmed.
+Only resident coverage permits a cold admission. The existing cold-activation
+owner binds that coverage to the actual admitted Broker work keys. Before new
+rolling admission, it reconciles the Broker's active ownership, including canceled
+in-flight leases until their worker return. Completed cold inputs are retained
+before coverage is released; those inputs survive until the complete cold picture
+becomes resident, the activation expires, or decoded residency is trimmed.
+An independently admitted later input extends the same preparation and cannot
+discard an earlier worker's still-needed coverage. Near coverage ends when its
+physical work returns, not when the entire far picture finally becomes Ready.
 Preparation guards are reported separately and cannot publish cold readiness.
 If the remaining Broker grant cannot admit the complete cold picture, covered
 preparation may admit one canonical decode request for a distinct new moving

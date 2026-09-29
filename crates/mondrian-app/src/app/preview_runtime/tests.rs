@@ -6118,21 +6118,48 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
 #[test]
 fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() {
     for capacity in [7, 8] {
-        assert_cold_source_preparation(capacity, true, true);
+        assert_cold_source_preparation(capacity, true, true, ColdPreparationContinuation::Complete);
     }
 }
 
 #[test]
 fn cold_source_preparation_does_not_wait_for_the_existing_sources_restart() {
-    assert_cold_source_preparation(7, false, true);
+    assert_cold_source_preparation(7, false, true, ColdPreparationContinuation::Complete);
 }
 
 #[test]
 fn idle_worker_can_prepare_a_cold_source_with_one_remaining_slot() {
-    assert_cold_source_preparation(7, false, false);
+    assert_cold_source_preparation(7, false, false, ColdPreparationContinuation::Complete);
 }
 
-fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_near_worker: bool) {
+#[test]
+fn completed_cold_source_releases_coverage_before_rolling_prefetch() {
+    assert_cold_source_preparation(7, false, true, ColdPreparationContinuation::Advance(51));
+}
+
+#[test]
+fn canceled_cold_source_keeps_coverage_until_its_worker_lease_returns() {
+    assert_cold_source_preparation(7, false, true, ColdPreparationContinuation::CancelInFlight);
+}
+
+#[test]
+fn later_cold_input_admission_keeps_earlier_worker_coverage() {
+    assert_cold_source_preparation(7, false, true, ColdPreparationContinuation::OverlapRestart);
+}
+
+enum ColdPreparationContinuation {
+    Complete,
+    Advance(i64),
+    CancelInFlight,
+    OverlapRestart,
+}
+
+fn assert_cold_source_preparation(
+    capacity: usize,
+    seed_restart: bool,
+    shares_near_worker: bool,
+    continuation: ColdPreparationContinuation,
+) {
     let (mut state, root) = state_with_sequential_invalid_video_assets();
     let mut ids = Vec::new();
     for name in ["third.mp4", "overlay.mp4"] {
@@ -6268,6 +6295,45 @@ fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_ne
     // Complete both actual Broker leases. The speculative guards must not
     // declare the cold picture Ready before its missing decode completes.
     let receiver = service.scheduler.job_receiver();
+    if matches!(continuation, ColdPreparationContinuation::CancelInFlight) {
+        let job = match receiver.recv_for_worker_outcome_timeout(
+            MediaPreviewWorkerLane::NonPlayback,
+            Duration::from_millis(10),
+        ) {
+            MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+            other => panic!("expected cold execution lease: {other:?}"),
+        };
+        assert_eq!(job.key, *cold);
+        let execution = job.execution_id.expect("physical worker lease");
+        service.scheduler.close();
+        assert!(!service.scheduler.has_pending_key(cold));
+        assert!(service.scheduler.active_keys().contains(cold));
+        schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        assert_eq!(
+            service
+                .future_media_window
+                .borrow()
+                .diagnostics()
+                .retained_cold_preparation_media_frames,
+            2
+        );
+        service.scheduler.abandon_execution(execution);
+        drop(job);
+        assert!(!service.scheduler.active_keys().contains(cold));
+        schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        assert_eq!(
+            service
+                .future_media_window
+                .borrow()
+                .diagnostics()
+                .retained_cold_preparation_media_frames,
+            0
+        );
+        service.shutdown();
+        drop(state);
+        std::fs::remove_dir_all(root).expect("cleanup canceled preparation");
+        return;
+    }
     let complete_queued_job = |lane| {
         let mut job = match receiver
             .recv_for_worker_outcome_timeout(lane, Duration::from_millis(10))
@@ -6289,15 +6355,67 @@ fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_ne
         let _ = service.scheduler.resolve_execution(execution, false);
         job.key
     };
-    for lane in [
-        MediaPreviewWorkerLane::Playback,
-        MediaPreviewWorkerLane::NonPlayback,
-    ] {
-        complete_queued_job(lane);
-    }
-    if !seed_restart {
+    complete_queued_job(MediaPreviewWorkerLane::Playback);
+    if matches!(continuation, ColdPreparationContinuation::OverlapRestart) {
         schedule_media_prefetches_for_state(&service, &state, sequence, 48);
         assert!(service.scheduler.has_pending_key(overlay_restart));
+        assert!(service.scheduler.active_keys().contains(cold));
+        assert_eq!(
+            service
+                .future_media_window
+                .borrow()
+                .diagnostics()
+                .retained_cold_preparation_media_frames,
+            2
+        );
+        assert_eq!(
+            complete_queued_job(MediaPreviewWorkerLane::Playback),
+            *overlay_restart
+        );
+        schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        assert_eq!(
+            service
+                .future_media_window
+                .borrow()
+                .diagnostics()
+                .retained_cold_preparation_media_frames,
+            3
+        );
+    }
+    complete_queued_job(MediaPreviewWorkerLane::NonPlayback);
+    let mut current_guards = Vec::new();
+    let mut rolling_keys = Vec::new();
+    let scheduling_frame = match continuation {
+        ColdPreparationContinuation::Advance(frame) => frame,
+        _ => 48,
+    };
+    if let ColdPreparationContinuation::Advance(frame) = continuation {
+        // The physically presented picture remains owned while its successor
+        // is decoded. Old cold-open coverage must not evict that successor
+        // when the independent overlay restart later acquires its real slot.
+        for key in near.iter().rev().take(2) {
+            current_guards
+                .push(service.frame_store.borrow_mut().media_frame(key).expect("current picture"));
+        }
+        rolling_keys = future_media_prefix_keys_for_state(&service, &state, frame, 1, resolution);
+        schedule_media_prefetches_for_state(&service, &state, sequence, frame);
+        for lane in [
+            MediaPreviewWorkerLane::Playback,
+            MediaPreviewWorkerLane::NonPlayback,
+        ] {
+            let key = complete_queued_job(lane);
+            assert!(
+                rolling_keys.contains(&key),
+                "the next full picture owns both available slots"
+            );
+        }
+    }
+    if !seed_restart && !matches!(continuation, ColdPreparationContinuation::OverlapRestart) {
+        schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
+        assert!(service.scheduler.has_pending_key(overlay_restart));
+        for key in &rolling_keys {
+            assert!(service.frame_store.borrow_mut().media_frame(key).is_some(), "completed cold work must release obsolete coverage before a restart can evict the nearest picture");
+        }
         assert_eq!(
             service
                 .future_media_window
@@ -6312,7 +6430,7 @@ fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_ne
             *overlay_restart
         );
     }
-    schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+    schedule_media_prefetches_for_state(&service, &state, sequence, scheduling_frame);
     let complete = service.future_media_window.borrow().diagnostics();
     assert_eq!(complete.retained_cold_preparation_media_frames, 0);
     assert_eq!(complete.retained_cold_activation_media_frames, 2);
@@ -6321,6 +6439,7 @@ fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_ne
     let trimmed = service.future_media_window.borrow().diagnostics();
     assert_eq!(trimmed.retained_cold_preparation_media_frames, 0);
     assert_eq!(trimmed.retained_cold_activation_media_frames, 0);
+    drop(current_guards);
     service.shutdown();
     drop(state);
     std::fs::remove_dir_all(root).expect("cleanup");
