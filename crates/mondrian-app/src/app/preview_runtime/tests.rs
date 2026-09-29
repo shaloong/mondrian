@@ -5909,6 +5909,41 @@ fn blocked_immediate_closure_does_not_admit_farther_cold_source() {
     assert!(service.scheduler.mark_execution_completed(held_execution));
     let _ = service.scheduler.resolve_execution(held_execution, false);
 
+    // The two free entries belong to the next complete rolling picture.
+    // A merely proposed cold reservation must not consume its headroom and
+    // then prevent both plans from admitting any work.
+    service.frame_store.replace(test_cpu_frame_store(4, 640 * 1024 * 1024, 6));
+    for key in &immediate_keys {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch,
+        ));
+    }
+    let next_keys = future_media_prefix_keys_for_state(&service, &state, 1, 1, resolution);
+    assert_eq!(next_keys.len(), 2);
+    schedule_media_prefetches_for_state(&service, &state, sequence, 0);
+    assert!(
+        next_keys.iter().all(|key| service.scheduler.has_pending_key(key)),
+        "unadmitted cold work cannot reserve capacity ahead of the rolling frontier"
+    );
+    assert!(!service.scheduler.has_pending_key(&far_keys[0]));
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 2);
+    let receiver = service.scheduler.job_receiver();
+    for lane in [
+        MediaPreviewWorkerLane::Playback,
+        MediaPreviewWorkerLane::NonPlayback,
+    ] {
+        let job = match receiver.recv_for_worker_outcome_timeout(lane, Duration::from_millis(10)) {
+            MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+            other => panic!("expected complete rolling picture on {lane:?}: {other:?}"),
+        };
+        let execution_id = job.execution_id.expect("execution lease");
+        assert!(service.scheduler.mark_execution_completed(execution_id));
+        let _ = service.scheduler.resolve_execution(execution_id, false);
+    }
+
     // Queue slots are now free, but a resident immediate picture leaves only
     // one physical entry. The next rolling picture needs two new inputs. A
     // one-input cold activation on the same worker must not cross that grant

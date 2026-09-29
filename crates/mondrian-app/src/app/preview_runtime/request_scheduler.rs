@@ -902,7 +902,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 0,
-                &[],
             );
             let current_media_closure_ready = current_plan.window_proven_blank
                 || (current_plan.preservable_media_frames > 0
@@ -1016,7 +1015,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 remaining_prefetch_jobs,
-                &[],
             );
             immediate_window_proven_blank = immediate_plan.window_proven_blank;
             immediate_closure = immediate_plan.first_media_frame.clone();
@@ -1039,7 +1037,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 };
             }
         }
-        let admit_steady_prefix = |slots, reserved_after_prefix: &[PlannedFutureMediaRequest]| {
+        let admit_steady_prefix = |slots| {
             let plan = self.plan_future_media_prefix(
                 snapshot,
                 proxy_demands,
@@ -1051,7 +1049,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 slots,
-                reserved_after_prefix,
             );
             let window_proven_blank = plan.window_proven_blank;
             let admission_limit_reached = plan.admission_limit_reached;
@@ -1074,7 +1071,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     Resolution { width: target_width, height: target_height },
                     color_context.clone(),
                     slots,
-                    &[],
                 )
             };
             let mut activation_plan = plan_activation(remaining_prefetch_jobs);
@@ -1091,13 +1087,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // The next Program frame may reuse an already decoded source
                 // sample. A cold open on that source's worker can still outlast
                 // the first missing sample in the rolling prefix. Give that
-                // prefix first admission, and replan cold work against the
-                // remaining real capacity without retaining far pixel guards.
-                let cold_reservations = activation_plan.requests.clone();
+                // prefix first admission against real ownership. An unadmitted
+                // cold proposal cannot reduce that prefix's physical headroom:
+                // doing so could reject both complete closures with no producer.
+                // Replan cold work after near admission, without far pixel guards.
                 drop(activation_plan);
                 observation.next("prefetch-window");
                 let (window_proven_blank, scheduled, admission_limit_reached) =
-                    admit_steady_prefix(remaining_prefetch_jobs, &cold_reservations);
+                    admit_steady_prefix(remaining_prefetch_jobs);
                 admitted_steady_window = Some(window_proven_blank);
                 remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
                 observation.next("prefetch-cold");
@@ -1142,7 +1139,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 Resolution { width: target_width, height: target_height },
                 color_context.clone(),
                 remaining_prefetch_jobs,
-                &[],
             );
             let window_proven_blank = immediate_plan.window_proven_blank;
             let immediate_scheduled = self.admit_future_media_prefix(
@@ -1169,7 +1165,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Some(window_proven_blank) => immediate_window_proven_blank && window_proven_blank,
             None => {
                 let (window_proven_blank, scheduled, _) =
-                    admit_steady_prefix(steady_admission_slots, &[]);
+                    admit_steady_prefix(steady_admission_slots);
                 remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
                 immediate_window_proven_blank && window_proven_blank
             }
@@ -1212,7 +1208,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         Resolution { width: target_width, height: target_height },
                         color_context,
                         remaining_prefetch_jobs,
-                        &[],
                     );
                     self.future_media_window
                         .borrow_mut()
@@ -1302,7 +1297,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Resolution { width: target_width, height: target_height },
             color_context,
             0,
-            &[],
         );
         let bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
             && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
@@ -1397,7 +1391,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_resolution: Resolution,
         color_context: ProgramColorContext,
         max_new_jobs: usize,
-        reserved_after_prefix: &[PlannedFutureMediaRequest],
     ) -> FutureMediaPrefixPlan {
         let mut plan = FutureMediaPrefixPlan::default();
         let mut accepted_keys = self.scheduler.pending_keys().into_iter().collect::<HashSet<_>>();
@@ -1478,23 +1471,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             // rejected farther frame: otherwise that frame could block a
             // previously accepted nearer missing request during admission.
             let mut headroom = self.frame_store.borrow().media_prefetch_headroom();
-            // Plan the near prefix and the discovered cold closure against
-            // one physical grant. This is a planning deduction, not a second
-            // lease or authority. Existing/pending and shared keys are already
-            // represented and must not be charged again.
-            let cold_tail_fits = reserved_after_prefix.iter().all(|cold| {
-                accepted_keys.contains(&cold.key)
-                    || requests.iter().any(|near| near.key == cold.key)
-                    || headroom.try_reserve_many(
-                        cold.reservation.entries,
-                        cold.reservation.cpu_bytes,
-                        cold.reservation.decoder_resource_units,
-                    )
-            });
-            if !cold_tail_fits {
-                plan.admission_limit_reached = true;
-                break;
-            }
             let prior_requests_fit = plan.requests.iter().all(|request| {
                 headroom.try_reserve_many(
                     request.reservation.entries,
@@ -1574,7 +1550,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             target_resolution,
             color_context,
             max_future_frames.saturating_mul(64).max(1),
-            &[],
         )
         .requests
         .into_iter()
@@ -1805,7 +1780,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             } else {
                 0
             },
-            &[],
         );
         let ready_media_frames = plan.ready_media_frames;
         let preservable_media_frames = plan.preservable_media_frames;

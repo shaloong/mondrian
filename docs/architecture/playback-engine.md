@@ -2044,15 +2044,17 @@ immediate closure, the existing rolling prefix gets first claim on the remaining
 bounded admissions. A resident immediate frame can cover the same decoded source
 sample as its predecessor, so it does not prove that the next physical sample is
 already available. Cold-plan pixel guards are dropped before planning that near
-prefix. That prefix deducts the missing cold closure from the same physical
-headroom before accepting near residency; it cannot consume the entire grant
-and starve the source it must later present. Shared and already-owned keys are
-charged once. Cold work is then replanned against the remaining actual capacity.
+prefix. That prefix plans against actual Frame Store and Broker ownership;
+an unadmitted cold proposal cannot spend its headroom. Deducting such a proposal
+could reject a nearer complete picture that fits the remaining grant and then
+reject cold work at that same frontier, leaving no producer to make progress.
+Shared and already-owned keys are charged once. Cold work is then replanned
+against the remaining actual capacity.
 The next missing rolling picture retains one admission frontier for both queue
 slots and physical entry, byte and decoder-resource grants. One spare slot or
 physical entry cannot go to a smaller far closure when that nearer picture needs
-two. A failure to fit the reserved cold tail or previously planned near requests
-also closes this frontier; the scheduler cannot mistake physical refusal for an
+two. A failure to fit previously planned near requests also closes this frontier;
+the scheduler cannot mistake physical refusal for an
 unblocked prefix and then admit the smaller cold plan independently.
 On a single-worker topology, opposite logical lanes share the same actual owner.
 These rules avoid placing a long source open ahead of the current source's next decode
