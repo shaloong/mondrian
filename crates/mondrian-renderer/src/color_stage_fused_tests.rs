@@ -147,6 +147,7 @@ fn fused_yuv_input_matches_two_pass_sdr_pq_hlg() {
                         &prepared.bind_group
                     },
                     &output.resource().texture_view,
+                    None,
                 );
                 let reference = runtime.frame_table().get(&working).expect("working result");
                 let expected = readback(&context, &mut encoder, reference);

@@ -7,18 +7,19 @@ use super::audio_playback_acceptance::{
     ProfessionalVideoReadinessObservation,
 };
 use super::playback_acceptance::{
-    evaluate_playback_qualification, evaluate_professional_playback,
-    PlaybackDecodeExecutionEvidence, PresentedDecodeExecutionEvidence,
-    PreviewCancellationRecoveryEvidence, PreviewPlaybackMediaProbeReport,
-    PreviewPlaybackQualificationGateReport, PreviewPlaybackQualificationObservation,
-    PreviewProcessMemoryEvidenceCollector, PreviewProcessMemoryEvidenceReport,
-    PreviewProfessionalPlaybackGateReport, PreviewRuntimeAcceptanceEvidence,
-    ProfessionalNativeVideoGpuTimingEvidence, ProfessionalPlaybackObservation,
-    PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS, PROFESSIONAL_MIN_ACCURATE_SEEKS,
-    PROFESSIONAL_MIN_OBSERVED_DURATION_US, PROFESSIONAL_MIN_READY_BASIS_POINTS,
-    PROFESSIONAL_MIN_VISIBLE_PERCENT, PROFESSIONAL_MIN_WARM_SEEKS,
-    PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US, PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US,
-    PROFESSIONAL_READY_TIMEOUT_MS, PROFESSIONAL_TOTAL_TIMEOUT_MS,
+    evaluate_playback_qualification, evaluate_professional_native_video_gpu_timing,
+    evaluate_professional_playback, PlaybackDecodeExecutionEvidence,
+    PresentedDecodeExecutionEvidence, PreviewCancellationRecoveryEvidence,
+    PreviewPlaybackMediaProbeReport, PreviewPlaybackQualificationGateReport,
+    PreviewPlaybackQualificationObservation, PreviewProcessMemoryEvidenceCollector,
+    PreviewProcessMemoryEvidenceReport, PreviewProfessionalPlaybackGateReport,
+    PreviewRuntimeAcceptanceEvidence, ProfessionalNativeVideoGpuTimingEvidence,
+    ProfessionalPlaybackObservation, PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
+    PROFESSIONAL_MIN_ACCURATE_SEEKS, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+    PROFESSIONAL_MIN_READY_BASIS_POINTS, PROFESSIONAL_MIN_VISIBLE_PERCENT,
+    PROFESSIONAL_MIN_WARM_SEEKS, PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US,
+    PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US, PROFESSIONAL_READY_TIMEOUT_MS,
+    PROFESSIONAL_TOTAL_TIMEOUT_MS,
 };
 use super::playback_preview::{
     pump_playback_preview, PlaybackPreviewAdapter, PlaybackPreviewPumpOutcome,
@@ -2372,23 +2373,26 @@ struct ContinuousPlaybackWindowEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewNativeVideoGpuTimingPolicy {
     Disabled,
-    Strict { observation_capacity: usize },
+    Strict {
+        observation_capacity: usize,
+        ring_capacity: usize,
+    },
 }
 
 impl PreviewNativeVideoGpuTimingPolicy {
     const fn renderer_policy(self) -> NativeVideoImportGpuTimingPolicy {
         match self {
             Self::Disabled => NativeVideoImportGpuTimingPolicy::Disabled,
-            Self::Strict { .. } => NativeVideoImportGpuTimingPolicy::Enabled {
-                capacity: NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
-            },
+            Self::Strict { ring_capacity, .. } => {
+                NativeVideoImportGpuTimingPolicy::Enabled { capacity: ring_capacity }
+            }
         }
     }
 
     const fn observation_capacity(self) -> usize {
         match self {
             Self::Disabled => 0,
-            Self::Strict { observation_capacity } => observation_capacity,
+            Self::Strict { observation_capacity, .. } => observation_capacity,
         }
     }
 }
@@ -6132,6 +6136,8 @@ fn run_external_continuous_playback_gate(
             200_000,
         )
     };
+    let native_import_timing_requested = sealed
+        || std::env::var("MONDRIAN_PREVIEW_EXTERNAL_NATIVE_IMPORT_TIMING").as_deref() == Ok("1");
     let result = run_preview_media_continuous_playback_probe(
         &root_dir,
         &video_path,
@@ -6151,13 +6157,14 @@ fn run_external_continuous_playback_gate(
             resize_probe_frames: if seek_probe_count == 0 { 0 } else { 8 },
             video_layer_count,
             probe_cancellation_recovery: professional,
-            native_video_gpu_timing: if sealed {
+            native_video_gpu_timing: if native_import_timing_requested {
                 PreviewNativeVideoGpuTimingPolicy::Strict {
                     observation_capacity:
                         professional_native_video_gpu_timing_observation_capacity(
                             frame_count,
                             seek_probe_count,
                         )?,
+                    ring_capacity: NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
                 }
             } else {
                 PreviewNativeVideoGpuTimingPolicy::Disabled
@@ -6234,6 +6241,21 @@ fn run_external_continuous_playback_gate(
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
     write_report_if_needed(&report_json)?;
+
+    if native_import_timing_requested {
+        let timing = &report.native_video_gpu_timing;
+        let evidence = &timing.evidence;
+        let mut failures = Vec::new();
+        evaluate_professional_native_video_gpu_timing(evidence, &mut failures);
+        anyhow::ensure!(
+            failures.is_empty()
+                && timing.yuv_decode_marker_bracket.samples == evidence.renderer_submitted_imports
+                && timing.yuv_decode_marker_bracket.p95_us > 0,
+            "native-import GPU timestamp coverage incomplete: {failures:?}; marker_samples={}, renderer_submitted={}",
+            timing.yuv_decode_marker_bracket.samples,
+            evidence.renderer_submitted_imports,
+        );
+    }
 
     let failed_cases: Vec<_> =
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();

@@ -1015,7 +1015,7 @@ fn checked_evidence_total(values: &[u64]) -> Option<u64> {
     values.iter().try_fold(0_u64, |total, value| total.checked_add(*value))
 }
 
-fn evaluate_professional_native_video_gpu_timing(
+pub(crate) fn evaluate_professional_native_video_gpu_timing(
     evidence: &ProfessionalNativeVideoGpuTimingEvidence,
     failures: &mut Vec<PreviewAcceptanceFailure>,
 ) {

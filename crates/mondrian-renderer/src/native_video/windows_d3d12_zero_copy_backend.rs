@@ -708,6 +708,7 @@ impl D3D12NativeVideoImportBackend {
             &mut encoder,
             &prepared_yuv.bind_group,
             &working.resource().texture_view,
+            None,
         );
         // The first marker bracket now contains fused YUV sampling and OCIO.
         // The second remains empty; no intermediate color pass is submitted.

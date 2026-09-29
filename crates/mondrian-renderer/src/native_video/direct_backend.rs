@@ -11,6 +11,9 @@ use std::time::Instant;
 
 use mondrian_media::PreviewNativeDecodedFrame;
 
+#[cfg(target_os = "macos")]
+use super::gpu_timing::NativeVideoImportGpuTimingRuntime;
+
 use crate::{
     GpuColorFrameAllocationPlan, GpuColorFrameResource, GpuColorFrameWgpuResource,
     GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
@@ -18,6 +21,12 @@ use crate::{
     GpuNativeDecodedFrameImportSupport, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, NativeVideoImportCpuTimings,
     RenderGpuOutputBoundaryRuntime,
+};
+#[cfg(target_os = "macos")]
+use crate::{
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample,
 };
 
 /// Shader-readable planes plus any platform ownership retained by their wgpu
@@ -183,6 +192,8 @@ pub(crate) struct DirectNativeVideoImportBackend<A> {
     color_runtime: RenderGpuOutputBoundaryRuntime,
     frame_cpu_timings: NativeVideoImportCpuTimings,
     retained_sources: Arc<DirectRetainedSourceState>,
+    #[cfg(target_os = "macos")]
+    gpu_timing: NativeVideoImportGpuTimingRuntime,
 }
 
 impl<A> DirectNativeVideoImportBackend<A>
@@ -194,6 +205,7 @@ where
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+        #[cfg(target_os = "macos")] gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
     ) -> Result<Self, DirectNativeVideoImportBackendCreateError> {
         let color_runtime = RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool)
             .map_err(
@@ -213,7 +225,38 @@ where
             color_runtime,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
             retained_sources: Arc::new(DirectRetainedSourceState::default()),
+            #[cfg(target_os = "macos")]
+            gpu_timing: NativeVideoImportGpuTimingRuntime::new(device, queue, gpu_timing_policy),
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
+        self.gpu_timing.begin_candidate()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn end_viewer_candidate(
+        &mut self,
+        candidate: Option<NativeVideoImportCandidateToken>,
+        succeeded: bool,
+    ) -> Option<NativeVideoImportCandidateTimingReceipt> {
+        self.gpu_timing.end_candidate(candidate, succeeded)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn collect_gpu_timings_after_device_poll(&mut self) {
+        self.gpu_timing.collect_after_device_poll();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
+        self.gpu_timing.take_completed()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
+        self.gpu_timing.diagnostics()
     }
 
     pub(crate) fn support(&self) -> &GpuNativeDecodedFrameImportSupport {
@@ -355,15 +398,28 @@ where
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.native-video.direct-import"),
         });
+        #[cfg(target_os = "macos")]
+        let mut timing_probe = self.gpu_timing.begin_import(&mut encoder, None);
+        #[cfg(target_os = "macos")]
+        let pass_query_set = self.gpu_timing.fused_pass_query_set(&timing_probe);
+        #[cfg(not(target_os = "macos"))]
+        let pass_query_set: Option<wgpu::QuerySet> = None;
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
         let yuv_record_started = Instant::now();
         backend.record(
             &mut encoder,
             &prepared_yuv.bind_group,
             &working.resource().texture_view,
+            pass_query_set.as_ref(),
         );
         // This bracket records the fused YUV + OCIO pass. No separate color
         // pass or frame-table extraction remains to time.
+        #[cfg(target_os = "macos")]
+        {
+            self.gpu_timing.mark_after_yuv(&mut encoder, &mut timing_probe);
+            self.gpu_timing.mark_after_input_color(&mut encoder, &mut timing_probe);
+            self.gpu_timing.finish_recording(&mut encoder, &mut timing_probe);
+        }
         let yuv_record_us = elapsed_us(yuv_record_started);
         let color_stage_us = 0;
         let resource_extract_us = 0;
@@ -374,8 +430,12 @@ where
         // queue-completion retain.
         let retained_source = matches!(&input, DirectNativeYuvInput::Textures(_))
             .then(|| native_frame.handle.clone());
-        if retained_source.is_some() {
-            self.retained_sources.increment()?;
+        if retained_source.is_some()
+            && let Err(error) = self.retained_sources.increment()
+        {
+            #[cfg(target_os = "macos")]
+            self.gpu_timing.abandon_before_submit(timing_probe);
+            return Err(error);
         }
         let command = encoder.finish();
         let submitted = match &input {
@@ -389,11 +449,15 @@ where
             }
         };
         if let Err(error) = submitted {
+            #[cfg(target_os = "macos")]
+            self.gpu_timing.abandon_before_submit(timing_probe);
             if retained_source.is_some() {
                 self.retained_sources.decrement();
             }
             return Err(error);
         }
+        #[cfg(target_os = "macos")]
+        self.gpu_timing.after_submit(timing_probe);
         if let Some(retained_source) = retained_source {
             let retained_sources = Arc::clone(&self.retained_sources);
             self.queue.on_submitted_work_done(move || {

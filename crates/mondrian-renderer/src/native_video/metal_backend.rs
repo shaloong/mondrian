@@ -29,7 +29,10 @@ use crate::{
     GpuColorFrameResource, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
     GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportError,
     GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, NativeVideoImportCpuTimings,
+    GpuNativeDecodedFrameTextureFormat, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample,
 };
 
 /// Failure to bind the VideoToolbox Adapter to one wgpu Metal device.
@@ -73,6 +76,7 @@ impl MetalNativeVideoImportBackend {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+        gpu_timing_policy: NativeVideoImportGpuTimingPolicy,
     ) -> Result<Self, MetalNativeVideoImportBackendCreateError> {
         let backend = adapter.get_info().backend;
         if backend != wgpu::Backend::Metal {
@@ -121,10 +125,16 @@ impl MetalNativeVideoImportBackend {
         let plane_adapter =
             MetalNativeYuvPlaneAdapter { cache: CvMetalTextureCacheHandle(cache), support };
         Ok(Self {
-            inner: DirectNativeVideoImportBackend::new(plane_adapter, device, queue, resource_pool)
-                .map_err(|error| MetalNativeVideoImportBackendCreateError::Direct {
-                    reason: error.to_string(),
-                })?,
+            inner: DirectNativeVideoImportBackend::new(
+                plane_adapter,
+                device,
+                queue,
+                resource_pool,
+                gpu_timing_policy,
+            )
+            .map_err(|error| MetalNativeVideoImportBackendCreateError::Direct {
+                reason: error.to_string(),
+            })?,
         })
     }
 
@@ -136,6 +146,30 @@ impl MetalNativeVideoImportBackend {
     /// CPU command-preparation attribution for the latest frame.
     pub fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
         self.inner.frame_cpu_timings()
+    }
+
+    pub(crate) fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
+        self.inner.begin_viewer_candidate()
+    }
+
+    pub(crate) fn end_viewer_candidate(
+        &mut self,
+        candidate: Option<NativeVideoImportCandidateToken>,
+        succeeded: bool,
+    ) -> Option<NativeVideoImportCandidateTimingReceipt> {
+        self.inner.end_viewer_candidate(candidate, succeeded)
+    }
+
+    pub(crate) fn collect_gpu_timings_after_device_poll(&mut self) {
+        self.inner.collect_gpu_timings_after_device_poll();
+    }
+
+    pub(crate) fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
+        self.inner.take_completed_gpu_timings()
+    }
+
+    pub(crate) fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
+        self.inner.gpu_timing_diagnostics()
     }
 
     pub(crate) fn prepare_import_plan(

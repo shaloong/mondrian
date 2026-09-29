@@ -268,12 +268,12 @@ impl ViewerNativeVideoImportRuntime {
         }
         #[cfg(target_os = "macos")]
         {
-            let _ = gpu_timing_policy;
             match MetalNativeVideoImportBackend::new_with_resource_pool(
                 adapter,
                 device,
                 queue,
                 resource_pool,
+                gpu_timing_policy,
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
@@ -344,7 +344,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Begin one explicit Viewer-candidate attribution scope.
     pub fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.begin_viewer_candidate();
         }
@@ -359,11 +359,11 @@ impl ViewerNativeVideoImportRuntime {
         candidate: Option<NativeVideoImportCandidateToken>,
         viewer_record_succeeded: bool,
     ) -> Option<NativeVideoImportCandidateTimingReceipt> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.end_viewer_candidate(candidate, viewer_record_succeeded);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = (candidate, viewer_record_succeeded);
         None
     }
@@ -387,7 +387,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Collect callbacks after the execution owner has polled the device.
     pub fn collect_gpu_timings_after_device_poll(&mut self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             backend.collect_gpu_timings_after_device_poll();
         }
@@ -395,7 +395,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Drain completed native-import hardware timestamp samples.
     pub fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.take_completed_gpu_timings();
         }
@@ -404,11 +404,11 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Cumulative native-import GPU timing coverage and availability.
     pub fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_ref() {
             return backend.gpu_timing_diagnostics();
         }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         if self.support.renderer_backend_ready {
             return NativeVideoImportGpuTimingDiagnostics::inactive(
                 false,
