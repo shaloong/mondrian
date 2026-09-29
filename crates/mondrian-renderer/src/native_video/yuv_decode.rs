@@ -1000,7 +1000,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     /// Record one decode draw into the plan's encoded source resource.
     pub fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut impl crate::gpu_command::GpuCommandEncoder,
         plan: &GpuNativeYuvDecodePlan,
         prepared: &GpuNativeYuvPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
@@ -1650,6 +1650,67 @@ mod tests {
         {
             return;
         }
+        assert_yuva444sp16_pixels(&context, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires real Metal; measures the production YUV render pass and verifies pixels"]
+    fn yuva444sp16_pass_timestamps_preserve_pixels_and_retire_incomplete_scopes() {
+        use crate::gpu_command::GpuPassTimestampCoverageError as CoverageError;
+        let _permit = crate::context::TestGpuContextPermit::acquire();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            ..wgpu::InstanceDescriptor::new_without_display_handle_from_env()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .expect("physical Metal adapter");
+        assert_eq!(adapter.get_info().backend, wgpu::Backend::Metal);
+        let features = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        assert!(adapter.features().contains(features));
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .expect("Metal device with actual pass counters and 16-bit planes");
+        eprintln!("production_yuva_adapter={:?}", adapter.get_info());
+        let context = crate::GpuContext::from_device_queue(
+            std::sync::Arc::new(device),
+            std::sync::Arc::new(queue),
+            adapter,
+        );
+        let mut ring = crate::profile::GpuTimestampQueryRing::new_for_passes(
+            &context.device,
+            &context.queue,
+            1,
+            1,
+        )
+        .expect("bounded pass timestamp ring");
+        for _ in 0..9 {
+            assert_yuva444sp16_pixels(&context, Some((&mut ring, None)));
+        }
+        for error in [
+            CoverageError::LeadingCommands,
+            CoverageError::TrailingCommands,
+            CoverageError::QueryCapacity,
+        ] {
+            assert_yuva444sp16_pixels(&context, Some((&mut ring, Some(error))));
+            // The same slot must become usable after incomplete work completes.
+            assert_yuva444sp16_pixels(&context, Some((&mut ring, None)));
+        }
+        assert_eq!(ring.discarded_samples(), 3);
+    }
+
+    fn assert_yuva444sp16_pixels(
+        context: &crate::GpuContext,
+        mut timing: Option<(
+            &mut crate::profile::GpuTimestampQueryRing,
+            Option<crate::gpu_command::GpuPassTimestampCoverageError>,
+        )>,
+    ) {
         let texture = |format| {
             context.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("native-yuva444sp16-plane"),
@@ -1733,7 +1794,54 @@ mod tests {
             .prepare_pass(&context.device, &plan, planes)
             .expect("three-plane bindings");
         let mut encoder = context.device.create_command_encoder(&Default::default());
-        decoder.record(&mut encoder, &plan, &prepared, &output).expect("record decode");
+        let token = if let Some((ring, expected_error)) = timing.as_mut() {
+            use crate::gpu_command::{GpuCommandEncoder, GpuPassTimestampCoverageError as Error};
+            use crate::profile::GpuTimestampStageMarker;
+            let (token, mut recorder) = ring
+                .begin_pass_frame(&context.device, &mut encoder)
+                .expect("begin pass scope")
+                .expect("previous scope retired");
+            let scratch = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("timestamp-coverage-negative-control"),
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if *expected_error == Some(Error::LeadingCommands) {
+                recorder.clear_buffer(&scratch, 0, None);
+            }
+            decoder
+                .record(&mut recorder, &plan, &prepared, &output)
+                .expect("production decode");
+            if *expected_error == Some(Error::QueryCapacity) {
+                decoder
+                    .record(&mut recorder, &plan, &prepared, &output)
+                    .expect("query exhaustion must still execute production decode");
+            }
+            for stage in [
+                GpuTimestampStageMarker::AfterWorkingComposite,
+                GpuTimestampStageMarker::AfterSpatial,
+                GpuTimestampStageMarker::AfterProgramOutputBoundary,
+                GpuTimestampStageMarker::AfterMonitorAdaptation,
+                GpuTimestampStageMarker::AfterProgramScopes,
+                GpuTimestampStageMarker::AfterSignalMonitoring,
+            ] {
+                recorder.mark_stage(stage);
+            }
+            if *expected_error == Some(Error::TrailingCommands) {
+                recorder.clear_buffer(&scratch, 0, None);
+            }
+            let receipt = recorder.finish();
+            assert_eq!(receipt.coverage().err(), *expected_error);
+            assert_eq!(
+                ring.finish_pass_frame(receipt).expect("end pass scope"),
+                expected_error.is_none()
+            );
+            Some(token)
+        } else {
+            decoder.record(&mut encoder, &plan, &prepared, &output).expect("record decode");
+            None
+        };
         let readback_plan =
             crate::GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
                 .expect("readback plan");
@@ -1745,6 +1853,37 @@ mod tests {
         )
         .expect("readback");
         context.queue.submit([encoder.finish()]);
+        if let Some((ring, expected_error)) = timing.as_mut() {
+            let token = token.expect("recorded scope identity");
+            ring.after_submit(token).expect("retain submitted query scope");
+            assert!(matches!(
+                ring.after_submit(token),
+                Err(crate::profile::GpuTimestampRingError::InvalidToken)
+            ));
+            let samples =
+                ring.finish_all(&context.device).expect("consume measured work and resolve");
+            if expected_error.is_some() {
+                assert!(
+                    samples.is_empty(),
+                    "incomplete scope must not produce a timing sample"
+                );
+            } else {
+                assert_eq!(samples.len(), 1);
+                assert_eq!(samples[0].token, token);
+                assert!(samples[0].elapsed_us > 0);
+                assert_eq!(
+                    samples[0].stages.through_working_composite_us,
+                    samples[0].elapsed_us
+                );
+                assert_eq!(samples[0].stages.spatial_us, 0);
+                assert_eq!(samples[0].stages.display_calibration_us, 0);
+                eprintln!(
+                    "production_yuva_token={} pass_span_us={}",
+                    token.id(),
+                    samples[0].elapsed_us
+                );
+            }
+        }
         let mapped = map_readback_buffer(&context.device, &readback);
         let actual = readback_plan.unpack_mapped_rgba32float(&mapped).expect("pixels");
         readback.unmap();

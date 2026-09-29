@@ -5,14 +5,15 @@
 //! latency so callers can attribute stalls instead of treating wall time as GPU
 //! render time.
 
+use crate::gpu_command::{
+    GpuPassTimestampLayout, GpuPassTimestampReceipt, GpuPassTimestampRecorder,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 const TIMESTAMP_READBACK_BYTES: u64 = 2 * wgpu::QUERY_SIZE as u64;
 const VIEWER_STAGE_TIMESTAMP_COUNT: u32 = 8;
-const VIEWER_STAGE_TIMESTAMP_READBACK_BYTES: u64 =
-    VIEWER_STAGE_TIMESTAMP_COUNT as u64 * wgpu::QUERY_SIZE as u64;
 
 /// Initialize opt-in production GPU profiling from `MONDRIAN_RENDER_PROFILE`.
 pub fn init_profiling() {
@@ -208,7 +209,7 @@ impl GpuTimestampToken {
 pub struct GpuTimestampSample {
     /// Token returned when recording began.
     pub token: GpuTimestampToken,
-    /// Hardware GPU duration between the two encoder timestamps.
+    /// Hardware GPU duration across the measured encoder or complete pass scope.
     pub elapsed_us: u64,
     /// Hardware GPU attribution between ordered Viewer stage markers.
     pub stages: GpuTimestampStageDurations,
@@ -232,7 +233,7 @@ pub enum GpuTimestampStageMarker {
 }
 
 impl GpuTimestampStageMarker {
-    const fn query_index(self) -> u32 {
+    pub(crate) const fn query_index(self) -> u32 {
         match self {
             Self::AfterWorkingComposite => 1,
             Self::AfterSpatial => 2,
@@ -263,6 +264,13 @@ pub struct GpuTimestampStageDurations {
     pub display_calibration_us: u64,
 }
 
+fn encoder_timestamp_layout() -> GpuPassTimestampLayout {
+    GpuPassTimestampLayout {
+        query_count: VIEWER_STAGE_TIMESTAMP_COUNT,
+        boundaries: [0, 1, 2, 3, 4, 5, 6, 7],
+    }
+}
+
 struct GpuTimestampStageTimer {
     query_set: wgpu::QuerySet,
     resolve_buffer: wgpu::Buffer,
@@ -272,23 +280,31 @@ struct GpuTimestampStageTimer {
 
 impl GpuTimestampStageTimer {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+        Self::with_capacity(device, queue, VIEWER_STAGE_TIMESTAMP_COUNT)
+    }
+
+    fn with_capacity(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        query_capacity: u32,
+    ) -> Option<Self> {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("mondrian_viewer_stage_timestamp_queries"),
             ty: wgpu::QueryType::Timestamp,
-            count: VIEWER_STAGE_TIMESTAMP_COUNT,
+            count: query_capacity,
         });
         let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian_viewer_stage_timestamp_resolve"),
-            size: VIEWER_STAGE_TIMESTAMP_READBACK_BYTES,
+            size: u64::from(query_capacity) * u64::from(wgpu::QUERY_SIZE),
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian_viewer_stage_timestamp_readback"),
-            size: VIEWER_STAGE_TIMESTAMP_READBACK_BYTES,
+            size: u64::from(query_capacity) * u64::from(wgpu::QUERY_SIZE),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -312,10 +328,10 @@ impl GpuTimestampStageTimer {
         encoder.write_timestamp(&self.query_set, VIEWER_STAGE_TIMESTAMP_COUNT - 1);
     }
 
-    fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn resolve(&self, encoder: &mut wgpu::CommandEncoder, layout: GpuPassTimestampLayout) {
         encoder.resolve_query_set(
             &self.query_set,
-            0..VIEWER_STAGE_TIMESTAMP_COUNT,
+            0..layout.query_count,
             &self.resolve_buffer,
             0,
         );
@@ -324,7 +340,7 @@ impl GpuTimestampStageTimer {
             0,
             &self.readback_buffer,
             0,
-            VIEWER_STAGE_TIMESTAMP_READBACK_BYTES,
+            u64::from(layout.query_count) * u64::from(wgpu::QUERY_SIZE),
         );
     }
 
@@ -339,6 +355,7 @@ impl GpuTimestampStageTimer {
 
     fn read_mapped_elapsed_us(
         &self,
+        layout: GpuPassTimestampLayout,
     ) -> Result<(u64, GpuTimestampStageDurations), GpuTimestampReadError> {
         let slice = self.readback_buffer.slice(..);
         let mapped = match slice.get_mapped_range() {
@@ -348,14 +365,14 @@ impl GpuTimestampStageTimer {
                 return Err(GpuTimestampReadError::MappedRange(error.to_string()));
             }
         };
-        if mapped.len() < VIEWER_STAGE_TIMESTAMP_READBACK_BYTES as usize {
+        if mapped.len() < layout.query_count as usize * wgpu::QUERY_SIZE as usize {
             drop(mapped);
             self.readback_buffer.unmap();
             return Err(GpuTimestampReadError::ShortReadback);
         }
         let mut values = [0_u64; VIEWER_STAGE_TIMESTAMP_COUNT as usize];
         for (index, value) in values.iter_mut().enumerate() {
-            let offset = index * wgpu::QUERY_SIZE as usize;
+            let offset = layout.boundaries[index] as usize * wgpu::QUERY_SIZE as usize;
             let mut bytes = [0_u8; 8];
             bytes.copy_from_slice(&mapped[offset..offset + 8]);
             *value = u64::from_ne_bytes(bytes);
@@ -404,10 +421,12 @@ pub struct GpuTimestampQueryRing {
     completed: Vec<GpuTimestampSample>,
     next_id: u64,
     discarded_samples: u64,
+    pass_timestamps: bool,
 }
 
 struct GpuTimestampQuerySlot {
     timer: GpuTimestampStageTimer,
+    layout: Option<GpuPassTimestampLayout>,
     state: GpuTimestampSlotState,
 }
 
@@ -440,6 +459,7 @@ impl GpuTimestampQueryRing {
         for _ in 0..capacity {
             slots.push(GpuTimestampQuerySlot {
                 timer: GpuTimestampStageTimer::new(device, queue)?,
+                layout: Some(encoder_timestamp_layout()),
                 state: GpuTimestampSlotState::Free,
             });
         }
@@ -450,7 +470,87 @@ impl GpuTimestampQueryRing {
             completed: Vec::new(),
             next_id: 1,
             discarded_samples: 0,
+            pass_timestamps: false,
         })
+    }
+
+    /// Allocate bounded pass queries without requiring encoder timestamp writes.
+    /// Each actual pass consumes two queries. Complete coverage is established
+    /// by its consuming receipt, never inferred from feature availability.
+    pub fn new_for_passes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capacity: usize,
+        max_passes_per_frame: u32,
+    ) -> Option<Self> {
+        let query_capacity = max_passes_per_frame.checked_mul(2)?;
+        if capacity == 0 || query_capacity == 0 || query_capacity > wgpu::QUERY_SET_MAX_QUERIES {
+            return None;
+        }
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            slots.push(GpuTimestampQuerySlot {
+                timer: GpuTimestampStageTimer::with_capacity(device, queue, query_capacity)?,
+                layout: None,
+                state: GpuTimestampSlotState::Free,
+            });
+        }
+        Some(Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            slots,
+            completed: Vec::new(),
+            next_id: 1,
+            discarded_samples: 0,
+            pass_timestamps: true,
+        })
+    }
+
+    /// Borrow a scope before recording frame commands; polling never waits.
+    pub fn begin_pass_frame<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &'a mut wgpu::CommandEncoder,
+    ) -> Result<Option<(GpuTimestampToken, GpuPassTimestampRecorder<'a>)>, GpuTimestampRingError>
+    {
+        if !self.pass_timestamps {
+            return Err(GpuTimestampRingError::RecordingMode);
+        }
+        let Some(token) = self.acquire_slot(device)? else {
+            return Ok(None);
+        };
+        self.slots[token.slot].layout = None;
+        let query_set = self.slots[token.slot].timer.query_set.clone();
+        Ok(Some((
+            token,
+            GpuPassTimestampRecorder::new(encoder, query_set, token),
+        )))
+    }
+
+    /// Retain even an incomplete scope until its submitted work really finishes.
+    /// Returns false for unavailable coverage; such a scope produces no sample.
+    pub fn finish_pass_frame(
+        &mut self,
+        receipt: GpuPassTimestampReceipt,
+    ) -> Result<bool, GpuTimestampRingError> {
+        if !self.pass_timestamps {
+            return Err(GpuTimestampRingError::RecordingMode);
+        }
+        let token = receipt.token;
+        let Some(slot) = self.slots.get_mut(token.slot) else {
+            return Err(GpuTimestampRingError::InvalidToken);
+        };
+        if slot.timer.query_set != receipt.query_set
+            || !matches!(slot.state, GpuTimestampSlotState::Recording { token: active, .. } if active == token)
+        {
+            return Err(GpuTimestampRingError::InvalidToken);
+        }
+        slot.layout = receipt.layout.ok();
+        slot.state = GpuTimestampSlotState::Recorded { token };
+        if slot.layout.is_none() {
+            self.discarded_samples = self.discarded_samples.saturating_add(1);
+        }
+        Ok(slot.layout.is_some())
     }
 
     /// Poll completed maps and begin one frame timestamp without waiting.
@@ -458,6 +558,21 @@ impl GpuTimestampQueryRing {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<Option<GpuTimestampToken>, GpuTimestampRingError> {
+        if self.pass_timestamps {
+            return Err(GpuTimestampRingError::RecordingMode);
+        }
+        let Some(token) = self.acquire_slot(device)? else {
+            return Ok(None);
+        };
+        self.slots[token.slot].layout = Some(encoder_timestamp_layout());
+        self.slots[token.slot].timer.begin(encoder);
+        Ok(Some(token))
+    }
+
+    fn acquire_slot(
+        &mut self,
+        device: &wgpu::Device,
     ) -> Result<Option<GpuTimestampToken>, GpuTimestampRingError> {
         device
             .poll(wgpu::PollType::Poll)
@@ -473,7 +588,6 @@ impl GpuTimestampQueryRing {
         };
         let token = GpuTimestampToken { id: self.next_id, slot };
         self.next_id = self.next_id.saturating_add(1);
-        self.slots[slot].timer.begin(encoder);
         self.slots[slot].state = GpuTimestampSlotState::Recording { token, next_query_index: 1 };
         Ok(Some(token))
     }
@@ -485,6 +599,9 @@ impl GpuTimestampQueryRing {
         token: GpuTimestampToken,
         marker: GpuTimestampStageMarker,
     ) -> Result<(), GpuTimestampRingError> {
+        if self.pass_timestamps {
+            return Err(GpuTimestampRingError::RecordingMode);
+        }
         let expected = marker.query_index();
         let Some(slot) = self.slots.get_mut(token.slot) else {
             return Err(GpuTimestampRingError::InvalidToken);
@@ -507,6 +624,9 @@ impl GpuTimestampQueryRing {
         encoder: &mut wgpu::CommandEncoder,
         token: GpuTimestampToken,
     ) -> Result<(), GpuTimestampRingError> {
+        if self.pass_timestamps {
+            return Err(GpuTimestampRingError::RecordingMode);
+        }
         self.validate_recording_complete(token)?;
         self.slots[token.slot].timer.finish(encoder);
         self.slots[token.slot].state = GpuTimestampSlotState::Recorded { token };
@@ -611,11 +731,15 @@ impl GpuTimestampQueryRing {
                 _ => None,
             };
             if let Some(token) = completed_work {
+                let Some(layout) = self.slots[index].layout else {
+                    self.slots[index].state = GpuTimestampSlotState::Free;
+                    continue;
+                };
                 let mut encoder =
                     self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("mondrian_viewer_timestamp_resolve_after_completion"),
                     });
-                self.slots[index].timer.resolve(&mut encoder);
+                self.slots[index].timer.resolve(&mut encoder, layout);
                 self.queue.submit([encoder.finish()]);
                 let receiver = self.slots[index].timer.map_async();
                 self.slots[index].state = GpuTimestampSlotState::Pending { token, receiver };
@@ -640,7 +764,8 @@ impl GpuTimestampQueryRing {
             let GpuTimestampSlotState::Pending { token, .. } = state else {
                 return Err(GpuTimestampRingError::InvalidToken);
             };
-            let (elapsed_us, stages) = self.slots[index].timer.read_mapped_elapsed_us()?;
+            let layout = self.slots[index].layout.ok_or(GpuTimestampRingError::InvalidToken)?;
+            let (elapsed_us, stages) = self.slots[index].timer.read_mapped_elapsed_us(layout)?;
             self.completed.push(GpuTimestampSample { token, elapsed_us, stages });
         }
         Ok(())
@@ -650,6 +775,9 @@ impl GpuTimestampQueryRing {
 /// Failure in the bounded asynchronous timestamp-query ring.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuTimestampRingError {
+    /// The caller used an encoder boundary with a pass ring, or vice versa.
+    #[error("GPU timestamp recording API does not match the ring mode")]
+    RecordingMode,
     /// Non-blocking or final device polling failed.
     #[error("GPU timestamp ring device poll failed: {0}")]
     DevicePoll(String),
@@ -837,7 +965,8 @@ mod tests {
     #[test]
     #[ignore = "requires real Metal; verifies query completion/resolve ownership using pass counters"]
     fn timestamp_ring_resolves_only_after_work_completion() -> anyhow::Result<()> {
-        use super::{GpuTimestampQuerySlot, GpuTimestampSlotState, GpuTimestampStageTimer};
+        use super::GpuTimestampSlotState;
+        use crate::gpu_command::GpuCommandEncoder;
         use std::time::{Duration, Instant};
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
@@ -888,44 +1017,58 @@ mod tests {
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: output.as_entire_binding() }],
         });
-        // Pass admission is tested elsewhere. Exercise the same production storage,
-        // completion and resolve state machine with actual Metal pass counters.
-        let timer = GpuTimestampStageTimer::new(&device, &queue).unwrap();
-        let mut ring = GpuTimestampQueryRing {
-            device: device.clone(),
-            queue: queue.clone(),
-            slots: vec![GpuTimestampQuerySlot { timer, state: GpuTimestampSlotState::Free }],
-            completed: Vec::new(),
-            next_id: 1,
-            discarded_samples: 0,
-        };
+        let mut ring = GpuTimestampQueryRing::new_for_passes(&device, &queue, 1, 4)
+            .expect("bounded actual-pass ring");
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("metal-pass-readback"),
             size: 65536 * 4,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        for sample in 0..9 {
+        for sample in 0..10 {
             anyhow::ensure!(matches!(ring.slots[0].state, GpuTimestampSlotState::Free));
-            let token = super::GpuTimestampToken { id: ring.next_id, slot: 0 };
-            ring.next_id += 1;
             let mut encoder = device.create_command_encoder(&Default::default());
-            for pass_index in 0..4 {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("metal-real-compute-pass"),
-                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                        query_set: &ring.slots[0].timer.query_set,
-                        beginning_of_pass_write_index: Some(pass_index * 2),
-                        end_of_pass_write_index: Some(pass_index * 2 + 1),
-                    }),
-                });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &binding, &[]);
-                pass.dispatch_workgroups(1024, 1, 1);
+            let (token, mut recorder) = ring.begin_pass_frame(&device, &mut encoder)?.unwrap();
+            for marker in [
+                GpuTimestampStageMarker::AfterWorkingComposite,
+                GpuTimestampStageMarker::AfterSpatial,
+                GpuTimestampStageMarker::AfterProgramOutputBoundary,
+                GpuTimestampStageMarker::AfterMonitorAdaptation,
+            ] {
+                {
+                    let mut pass = recorder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("metal-real-compute-pass"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(0, &binding, &[]);
+                    pass.dispatch_workgroups(1024, 1, 1);
+                }
+                recorder.mark_stage(marker);
             }
+            recorder.mark_stage(GpuTimestampStageMarker::AfterProgramScopes);
+            recorder.mark_stage(GpuTimestampStageMarker::AfterSignalMonitoring);
+            let incomplete = sample == 9;
+            if incomplete {
+                recorder.copy_buffer_to_buffer(&output, 0, &readback, 0, Some(65536 * 4));
+            }
+            let receipt = recorder.finish();
+            if incomplete {
+                anyhow::ensure!(
+                    receipt.coverage()
+                        == Err(crate::gpu_command::GpuPassTimestampCoverageError::TrailingCommands)
+                );
+            } else {
+                anyhow::ensure!(receipt.coverage().is_ok());
+            }
+            anyhow::ensure!(ring.finish_pass_frame(receipt)? != incomplete);
+            anyhow::ensure!(matches!(
+                ring.slots[0].state,
+                GpuTimestampSlotState::Recorded { .. }
+            ));
+            // Oracle readback is outside the measured compute scope.
             encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 65536 * 4);
             queue.submit([encoder.finish()]);
-            ring.slots[0].state = GpuTimestampSlotState::Recorded { token };
             ring.after_submit(token)?;
             anyhow::ensure!(matches!(
                 ring.slots[0].state,
@@ -940,7 +1083,7 @@ mod tests {
                 let _ = tx.send(result);
             });
             let mut saw_resolve_pending = false;
-            let samples = if sample == 8 {
+            let samples = if sample >= 8 {
                 ring.finish_all(&device)?
             } else {
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -957,14 +1100,22 @@ mod tests {
                 }
                 ring.take_completed()
             };
-            anyhow::ensure!(samples.len() == 1 && samples[0].token == token);
-            anyhow::ensure!(samples[0].elapsed_us > 0 && (sample == 8 || saw_resolve_pending));
             anyhow::ensure!(matches!(ring.slots[0].state, GpuTimestampSlotState::Free));
-            eprintln!(
-                "sample={sample} token={} gpu_elapsed_us={} retired=true",
-                token.id(),
-                samples[0].elapsed_us
-            );
+            if incomplete {
+                anyhow::ensure!(samples.is_empty() && ring.discarded_samples() == 1);
+                eprintln!(
+                    "sample={sample} token={} incomplete=true retired=true",
+                    token.id()
+                );
+            } else {
+                anyhow::ensure!(samples.len() == 1 && samples[0].token == token);
+                anyhow::ensure!(samples[0].elapsed_us > 0 && (sample == 8 || saw_resolve_pending));
+                eprintln!(
+                    "sample={sample} token={} gpu_elapsed_us={} retired=true",
+                    token.id(),
+                    samples[0].elapsed_us
+                );
+            }
             rx.recv_timeout(Duration::from_secs(5))??;
             let mapped = readback.slice(..).get_mapped_range()?;
             for (index, bytes) in mapped.chunks_exact(4).enumerate() {

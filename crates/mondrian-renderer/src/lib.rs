@@ -24,6 +24,7 @@ pub mod cross_application_qualification;
 pub mod display_calibration;
 mod display_matte;
 pub use display_matte::GpuDisplayCalibrationBackdrop;
+pub mod gpu_command;
 pub mod gpu_composite_execution;
 pub mod gpu_compositor;
 pub mod gpu_memory_capacity;
