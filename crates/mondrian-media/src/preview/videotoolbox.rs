@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 
 pub(super) mod hevc;
 
-/// Explicit source contract for limited-range ProRes 4444/XQ or HEVC Main10.
+/// Explicit source contract for limited-range ProRes 4444/XQ or ten-bit HEVC.
 /// CICP values must come from the resolved source contract, never defaults.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -24,6 +24,8 @@ pub(super) struct VideoToolboxContract {
     pub transfer: u32,
     /// CICP matrix coefficients (1 or 9).
     pub matrix: u32,
+    /// Validated HEVC SPS chroma_format_idc (1/2/3); ProRes 4444 uses 3.
+    pub chroma_format_idc: u32,
 }
 
 /// Native stage and OSStatus are retained for structured rejection diagnostics.
@@ -124,6 +126,9 @@ impl VideoToolboxDecoder {
         if range != DecodedVideoRange::Limited {
             return Err(VideoToolboxError { status: -70001, stage: 11 });
         }
+        if configuration.is_some_and(|c| c.chroma_format_idc != contract.chroma_format_idc) {
+            return Err(VideoToolboxError { status: -70001, stage: 11 });
+        }
         let sets: Vec<_> = configuration
             .into_iter()
             .flat_map(|configuration| &configuration.parameter_sets)
@@ -202,7 +207,12 @@ impl VideoToolboxDecoder {
             || output.height != self.contract.height
             || output.pixel_format
                 != if self.contract.codec == u32::from_be_bytes(*b"hvc1") {
-                    u32::from_be_bytes(*b"x420")
+                    match self.contract.chroma_format_idc {
+                        1 => u32::from_be_bytes(*b"x420"),
+                        2 => u32::from_be_bytes(*b"x422"),
+                        3 => u32::from_be_bytes(*b"x444"),
+                        _ => return Err(VideoToolboxError { status: -70001, stage: 9 }),
+                    }
                 } else {
                     u32::from_be_bytes(*b"s4as")
                 }
@@ -368,6 +378,7 @@ mod tests {
             primaries: raw.color_primaries as u32,
             transfer: raw.color_trc as u32,
             matrix: raw.color_space as u32,
+            chroma_format_idc: 3,
         };
         assert_eq!(raw.color_range, ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG);
         let packet = input.packets().find(|(s, _)| s.index() == index).unwrap().1;
@@ -418,6 +429,7 @@ mod tests {
             primaries: 1,
             transfer: 0,
             matrix: 1,
+            chroma_format_idc: 3,
         };
         let error = VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap_err();
         assert_eq!(error.stage, 11);

@@ -8,7 +8,7 @@
 pub(crate) enum HevcContractError {
     #[error("malformed HEVC configuration or access unit")]
     Malformed,
-    #[error("native HEVC requires single-layer progressive Main10 4:2:0")]
+    #[error("native HEVC requires single-layer progressive ten-bit Main10 or Range Extensions")]
     UnsupportedSampling,
     #[error("HEVC SPS visible extent conflicts with source metadata")]
     Extent,
@@ -23,7 +23,22 @@ pub(crate) struct HevcConfiguration {
     pub parameter_sets: Vec<Vec<u8>>,
     pub length_size: usize,
     pub reorder_depth: usize,
+    pub chroma_format_idc: u32,
     max_temporal_layers: u32,
+}
+
+/// Source metadata admission; the coded SPS must independently agree below.
+pub(crate) fn source_chroma_format(profile: i32, pixel_format: i32) -> Option<u32> {
+    use ffmpeg_next::ffi;
+    let chroma = match pixel_format {
+        value if value == ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32 => 1,
+        value if value == ffi::AVPixelFormat::AV_PIX_FMT_YUV422P10LE as i32 => 2,
+        value if value == ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10LE as i32 => 3,
+        _ => return None,
+    };
+    ((profile == ffi::FF_PROFILE_HEVC_MAIN_10 && chroma == 1)
+        || profile == ffi::FF_PROFILE_HEVC_REXT)
+        .then_some(chroma)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +62,7 @@ impl HevcConfiguration {
         let mut kinds = 0;
         let mut reorder_depth = 0;
         let mut max_temporal_layers = 0;
+        let mut chroma_format_idc = None;
         for _ in 0..bytes[22] {
             let kind = *bytes.get(position).ok_or(E::Malformed)? & 63;
             position += 1;
@@ -64,8 +80,12 @@ impl HevcConfiguration {
                 }
                 if kind == 33 {
                     let facts = sps_prefix(nal, width, height)?;
-                    reorder_depth = reorder_depth.max(facts.0);
-                    max_temporal_layers = max_temporal_layers.max(facts.1);
+                    if chroma_format_idc.is_some_and(|chroma| chroma != facts.chroma_format_idc) {
+                        return Err(E::UnsupportedSampling);
+                    }
+                    chroma_format_idc = Some(facts.chroma_format_idc);
+                    reorder_depth = reorder_depth.max(facts.reorder_depth);
+                    max_temporal_layers = max_temporal_layers.max(facts.max_temporal_layers);
                 }
                 if (32..=34).contains(&kind) {
                     kinds |= 1 << (kind - 32);
@@ -81,6 +101,7 @@ impl HevcConfiguration {
             parameter_sets: sets,
             length_size,
             reorder_depth,
+            chroma_format_idc: chroma_format_idc.ok_or(E::Malformed)?,
             max_temporal_layers,
         })
     }
@@ -202,7 +223,13 @@ impl Bits {
     }
 }
 
-fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<(usize, u32), HevcContractError> {
+struct HevcSpsFacts {
+    reorder_depth: usize,
+    max_temporal_layers: u32,
+    chroma_format_idc: u32,
+}
+
+fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<HevcSpsFacts, HevcContractError> {
     use HevcContractError as E;
     let mut bits = Bits::rbsp(nal)?;
     bits.skip(4)?; // sps_video_parameter_set_id
@@ -210,8 +237,13 @@ fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<(usize, u32), HevcC
     if sublayers > 6 || bits.read(1)? != 1 {
         return Err(E::UnsupportedSampling);
     }
-    bits.skip(3)?; // general_profile_space, general_tier_flag
-    if bits.read(5)? != 2 {
+    // Profile identifiers below belong to the standard namespace.
+    if bits.read(2)? != 0 {
+        return Err(E::UnsupportedSampling);
+    }
+    bits.skip(1)?; // general_tier_flag
+    let profile = bits.read(5)?;
+    if !matches!(profile, 2 | 4) {
         return Err(E::UnsupportedSampling);
     }
     bits.skip(32)?; // general_profile_compatibility_flags
@@ -238,9 +270,18 @@ fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<(usize, u32), HevcC
             bits.skip(8)?;
         }
     }
-    if bits.ue()? > 15 || bits.ue()? != 1 {
+    if bits.ue()? > 15 {
         return Err(E::UnsupportedSampling);
     }
+    let chroma_format_idc = bits.ue()?;
+    if !matches!(chroma_format_idc, 1..=3)
+        || (profile == 2 && chroma_format_idc != 1)
+        || (chroma_format_idc == 3 && bits.read(1)? != 0)
+    {
+        return Err(E::UnsupportedSampling);
+    }
+    let sub_width = if chroma_format_idc == 3 { 1 } else { 2 };
+    let sub_height = if chroma_format_idc == 1 { 2 } else { 1 };
     let coded_width = bits.ue()?;
     let coded_height = bits.ue()?;
     let mut crop_width = 0u32;
@@ -249,12 +290,12 @@ fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<(usize, u32), HevcC
         crop_width = bits
             .ue()?
             .checked_add(bits.ue()?)
-            .and_then(|v| v.checked_mul(2))
+            .and_then(|v| v.checked_mul(sub_width))
             .ok_or(E::Extent)?;
         crop_height = bits
             .ue()?
             .checked_add(bits.ue()?)
-            .and_then(|v| v.checked_mul(2))
+            .and_then(|v| v.checked_mul(sub_height))
             .ok_or(E::Extent)?;
     }
     if coded_width.checked_sub(crop_width) != Some(width)
@@ -276,7 +317,11 @@ fn sps_prefix(nal: &[u8], width: u32, height: u32) -> Result<(usize, u32), HevcC
         }
         reorder = reorder.max(layer_reorder as usize);
     }
-    Ok((reorder, sublayers as u32 + 1))
+    Ok(HevcSpsFacts {
+        reorder_depth: reorder,
+        max_temporal_layers: sublayers as u32 + 1,
+        chroma_format_idc,
+    })
 }
 
 #[cfg(test)]
@@ -288,6 +333,8 @@ mod tests {
     const VPS: &str = "40010c01ffff022000000300900000030000030078959409";
     const SPS: &str = "420101022000000300900000030000030078a003c08010e4d96565924caf016a12201208000003000800000300f040";
     const PPS: &str = "4401c172b46240";
+    const SPS_422: &str = "4201010408000003009d08000003000078b003c08010e4d96565924caf016a12201208000003000800000300f040";
+    const SPS_444: &str = "4201010408000003009c0800000300007890007810021c9b2cacb24995e02d424402410000030001000003001e08";
 
     fn nal(hex: &str) -> Vec<u8> {
         (0..hex.len())
@@ -324,6 +371,7 @@ mod tests {
         let bytes = configuration();
         let config = HevcConfiguration::parse(&bytes, 1920, 1080).unwrap();
         assert_eq!(config.reorder_depth, 2);
+        assert_eq!(config.chroma_format_idc, 1);
         assert_eq!(config.max_temporal_layers, 1);
         for length in 0..bytes.len() {
             assert!(HevcConfiguration::parse(&bytes[..length], 1920, 1080).is_err());
@@ -344,6 +392,73 @@ mod tests {
         let mut sps = nal(SPS);
         sps[2] &= !1; // temporal nesting proof is required.
         assert!(sps_prefix(&sps, 1920, 1080).is_err());
+    }
+
+    #[test]
+    fn range_extensions_use_coded_chroma_and_crop_units() {
+        for (sps, chroma) in [(SPS_422, 2), (SPS_444, 3)] {
+            let bytes = nal(sps);
+            let facts = sps_prefix(&bytes, 1920, 1080).unwrap();
+            assert_eq!(facts.chroma_format_idc, chroma);
+            assert_eq!(facts.reorder_depth, 2);
+            assert_eq!(facts.max_temporal_layers, 1);
+            let mut nonstandard_namespace = bytes.clone();
+            nonstandard_namespace[3] |= 0x40;
+            assert!(matches!(
+                sps_prefix(&nonstandard_namespace, 1920, 1080),
+                Err(HevcContractError::UnsupportedSampling)
+            ));
+            assert!(matches!(
+                sps_prefix(&bytes, 1920, 1088),
+                Err(HevcContractError::Extent)
+            ));
+        }
+        let mut config = configuration();
+        config[22] += 2;
+        for sps in [SPS_422, SPS_444] {
+            let bytes = nal(sps);
+            config.extend([33, 0, 1]);
+            config.extend((bytes.len() as u16).to_be_bytes());
+            config.extend(bytes);
+        }
+        assert!(matches!(
+            HevcConfiguration::parse(&config, 1920, 1080),
+            Err(HevcContractError::UnsupportedSampling)
+        ));
+    }
+
+    #[test]
+    fn source_metadata_admission_requires_a_ten_bit_profile_and_sampling_pair() {
+        use ffmpeg_next::ffi;
+        for (pixel, chroma) in [
+            (ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE, 1),
+            (ffi::AVPixelFormat::AV_PIX_FMT_YUV422P10LE, 2),
+            (ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10LE, 3),
+        ] {
+            assert_eq!(
+                source_chroma_format(ffi::FF_PROFILE_HEVC_REXT, pixel as i32),
+                Some(chroma)
+            );
+            assert_eq!(
+                source_chroma_format(ffi::FF_PROFILE_HEVC_MAIN_10, pixel as i32),
+                (chroma == 1).then_some(1)
+            );
+            assert_eq!(
+                source_chroma_format(ffi::FF_PROFILE_UNKNOWN, pixel as i32),
+                None
+            );
+        }
+        for pixel in [
+            ffi::AVPixelFormat::AV_PIX_FMT_YUV420P12LE,
+            ffi::AVPixelFormat::AV_PIX_FMT_YUV422P12LE,
+            ffi::AVPixelFormat::AV_PIX_FMT_YUV444P12LE,
+            ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+        ] {
+            assert_eq!(
+                source_chroma_format(ffi::FF_PROFILE_HEVC_REXT, pixel as i32),
+                None
+            );
+        }
     }
 
     #[test]

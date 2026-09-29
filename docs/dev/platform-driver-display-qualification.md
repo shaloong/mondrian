@@ -228,6 +228,35 @@ binds the row/source/release/build identity, target artifact metadata, one
 machine report, before/after environment snapshots, and exactly one normalized
 report/raw-evidence/source-replay set for every required owner lane.
 
+## macOS ten-bit HEVC Range Extensions diagnostic
+
+The production-linked Media and Renderer tests below require six 1080p30
+motion/B-frame fixtures, at least 60 frames each, explicit limited range/CICP,
+and ten-bit planar source sampling. Set `MONDRIAN_MACOS_HEVC_REXT_FIXTURES` to
+colon-separated paths ordered 4:2:2 SDR Rec.709/PQ/HLG, then 4:4:4
+SDR Rec.709/PQ/HLG. Renderer also requires `WGPU_BACKEND=metal` and
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` pointing to the current production worker.
+
+```sh
+cargo test --locked -p mondrian-media --all-features -j 2 --lib \
+  direct_hevc_range_extensions_sessions_preserve_seek_cancel_and_reopen_authority \
+  -- --ignored --nocapture --test-threads=1
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  cpu_and_native_hevc_range_extensions_viewer_pixels_agree_across_gop_seeks \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The Media test checks seven seeks plus cancellation before/mid execution,
+retry, reopen and zero native output residual per fixture. The Renderer test
+requires the actual direct VideoToolbox path and observed hardware execution,
+P210/P410 import and the unchanged `1/1024` CPU/native Viewer pixel tolerance.
+Hardware capability, full-source pixel fidelity, residency and lifecycle
+receipts are separate requirements. Readback in this comparison is an oracle;
+production zero-readback/performance claims require the separate owner counters.
+These short development tests do not replace physical HDR, sustained playback
+or sealed commercial qualification. Ignored tests remain NotRun unless invoked.
+
 ## macOS ProRes 422 reconstruction diagnostic
 
 The opt-in Renderer test

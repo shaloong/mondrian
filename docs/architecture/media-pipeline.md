@@ -4342,16 +4342,24 @@ materialization path, without a fabricated FFmpeg hardware-frame context.
 Renderer retirement retains this source through real GPU completion. Unified
 allocation accounting uses the native buffer allocation once.
 
-### macOS HEVC Main10 admission evidence
+### macOS ten-bit HEVC admission evidence
 
 The same private VideoToolbox adapter admits progressive, single-layer HEVC
-Main10 4:2:0 with explicit limited range, chroma location and supported CICP.
+Main10 4:2:0 and ten-bit Range Extensions 4:2:2/4:4:4 with explicit limited
+range and supported CICP. Source profile/pixel metadata and the coded SPS must
+agree on the actual sampling grid. The SPS conformance window uses that grid's
+crop units; separate color planes, other bit depths and unproved scan contracts
+fail closed. Subsampled 4:2:0 requires explicit chroma location; 4:2:2 uses the
+existing H.265-defined left grid and 4:4:4 has no subsampled chroma phase.
 CoreMedia creates the format description from the source VPS/SPS/PPS, without
 overwriting coded color metadata with the caller's expected values. Successful
-output requires actual `x420` ten-bit bi-planar geometry, IOSurface ownership,
+output requires actual `x420`, `x422` or `x444` ten-bit bi-planar geometry,
+matching plane extent/stride, IOSurface ownership,
 matching CVPixelBuffer color attachments and the session's observed hardware
-property. Other HEVC sampling families retain the FFmpeg path and its explicit
-unobserved execution state.
+property. Other HEVC sampling families retain their separately admitted FFmpeg
+path and its explicit unobserved execution state. Native source samples still
+use the shared color/effect/composite pipeline; the platform adapter owns only
+codec and physical-surface facts.
 
 A bounded SPS prefix supplies the coded reorder capacity; it is never inferred
 from a short sample or a fixed number of B frames. The shared `PreviewCodec`
@@ -4386,7 +4394,7 @@ HEVC session creation requests
 `EnableHardwareAcceleratedVideoDecoder`, not the require-hardware property,
 and successful output does not independently query execution. The adapter must
 not inspect private decoder storage to obtain that property. In contrast, the
-direct macOS ProRes/Main10 adapter above publishes native output only after its actual
+direct macOS ProRes/ten-bit HEVC adapter above publishes native output only after its actual
 session property proves hardware execution; that observation is `Some(true)`.
 
 `PreviewDecodeExecutionPath::NativeSurface` and `NativeCpuTransfer` preserve this

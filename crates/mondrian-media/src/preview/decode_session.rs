@@ -1885,8 +1885,8 @@ impl PreviewDecodeSession {
             let direct_codec = ((codec_id == ffmpeg::codec::Id::PRORES
                 && matches!(raw.codec_tag.swap_bytes(), 0x61703468 | 0x61703478))
                 || (codec_id == ffmpeg::codec::Id::HEVC
-                    && raw.profile == ffmpeg::ffi::FF_PROFILE_HEVC_MAIN_10
-                    && raw.format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32
+                    && super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format)
+                        .is_some()
                     && raw.color_range == ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG))
                 && hardware_decode_request.prefers_gpu_residency()
                 && backend != PreviewDecodeBackend::Software
@@ -3909,19 +3909,52 @@ mod session_topology_tests {
         let path = PathBuf::from(
             std::env::var("MONDRIAN_HEVC_VT_TEST_MEDIA_PATH").expect("explicit Main10 fixture"),
         );
+        assert_native_hevc_session_contract(
+            &path,
+            DecodedVideoSurfaceFormat::P010,
+            ColorSpace::Rec2100Pq,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires actual VideoToolbox and six SDR/PQ/HLG HEVC 422/444 motion/B fixtures"]
+    fn direct_hevc_range_extensions_sessions_preserve_seek_cancel_and_reopen_authority() {
+        let fixtures = std::env::var_os("MONDRIAN_MACOS_HEVC_REXT_FIXTURES")
+            .expect("explicit SDR/PQ/HLG fixtures for 422, then 444");
+        let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+        assert_eq!(paths.len(), 6);
+        let colors = [
+            ColorSpace::Rec709,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let format = if index < 3 {
+                DecodedVideoSurfaceFormat::P210
+            } else {
+                DecodedVideoSurfaceFormat::P410
+            };
+            assert_native_hevc_session_contract(path, format, colors[index % 3]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_native_hevc_session_contract(
+        path: &Path,
+        expected_surface: DecodedVideoSurfaceFormat,
+        source_color: ColorSpace,
+    ) {
         let mut context = PreviewDecodeSessionContext::new();
         let request_for = |index| {
             let mut request = PreviewDecodeRequest::new(
-                &path,
+                path,
                 SourceSampleTarget::covering(mondrian_core::TimelineTime::new(index, 30).unwrap()),
                 PreviewDecodeAccessMode::PlaybackCursor,
-                PreviewSourceColorContract::automatic(
-                    ColorSpace::Rec2100Pq,
-                    DecodedVideoRange::Limited,
-                ),
+                PreviewSourceColorContract::automatic(source_color, DecodedVideoRange::Limited),
             )
             .with_field_processing(PreviewSourceFieldProcessing::Progressive)
-            .with_fingerprint(MediaFileFingerprint::capture(&path))
+            .with_fingerprint(MediaFileFingerprint::capture(path))
             .with_hardware_decode_request(PreviewHardwareDecodeRequest::RequireGpuResident);
             request.representation = PreviewDecodeRepresentation::NativeSurface;
             request
@@ -3929,7 +3962,7 @@ mod session_topology_tests {
         for index in [0, 1, 17, 59, 2, 29, 0] {
             let outcome = context.decode_cancellable(request_for(index), || false).unwrap();
             let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
-                panic!("Main10 native demand must never fall back to CPU")
+                panic!("ten-bit HEVC native demand must never fall back to CPU")
             };
             assert_eq!(
                 frame.diagnostics.path,
@@ -3940,7 +3973,7 @@ mod session_topology_tests {
                 frame.diagnostics.selected_pts,
                 frame.diagnostics.requested_pts
             );
-            assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::P010);
+            assert_eq!(frame.surface_format, expected_surface);
             assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
             assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
             assert!(!frame.diagnostics.cpu_resident);
@@ -3968,7 +4001,7 @@ mod session_topology_tests {
         let PreviewDecodeOutcome::NativeGpuFrame(frame) =
             context.decode_cancellable(request_for(5), || false).unwrap()
         else {
-            panic!("Main10 native retry")
+            panic!("ten-bit HEVC native retry")
         };
         assert!(frame.diagnostics.seek_performed);
         assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
@@ -3977,7 +4010,7 @@ mod session_topology_tests {
         let PreviewDecodeOutcome::NativeGpuFrame(frame) =
             context.decode_cancellable(request_for(0), || false).unwrap()
         else {
-            panic!("Main10 native reopen")
+            panic!("ten-bit HEVC native reopen")
         };
         assert_eq!(
             frame.diagnostics.session_disposition,
@@ -3986,7 +4019,7 @@ mod session_topology_tests {
         drop(frame);
         context.clear();
         assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
-        eprintln!("Main10 production session: seven seeks, before/mid cancellation, retry, reopen, zero output residual");
+        eprintln!("{expected_surface:?} HEVC production session: seven seeks, before/mid cancellation, retry, reopen, zero output residual");
     }
 
     #[cfg(target_os = "macos")]

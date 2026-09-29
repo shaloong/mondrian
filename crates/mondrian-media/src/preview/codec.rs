@@ -82,9 +82,14 @@ impl PreviewCodec {
         }
         let is_hevc = parameters.id() == ffmpeg::codec::Id::HEVC;
         let hevc = if is_hevc {
-            if raw.format != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32
-                || raw.color_range != ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG
-                || raw.chroma_location == ffmpeg::ffi::AVChromaLocation::AVCHROMA_LOC_UNSPECIFIED
+            let source_chroma =
+                super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format).ok_or(
+                    PreviewCodecError::Hevc(HevcContractError::UnsupportedSampling),
+                )?;
+            if raw.color_range != ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG
+                || (source_chroma == 1
+                    && raw.chroma_location
+                        == ffmpeg::ffi::AVChromaLocation::AVCHROMA_LOC_UNSPECIFIED)
                 || raw.extradata.is_null()
                 || raw.extradata_size <= 0
             {
@@ -95,11 +100,14 @@ impl PreviewCodec {
             // SAFETY: Source Parameters owns the validated positive byte range.
             let bytes =
                 unsafe { std::slice::from_raw_parts(raw.extradata, raw.extradata_size as usize) };
-            Some(HevcConfiguration::parse(
-                bytes,
-                raw.width as u32,
-                raw.height as u32,
-            )?)
+            let configuration =
+                HevcConfiguration::parse(bytes, raw.width as u32, raw.height as u32)?;
+            if configuration.chroma_format_idc != source_chroma {
+                return Err(PreviewCodecError::Hevc(
+                    HevcContractError::UnsupportedSampling,
+                ));
+            }
+            Some(configuration)
         } else {
             None
         };
@@ -117,6 +125,9 @@ impl PreviewCodec {
             primaries: raw.color_primaries as u32,
             transfer: raw.color_trc as u32,
             matrix: raw.color_space as u32,
+            chroma_format_idc: hevc
+                .as_ref()
+                .map_or(3, |configuration| configuration.chroma_format_idc),
         };
         Ok(Self::VideoToolbox(VideoToolboxCodec {
             decoder: Some(match &hevc {

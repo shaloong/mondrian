@@ -46,13 +46,22 @@ static CFMutableDictionaryRef dictionary(void) {
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 }
 
+static OSType output_pixel(const MdnVtContract *contract) {
+    if (contract->codec != kCMVideoCodecType_HEVC)
+        return kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
+    switch (contract->chroma_format_idc) {
+        case 1: return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+        case 2: return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
+        case 3: return kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange;
+        default: return 0;
+    }
+}
+
 static OSStatus create_session(MdnVtDecoder *decoder) {
     CFMutableDictionaryRef attributes = dictionary();
     CFMutableDictionaryRef iosurface = dictionary();
     CFMutableDictionaryRef specification = dictionary();
-    int32_t pixel_format = decoder->contract.codec == kCMVideoCodecType_HEVC ?
-        kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange :
-        kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
+    int32_t pixel_format = (int32_t)output_pixel(&decoder->contract);
     CFNumberRef pixel = CFNumberCreate(NULL, kCFNumberSInt32Type, &pixel_format);
     OSStatus status = -70002;
     if (!attributes || !iosurface || !specification || !pixel) goto done;
@@ -77,6 +86,8 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
     if (error) *error = (MdnVtError){0};
     if (!contract || !contract->width || !contract->height ||
         contract->width > INT32_MAX || contract->height > INT32_MAX ||
+        contract->chroma_format_idc < 1 || contract->chroma_format_idc > 3 ||
+        (contract->codec != kCMVideoCodecType_HEVC && contract->chroma_format_idc != 3) ||
         (contract->codec != kCMVideoCodecType_AppleProRes4444 &&
          contract->codec != kCMVideoCodecType_AppleProRes4444XQ &&
          contract->codec != kCMVideoCodecType_HEVC)) {
@@ -241,8 +252,7 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
     if (status) goto done;
     stage = MDN_VT_SURFACE;
     int hevc = decoder->contract.codec == kCMVideoCodecType_HEVC;
-    OSType expected_pixel = hevc ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange :
-        kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
+    OSType expected_pixel = output_pixel(&decoder->contract);
     size_t planes = hevc ? 2 : 3;
     if (CVPixelBufferGetPixelFormatType(image) != expected_pixel ||
         CVPixelBufferGetWidth(image) != decoder->contract.width ||
@@ -251,8 +261,10 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
         status = -70001; goto done;
     }
     for (size_t plane = 0; plane < planes; plane++) {
-        size_t width = hevc && plane ? (decoder->contract.width + 1) / 2 : decoder->contract.width;
-        size_t height = hevc && plane ? (decoder->contract.height + 1) / 2 : decoder->contract.height;
+        size_t width = hevc && plane && decoder->contract.chroma_format_idc != 3 ?
+            (decoder->contract.width + 1) / 2 : decoder->contract.width;
+        size_t height = hevc && plane && decoder->contract.chroma_format_idc == 1 ?
+            (decoder->contract.height + 1) / 2 : decoder->contract.height;
         size_t bytes_per_pixel = plane == 1 ? 4 : 2;
         if (CVPixelBufferGetWidthOfPlane(image, plane) != width ||
             CVPixelBufferGetHeightOfPlane(image, plane) != height ||

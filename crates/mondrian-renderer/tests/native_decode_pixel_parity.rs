@@ -67,6 +67,7 @@ fn cpu_and_native_main10_motion_viewer_pixels_agree_across_gop_seeks() -> Result
         "MONDRIAN_MACOS_MAIN10_MOTION_FIXTURE",
         [(DecodedVideoSurfaceFormat::P010, ColorSpace::Rec2100Pq)],
         1.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -85,6 +86,33 @@ fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
             (DecodedVideoSurfaceFormat::P210, colors[index % 3])
         }),
         1.0,
+        PreviewDecodePath::InProcessFfmpegNative,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker and six SDR/PQ/HLG HEVC 422/444 motion fixtures"]
+fn cpu_and_native_hevc_range_extensions_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    let colors = [
+        ColorSpace::Rec709,
+        ColorSpace::Rec2100Pq,
+        ColorSpace::Rec2100Hlg,
+    ];
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_HEVC_REXT_FIXTURES",
+        std::array::from_fn::<_, 6, _>(|index| {
+            (
+                if index < 3 {
+                    DecodedVideoSurfaceFormat::P210
+                } else {
+                    DecodedVideoSurfaceFormat::P410
+                },
+                colors[index % 3],
+            )
+        }),
+        1.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -100,6 +128,7 @@ fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result
             (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec709),
         ],
         1.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -115,6 +144,7 @@ fn cpu_and_videotoolbox_hdr_viewer_pixels_agree_across_gop_seeks() -> Result<()>
             (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec2100Hlg),
         ],
         1.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -136,6 +166,7 @@ fn cpu_and_prores4444_alpha_viewer_pixels_agree_across_seeks() -> Result<()> {
             ),
         ],
         0.5,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -157,6 +188,7 @@ fn transparent_prores4444_viewer_output_is_zero_across_seeks() -> Result<()> {
             ),
         ],
         0.0,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -165,6 +197,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
     fixture_env: &str,
     cases: [(DecodedVideoSurfaceFormat, ColorSpace); N],
     expected_alpha: f32,
+    expected_native_decode_path: PreviewDecodePath,
 ) -> Result<()> {
     mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
     let fixtures = std::env::var_os(fixture_env).with_context(|| fixture_env.to_owned())?;
@@ -185,7 +218,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
             let cpu = measure_with_resource_observer(
                 &path,
                 false,
-                Some(surface),
+                Some((surface, expected_native_decode_path)),
                 color,
                 &context,
                 &mut runtime,
@@ -194,7 +227,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
             let native = measure_with_resource_observer(
                 &path,
                 true,
-                Some(surface),
+                Some((surface, expected_native_decode_path)),
                 color,
                 &context,
                 &mut runtime,
@@ -297,7 +330,7 @@ fn measure(
     measure_with_resource_observer(
         path,
         native,
-        expected_native_surface,
+        expected_native_surface.map(|surface| (surface, PreviewDecodePath::InProcessFfmpegNative)),
         ColorSpace::Rec709,
         context,
         runtime,
@@ -352,12 +385,14 @@ fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
 fn measure_with_resource_observer(
     path: &Path,
     native: bool,
-    expected_native_surface: Option<DecodedVideoSurfaceFormat>,
+    expected_native_surface: Option<(DecodedVideoSurfaceFormat, PreviewDecodePath)>,
     source_color: ColorSpace,
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
     mut observe: impl FnMut(u32, u32, GpuColorFrameWgpuResourcePoolDiagnostics),
 ) -> Result<Vec<Vec<f32>>> {
+    let expected_decode_path = expected_native_surface.map(|(_, path)| path);
+    let expected_native_surface = expected_native_surface.map(|(surface, _)| surface);
     let (bootstrap, observer) = PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(
         std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
             .context("explicit packaged demux worker")?
@@ -434,14 +469,9 @@ fn measure_with_resource_observer(
                         Some(f.diagnostics.decoded_video_sampling.bit_depth),
                         expected.fixed_bit_depth()
                     );
-                    if matches!(
-                        expected,
-                        DecodedVideoSurfaceFormat::P010 | DecodedVideoSurfaceFormat::Yuva444sp16
-                    ) {
-                        assert_eq!(
-                            f.diagnostics.path,
-                            PreviewDecodePath::InProcessVideoToolboxNative
-                        );
+                    assert_eq!(Some(f.diagnostics.path), expected_decode_path);
+                    if expected_decode_path == Some(PreviewDecodePath::InProcessVideoToolboxNative)
+                    {
                         assert_eq!(f.diagnostics.hardware_decode_observed, Some(true));
                     }
                 }
