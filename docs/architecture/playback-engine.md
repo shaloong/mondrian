@@ -2075,6 +2075,14 @@ Only resident coverage permits a cold admission. Its actual pixel guards and
 already-resident cold inputs survive through the existing cold-activation owner
 until the complete cold picture becomes resident or decoded residency is trimmed.
 Preparation guards are reported separately and cannot publish cold readiness.
+If the remaining Broker grant cannot admit the complete cold picture, covered
+preparation may admit one canonical decode request for a distinct new moving
+source. A restart of an already-active source cannot require an extra slot
+before that cold Session can open. This is source work, not a partial picture:
+the rejected full-picture preservable/Ready counts stay zero, and the entire
+activation closure must subsequently become resident before cold readiness.
+The same actual Store reservation, worker affinity and Broker lease apply;
+no virtual capacity or additional queue is created.
 
 Cold-plan pixel guards are dropped before planning the nearer work. All plans
 use actual Frame Store and Broker ownership; an unadmitted cold proposal cannot
@@ -2284,7 +2292,11 @@ offers an atomic speculative batch reservation for one complete frame
 dependency closure. It evicts releasable Store-only LRU ownership first, then
 publishes one independently owned lease per request only when the complete
 entry/byte/decoder-unit aggregate fits. A multi-layer native cold activation
-therefore cannot retain one surface while waiting indefinitely for another.
+uses that complete batch for picture work. Covered cold-source preparation
+instead owns one exact decode reservation under the same aggregate limits;
+it cannot publish complete-picture readiness or reserve unadmitted inputs.
+Resident cold dependencies remain guarded while later activation work owns its
+real Broker leases, including an already-active source restart after cold open.
 The Store never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
 identity, stable presentation-resource naming, and the CPU raster output
 contract. The Window presentation Adapter alone maps that value to

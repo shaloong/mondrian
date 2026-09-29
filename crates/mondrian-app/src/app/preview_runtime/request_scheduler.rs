@@ -360,7 +360,7 @@ impl FutureMediaWindowCache {
             .map(opposite_media_preview_worker_lane)
             .unwrap_or(self.next_playback_source_lane);
         let mut assigned = false;
-        for request in &plan.requests {
+        for request in closure {
             let source = request.key.decode.source();
             if !source.is_still_image()
                 && !self.playback_source_worker_affinity.contains_key(source)
@@ -376,7 +376,7 @@ impl FutureMediaWindowCache {
 
     fn cold_activation_shared_near_sources(
         &self,
-        plan: &FutureMediaPrefixPlan,
+        cold_requests: &[PlannedFutureMediaRequest],
         near_closure: &[PlannedFutureMediaRequest],
         worker_count: usize,
     ) -> Vec<mondrian_media::PreviewDecodeSource> {
@@ -386,7 +386,7 @@ impl FutureMediaWindowCache {
                 let source = near.key.decode.source();
                 let lane = self.playback_source_worker_affinity.get(source)?;
                 (!source.is_still_image()
-                    && plan.requests.iter().any(|cold| {
+                    && cold_requests.iter().any(|cold| {
                         let cold_source = cold.key.decode.source();
                         !cold_source.is_still_image()
                             && cold_source != source
@@ -532,10 +532,10 @@ impl FutureMediaWindowCache {
 }
 
 struct FutureMediaPrefixPlan {
-    /// The first accepted frame's immutable source inputs, including resident
+    /// The first scoped frame's immutable logical source inputs, including resident
     /// and pending keys. Complete-frame plans use the full closure to derive
     /// cold Session affinity; source coverage projects only the selected owner.
-    /// This Arc retains no pixel leases.
+    /// This Arc retains no pixel leases and proves no physical admission.
     first_media_frame: Option<Arc<[PlannedFutureMediaRequest]>>,
     /// Physical guards that keep accepted near-term resident frames non-evictable
     /// until every planned missing request has transferred into Broker ownership.
@@ -1145,13 +1145,35 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.future_media_window
                 .borrow_mut()
                 .assign_cold_activation_worker_affinity(&activation_plan);
+            // Logical lowering survives a rejected full-picture reservation.
+            // Derive unowned distinct source work from that same canonical closure.
+            let source_preparations = activation_plan
+                .first_media_frame
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter(|request| {
+                    let source = request.key.decode.source();
+                    !source.is_still_image()
+                        && immediate_closure
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .all(|near| near.key.decode.source() != source)
+                        && !self.scheduler.has_pending_key(&request.key)
+                        && self.failed_media_key(&request.key).is_none()
+                        && self.frame_store.borrow_mut().media_frame(&request.key).is_none()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let shared_near_sources =
                 self.future_media_window.borrow().cold_activation_shared_near_sources(
-                    &activation_plan,
+                    &source_preparations,
                     immediate_closure.as_deref().unwrap_or(&[]),
                     self.decode_worker_count,
                 );
             let shares_near_worker = prioritize_immediate && !shared_near_sources.is_empty();
+            let mut source_preparation_allowed = !shares_near_worker;
             if shares_near_worker {
                 drop(activation_plan);
                 observation.next("prefetch-window");
@@ -1224,6 +1246,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 observation.next("prefetch-cold");
                 activation_plan =
                     plan_activation(if can_open { remaining_prefetch_jobs } else { 0 });
+                source_preparation_allowed = can_open;
+            }
+            if source_preparation_allowed
+                && remaining_prefetch_jobs > 0
+                && activation_plan.admission_limit_reached
+                && activation_plan.preservable_media_frames == 0
+                && let Some(request) = source_preparations.into_iter().next()
+            {
+                // One physical source can open without an already-active source's
+                // restart. Keep the rejected full-picture readiness counts zero.
+                // The same Store/Broker validates this exact decode reservation.
+                activation_plan.requests.push(request);
             }
             bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                 && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
@@ -1232,7 +1266,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     activation_frame,
                     std::mem::take(&mut activation_plan.resident_guards),
                 );
-            } else if !preparation_guards.is_empty() {
+            } else {
+                // Completed cold inputs must survive the remaining activation
+                // work, even when their decoder no longer needs near coverage.
                 preparation_guards.extend(std::mem::take(&mut activation_plan.resident_guards));
             }
             let activation_scheduled = self.admit_future_media_prefix(
@@ -1641,6 +1677,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 continue;
             }
             plan.window_proven_blank = false;
+            if plan.first_media_frame.is_none() {
+                plan.first_media_frame = Some(Arc::clone(&requests));
+            }
             if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) {
                 plan.retain_frontier_guards(
                     &requests,
@@ -1711,9 +1750,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // native frame must acquire every surface before nearer work
                 // can consume any of its grant.
                 break;
-            }
-            if plan.first_media_frame.is_none() {
-                plan.first_media_frame = Some(Arc::clone(&requests));
             }
             for (key, guard) in trial_resident_guards {
                 resident_recency_order.push(key);

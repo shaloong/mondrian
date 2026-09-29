@@ -6118,11 +6118,21 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
 #[test]
 fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() {
     for capacity in [7, 8] {
-        assert_covered_source_worker_can_prepare_cold(capacity);
+        assert_cold_source_preparation(capacity, true, true);
     }
 }
 
-fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
+#[test]
+fn cold_source_preparation_does_not_wait_for_the_existing_sources_restart() {
+    assert_cold_source_preparation(7, false, true);
+}
+
+#[test]
+fn idle_worker_can_prepare_a_cold_source_with_one_remaining_slot() {
+    assert_cold_source_preparation(7, false, false);
+}
+
+fn assert_cold_source_preparation(capacity: usize, seed_restart: bool, shares_near_worker: bool) {
     let (mut state, root) = state_with_sequential_invalid_video_assets();
     let mut ids = Vec::new();
     for name in ["third.mp4", "overlay.mp4"] {
@@ -6172,7 +6182,7 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
     for key in &near {
         service.future_media_window.borrow_mut().remember_playback_worker_affinity(
             key.decode.source().clone(),
-            if key.asset_id == ids[1] {
+            if key.asset_id == ids[1] || !shares_near_worker {
                 MediaPreviewWorkerLane::Playback
             } else {
                 MediaPreviewWorkerLane::NonPlayback
@@ -6185,7 +6195,7 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
         .iter()
         .filter(|k| k.asset_id != ids[1])
         .chain(near.iter().filter(|k| k.asset_id == ids[1]).take(2))
-        .chain(std::iter::once(overlay_restart))
+        .chain(seed_restart.then_some(overlay_restart))
     {
         assert!(admit_test_media_frame(
             &mut service.frame_store.borrow_mut(),
@@ -6199,6 +6209,22 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
         .filter(|k| k.asset_id == ids[1])
         .nth(2)
         .expect("nearest missing overlay");
+    if !shares_near_worker {
+        // The other owner already holds the nearest missing overlay. Only one
+        // Broker slot remains, while the distinct cold source's worker is idle.
+        assert_eq!(
+            service.request_media_preview(
+                next_overlay.clone(),
+                crate::app::preview_access_mode::MediaPreviewRequestIntent::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                None,
+                None,
+                PreviewDecodeAdaptiveHints::default(),
+            ),
+            request_scheduler::MediaPreviewRequestAdmission::Scheduled
+        );
+        assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 1);
+    }
     schedule_media_prefetches_for_state(&service, &state, sequence, 48);
     assert!(
         service.scheduler.has_pending_key(next_overlay),
@@ -6208,6 +6234,12 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
         service.scheduler.has_pending_key(cold),
         "a covered worker cannot wait for the other worker's full far window"
     );
+    if !seed_restart {
+        assert!(
+            !service.scheduler.has_pending_key(overlay_restart),
+            "the one remaining slot belongs to cold-source preparation"
+        );
+    }
     assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 2);
     for key in near.iter().take(2) {
         assert!(
@@ -6216,17 +6248,27 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
         );
     }
     let preparing = service.future_media_window.borrow().diagnostics();
-    assert_eq!(preparing.retained_cold_preparation_media_frames, 3);
+    // Covered preparation holds two required near source samples. A resident
+    // restart adds one guard; an idle source owner needs no near coverage.
+    assert_eq!(
+        preparing.retained_cold_preparation_media_frames,
+        if shares_near_worker {
+            if seed_restart {
+                3
+            } else {
+                2
+            }
+        } else {
+            0
+        }
+    );
     assert_eq!(preparing.retained_cold_activation_media_frames, 0);
     assert_eq!(preparing.retained_cold_activation_frame, None);
 
     // Complete both actual Broker leases. The speculative guards must not
     // declare the cold picture Ready before its missing decode completes.
     let receiver = service.scheduler.job_receiver();
-    for lane in [
-        MediaPreviewWorkerLane::Playback,
-        MediaPreviewWorkerLane::NonPlayback,
-    ] {
+    let complete_queued_job = |lane| {
         let mut job = match receiver
             .recv_for_worker_outcome_timeout(lane, Duration::from_millis(10))
         {
@@ -6245,6 +6287,30 @@ fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
             )
             .is_admitted());
         let _ = service.scheduler.resolve_execution(execution, false);
+        job.key
+    };
+    for lane in [
+        MediaPreviewWorkerLane::Playback,
+        MediaPreviewWorkerLane::NonPlayback,
+    ] {
+        complete_queued_job(lane);
+    }
+    if !seed_restart {
+        schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+        assert!(service.scheduler.has_pending_key(overlay_restart));
+        assert_eq!(
+            service
+                .future_media_window
+                .borrow()
+                .diagnostics()
+                .retained_cold_activation_media_frames,
+            0,
+            "prepared cold source is not a complete future picture"
+        );
+        assert_eq!(
+            complete_queued_job(MediaPreviewWorkerLane::Playback),
+            *overlay_restart
+        );
     }
     schedule_media_prefetches_for_state(&service, &state, sequence, 48);
     let complete = service.future_media_window.borrow().diagnostics();
