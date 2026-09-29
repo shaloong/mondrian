@@ -401,16 +401,16 @@ where
         #[cfg(target_os = "macos")]
         let mut timing_probe = self.gpu_timing.begin_import(&mut encoder, None);
         #[cfg(target_os = "macos")]
-        let pass_query_set = self.gpu_timing.fused_pass_query_set(&timing_probe);
+        let pass_query = self.gpu_timing.fused_pass_query_set(&timing_probe);
         #[cfg(not(target_os = "macos"))]
-        let pass_query_set: Option<wgpu::QuerySet> = None;
+        let pass_query: Option<(wgpu::QuerySet, u32)> = None;
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
         let yuv_record_started = Instant::now();
         backend.record(
             &mut encoder,
             &prepared_yuv.bind_group,
             &working.resource().texture_view,
-            pass_query_set.as_ref(),
+            pass_query.as_ref().map(|(query_set, start_index)| (query_set, *start_index)),
         );
         // This bracket records the fused YUV + OCIO pass. No separate color
         // pass or frame-table extraction remains to time.

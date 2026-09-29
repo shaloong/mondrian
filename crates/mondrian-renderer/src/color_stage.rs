@@ -688,15 +688,15 @@ impl RenderGpuFusedInputBackend {
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::BindGroup,
         output: &wgpu::TextureView,
-        timestamp_query_set: Option<&wgpu::QuerySet>,
+        timestamp_query: Option<(&wgpu::QuerySet, u32)>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian.native-video.fused-working-input"),
-            timestamp_writes: timestamp_query_set.map(|query_set| {
+            timestamp_writes: timestamp_query.map(|(query_set, start_index)| {
                 wgpu::RenderPassTimestampWrites {
                     query_set,
-                    beginning_of_pass_write_index: Some(0),
-                    end_of_pass_write_index: Some(1),
+                    beginning_of_pass_write_index: Some(start_index),
+                    end_of_pass_write_index: Some(start_index + 1),
                 }
             }),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

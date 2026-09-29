@@ -36,12 +36,6 @@ impl NativeVideoImportTimestampMode {
 pub const NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION: u32 = 1;
 
 /// Hard upper bound for explicitly activated native-import timestamp slots.
-/// A 256-slot pass-query ring lost the device on M4; 16 slots completed both
-/// 1080p and 4K30 physical runs with exact sample coverage. The strict gate
-/// reports any future capacity drops instead of accepting partial evidence.
-#[cfg(target_os = "macos")]
-pub const NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY: usize = 16;
-#[cfg(not(target_os = "macos"))]
 pub const NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY: usize = 256;
 
 /// Product policy for native-import GPU timing evidence.
@@ -449,7 +443,7 @@ impl NativeVideoImportGpuTimingRuntime {
     pub(super) fn fused_pass_query_set(
         &mut self,
         probe: &NativeVideoImportGpuTimingProbe,
-    ) -> Option<wgpu::QuerySet> {
+    ) -> Option<(wgpu::QuerySet, u32)> {
         let NativeVideoImportGpuTimingProbeDisposition::Recording(token) = &probe.disposition
         else {
             return None;
@@ -802,10 +796,26 @@ impl NativeVideoImportGpuTimestampRing {
     ) -> Self {
         debug_assert!(capacity > 0);
         debug_assert!(device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
+        // The tested M4 Metal device loses its device at this bound with a
+        // query set per slot. One set gives each slot disjoint pass markers.
+        let shared_query_set = (mode == NativeVideoImportTimestampMode::FusedPass).then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("mondrian.native-video.shared-import-gpu-timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: u32::try_from(capacity).expect("bounded timestamp capacity")
+                    * mode.query_count(),
+            })
+        });
         let mut slots = Vec::with_capacity(capacity);
         for slot in 0..capacity {
             slots.push(NativeVideoImportGpuTimestampSlot {
-                timer: NativeVideoImportGpuTimestampTimer::new(device, queue, slot, mode),
+                timer: NativeVideoImportGpuTimestampTimer::new(
+                    device,
+                    queue,
+                    slot,
+                    mode,
+                    shared_query_set.as_ref(),
+                ),
                 state: NativeVideoImportGpuTimestampSlotState::Free,
             });
         }
@@ -852,7 +862,7 @@ impl NativeVideoImportGpuTimestampRing {
     fn fused_pass_query_set(
         &mut self,
         token: NativeVideoImportGpuTimestampToken,
-    ) -> Option<wgpu::QuerySet> {
+    ) -> Option<(wgpu::QuerySet, u32)> {
         if self.mode != NativeVideoImportTimestampMode::FusedPass {
             return None;
         }
@@ -864,7 +874,7 @@ impl NativeVideoImportGpuTimestampRing {
                 fused_pass_armed,
             } if *active == token && !*fused_pass_armed => {
                 *fused_pass_armed = true;
-                Some(slot.timer.query_set.clone())
+                Some((slot.timer.query_set.clone(), slot.timer.query_start_index))
             }
             _ => None,
         }
@@ -1095,6 +1105,7 @@ impl NativeVideoImportGpuTimestampRing {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampTimer {
     query_set: wgpu::QuerySet,
+    query_start_index: u32,
     resolve_buffer: wgpu::Buffer,
     readback_buffer: wgpu::Buffer,
     timestamp_period_ns: f64,
@@ -1108,14 +1119,20 @@ impl NativeVideoImportGpuTimestampTimer {
         queue: &wgpu::Queue,
         slot: usize,
         mode: NativeVideoImportTimestampMode,
+        shared_query_set: Option<&wgpu::QuerySet>,
     ) -> Self {
         let readback_bytes = mode.query_count() as u64 * wgpu::QUERY_SIZE as u64;
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some(&format!(
-                "mondrian.native-video.import-gpu-timestamps.slot-{slot}"
-            )),
-            ty: wgpu::QueryType::Timestamp,
-            count: mode.query_count(),
+        let query_start_index = shared_query_set.map_or(0, |_| {
+            u32::try_from(slot).expect("bounded timestamp slot") * mode.query_count()
+        });
+        let query_set = shared_query_set.cloned().unwrap_or_else(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some(&format!(
+                    "mondrian.native-video.import-gpu-timestamps.slot-{slot}"
+                )),
+                ty: wgpu::QueryType::Timestamp,
+                count: mode.query_count(),
+            })
         });
         let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!(
@@ -1135,6 +1152,7 @@ impl NativeVideoImportGpuTimestampTimer {
         });
         Self {
             query_set,
+            query_start_index,
             resolve_buffer,
             readback_buffer,
             timestamp_period_ns: f64::from(queue.get_timestamp_period()),
@@ -1144,7 +1162,7 @@ impl NativeVideoImportGpuTimestampTimer {
 
     fn begin(&self, encoder: &mut dyn crate::gpu_command::GpuCommandEncoder) -> Result<(), String> {
         if self.mode == NativeVideoImportTimestampMode::Encoder {
-            encoder.write_timestamp(&self.query_set, 0)
+            encoder.write_timestamp(&self.query_set, self.query_start_index)
         } else {
             Ok(())
         }
@@ -1156,7 +1174,10 @@ impl NativeVideoImportGpuTimestampTimer {
         marker: NativeVideoImportGpuTimestampMarker,
     ) -> Result<(), String> {
         if self.mode == NativeVideoImportTimestampMode::Encoder {
-            encoder.write_timestamp(&self.query_set, marker.query_index())
+            encoder.write_timestamp(
+                &self.query_set,
+                self.query_start_index + marker.query_index(),
+            )
         } else {
             Ok(())
         }
@@ -1168,7 +1189,7 @@ impl NativeVideoImportGpuTimestampTimer {
     ) -> Result<(), String> {
         encoder.resolve_query_set(
             &self.query_set,
-            0..self.mode.query_count(),
+            self.query_start_index..self.query_start_index + self.mode.query_count(),
             &self.resolve_buffer,
             0,
         )?;
