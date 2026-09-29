@@ -6116,6 +6116,182 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
 }
 
 #[test]
+fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    let mut ids = Vec::new();
+    for name in ["third.mp4", "overlay.mp4"] {
+        let path = root.join(name);
+        std::fs::write(&path, b"invalid fixture").expect("fixture");
+        ids.push(commit_preview_test_media(
+            state.asset_library().expect("library"),
+            path.clone(),
+            rec709_video_media_info(std::fs::metadata(path).expect("metadata").len()),
+        ));
+    }
+    let mut sequence = state.active_sequence().expect("sequence").clone();
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(ids[0], tt(96, tb), tt(48, tb)).expect("third"))
+        .expect("insert third");
+    for position in [0, 48, 96] {
+        sequence.video_tracks[1]
+            .add_clip(Clip::new(ids[1], tt(position, tb), tt(48, tb)).expect("overlay"))
+            .expect("insert overlay");
+    }
+    state.test_set_sequence(Some(sequence));
+    state.play().expect("play");
+    let delivered =
+        deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    synchronize_visual_program_for_state(&service, &state);
+    service.frame_store.replace(test_cpu_frame_store(8, 640 * 1024 * 1024, 6));
+    let mut opened = test_preview_decode_diagnostics(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewHardwareDecodeDecision::GpuResidentNative,
+        PreviewHardwareDecodeBlocker::None,
+    );
+    opened.elapsed_us = 20_000;
+    service.record_startup_preroll_decode(opened, 0);
+    let sequence = state.active_sequence().expect("sequence");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let (width, height) = preview_dimensions_for_snapshot(&snapshot, sequence);
+    let resolution = Resolution { width, height };
+    let near = future_media_prefix_keys_for_state(&service, &state, 48, 3, resolution);
+    let far = future_media_prefix_keys_for_state(&service, &state, 95, 1, resolution);
+    let overlay_restart = far.iter().find(|k| k.asset_id == ids[1]).expect("overlay restart");
+    let cold = far.iter().find(|k| k.asset_id == ids[0]).expect("cold");
+    for key in &near {
+        service.future_media_window.borrow_mut().remember_playback_worker_affinity(
+            key.decode.source().clone(),
+            if key.asset_id == ids[1] {
+                MediaPreviewWorkerLane::Playback
+            } else {
+                MediaPreviewWorkerLane::NonPlayback
+            },
+        );
+    }
+    // The cold owner's first two source samples and the nearest full pictures
+    // are ready. The other owner's third picture still needs one request.
+    for key in near
+        .iter()
+        .filter(|k| k.asset_id != ids[1])
+        .chain(near.iter().filter(|k| k.asset_id == ids[1]).take(2))
+        .chain(std::iter::once(overlay_restart))
+    {
+        assert!(admit_test_media_frame(
+            &mut service.frame_store.borrow_mut(),
+            key.clone(),
+            test_media_frame(4),
+            MediaPreviewRequestPriority::Prefetch
+        ));
+    }
+    let next_overlay = near
+        .iter()
+        .filter(|k| k.asset_id == ids[1])
+        .nth(2)
+        .expect("nearest missing overlay");
+    schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+    assert!(
+        service.scheduler.has_pending_key(next_overlay),
+        "the nearest complete frontier must retain priority"
+    );
+    assert!(
+        service.scheduler.has_pending_key(cold),
+        "a covered worker cannot wait for the other worker's full far window"
+    );
+    assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 2);
+    let preparing = service.future_media_window.borrow().diagnostics();
+    assert_eq!(preparing.retained_cold_preparation_media_frames, 3);
+    assert_eq!(preparing.retained_cold_activation_media_frames, 0);
+    assert_eq!(preparing.retained_cold_activation_frame, None);
+
+    // Complete both actual Broker leases. The speculative guards must not
+    // declare the cold picture Ready before its missing decode completes.
+    let receiver = service.scheduler.job_receiver();
+    for lane in [
+        MediaPreviewWorkerLane::Playback,
+        MediaPreviewWorkerLane::NonPlayback,
+    ] {
+        let mut job = match receiver
+            .recv_for_worker_outcome_timeout(lane, Duration::from_millis(10))
+        {
+            MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job { job, .. }) => job,
+            other => panic!("expected admitted source work: {other:?}"),
+        };
+        let execution = job.execution_id.expect("execution lease");
+        assert!(service.scheduler.mark_execution_completed(execution));
+        assert!(service
+            .frame_store
+            .borrow_mut()
+            .insert_media_frame(
+                job.key.clone(),
+                test_media_frame(4),
+                job.residency_work.take().expect("physical work lease"),
+            )
+            .is_admitted());
+        let _ = service.scheduler.resolve_execution(execution, false);
+    }
+    schedule_media_prefetches_for_state(&service, &state, sequence, 48);
+    let complete = service.future_media_window.borrow().diagnostics();
+    assert_eq!(complete.retained_cold_preparation_media_frames, 0);
+    assert_eq!(complete.retained_cold_activation_media_frames, 2);
+    assert_eq!(complete.retained_cold_activation_frame, Some(96));
+    service.future_media_window.borrow_mut().release_decoded_residency();
+    let trimmed = service.future_media_window.borrow().diagnostics();
+    assert_eq!(trimmed.retained_cold_preparation_media_frames, 0);
+    assert_eq!(trimmed.retained_cold_activation_media_frames, 0);
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn cold_preparation_coverage_uses_engine_rate_and_requires_bounded_observations() {
+    let (mut state, root) = state_with_sequential_invalid_video_assets();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let transport = state.preview_execution_snapshot(Instant::now()).transport();
+    assert_eq!(service.cold_activation_covering_frames(transport, 16), None);
+    let mut opened = test_preview_decode_diagnostics(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewHardwareDecodeDecision::GpuResidentNative,
+        PreviewHardwareDecodeBlocker::None,
+    );
+    opened.elapsed_us = 20_000;
+    service.record_startup_preroll_decode(opened, 0);
+    assert_eq!(
+        service.cold_activation_covering_frames(transport, 16),
+        Some(2)
+    );
+    assert_eq!(
+        service.cold_activation_covering_frames(transport.with_frame_period(None), 16),
+        None
+    );
+    assert_eq!(
+        service
+            .cold_activation_covering_frames(transport.with_frame_period(Some(Duration::ZERO)), 16),
+        None
+    );
+    state
+        .shuttle(mondrian_playback::PlaybackShuttleDirection::Forward)
+        .expect("forward 2x");
+    let faster = state.preview_execution_snapshot(Instant::now()).transport();
+    assert_eq!(
+        faster.frame_period(),
+        state.playback_engine.frame_period().ok()
+    );
+    assert_eq!(service.cold_activation_covering_frames(faster, 16), Some(3));
+    assert_eq!(service.cold_activation_covering_frames(faster, 2), None);
+    opened.elapsed_us = 5_000_001;
+    service.record_startup_preroll_decode(opened, 0);
+    assert_eq!(service.cold_activation_covering_frames(faster, 16), None);
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn distinct_initial_moving_sources_use_both_existing_session_owners() {
     for worker_count in [1, 2, 3] {
         let mut window = FutureMediaWindowCache::default();

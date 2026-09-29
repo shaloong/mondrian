@@ -150,6 +150,14 @@ struct FutureMediaColdActivationMemo {
 struct FutureMediaColdActivationResidency {
     activation_frame: i64,
     frames: Vec<MediaPreviewFrame>,
+    preparation_guards: Vec<MediaPreviewFrame>,
+}
+
+#[derive(Clone, Copy)]
+enum FutureMediaPrefixScope<'a> {
+    CompleteFrames,
+    FirstMissingFrame,
+    SourceCoverage(&'a [mondrian_media::PreviewDecodeSource]),
 }
 
 #[derive(Default)]
@@ -308,8 +316,28 @@ impl FutureMediaWindowCache {
         {
             return;
         }
-        self.cold_activation_residency =
-            Some(FutureMediaColdActivationResidency { activation_frame, frames });
+        self.cold_activation_residency = Some(FutureMediaColdActivationResidency {
+            activation_frame,
+            frames,
+            preparation_guards: Vec::new(),
+        });
+    }
+
+    fn retain_cold_preparation(
+        &mut self,
+        activation_frame: i64,
+        preparation_guards: Vec<MediaPreviewFrame>,
+    ) {
+        if preparation_guards.is_empty()
+            || self.cold_activation.and_then(|memo| memo.activation_frame) != Some(activation_frame)
+        {
+            return;
+        }
+        self.cold_activation_residency = Some(FutureMediaColdActivationResidency {
+            activation_frame,
+            frames: Vec::new(),
+            preparation_guards,
+        });
     }
 
     /// Bind newly discovered cold sources to the worker that will open them.
@@ -346,27 +374,30 @@ impl FutureMediaWindowCache {
         }
     }
 
-    fn cold_activation_shares_near_worker(
+    fn cold_activation_shared_near_sources(
         &self,
         plan: &FutureMediaPrefixPlan,
         near_closure: &[PlannedFutureMediaRequest],
         worker_count: usize,
-    ) -> bool {
-        plan.requests.iter().any(|cold| {
-            let cold_source = cold.key.decode.source();
-            !cold_source.is_still_image()
-                && self.playback_source_worker_affinity.get(cold_source).is_some_and(|lane| {
-                    near_closure.iter().any(|near| {
-                        let near_source = near.key.decode.source();
-                        !near_source.is_still_image()
-                            && near_source != cold_source
+    ) -> Vec<mondrian_media::PreviewDecodeSource> {
+        near_closure
+            .iter()
+            .filter_map(|near| {
+                let source = near.key.decode.source();
+                let lane = self.playback_source_worker_affinity.get(source)?;
+                (!source.is_still_image()
+                    && plan.requests.iter().any(|cold| {
+                        let cold_source = cold.key.decode.source();
+                        !cold_source.is_still_image()
+                            && cold_source != source
                             && self
                                 .playback_source_worker_affinity
-                                .get(near_source)
-                                .is_some_and(|near_lane| worker_count == 1 || near_lane == lane)
-                    })
-                })
-        })
+                                .get(cold_source)
+                                .is_some_and(|cold_lane| worker_count == 1 || cold_lane == lane)
+                    }))
+                .then(|| source.clone())
+            })
+            .collect()
     }
 
     pub(super) fn playback_worker_affinity(
@@ -486,19 +517,25 @@ impl FutureMediaWindowCache {
             retained_cold_activation_frame: self
                 .cold_activation_residency
                 .as_ref()
+                .filter(|residency| !residency.frames.is_empty())
                 .map(|residency| residency.activation_frame),
             retained_cold_activation_media_frames: self
                 .cold_activation_residency
                 .as_ref()
                 .map_or(0, |residency| residency.frames.len()),
+            retained_cold_preparation_media_frames: self
+                .cold_activation_residency
+                .as_ref()
+                .map_or(0, |residency| residency.preparation_guards.len()),
         }
     }
 }
 
 struct FutureMediaPrefixPlan {
-    /// The first accepted frame's complete immutable source closure, including
-    /// already resident/pending inputs. Cold Session affinity cannot be derived
-    /// from the missing-request subset alone. This Arc retains no pixel leases.
+    /// The first accepted frame's immutable source inputs, including resident
+    /// and pending keys. Complete-frame plans use the full closure to derive
+    /// cold Session affinity; source coverage projects only the selected owner.
+    /// This Arc retains no pixel leases.
     first_media_frame: Option<Arc<[PlannedFutureMediaRequest]>>,
     /// Physical guards that keep accepted near-term resident frames non-evictable
     /// until every planned missing request has transferred into Broker ownership.
@@ -507,8 +544,8 @@ struct FutureMediaPrefixPlan {
     ready_media_frames: usize,
     preservable_media_frames: usize,
     window_proven_blank: bool,
-    /// The next complete picture exceeds the remaining request or physical
-    /// grant. Farther work sharing its worker cannot cross that frontier.
+    /// The next scoped closure is unavailable or exceeds remaining request or
+    /// physical grants. Farther work cannot cross that admission frontier.
     admission_limit_reached: bool,
 }
 
@@ -1074,37 +1111,90 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 )
             };
             let mut activation_plan = plan_activation(remaining_prefetch_jobs);
+            let mut preparation_guards = Vec::new();
+            let mut nearest_guards = Vec::new();
             self.future_media_window
                 .borrow_mut()
                 .assign_cold_activation_worker_affinity(&activation_plan);
-            let shares_near_worker = prioritize_immediate
-                && self.future_media_window.borrow().cold_activation_shares_near_worker(
+            let shared_near_sources =
+                self.future_media_window.borrow().cold_activation_shared_near_sources(
                     &activation_plan,
                     immediate_closure.as_deref().unwrap_or(&[]),
                     self.decode_worker_count,
                 );
+            let shares_near_worker = prioritize_immediate && !shared_near_sources.is_empty();
             if shares_near_worker {
-                // The next Program frame may reuse an already decoded source
-                // sample. A cold open on that source's worker can still outlast
-                // the first missing sample in the rolling prefix. Give that
-                // prefix first admission against real ownership. An unadmitted
-                // cold proposal cannot reduce that prefix's physical headroom:
-                // doing so could reject both complete closures with no producer.
-                // Replan cold work after near admission, without far pixel guards.
                 drop(activation_plan);
                 observation.next("prefetch-window");
-                let (window_proven_blank, scheduled, admission_limit_reached) =
-                    admit_steady_prefix(remaining_prefetch_jobs);
-                admitted_steady_window = Some(window_proven_blank);
-                remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
-                observation.next("prefetch-cold");
-                activation_plan = plan_activation(if admission_limit_reached {
-                    // A smaller far closure cannot cross the next complete
-                    // rolling picture's request or physical grant frontier.
-                    0
+                let can_open = if let Some(coverage_frames) =
+                    self.cold_activation_covering_frames(transport, prefetch_window_frames)
+                {
+                    // The nearest missing complete picture keeps first claim.
+                    // Beyond it only the source inputs on the blocked owner
+                    // need to cover a cold open. Another worker's farther
+                    // missing picture cannot indefinitely prevent preparation.
+                    let mut nearest = self.plan_future_media_prefix_scoped(
+                        snapshot,
+                        proxy_demands,
+                        sequence,
+                        frame,
+                        playback_direction,
+                        prefetch_window_frames,
+                        None,
+                        Resolution { width: target_width, height: target_height },
+                        color_context.clone(),
+                        remaining_prefetch_jobs,
+                        FutureMediaPrefixScope::FirstMissingFrame,
+                    );
+                    let nearest_owned = !nearest.admission_limit_reached;
+                    let nearest_requests = nearest.requests.len();
+                    admitted_steady_window = Some(nearest.window_proven_blank);
+                    nearest_guards = std::mem::take(&mut nearest.resident_guards);
+                    let scheduled = self.admit_future_media_prefix(
+                        nearest,
+                        preroll_deadline_at,
+                        playback_direction,
+                    );
+                    remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                    if nearest_owned && scheduled == nearest_requests {
+                        let mut coverage = self.plan_future_media_prefix_scoped(
+                            snapshot,
+                            proxy_demands,
+                            sequence,
+                            frame,
+                            playback_direction,
+                            coverage_frames,
+                            Some(activation_frame.saturating_sub(1)),
+                            Resolution { width: target_width, height: target_height },
+                            color_context.clone(),
+                            remaining_prefetch_jobs,
+                            FutureMediaPrefixScope::SourceCoverage(&shared_near_sources),
+                        );
+                        let resident_coverage = coverage.ready_media_frames == coverage_frames
+                            && coverage.preservable_media_frames == coverage_frames;
+                        preparation_guards = std::mem::take(&mut coverage.resident_guards);
+                        let scheduled = self.admit_future_media_prefix(
+                            coverage,
+                            preroll_deadline_at,
+                            playback_direction,
+                        );
+                        remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                        resident_coverage
+                    } else {
+                        false
+                    }
                 } else {
-                    remaining_prefetch_jobs
-                });
+                    // Without a finite observed preparation cost/Engine period,
+                    // retain the conservative complete-window protection.
+                    let (window_proven_blank, scheduled, frontier) =
+                        admit_steady_prefix(remaining_prefetch_jobs);
+                    admitted_steady_window = Some(window_proven_blank);
+                    remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(scheduled);
+                    !frontier
+                };
+                observation.next("prefetch-cold");
+                activation_plan =
+                    plan_activation(if can_open { remaining_prefetch_jobs } else { 0 });
             }
             bounded_cold_activation_ready = activation_plan.preservable_media_frames > 0
                 && activation_plan.ready_media_frames == activation_plan.preservable_media_frames;
@@ -1113,6 +1203,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     activation_frame,
                     std::mem::take(&mut activation_plan.resident_guards),
                 );
+            } else if !preparation_guards.is_empty() {
+                preparation_guards.extend(std::mem::take(&mut activation_plan.resident_guards));
             }
             let activation_scheduled = self.admit_future_media_prefix(
                 activation_plan,
@@ -1120,6 +1212,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewPlaybackDirection::Forward,
             );
             remaining_prefetch_jobs = remaining_prefetch_jobs.saturating_sub(activation_scheduled);
+            if activation_scheduled > 0 && !preparation_guards.is_empty() {
+                self.future_media_window
+                    .borrow_mut()
+                    .retain_cold_preparation(activation_frame, preparation_guards);
+            }
+            // Keep complete-picture guards through both actual admissions;
+            // only the blocked owner's coverage survives this turn.
+            drop(nearest_guards);
         }
 
         let immediate_window_proven_blank = if cold_activation_only {
@@ -1378,6 +1478,34 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    pub(super) fn cold_activation_covering_frames(
+        &self,
+        transport: PreviewTransportSnapshot,
+        temporal_ceiling: usize,
+    ) -> Option<usize> {
+        let classes = self.metrics.decode_access_mode_profiles.get().playback_cursor.work_classes;
+        let mut observed = classes.session_opened.latency_buckets;
+        for duration in [
+            self.metrics.decode_startup_preroll_max_duration_us.get(),
+            classes.session_replaced.max_duration_us,
+        ] {
+            if duration > 0 {
+                observed.record(duration);
+            }
+        }
+        let opening_ns = Duration::from_micros(observed.max_upper_bound_us()?).as_nanos();
+        let period_ns = transport.frame_period()?.as_nanos();
+        // Use the existing observed maximum's finite bucket envelope plus
+        // one presentation boundary. This predicts speculative coverage;
+        // it never renews a demand deadline or declares a frame Ready.
+        let frames = opening_ns
+            .checked_div(period_ns)?
+            .checked_add(u128::from(!opening_ns.is_multiple_of(period_ns)))?
+            .checked_add(1)?;
+        let frames = usize::try_from(frames).ok()?;
+        (frames <= temporal_ceiling).then_some(frames)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn plan_future_media_prefix(
         &self,
@@ -1391,6 +1519,36 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_resolution: Resolution,
         color_context: ProgramColorContext,
         max_new_jobs: usize,
+    ) -> FutureMediaPrefixPlan {
+        self.plan_future_media_prefix_scoped(
+            snapshot,
+            proxy_demands,
+            sequence,
+            current_frame,
+            playback_direction,
+            max_future_frames,
+            terminal_frame,
+            target_resolution,
+            color_context,
+            max_new_jobs,
+            FutureMediaPrefixScope::CompleteFrames,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_future_media_prefix_scoped(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
+        sequence: &Sequence,
+        current_frame: i64,
+        playback_direction: PreviewPlaybackDirection,
+        max_future_frames: usize,
+        terminal_frame: Option<i64>,
+        target_resolution: Resolution,
+        color_context: ProgramColorContext,
+        max_new_jobs: usize,
+        scope: FutureMediaPrefixScope<'_>,
     ) -> FutureMediaPrefixPlan {
         let mut plan = FutureMediaPrefixPlan::default();
         let mut accepted_keys = self.scheduler.pending_keys().into_iter().collect::<HashSet<_>>();
@@ -1416,7 +1574,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if crossed_terminal {
                 break;
             }
-            let requests = match self.cached_future_media_frame(
+            let mut requests = match self.cached_future_media_frame(
                 snapshot,
                 proxy_demands,
                 sequence,
@@ -1429,9 +1587,27 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 CachedFutureMediaFrame::Complete(requests) => requests,
                 CachedFutureMediaFrame::Unavailable => {
                     plan.window_proven_blank = false;
+                    plan.admission_limit_reached = true;
                     break;
                 }
             };
+            if let FutureMediaPrefixScope::SourceCoverage(sources) = scope {
+                let selected = requests
+                    .iter()
+                    .filter(|request| sources.contains(request.key.decode.source()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                requests = selected.into();
+                if requests.is_empty() {
+                    // The canonical Program needs no work from this owner at
+                    // this coordinate; it still covers one runtime interval.
+                    plan.preservable_media_frames += 1;
+                    if ready_prefix {
+                        plan.ready_media_frames += 1;
+                    }
+                    continue;
+                }
+            }
             if requests.is_empty() {
                 continue;
             }
@@ -1464,6 +1640,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 missing.push(request.clone());
             }
             if frontier {
+                plan.admission_limit_reached = true;
                 break;
             }
 
@@ -1515,6 +1692,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ready_prefix &= frame_ready;
             if ready_prefix {
                 plan.ready_media_frames = plan.ready_media_frames.saturating_add(1);
+            }
+            if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) && !frame_ready {
+                break;
             }
         }
         // Near-to-far lookup necessarily touches the Store LRU in the wrong

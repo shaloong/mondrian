@@ -5,7 +5,7 @@
 //! a second authoring or Playback authority.
 
 use std::collections::BTreeSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::{types::AssetId, FrameRounding};
@@ -219,6 +219,7 @@ pub(crate) struct PreviewTransportSnapshot {
     seek_source: TimelineSeekSource,
     demand: Option<PreviewFrameDemandSnapshot>,
     priming_work_deadline: Option<Instant>,
+    frame_period: Option<Duration>,
     purpose: PreviewFrameExecutionPurpose,
 }
 
@@ -244,6 +245,7 @@ impl PreviewTransportSnapshot {
             seek_source,
             demand,
             priming_work_deadline: None,
+            frame_period: None,
             purpose: PreviewFrameExecutionPurpose::Current,
         }
     }
@@ -302,6 +304,16 @@ impl PreviewTransportSnapshot {
     /// Playback Session identity.
     pub(crate) const fn epoch(self) -> PlaybackEpoch {
         self.epoch
+    }
+
+    /// Runtime period projected by the Playback Engine, never an Adapter clock.
+    pub(crate) const fn frame_period(self) -> Option<Duration> {
+        self.frame_period
+    }
+
+    pub(crate) const fn with_frame_period(mut self, period: Option<Duration>) -> Self {
+        self.frame_period = period;
+        self
     }
 
     /// Exact playback coordinate used to bind prepared Viewer work.

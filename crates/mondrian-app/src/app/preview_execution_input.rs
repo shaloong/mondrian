@@ -46,6 +46,7 @@ impl AppState {
             self.last_timeline_seek_source,
             demand,
         )
+        .with_frame_period(self.playback_engine.frame_period().ok())
         .with_priming_work_deadline(self.playback_priming_work_deadline_at(sampled_at));
         PreviewExecutionSnapshot::new(authoring, transport, &self.viewer_display_management)
     }

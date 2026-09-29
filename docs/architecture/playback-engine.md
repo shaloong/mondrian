@@ -1851,11 +1851,11 @@ shorten it. Native decode therefore remains bounded by its machine-class
 surface-unit grant (eight on the Standard class), while a compact CPU-YUV
 source can use a longer 60 fps prefix when its actual retained planes fit. The
 Standard 640 MiB policy physically fits the current frame, all 16 compact 4K
-10-bit 4:2:2 future frames, and three in-flight decode reservations; the 250 ms
+10-bit 4:2:2 future frames, and the two steady decode reservations; the 250 ms
 software-decode promise therefore does not collapse to roughly 150 ms solely
 because each retained plane set is about 31.6 MiB. The App enforces this
 physical decomposition: Priming may fill the entire temporal prefix, but steady
-Running admits no more than three queued-plus-in-flight prefetch reservations
+Running admits no more than two queued-plus-in-flight prefetch reservations
 and tops them up as work completes. A
 media reservation includes current linear-float pixels, encoded source pixels,
 and the possible lazy working-frame allocation, so a deferred
@@ -2040,16 +2040,35 @@ capacity. A blocked nearest closure is a frontier even when the farther frame
 needs fewer inputs; it cannot be bypassed by the separate cold-source plan.
 An idle opposite worker can still open the cold source in parallel. If the
 activation instead shares a worker with a different moving source in the
-immediate closure, the existing rolling prefix gets first claim on the remaining
-bounded admissions. A resident immediate frame can cover the same decoded source
-sample as its predecessor, so it does not prove that the next physical sample is
-already available. Cold-plan pixel guards are dropped before planning that near
-prefix. That prefix plans against actual Frame Store and Broker ownership;
-an unadmitted cold proposal cannot spend its headroom. Deducting such a proposal
-could reject a nearer complete picture that fits the remaining grant and then
-reject cold work at that same frontier, leaving no producer to make progress.
-Shared and already-owned keys are charged once. Cold work is then replanned
-against the remaining actual capacity.
+immediate closure, the nearest missing complete picture gets first claim on the
+remaining bounded admissions. A resident immediate frame can cover the same
+decoded source sample as its predecessor, so it does not prove that the next
+physical sample is already available. Beyond that complete frontier, cold
+preparation protects only the canonical source inputs belonging to the worker
+that must open the new source. Missing farther inputs on an independent worker
+cannot indefinitely defer that open. This source projection uses the same
+canonical visual lowering and physical Frame Store admission; it is resource
+coverage, never evidence that a complete picture is Ready.
+
+The coverage duration is the finite upper bound of the existing observed
+Playback Session open/replacement and startup latency buckets, divided by the
+Playback Engine's exact active-rate frame period, rounded up with one additional
+presentation boundary. It remains within the existing temporal ceiling. Unknown
+cost, missing period, an open-ended latency bucket, or coverage beyond that
+ceiling retains conservative complete-window protection. This prediction neither
+renews a demand deadline nor guarantees that an unobserved future open meets it.
+Only resident coverage permits a cold admission. Its actual pixel guards and
+already-resident cold inputs survive through the existing cold-activation owner
+until the complete cold picture becomes resident or decoded residency is trimmed.
+Preparation guards are reported separately and cannot publish cold readiness.
+
+Cold-plan pixel guards are dropped before planning the nearer work. All plans
+use actual Frame Store and Broker ownership; an unadmitted cold proposal cannot
+spend headroom. Deducting such a proposal could reject a nearer complete picture
+that fits the remaining grant and then reject cold work at that same frontier,
+leaving no producer to make progress. Shared and already-owned keys are charged
+once. Cold work is replanned against remaining actual capacity, and only an
+actual admitted cold request can retain its preparation guards.
 The next missing rolling picture retains one admission frontier for both queue
 slots and physical entry, byte and decoder-resource grants. One spare slot or
 physical entry cannot go to a smaller far closure when that nearer picture needs

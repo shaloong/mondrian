@@ -206,6 +206,8 @@ pub struct PreviewFutureMediaWindowDiagnostics {
     pub retained_cold_activation_frame: Option<i64>,
     /// Media frames physically retained for the bounded cold activation closure.
     pub retained_cold_activation_media_frames: usize,
+    /// Physical near/cold guards retained while the shared worker prepares a source.
+    pub retained_cold_preparation_media_frames: usize,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -934,7 +936,7 @@ pub struct PreviewDecodeWorkLatencyBuckets {
 }
 
 impl PreviewDecodeWorkLatencyBuckets {
-    fn record(&mut self, duration_us: u64) {
+    pub(super) fn record(&mut self, duration_us: u64) {
         match duration_us {
             0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
             10_001..=16_000 => self.le_16ms = self.le_16ms.saturating_add(1),
@@ -975,11 +977,19 @@ impl PreviewDecodeWorkLatencyBuckets {
     }
 
     pub(super) fn p95_upper_bound_us(self) -> Option<u64> {
+        self.quantile_upper_bound_us(95)
+    }
+
+    pub(super) fn max_upper_bound_us(self) -> Option<u64> {
+        self.quantile_upper_bound_us(100)
+    }
+
+    fn quantile_upper_bound_us(self, percentile: u64) -> Option<u64> {
         let total = self.total();
         if total == 0 {
             return None;
         }
-        let rank = total.saturating_mul(95).saturating_add(99) / 100;
+        let rank = total.saturating_mul(percentile).saturating_add(99) / 100;
         let mut cumulative = 0_u64;
         for (count, upper_bound_us) in [
             (self.le_10ms, Some(10_000)),
