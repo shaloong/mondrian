@@ -2063,15 +2063,23 @@ coordinate, leaving the bounded horizon, or rotating the semantic execution
 identity releases it. The target therefore cannot slide forward one frame per
 clock tick and reopen the same physical source ahead of current-source work.
 The future-media owner also retains a bounded exact-source-to-worker map. The
-initial source defaults to Playback, each new cold activation uses the opposite
-worker from an already-owned persistent source or the next alternating lane.
+initial moving source defaults to Playback. Further unbound moving sources
+alternate between the two existing moving-source lanes when the topology is
+parallel; a single-worker topology retains the primary logical lane. Static
+sources use their existing receiver and do not consume a moving-source placement.
+An existing source lookup never advances the placement cursor or moves its
+worker-local decoder Session. Each new cold activation uses the opposite
+worker from an already-owned persistent source or the same placement cursor.
 That decision uses the activation's complete immutable physical closure,
 including resident/pending layers; the missing-request subset alone would
 omit a persistent layer precisely when it was already ready and could send a
 far cold open onto its active worker. Only newly missing sources are assigned,
 and all missing requests in that activation inherit the chosen owner. The map
 uses the immutable physical decode-source contract, not an authored clip or
-Asset alias, and expires with semantic-window identity or bounded LRU eviction.
+Asset alias. Lookahead's initial binding and author, output, proxy, or admission
+plan invalidation clear semantic lowerings and cold pixel guards without
+discarding compatible worker-local source ownership. A physical Runtime/session
+retirement clears both; bounded LRU eviction still limits the source map.
 An in-family frame/cache trim releases the cold-activation payload owner but
 preserves this map and the immutable lowering plan; decoded-frame residency is
 not Session ownership. While Priming, observing a retained activation memo

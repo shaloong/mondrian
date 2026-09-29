@@ -6081,6 +6081,155 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
 }
 
 #[test]
+fn distinct_initial_moving_sources_use_both_existing_session_owners() {
+    for worker_count in [1, 2, 3] {
+        let mut window = FutureMediaWindowCache::default();
+        let first = test_media_key(8_201);
+        let second = test_media_key(8_202);
+        let third = test_media_key(8_203);
+        let mut alias = test_media_key_with_source_time(
+            first.clone(),
+            mondrian_core::TimelineTime::new(1, 60).unwrap(),
+        );
+        alias.asset_id = AssetId::new();
+        assert_eq!(
+            window.playback_worker_affinity(first.decode.source(), worker_count),
+            MediaPreviewWorkerLane::Playback
+        );
+        // A second sample/Asset alias of the same physical source must not
+        // consume another placement or open a duplicate decoder Session.
+        assert_eq!(
+            window.playback_worker_affinity(alias.decode.source(), worker_count),
+            MediaPreviewWorkerLane::Playback
+        );
+        assert_eq!(
+            window.playback_worker_affinity(second.decode.source(), worker_count),
+            if worker_count > 1 {
+                MediaPreviewWorkerLane::NonPlayback
+            } else {
+                MediaPreviewWorkerLane::Playback
+            }
+        );
+        assert_eq!(
+            window.playback_worker_affinity(third.decode.source(), worker_count),
+            MediaPreviewWorkerLane::Playback
+        );
+        assert_eq!(
+            window.playback_worker_affinity(second.decode.source(), worker_count),
+            if worker_count > 1 {
+                MediaPreviewWorkerLane::NonPlayback
+            } else {
+                MediaPreviewWorkerLane::Playback
+            }
+        );
+    }
+}
+
+#[test]
+fn lookahead_rotation_preserves_worker_ownership_until_physical_clear() {
+    let (state, _, root) = state_with_invalid_video_asset();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let first = test_media_key(8_211).decode.source().clone();
+    let second = test_media_key(8_212).decode.source().clone();
+    let third = test_media_key(8_213).decode.source().clone();
+    let mut window = service.future_media_window.borrow_mut();
+    assert_eq!(
+        window.playback_worker_affinity(&first, 2),
+        MediaPreviewWorkerLane::Playback
+    );
+    assert_eq!(
+        window.playback_worker_affinity(&second, 2),
+        MediaPreviewWorkerLane::NonPlayback
+    );
+
+    // Initial lookahead binding can follow Current request admission. It must
+    // not erase the placements that the queued/running payloads already use.
+    drop(window);
+    assert!(!future_media_prefix_keys_for_state(
+        &service,
+        &state,
+        0,
+        3,
+        Resolution { width: 64, height: 36 },
+    )
+    .is_empty());
+    let mut window = service.future_media_window.borrow_mut();
+    assert_eq!(
+        window.playback_worker_affinity(&second, 2),
+        MediaPreviewWorkerLane::NonPlayback
+    );
+    let lowered_before_rotation = window.diagnostics().semantic_frame_evaluations;
+    drop(window);
+    assert!(!future_media_prefix_keys_for_state(
+        &service,
+        &state,
+        0,
+        3,
+        Resolution { width: 128, height: 36 },
+    )
+    .is_empty());
+    let mut window = service.future_media_window.borrow_mut();
+    assert!(
+        window.diagnostics().semantic_frame_evaluations > lowered_before_rotation,
+        "old semantic lowering must be invalidated"
+    );
+    assert_eq!(
+        window.playback_worker_affinity(&first, 2),
+        MediaPreviewWorkerLane::Playback
+    );
+    assert_eq!(
+        window.playback_worker_affinity(&second, 2),
+        MediaPreviewWorkerLane::NonPlayback
+    );
+    window.clear_lowering_plans();
+    assert_eq!(
+        window.playback_worker_affinity(&third, 2),
+        MediaPreviewWorkerLane::Playback
+    );
+    window.release_decoded_residency();
+    assert_eq!(
+        window.playback_worker_affinity(&second, 2),
+        MediaPreviewWorkerLane::NonPlayback
+    );
+
+    window.clear();
+    assert_eq!(
+        window.playback_worker_affinity(&second, 2),
+        MediaPreviewWorkerLane::Playback
+    );
+    drop(window);
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn static_source_placement_does_not_consume_the_next_moving_owner() {
+    for worker_count in [1, 2, 3] {
+        let mut window = FutureMediaWindowCache::default();
+        let first = test_media_key(8_221).decode.source().clone();
+        let still = first.clone().with_still_image_source();
+        let second = test_media_key(8_222).decode.source().clone();
+        assert_eq!(
+            window.playback_worker_affinity(&first, worker_count),
+            MediaPreviewWorkerLane::Playback
+        );
+        assert_eq!(
+            window.playback_worker_affinity(&still, worker_count),
+            media_preview_worker_lane(worker_count - 1, worker_count)
+        );
+        assert_eq!(
+            window.playback_worker_affinity(&second, worker_count),
+            if worker_count > 1 {
+                MediaPreviewWorkerLane::NonPlayback
+            } else {
+                MediaPreviewWorkerLane::Playback
+            }
+        );
+    }
+}
+
+#[test]
 fn decoder_residency_trim_preserves_physical_source_worker_ownership() {
     let source = test_media_key(8_001).decode.source().clone();
     let mut window = FutureMediaWindowCache::default();

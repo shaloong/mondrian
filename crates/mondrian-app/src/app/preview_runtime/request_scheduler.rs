@@ -188,7 +188,7 @@ pub(super) struct FutureMediaWindowCache {
     playback_source_worker_affinity:
         HashMap<mondrian_media::PreviewDecodeSource, MediaPreviewWorkerLane>,
     playback_source_worker_recency: VecDeque<mondrian_media::PreviewDecodeSource>,
-    next_cold_activation_lane: MediaPreviewWorkerLane,
+    next_playback_source_lane: MediaPreviewWorkerLane,
     cache_hits: u64,
     semantic_frame_evaluations: u64,
     media_request_lowerings: u64,
@@ -205,7 +205,7 @@ impl Default for FutureMediaWindowCache {
             cold_activation_residency: None,
             playback_source_worker_affinity: HashMap::new(),
             playback_source_worker_recency: VecDeque::new(),
-            next_cold_activation_lane: MediaPreviewWorkerLane::NonPlayback,
+            next_playback_source_lane: MediaPreviewWorkerLane::NonPlayback,
             cache_hits: 0,
             semantic_frame_evaluations: 0,
             media_request_lowerings: 0,
@@ -220,16 +220,8 @@ impl FutureMediaWindowCache {
         if self.identity.as_ref() == Some(&identity) {
             return;
         }
-        if self.identity.is_some() {
-            self.identity_invalidations = self.identity_invalidations.saturating_add(1);
-        }
+        self.clear_lowering_plans();
         self.identity = Some(identity);
-        self.frames.clear();
-        self.cold_activation = None;
-        self.cold_activation_residency = None;
-        self.playback_source_worker_affinity.clear();
-        self.playback_source_worker_recency.clear();
-        self.next_cold_activation_lane = MediaPreviewWorkerLane::NonPlayback;
     }
 
     fn get(
@@ -338,7 +330,7 @@ impl FutureMediaWindowCache {
         });
         let activation_lane = existing_lane
             .map(opposite_media_preview_worker_lane)
-            .unwrap_or(self.next_cold_activation_lane);
+            .unwrap_or(self.next_playback_source_lane);
         let mut assigned = false;
         for request in &plan.requests {
             let source = request.key.decode.source();
@@ -350,7 +342,7 @@ impl FutureMediaWindowCache {
             }
         }
         if assigned {
-            self.next_cold_activation_lane = opposite_media_preview_worker_lane(activation_lane);
+            self.next_playback_source_lane = opposite_media_preview_worker_lane(activation_lane);
         }
     }
 
@@ -389,11 +381,17 @@ impl FutureMediaWindowCache {
             return media_preview_worker_lane(worker_count.saturating_sub(1), worker_count);
         }
         self.existing_playback_worker_affinity(source).unwrap_or_else(|| {
-            self.remember_playback_worker_affinity(
-                source.clone(),
-                MediaPreviewWorkerLane::Playback,
-            );
-            MediaPreviewWorkerLane::Playback
+            // Independent moving sources can decode concurrently on the two
+            // existing moving-source owners. Never place moving work on a
+            // dedicated Still lane, or move an already-bound decoder Session.
+            let lane = if worker_count <= 1 || self.playback_source_worker_affinity.is_empty() {
+                MediaPreviewWorkerLane::Playback
+            } else {
+                self.next_playback_source_lane
+            };
+            self.remember_playback_worker_affinity(source.clone(), lane);
+            self.next_playback_source_lane = opposite_media_preview_worker_lane(lane);
+            lane
         })
     }
 
@@ -439,20 +437,28 @@ impl FutureMediaWindowCache {
         self.cold_activation_residency = None;
     }
 
-    pub(super) fn clear(&mut self) {
+    /// Discard semantic lookahead without moving worker-local decoder ownership.
+    ///
+    /// Author, output, proxy, and admission changes invalidate lowered plans,
+    /// but they do not by themselves destroy compatible decoder Sessions.
+    pub(super) fn clear_lowering_plans(&mut self) {
         if self.identity.take().is_some()
             || !self.frames.is_empty()
             || self.cold_activation_residency.is_some()
-            || !self.playback_source_worker_affinity.is_empty()
         {
             self.identity_invalidations = self.identity_invalidations.saturating_add(1);
         }
         self.frames.clear();
         self.cold_activation = None;
         self.cold_activation_residency = None;
+    }
+
+    /// A physical Runtime/session retirement also releases source placement.
+    pub(super) fn clear(&mut self) {
+        self.clear_lowering_plans();
         self.playback_source_worker_affinity.clear();
         self.playback_source_worker_recency.clear();
-        self.next_cold_activation_lane = MediaPreviewWorkerLane::NonPlayback;
+        self.next_playback_source_lane = MediaPreviewWorkerLane::NonPlayback;
     }
 
     fn record_evaluation(&mut self, lowering_count: usize) {
@@ -757,7 +763,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             target_resolution,
             color_context.clone(),
         ) else {
-            self.future_media_window.borrow_mut().clear();
+            self.future_media_window.borrow_mut().clear_lowering_plans();
             return self.lower_future_media_frame(
                 snapshot,
                 proxy_demands,
