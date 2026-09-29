@@ -934,13 +934,17 @@ fn resolve_codec_defined_native_chroma_location(
     // HEVC 4:2:2 chroma samples are co-sited with the corresponding luma
     // samples by H.265 clause 6.2. Its VUI chroma-location fields apply only
     // to 4:2:0, so FFmpeg can correctly report Unspecified for a 4:2:2 frame.
-    // Keep the inference tied to the codec and sampling grid; other formats
-    // still need explicit frame metadata before native import.
-    if codec_id != ffmpeg::codec::Id::HEVC
-        || !surface_format.descriptor().is_some_and(|descriptor| {
-            descriptor.chroma_subsampling == Some(DecodedVideoSurfaceChromaSubsampling::Cs422)
-        })
-    {
+    // Apple ProRes White Paper (June 2014), p. 8, likewise defines its 4:2:2
+    // grid with chroma co-sited on the left luma sample of each pair:
+    // https://www.apple.com/support/assets/docs/products/finalcutpro/Apple_ProRes_June_2014.pdf
+    // Keep the inference tied to these codecs and the actual sampling grid;
+    // other formats still need explicit frame metadata before native import.
+    if !matches!(
+        codec_id,
+        ffmpeg::codec::Id::HEVC | ffmpeg::codec::Id::PRORES
+    ) || !surface_format.descriptor().is_some_and(|descriptor| {
+        descriptor.chroma_subsampling == Some(DecodedVideoSurfaceChromaSubsampling::Cs422)
+    }) {
         return Ok(location);
     }
     match location {
@@ -1287,6 +1291,33 @@ fn ensure_preview_scaler<'a>(
 
 #[cfg(test)]
 mod codec_chroma_tests {
+    #[test]
+    fn prores_422_resolves_only_its_defined_chroma_grid() {
+        use DecodedVideoChromaLocation::{Center, Left, Unknown};
+        use DecodedVideoSurfaceFormat::{P010, P210, P410};
+        let codec = ffmpeg::codec::Id::PRORES;
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(codec, P210, Unknown).unwrap(),
+            Left
+        );
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(codec, P210, Left).unwrap(),
+            Left
+        );
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(codec, P010, Unknown).unwrap(),
+            Unknown
+        );
+        assert_eq!(
+            resolve_codec_defined_native_chroma_location(codec, P410, Unknown).unwrap(),
+            Unknown
+        );
+        assert!(matches!(
+            resolve_codec_defined_native_chroma_location(codec, P210, Center),
+            Err(PreviewNativeFrameMaterializationError::ConflictingChromaLocation { .. })
+        ));
+    }
+
     use super::*;
 
     #[test]

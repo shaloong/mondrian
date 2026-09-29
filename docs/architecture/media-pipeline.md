@@ -3021,7 +3021,15 @@ descriptor-qualified families above; unknown and ordinary CPU planar formats
 fail closed before reaching the app or renderer. They must also carry
 `DecodedVideoSampling` at construction time: range must be explicit, bit depth
 must match the native surface contract, and subsampled YCbCr payloads must have
-explicit chroma location. 4:4:4 permits unspecified chroma location because no
+explicit chroma location. HEVC 4:2:2 (H.265 clause 6.2) and ProRes 4:2:2
+(the left-co-sited grid shown in Apple's June 2014 ProRes White Paper, page 8)
+resolve an unspecified location to `Left` in the shared media codec adapter;
+conflicting explicit locations are rejected. This rule is confined to the
+actual 4:2:2 sampling grid, not inferred from a platform or filename. ProRes
+Proxy/LT/Standard/HQ with a proven 10-bit 4:2:2 format may enter the existing
+native codec/device/import capability checks. This is candidate admission,
+not hardware-execution evidence; ProRes 4444 remains excluded pending native
+pixel parity. 4:4:4 permits unspecified chroma location because no
 subsampled grid origin exists. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but

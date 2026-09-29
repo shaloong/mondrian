@@ -1124,6 +1124,12 @@ fn native_surface_hint_from_stream(
             {
                 Some(surface)
             }
+            VideoCodec::ProRes(
+                mondrian_core::ProResVariant::Proxy
+                | mondrian_core::ProResVariant::Lt
+                | mondrian_core::ProResVariant::Standard
+                | mondrian_core::ProResVariant::Hq,
+            ) if surface == PreviewNativeSurfaceHint::Yuv422p10 => Some(surface),
             VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
             _ => None,
         },
@@ -1272,6 +1278,42 @@ mod tests {
         )
         .expect("ProRes remains a valid CPU-decodable source");
         assert_eq!(source.native_surface_hint(), None);
+    }
+
+    #[test]
+    fn prores_422_native_hint_requires_matching_variant_and_ten_bit_surface() {
+        use mondrian_core::ProResVariant;
+        for variant in [
+            ProResVariant::Proxy,
+            ProResVariant::Lt,
+            ProResVariant::Standard,
+            ProResVariant::Hq,
+            ProResVariant::R4444,
+            ProResVariant::R4444Xq,
+        ] {
+            for pixel_format in [
+                PixelFormat::Yuv422p10le,
+                PixelFormat::Yuv420p10le,
+                PixelFormat::Yuv444p12le,
+            ] {
+                let mut stream = video_stream(0, pixel_format, true);
+                stream.codec = VideoCodec::ProRes(variant.clone());
+                stream.codec_profile = VideoCodecProfile::Unknown;
+                let source = PreviewDecodeSource::from_probed_stream(
+                    absolute_test_path("media/prores.mov"),
+                    exact_fingerprint(16),
+                    &stream,
+                )
+                .expect("valid probed ProRes source");
+                let eligible = pixel_format == PixelFormat::Yuv422p10le
+                    && !matches!(variant, ProResVariant::R4444 | ProResVariant::R4444Xq);
+                assert_eq!(
+                    source.native_surface_hint(),
+                    eligible.then_some(PreviewNativeSurfaceHint::Yuv422p10),
+                    "{variant:?} {pixel_format:?}",
+                );
+            }
+        }
     }
 
     #[test]
