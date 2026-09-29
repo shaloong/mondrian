@@ -161,6 +161,73 @@ fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "requires real Metal, a ProRes422 source and lossless planar capture of the same VideoToolbox x422 samples"]
+fn prores422_matched_reconstruction_uses_the_same_viewer_color_path() -> Result<()> {
+    mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
+    let fixtures = std::env::var_os("MONDRIAN_MACOS_PRORES422_MATCHED_RECONSTRUCTION")
+        .context("explicit ProRes422 source and matching VideoToolbox sample capture")?;
+    let color = match std::env::var("MONDRIAN_MACOS_PRORES422_MATCHED_COLOR")?.as_str() {
+        "sdr" => ColorSpace::Rec709,
+        "pq" => ColorSpace::Rec2100Pq,
+        "hlg" => ColorSpace::Rec2100Hlg,
+        other => anyhow::bail!("unsupported matched ProRes422 color: {other}"),
+    };
+    let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+    anyhow::ensure!(
+        paths.len() == 2,
+        "expected ProRes source and matched FFV1 capture"
+    );
+    let context = pollster::block_on(GpuContext::new())?;
+    anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    anyhow::ensure!(runtime
+        .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
+    let result = (|| -> Result<()> {
+        let native = measure_with_resource_observer(
+            &paths[0],
+            true,
+            Some((
+                DecodedVideoSurfaceFormat::P210,
+                PreviewDecodePath::InProcessFfmpegNative,
+            )),
+            None,
+            color,
+            &context,
+            &mut runtime,
+            |_, _, _| {},
+        )?;
+        let captured = measure_with_resource_observer(
+            &paths[1],
+            false,
+            None,
+            None,
+            color,
+            &context,
+            &mut runtime,
+            |_, _, _| {},
+        )?;
+        anyhow::ensure!(native.len() == captured.len());
+        for (index, (native, captured)) in native.iter().zip(captured).enumerate() {
+            anyhow::ensure!(native.len() == captured.len());
+            let max =
+                native.iter().zip(captured).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            eprintln!("matched ProRes422 sample {index}: maximum Viewer difference {max}");
+            anyhow::ensure!(
+                max <= 1.0 / 1024.0,
+                "matched decoder sample changed in Viewer"
+            );
+        }
+        Ok(())
+    })();
+    let closure = retirement::retire_runtime(&context.device, runtime);
+    result?;
+    closure?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "requires real Metal, explicit demux worker and six SDR/PQ/HLG HEVC 422/444 motion fixtures"]
 fn cpu_and_native_hevc_range_extensions_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     let colors = [

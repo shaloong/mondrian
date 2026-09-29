@@ -324,8 +324,39 @@ quality settings or acceptance thresholds were changed. See the
 This is an implementation comparison, not a claim that Apple's reconstruction
 violates the codec specification.
 
-Keep this test explicitly Failed until reconstruction fidelity is resolved.
-Its ignored default state is NotRun, never Passed. Record all individual seek
+The separate opt-in `prores422_matched_reconstruction_uses_the_same_viewer_color_path`
+test isolates the renderer from decoder reconstruction. Supply one original
+ProRes 422 MOV and a lossless FFV1 MOV made from the **same observed
+VideoToolbox `x422` output words** in
+`MONDRIAN_MACOS_PRORES422_MATCHED_RECONSTRUCTION`, separated by a colon. Set
+`MONDRIAN_MACOS_PRORES422_MATCHED_COLOR` to `sdr`, `pq`, or `hlg`. The capture
+must retain at least 31 frames, shift each ten-bit `x422` code right by six
+into planar YUV422P10LE, preserve the original per-frame timestamps and
+primaries/transfer/matrix, and decode byte-for-byte to the captured raw planes.
+For the 30 fps development fixtures, the FFV1 MOV track timescale is 15360.
+Matroska's 1/1000 timebase can select a different frame at an exact seek and
+invalidates this matched comparison. The source's limited range remains an
+explicit decode request when MOV does not expose FFV1 range metadata.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  prores422_matched_reconstruction_uses_the_same_viewer_color_path \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+On the M4, four observed-hardware captures (Proxy SDR/PQ/HLG and HQ SDR)
+passed all six seeks with zero encoded Float16 Viewer pixel difference. This
+shows that the two production Viewer input paths agree for identical decoded
+codes. It does not prove which independent ProRes decoder is the reference,
+erase the existing cross-decoder failure, or qualify VideoToolbox hardware
+execution in the FFmpeg native owner, which still reports that status as
+unknown. Keep the source/capture provenance and raw byte hashes with the
+external test evidence.
+
+Keep the independent-decoder test explicitly Failed until reconstruction
+fidelity is resolved. Its ignored default state is NotRun, never Passed.
+Record all individual seek
 differences, exact worst RGBA components, actual path/hardware evidence, fixture
 hashes and complete logs. These development diagnostics do not qualify physical
 HDR presentation, relative performance or the sealed commercial matrix.
