@@ -152,7 +152,7 @@ fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
     compare_macos_videotoolbox_fixtures(
         "MONDRIAN_MACOS_PRORES422_FIXTURES",
         std::array::from_fn::<_, 12, _>(|index| {
-            (DecodedVideoSurfaceFormat::P210, colors[index % 3])
+            (DecodedVideoSurfaceFormat::P216, colors[index % 3])
         }),
         1.0,
         PreviewDecodePath::InProcessVideoToolboxNative,
@@ -161,7 +161,7 @@ fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "requires real Metal, a ProRes422 source and lossless planar capture of the same VideoToolbox x422 samples"]
+#[ignore = "requires real Metal, a ProRes422 source and lossless planar capture of the same VideoToolbox sv22 samples"]
 fn prores422_matched_reconstruction_uses_the_same_viewer_color_path() -> Result<()> {
     mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
     let fixtures = std::env::var_os("MONDRIAN_MACOS_PRORES422_MATCHED_RECONSTRUCTION")
@@ -188,7 +188,7 @@ fn prores422_matched_reconstruction_uses_the_same_viewer_color_path() -> Result<
             &paths[0],
             true,
             Some((
-                DecodedVideoSurfaceFormat::P210,
+                DecodedVideoSurfaceFormat::P216,
                 PreviewDecodePath::InProcessVideoToolboxNative,
             )),
             None,
@@ -201,7 +201,7 @@ fn prores422_matched_reconstruction_uses_the_same_viewer_color_path() -> Result<
             &paths[1],
             false,
             None,
-            None,
+            Some(DecodedVideoSurfaceFormat::Yuv422p16le),
             color,
             &context,
             &mut runtime,

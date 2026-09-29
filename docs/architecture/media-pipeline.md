@@ -4321,9 +4321,9 @@ only, not original-native-media qualification.
 ### macOS ProRes 422 direct decode evidence
 
 The same exclusive `PreviewCodec`/VideoToolbox adapter now accepts the four
-progressive ProRes 422 variants. It requests a two-plane `x422` CVPixelBuffer,
+progressive ProRes 422 variants. It requests a two-plane 16-bit `sv22` CVPixelBuffer,
 validates real plane extents, strides, IOSurface identity and color attachments,
-and publishes P210 only when the session reports actual hardware decoding.
+and publishes P216 only when the session reports actual hardware decoding.
 Every compressed intra packet must prove 4:2:2 chroma, no alpha, progressive
 scan, unchanged extent and matching CICP before it reaches VideoToolbox.
 Conflicting packet metadata poisons the decoder, and seek reset cannot unpoison
@@ -4332,7 +4332,7 @@ YUV/OCIO/Program Output path; it creates no platform color interpretation.
 
 On the M4/macOS 26.4.1 development host, the direct path rendered Proxy
 SDR/PQ/HLG and HQ SDR hardware samples with zero Float16 pixel difference
-against byte-exact compact CPU captures of those same `x422` codes. The App
+against byte-exact compact CPU captures of those same `sv22` words. The App
 short Preview gate observed hardware decode, GPU completion, color contract,
 zero CPU pixel transfer and consuming closure for 1080p Proxy SDR/PQ/HLG.
 Independent FFmpeg software reconstruction still differs from VideoToolbox

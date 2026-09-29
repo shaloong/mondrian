@@ -998,6 +998,9 @@ fn decoded_native_surface_format(
             value if value == u32::from_be_bytes(*b"x422") => {
                 return Ok(DecodedVideoSurfaceFormat::P210);
             }
+            value if value == u32::from_be_bytes(*b"sv22") => {
+                return Ok(DecodedVideoSurfaceFormat::P216);
+            }
             value if value == u32::from_be_bytes(*b"x444") => {
                 return Ok(DecodedVideoSurfaceFormat::P410);
             }

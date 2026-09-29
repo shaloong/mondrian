@@ -55,7 +55,7 @@ static int prores422(uint32_t codec) {
 
 static OSType output_pixel(const MdnVtContract *contract) {
     if (prores422(contract->codec))
-        return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
+        return kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange;
     if (contract->codec != kCMVideoCodecType_HEVC)
         return kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
     switch (contract->chroma_format_idc) {

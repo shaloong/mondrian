@@ -232,7 +232,7 @@ impl VideoToolboxDecoder {
                         _ => return Err(VideoToolboxError { status: -70001, stage: 9 }),
                     }
                 } else if self.contract.chroma_format_idc == 2 {
-                    u32::from_be_bytes(*b"x422")
+                    u32::from_be_bytes(*b"sv22")
                 } else {
                     u32::from_be_bytes(*b"s4as")
                 }

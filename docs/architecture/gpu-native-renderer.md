@@ -1795,7 +1795,7 @@ The opt-in `native_decode_pixel_parity` integration test feeds explicit fixtures
 through the production isolated demux and both compact CPU YUV and native decode.
 Linux uses CUDA fixtures. macOS requires tagged HEVC 10-bit 4:2:0, 4:2:2 and 4:4:4
 fixtures and verifies CVPixelBuffer residency and P010/P210/P410 surfaces.
-The direct Main10 P010, ProRes 422 P210, and ProRes 4444 routes also require
+The direct Main10 P010, ProRes 422 P216, and ProRes 4444 routes also require
 the actual
 session's observed hardware property; FFmpeg-managed VideoToolbox sessions retain
 unobserved execution rather than inferring it from their surfaces. A separate

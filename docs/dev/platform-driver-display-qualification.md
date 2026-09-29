@@ -315,11 +315,15 @@ hardware decode. A separate public-API hardware-observed P216 candidate also
 failed the unchanged tolerance and was removed. Neither route is qualified by
 successful decode or lifecycle receipts alone.
 
-The subsequent direct VideoToolbox `x422` route preserves P210 sampling and
-reports the decoder session's observed hardware property. The unchanged
+The subsequent direct VideoToolbox `x422` route preserved P210 sampling and
+reported the decoder session's observed hardware property. The unchanged
 twelve-fixture comparison still failed all 72 seeks (maximum 0.009521484),
-now with 72 observed hardware frames. The discrepancy is therefore not
-resolved by proving hardware execution.
+with 72 observed hardware frames. The production route now requests 16-bit
+bi-planar `sv22` and imports P216, retaining the full decoded words through
+the shared Metal Viewer path. The independent comparison still fails all 72
+seeks (maximum 0.010742188) with observed hardware on every sample. Neither
+proof of hardware execution nor increased surface precision resolves that
+cross-decoder disagreement.
 
 FFmpeg 8.1.2's ProRes software reconstruction clips ten-bit samples to
 4–1019; the observed native outputs extend beyond that interval. Diagnostic
@@ -333,11 +337,11 @@ violates the codec specification.
 The separate opt-in `prores422_matched_reconstruction_uses_the_same_viewer_color_path`
 test isolates the renderer from decoder reconstruction. Supply one original
 ProRes 422 MOV and a lossless FFV1 MOV made from the **same observed
-VideoToolbox `x422` output words** in
+VideoToolbox `sv22` output words** in
 `MONDRIAN_MACOS_PRORES422_MATCHED_RECONSTRUCTION`, separated by a colon. Set
 `MONDRIAN_MACOS_PRORES422_MATCHED_COLOR` to `sdr`, `pq`, or `hlg`. The capture
-must retain at least 31 frames, shift each ten-bit `x422` code right by six
-into planar YUV422P10LE, preserve the original per-frame timestamps and
+must retain at least 31 frames, retain each 16-bit decoded word without a
+shift in planar YUV422P16LE, preserve the original per-frame timestamps and
 primaries/transfer/matrix, and decode byte-for-byte to the captured raw planes.
 For the 30 fps development fixtures, the FFV1 MOV track timescale is 15360.
 Matroska's 1/1000 timebase can select a different frame at an exact seek and
@@ -351,7 +355,7 @@ cargo test --locked -p mondrian-renderer --all-features -j 2 \
   -- --exact --ignored --nocapture --test-threads=1
 ```
 
-On the M4, four observed-hardware captures (Proxy SDR/PQ/HLG and HQ SDR)
+On the M4, four observed-hardware 16-bit captures (Proxy SDR/PQ/HLG and HQ SDR)
 passed all six seeks with zero encoded Float16 Viewer pixel difference. The
 direct production owner now independently reports `Some(true)` for each
 sample. This shows that the two production Viewer input paths agree for
