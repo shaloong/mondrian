@@ -2,8 +2,8 @@
 
 use crate::{
     timeline_position_ns_floor, ClockMaster, FrameDeliveryApplication, FrameDeliveryKind,
-    FrameDemand, FrameDemandIdentity, MonotonicTimestamp, PlaybackEpoch, PlaybackRate,
-    PlaybackSnapshot, PreviewResolutionScale, TransportState,
+    FrameDemand, FrameDemandIdentity, FrameDemandKind, MonotonicTimestamp, PlaybackEpoch,
+    PlaybackRate, PlaybackSnapshot, PreviewResolutionScale, TransportState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 7;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 8;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,11 @@ pub enum PlaybackEvidenceEventKind {
     Delivery {
         sequence: u64,
         target_frame: i64,
+        quality_revision: u64,
+        /// Exact consumed demand kind; rejected authority has none.
+        demand_kind: Option<FrameDemandKind>,
+        transport_state_before: TransportState,
+        transport_state_after: TransportState,
         kind: FrameDeliveryKind,
         accepted: bool,
         /// Exact completion minus the consumed demand's deadline. Negative is
@@ -122,7 +127,7 @@ pub struct PlaybackEvidenceEvent {
     pub sequence: u64,
     /// Runtime microseconds since the Adapter origin.
     pub observed_at_us: u64,
-    /// Playback epoch current for this event.
+    /// Playback epoch belonging to this event, including rejected delivery identity.
     pub epoch: u64,
     /// Typed event payload.
     pub kind: PlaybackEvidenceEventKind,
@@ -248,7 +253,7 @@ pub struct PlaybackClockFrameAdvanceCounts {
 
 /// Whole-run counts for preview-resolution reductions selected by playback policy.
 ///
-/// These aggregates remain available when the bounded detailed-event tail evicts
+/// These aggregates remain available when bounded detailed-event retention evicts
 /// old frame events during long playback sessions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackPreviewScaleReductionCounts {
@@ -301,9 +306,9 @@ pub struct PlaybackEvidenceReport {
     pub audio_underrun_recoveries: u64,
     /// Detailed events currently retained.
     pub retained_event_count: usize,
-    /// Old detailed events intentionally evicted by the retention budget.
+    /// Detailed events discarded by the retention budget, including incoming events.
     pub evicted_event_count: u64,
-    /// Bounded detailed event tail.
+    /// Bounded prioritized detail in observation order.
     pub events: Vec<PlaybackEvidenceEvent>,
 }
 
@@ -667,10 +672,14 @@ impl PlaybackEvidenceCollector {
         }
         self.push_event(
             completed_at,
-            snapshot.epoch,
+            identity.epoch,
             PlaybackEvidenceEventKind::Delivery {
                 sequence: identity.sequence.get(),
                 target_frame: identity.target_frame,
+                quality_revision: identity.quality_revision,
+                demand_kind: application.demand().map(|demand| demand.kind),
+                transport_state_before: application.transport_state_before(),
+                transport_state_after: snapshot.state,
                 kind: delivery.kind(),
                 accepted: application.accepted(),
                 deadline_offset_ns,
@@ -963,18 +972,39 @@ impl PlaybackEvidenceCollector {
         epoch: PlaybackEpoch,
         kind: PlaybackEvidenceEventKind,
     ) {
-        if self.events.len() == self.config.event_capacity {
-            self.events.pop_front();
-            self.evicted_event_count = self.evicted_event_count.saturating_add(1);
-        }
-        self.events.push_back(PlaybackEvidenceEvent {
+        let event = PlaybackEvidenceEvent {
             sequence: self.next_event_sequence,
             observed_at_us: duration_us(observed_at.duration_since_origin()),
             epoch: epoch.get(),
             kind,
-        });
+        };
         self.next_event_sequence = self.next_event_sequence.saturating_add(1);
+        if self.events.len() == self.config.event_capacity {
+            // Keep the first accepted non-Ready receipt and a bounded recent tail
+            // of subsequent failures. Ordinary traffic cannot erase their detail.
+            let ordinary =
+                self.events.iter().position(|event| !is_accepted_nonready_delivery(event.kind));
+            self.evicted_event_count = self.evicted_event_count.saturating_add(1);
+            match ordinary {
+                Some(index) => {
+                    self.events.remove(index);
+                }
+                None if !is_accepted_nonready_delivery(kind) || self.config.event_capacity == 1 => {
+                    return;
+                }
+                None => {
+                    self.events.remove(1);
+                }
+            }
+        }
+        self.events.push_back(event);
     }
+}
+
+fn is_accepted_nonready_delivery(kind: PlaybackEvidenceEventKind) -> bool {
+    matches!(kind, PlaybackEvidenceEventKind::Delivery {
+        accepted: true, kind, ..
+    } if kind != FrameDeliveryKind::Ready)
 }
 
 fn increment_delivery(counts: &mut PlaybackDeliveryCounts, kind: FrameDeliveryKind) {
@@ -1172,6 +1202,7 @@ mod tests {
             delivery: FrameDeliveryCandidate::for_demand(identity, FrameDeliveryKind::Ready)
                 .complete_at(completed_at),
             accepted: true,
+            transport_state_before: state,
             snapshot: PlaybackSnapshot {
                 epoch,
                 state,
@@ -1332,6 +1363,137 @@ mod tests {
         assert!(report.evicted_event_count > 0);
         assert_eq!(report.preview_scale_reductions.to_half, 1);
         assert_eq!(report.preview_scale_reductions.to_quarter, 1);
+    }
+
+    #[test]
+    fn accepted_nonready_delivery_survives_long_normal_event_tail() {
+        for capacity in [1, 2, 8] {
+            let epoch = PlaybackEpoch(41);
+            let mut collector = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig {
+                event_capacity: capacity,
+                sample_capacity: 1,
+            })
+            .unwrap();
+            let mut late = delivery_application(
+                epoch,
+                1,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at(1),
+                Some((ClockMaster::Synthetic, 0, 0)),
+            );
+            late.delivery = FrameDeliveryCandidate::for_demand(
+                late.delivery.identity(),
+                FrameDeliveryKind::Late,
+            )
+            .complete_at(at(1));
+            collector.observe_delivery(late).unwrap();
+            let original = collector.report().events[0];
+            for frame in 1..=5_000 {
+                collector
+                    .observe_snapshot(
+                        at(frame as u64 + 1),
+                        snapshot(
+                            epoch,
+                            frame,
+                            TransportState::Playing,
+                            Some(ClockMaster::Synthetic),
+                        ),
+                        None,
+                    )
+                    .unwrap();
+            }
+            let report = collector.report();
+            assert_eq!(report.deliveries.late, 1);
+            assert!(
+                report.events.contains(&original),
+                "the exact accepted Late receipt must survive normal traffic"
+            );
+            assert!(report.retained_event_count <= capacity);
+            assert!(report.evicted_event_count > 4_096);
+        }
+    }
+
+    #[test]
+    fn saturated_nonready_retention_keeps_first_and_recent_receipts() {
+        for capacity in [1, 2, 8] {
+            let epoch = PlaybackEpoch(42);
+            let mut collector = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig {
+                event_capacity: capacity,
+                sample_capacity: 1,
+            })
+            .unwrap();
+            for sequence in 1..=20 {
+                let mut application = delivery_application(
+                    epoch,
+                    sequence,
+                    FramePosition::new(0, Rational::new(1, 25)),
+                    at(sequence),
+                    Some((ClockMaster::Synthetic, 0, 0)),
+                );
+                application.delivery = FrameDeliveryCandidate::for_demand(
+                    application.delivery.identity(),
+                    FrameDeliveryKind::Late,
+                )
+                .complete_at(at(sequence));
+                collector.observe_delivery(application).unwrap();
+            }
+            // A normal event cannot evict any retained non-Ready receipt.
+            collector
+                .observe_snapshot(
+                    at(21),
+                    snapshot(
+                        epoch,
+                        0,
+                        TransportState::Playing,
+                        Some(ClockMaster::Synthetic),
+                    ),
+                    None,
+                )
+                .unwrap();
+            let report = collector.report();
+            assert_eq!(report.events.len(), capacity);
+            assert_eq!(report.deliveries.late, 20);
+            let sequences: Vec<_> = report
+                .events
+                .iter()
+                .map(|event| match event.kind {
+                    PlaybackEvidenceEventKind::Delivery { sequence, .. } => sequence,
+                    _ => panic!("normal traffic displaced terminal receipt"),
+                })
+                .collect();
+            let expected: Vec<_> = std::iter::once(1).chain((22 - capacity as u64)..=20).collect();
+            assert_eq!(sequences, expected);
+            assert!(report.evicted_event_count >= 20 - capacity as u64);
+            assert!(report.events.windows(2).all(|pair| pair[0].sequence < pair[1].sequence));
+        }
+    }
+
+    #[test]
+    fn delivery_context_is_authenticated_before_and_after_engine_transition() {
+        let mut engine = crate::PlaybackEngine::default();
+        engine.play(100, at(0)).unwrap();
+        let demand = engine.pending_frame_demand().unwrap();
+        let application = engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(demand.identity(), FrameDeliveryKind::Blocked)
+                    .complete_at(at(1)),
+            )
+            .unwrap();
+        assert_eq!(
+            application.transport_state_before(),
+            TransportState::Priming
+        );
+        assert_eq!(application.snapshot().state, TransportState::Blocked);
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector.observe_delivery(application).unwrap();
+        assert!(matches!(collector.report().events[0].kind,
+            PlaybackEvidenceEventKind::Delivery {
+                quality_revision, demand_kind: Some(FrameDemandKind::TimedPlayback),
+                transport_state_before: TransportState::Priming,
+                transport_state_after: TransportState::Blocked,
+                accepted: true, kind: FrameDeliveryKind::Blocked, ..
+            } if quality_revision == demand.quality_revision
+        ));
     }
 
     #[test]
@@ -1563,14 +1725,17 @@ mod tests {
         assert!(application.demand().is_none());
         let mut collector = PlaybackEvidenceCollector::default();
         collector.observe_delivery(application).expect("rejected evidence");
+        assert_eq!(collector.report().events[0].epoch, demand.epoch.get());
         assert!(matches!(
             collector.report().events[0].kind,
             PlaybackEvidenceEventKind::Delivery {
                 accepted: false,
+                demand_kind: None,
+                quality_revision,
                 deadline_offset_ns: None,
                 clock_phase: None,
                 ..
-            }
+            } if quality_revision == demand.quality_revision
         ));
     }
 

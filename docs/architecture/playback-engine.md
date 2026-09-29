@@ -1709,21 +1709,28 @@ Logging alone is not evidence.
 and headless/perf Adapters. It consumes only Engine-created
 `FrameDeliveryApplication`; callers cannot separately supply acceptance,
 snapshot, consumed demand, or timestamp. Every fallible timestamp/phase calculation is
-preflighted before collector mutation. Schema v7 retains exact signed rate
+preflighted before collector mutation. Schema v8 retains exact signed rate
 transitions and at most 4,096 detailed
-tail events and a deterministic 4,096-sample whole-run reservoir per
+events and a deterministic 4,096-sample whole-run reservoir per
 latency/phase-error metric.
 Each metric separately keeps its exact population count and exact all-run
 maximum; p50/p95/p99 are explicitly reservoir estimates. Clock Master and
 Transport State residency, single/multi-frame advancement and skipped-target
 counts, delivery counts, superseded demand/seek totals, and underrun totals are
 streaming aggregates and do not depend on retained detail.
+Accepted non-Ready Delivery receipts take priority over ordinary events within
+the same event capacity. The first such receipt survives ordinary traffic. If
+non-Ready receipts fill the ring, the first and a bounded recent tail remain;
+a one-slot ring retains only the first. Every discarded event remains counted.
 Detailed-event eviction is expected bounded retention, remains reported, and is
 not reclassified as observation loss. A gate may use the exact maximum, a
 declared reservoir percentile, or aggregate counters, but cannot infer failure
 merely because old diagnostic events were intentionally evicted.
 
-Each terminal Delivery event retains the signed nanosecond offset between its
+Each terminal Delivery event binds its submitted epoch and quality revision,
+exact consumed demand kind, and Engine transport state before and after the
+application. Rejected authority keeps its original identity and has no consumed
+demand kind. Each terminal Delivery event retains the signed nanosecond offset between its
 actual completion observation and the consumed Engine demand's deadline, plus
 the same-instant Clock Master, signed target phase error, uncertainty, and
 conservative proven error. Negative offsets precede the deadline; zero is its

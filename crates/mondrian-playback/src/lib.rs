@@ -578,6 +578,7 @@ impl PlaybackClockPhaseObservation {
 pub struct FrameDeliveryApplication {
     delivery: FrameDelivery,
     accepted: bool,
+    transport_state_before: TransportState,
     snapshot: PlaybackSnapshot,
     demand: Option<FrameDemand>,
     clock_phase: Option<PlaybackClockPhaseObservation>,
@@ -592,6 +593,11 @@ impl FrameDeliveryApplication {
     /// Whether this delivery consumed current Engine authority.
     pub const fn accepted(&self) -> bool {
         self.accepted
+    }
+
+    /// Engine state immediately before this application attempt.
+    pub const fn transport_state_before(&self) -> TransportState {
+        self.transport_state_before
     }
 
     /// Authoritative state after the application attempt.
@@ -1825,11 +1831,13 @@ impl PlaybackEngine {
         &mut self,
         delivery: FrameDelivery,
     ) -> Result<FrameDeliveryApplication, PlaybackError> {
+        let transport_state_before = self.state;
         let identity = delivery.identity();
         if identity.epoch != self.epoch || identity.quality_revision != self.quality_revision {
             return Ok(FrameDeliveryApplication {
                 delivery,
                 accepted: false,
+                transport_state_before,
                 snapshot: self.snapshot(),
                 demand: None,
                 clock_phase: None,
@@ -1840,6 +1848,7 @@ impl PlaybackEngine {
             return Ok(FrameDeliveryApplication {
                 delivery,
                 accepted: false,
+                transport_state_before,
                 snapshot: self.snapshot(),
                 demand: None,
                 clock_phase: None,
@@ -1851,6 +1860,7 @@ impl PlaybackEngine {
             return Ok(FrameDeliveryApplication {
                 delivery,
                 accepted: false,
+                transport_state_before,
                 snapshot: self.snapshot(),
                 demand: None,
                 clock_phase: None,
@@ -1868,6 +1878,7 @@ impl PlaybackEngine {
             return Ok(FrameDeliveryApplication {
                 delivery,
                 accepted: true,
+                transport_state_before,
                 snapshot: self.snapshot(),
                 demand: Some(active_demand),
                 clock_phase: None,
@@ -1936,6 +1947,7 @@ impl PlaybackEngine {
         Ok(FrameDeliveryApplication {
             delivery,
             accepted: true,
+            transport_state_before,
             snapshot: self.snapshot(),
             demand: Some(active_demand),
             clock_phase,
