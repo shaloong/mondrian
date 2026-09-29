@@ -395,6 +395,8 @@ struct HeadlessViewerGpuExecutionSummary {
     /// Unique `(epoch, target_frame)` publication coverage. Reissued quality
     /// or handoff demands for the same frame cannot inflate this value.
     presented_unique_frame_completions: usize,
+    /// Exact publication coverage of the declared continuous observation window.
+    window_presented_unique_frame_completions: Option<usize>,
     #[serde(skip)]
     presented_frame_bindings: HashSet<(mondrian_playback::PlaybackEpoch, i64)>,
     output_extents: Vec<HeadlessViewerGpuExtent>,
@@ -638,6 +640,24 @@ impl HeadlessViewerGpuExecutionSummary {
                     self.presented_unique_frame_completions.saturating_add(1);
             }
         }
+    }
+
+    fn seal_publication_window(
+        &mut self,
+        epoch: mondrian_playback::PlaybackEpoch,
+        start_frame: i64,
+        frames: usize,
+    ) {
+        self.window_presented_unique_frame_completions = Some(
+            self.presented_frame_bindings
+                .iter()
+                .filter(|(published_epoch, frame)| {
+                    *published_epoch == epoch
+                        && *frame >= start_frame
+                        && i128::from(*frame) - i128::from(start_frame) < frames as i128
+                })
+                .count(),
+        );
     }
 
     fn p95_duration_us(&self) -> u64 {
@@ -1038,6 +1058,13 @@ fn repeated_demands_for_one_epoch_frame_count_as_one_publication_coverage_unit()
     summary.record_current_output_presentation(Some(second));
 
     assert_eq!(summary.presented_demand_completions, 2);
+    assert_eq!(summary.presented_unique_frame_completions, 1);
+    summary.seal_publication_window(first.epoch, 18, 1);
+    assert_eq!(summary.window_presented_unique_frame_completions, Some(0));
+    summary.seal_publication_window(first.epoch, 16, 1);
+    assert_eq!(summary.window_presented_unique_frame_completions, Some(0));
+    summary.seal_publication_window(first.epoch, 17, 1);
+    assert_eq!(summary.window_presented_unique_frame_completions, Some(1));
     assert_eq!(summary.presented_unique_frame_completions, 1);
 }
 
@@ -6288,21 +6315,24 @@ fn evaluate_external_playback_gates(
     let min_visible_frames = frames.saturating_mul(min_visible_percent).saturating_add(99) / 100;
     let min_ready_frames =
         frames.saturating_mul(min_ready_basis_points).saturating_add(9_999) / 10_000;
-    let ready_frames = if playback_evidence.demand_count > 0 {
-        // The Viewer publication is the final authority for whether an exact
-        // current frame became visible. A Frame Demand may be superseded at a
-        // clock boundary after its GPU output was already published, so the
-        // Engine delivery ledger alone can under-count exact presentation.
-        // Keep both independently gated below and use their union's lower-cost
-        // cardinality here: both ledgers de-duplicate by epoch/frame.
-        usize::try_from(playback_evidence.deliveries.ready)
-            .unwrap_or(usize::MAX)
-            .max(headless_gpu.presented_unique_frame_completions)
-    } else {
-        // Deterministic unit fixtures without an Engine event stream retain
-        // the direct readiness observation as their evidence source.
-        readiness.ready
-    };
+    let ready_frames =
+        if let Some(coverage) = headless_gpu.window_presented_unique_frame_completions {
+            coverage
+        } else if playback_evidence.demand_count > 0 {
+            // The Viewer publication is the final authority for whether an exact
+            // current frame became visible. A Frame Demand may be superseded at a
+            // clock boundary after its GPU output was already published, so the
+            // Engine delivery ledger alone can under-count exact presentation.
+            // Keep both independently gated below and use their union's lower-cost
+            // cardinality here: both ledgers de-duplicate by epoch/frame.
+            usize::try_from(playback_evidence.deliveries.ready)
+                .unwrap_or(usize::MAX)
+                .max(headless_gpu.presented_unique_frame_completions)
+        } else {
+            // Deterministic unit fixtures without an Engine event stream retain
+            // the direct readiness observation as their evidence source.
+            readiness.ready
+        };
     let ready_basis_points = ready_frames.saturating_mul(10_000) / frames.max(1);
     let playback_decode_profile = preview_diagnostics.decode_access_mode_profiles.playback_cursor;
     let playback_temporal_approximation_frames =
@@ -6339,7 +6369,11 @@ fn evaluate_external_playback_gates(
     if classified_rendered_frames != headless_gpu.rendered_frames {
         failures.push("viewer_gpu_execution_classification");
     }
-    if headless_gpu.presented_unique_frame_completions < min_ready_frames {
+    if headless_gpu
+        .window_presented_unique_frame_completions
+        .unwrap_or(headless_gpu.presented_unique_frame_completions)
+        < min_ready_frames
+    {
         failures.push("viewer_gpu_publication_coverage");
     }
     if headless_gpu.gpu_completion_observed_frames != headless_gpu.rendered_frames {
@@ -6798,6 +6832,11 @@ fn run_preview_media_continuous_playback_probe(
                     process_memory_evidence.observe_playback_duration(wall_duration_us);
                     let terminal = state.playback_engine.snapshot();
                     let window_playback = state.playback_evidence_report();
+                    headless_gpu.seal_publication_window(
+                        terminal_epoch,
+                        start_frame,
+                        config.frame_count,
+                    );
                     continuous_playback_window = Some(ContinuousPlaybackWindowEvidence {
                         target_observations: config.frame_count,
                         observed_observations: opportunity_ledger.observed_opportunities(),
@@ -10664,6 +10703,35 @@ fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready()
         vec!["current_ready_ratio", "viewer_gpu_publication_coverage"]
     );
     assert!(!gates.passed);
+}
+
+#[test]
+fn external_playback_window_excludes_startup_publications_from_ready_coverage() {
+    let readiness = PreviewReadinessCounts { ready: 19, stale: 1, ..Default::default() };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let diagnostics = PreviewDiagnostics::default();
+    let mut evidence = PlaybackEvidenceCollector::default().report();
+    evidence.demand_count = 21;
+    evidence.deliveries.ready = 21;
+    let mut gpu = passing_headless_gpu_summary(21);
+    gpu.window_presented_unique_frame_completions = Some(19);
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        &gpu,
+        20,
+        33_000,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        9_950,
+    );
+    assert_eq!(gates.ready_frames, 19);
+    assert_eq!(gates.ready_basis_points, 9_500);
+    assert!(gates.failures.contains(&"current_ready_ratio"));
+    assert!(gates.failures.contains(&"viewer_gpu_publication_coverage"));
 }
 
 #[test]
