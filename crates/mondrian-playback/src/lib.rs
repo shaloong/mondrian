@@ -2009,6 +2009,30 @@ impl PlaybackEngine {
         }
     }
 
+    /// Return one frame's runtime period on the bound grid at the active rate.
+    ///
+    /// The exact rational period is rounded up once to a nanosecond. Adapters
+    /// may use it as a diagnostic budget; it neither advances the Clock Master
+    /// nor replaces a Frame Demand's timestamp-bound presentation deadline.
+    pub fn frame_period(&self) -> Result<Duration, PlaybackError> {
+        let numerator = u128::try_from(self.position.time_base.num)
+            .map_err(|_| PlaybackError::InvalidTimeBase)?
+            .checked_mul(1_000_000_000)
+            .and_then(|value| value.checked_mul(u128::from(self.rate.denominator())))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        let denominator = u128::try_from(self.position.time_base.den)
+            .map_err(|_| PlaybackError::InvalidTimeBase)?
+            .checked_mul(u128::from(self.rate.magnitude_numerator()))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+        let period_ns = numerator
+            .checked_add(denominator.saturating_sub(1))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?
+            / denominator;
+        nonnegative_ns_duration(
+            i128::try_from(period_ns).map_err(|_| PlaybackError::TransportArithmeticOverflow)?,
+        )
+    }
+
     /// Latest monotonic timestamp accepted by authoritative Engine state.
     ///
     /// Adapters use this as their sole execution high-water mark. Evidence

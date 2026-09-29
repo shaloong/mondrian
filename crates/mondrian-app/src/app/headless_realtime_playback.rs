@@ -390,14 +390,15 @@ pub(crate) struct HeadlessRealtimeStageTiming {
 }
 
 impl HeadlessRealtimeStageTiming {
-    fn observe(&mut self, duration: Duration) {
+    fn observe(&mut self, duration: Duration, frame_period_ns: Option<u128>) {
         self.observations = self.observations.saturating_add(1);
         let elapsed_us = duration.as_micros().min(u128::from(u64::MAX)) as u64;
         self.max_us = self.max_us.max(elapsed_us);
         self.above_5ms = self.above_5ms.saturating_add(u64::from(elapsed_us > 5_000));
         self.above_20ms = self.above_20ms.saturating_add(u64::from(elapsed_us > 20_000));
-        self.above_frame_interval =
-            self.above_frame_interval.saturating_add(u64::from(elapsed_us > 33_366));
+        self.above_frame_interval = self.above_frame_interval.saturating_add(u64::from(
+            frame_period_ns.is_some_and(|period| duration.as_nanos() > period),
+        ));
     }
 
     fn merge(&mut self, interval: Self) {
@@ -412,6 +413,8 @@ impl HeadlessRealtimeStageTiming {
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct HeadlessRealtimeIntervalTiming {
+    /// Engine-derived budget for this interval; absent before any observation.
+    frame_period_ns: Option<u128>,
     total: HeadlessRealtimeStageTiming,
     audio_pump: HeadlessRealtimeStageTiming,
     clock_advance: HeadlessRealtimeStageTiming,
@@ -420,6 +423,15 @@ struct HeadlessRealtimeIntervalTiming {
     successor: HeadlessRealtimeStageTiming,
     lookahead: HeadlessRealtimeStageTiming,
     wait: HeadlessRealtimeStageTiming,
+}
+
+impl HeadlessRealtimeIntervalTiming {
+    fn for_engine(engine: &mondrian_playback::PlaybackEngine) -> anyhow::Result<Self> {
+        Ok(Self {
+            frame_period_ns: Some(engine.frame_period()?.as_nanos()),
+            ..Self::default()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -1609,7 +1621,8 @@ impl HeadlessRealtimePlaybackSession {
         let original_intent = target_intent;
         let mut original_picture_proven = false;
         let mut audio_stability_marker = None;
-        let mut recovery_timing = HeadlessRealtimeIntervalTiming::default();
+        let mut recovery_timing =
+            HeadlessRealtimeIntervalTiming::for_engine(&state.playback_engine)?;
         loop {
             anyhow::ensure!(
                 Instant::now() < deadline,
@@ -2329,7 +2342,7 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
     pump_audio: bool,
 ) -> anyhow::Result<HeadlessRealtimeIntervalOutcome> {
     let interval_started = Instant::now();
-    let mut interval_timing = HeadlessRealtimeIntervalTiming::default();
+    let mut interval_timing = HeadlessRealtimeIntervalTiming::for_engine(&state.playback_engine)?;
     let work_watch = preview_service.work_watch();
     let interval_deadline = Instant::now()
         .checked_add(gpu_completion_timeout)
@@ -2445,7 +2458,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                         sampled_intent,
                         preview_service.has_retained_gpu_output(),
                     );
-                    interval_timing.candidate.observe(candidate_started.elapsed());
+                    interval_timing
+                        .candidate
+                        .observe(candidate_started.elapsed(), interval_timing.frame_period_ns);
                     driver.candidate_status = attempt.status;
                     apply_headless_candidate_binding(
                         &mut driver.candidate_binding,
@@ -2576,7 +2591,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                             pump_outcome.needs_follow_up_poll
                                 && !driver.candidate_status.requires_bounded_wait(),
                         );
-                        interval_timing.wait.observe(wait_started.elapsed());
+                        interval_timing
+                            .wait
+                            .observe(wait_started.elapsed(), interval_timing.frame_period_ns);
                         continue 'interval;
                     }
                 }
@@ -2605,7 +2622,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
         if state.playback_epoch() == sampled_epoch && state.current_frame() == sampled_frame {
             let clock_started = Instant::now();
             state.advance_playback_clock_at(now);
-            interval_timing.clock_advance.observe(clock_started.elapsed());
+            interval_timing
+                .clock_advance
+                .observe(clock_started.elapsed(), interval_timing.frame_period_ns);
         }
         let coordinate_changed =
             state.playback_epoch() != sampled_epoch || state.current_frame() != sampled_frame;
@@ -2631,7 +2650,10 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
         let preview_pump_started = Instant::now();
         let (pump_outcome, accepted_terminal) =
             pump_headless_boundary_preview(state, preview_service);
-        interval_timing.preview_pump.observe(preview_pump_started.elapsed());
+        interval_timing.preview_pump.observe(
+            preview_pump_started.elapsed(),
+            interval_timing.frame_period_ns,
+        );
         if coordinate_changed {
             let sample = completed_headless_interval_sample(
                 presented_sample,
@@ -2652,7 +2674,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                     safety_deadline,
                     already_visible_at,
                 )?;
-                interval_timing.candidate.observe(candidate_started.elapsed());
+                interval_timing
+                    .candidate
+                    .observe(candidate_started.elapsed(), interval_timing.frame_period_ns);
                 driver.candidate_status = attempt.status;
                 driver.retain_boundary_attempt(
                     current_intent,
@@ -2692,7 +2716,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 &mut interval_timing,
                 true,
             )?;
-            interval_timing.total.observe(interval_started.elapsed());
+            interval_timing
+                .total
+                .observe(interval_started.elapsed(), interval_timing.frame_period_ns);
             let advanced_frames = if state.playback_epoch() == sampled_epoch {
                 state.current_frame().saturating_sub(sampled_frame).max(1) as u64
             } else {
@@ -2746,7 +2772,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
                 observer,
                 safety_deadline,
             )?;
-            interval_timing.candidate.observe(candidate_started.elapsed());
+            interval_timing
+                .candidate
+                .observe(candidate_started.elapsed(), interval_timing.frame_period_ns);
             driver.candidate_status = attempt.status;
             apply_headless_candidate_binding(
                 &mut driver.candidate_binding,
@@ -2784,7 +2812,9 @@ fn run_headless_realtime_interval<O: HeadlessGpuExecutionObserver>(
             wake_deadline,
             pump_outcome.needs_follow_up_poll && !driver.candidate_status.requires_bounded_wait(),
         );
-        interval_timing.wait.observe(wait_started.elapsed());
+        interval_timing
+            .wait
+            .observe(wait_started.elapsed(), interval_timing.frame_period_ns);
     }
 }
 
@@ -2911,7 +2941,7 @@ fn promote_exact_headless_boundary_successor<O: HeadlessGpuExecutionObserver>(
         safety_deadline,
         Some(boundary_at),
     )?;
-    timing.candidate.observe(candidate_started.elapsed());
+    timing.candidate.observe(candidate_started.elapsed(), timing.frame_period_ns);
     driver.candidate_status = attempt.status;
     driver.retain_boundary_attempt(
         current_intent,
@@ -2960,7 +2990,7 @@ fn prepare_headless_realtime_successor<O: HeadlessGpuExecutionObserver>(
                 observer,
                 safety_deadline,
             )?;
-            timing.candidate.observe(candidate_started.elapsed());
+            timing.candidate.observe(candidate_started.elapsed(), timing.frame_period_ns);
             driver.candidate_status = attempt.status;
             driver.retain_boundary_attempt(
                 current_intent,
@@ -3002,7 +3032,7 @@ fn prepare_headless_realtime_successor<O: HeadlessGpuExecutionObserver>(
                 false
             };
             observer.successor_preparation(ready);
-            timing.successor.observe(started.elapsed());
+            timing.successor.observe(started.elapsed(), timing.frame_period_ns);
             ready
         } else {
             true
@@ -3022,7 +3052,7 @@ fn prepare_headless_realtime_successor<O: HeadlessGpuExecutionObserver>(
                 } else {
                     retain_headless_preview_lookahead(preview_service, state, gpu_adapter)?
                 };
-            timing.lookahead.observe(started.elapsed());
+            timing.lookahead.observe(started.elapsed(), timing.frame_period_ns);
             prepared
         } else {
             false
@@ -3062,7 +3092,7 @@ fn pump_headless_realtime_audio(
     }
     let audio_started = Instant::now();
     state.pump_audio_output()?;
-    timing.audio_pump.observe(audio_started.elapsed());
+    timing.audio_pump.observe(audio_started.elapsed(), timing.frame_period_ns);
     Ok(())
 }
 
@@ -3081,7 +3111,7 @@ fn pump_headless_realtime_audio_before_picture(
             state.pump_audio_output_without_clock_commit()?;
         }
     }
-    timing.audio_pump.observe(audio_started.elapsed());
+    timing.audio_pump.observe(audio_started.elapsed(), timing.frame_period_ns);
     Ok(())
 }
 
@@ -4358,6 +4388,43 @@ mod tests {
             headless_preview_wait_budget(now + Duration::from_secs(1), now, false),
             Some(HEADLESS_PREVIEW_CLOCK_TICK_MAX_WAIT)
         );
+    }
+
+    #[test]
+    fn stage_timing_compares_nanoseconds_with_the_engine_frame_period() {
+        for (grid, rate) in [
+            (
+                mondrian_core::Rational::new(1, 24),
+                mondrian_playback::PlaybackRate::FORWARD_1X,
+            ),
+            (
+                mondrian_core::Rational::new(1001, 30000),
+                mondrian_playback::PlaybackRate::FORWARD_1X,
+            ),
+            (
+                mondrian_core::Rational::new(1, 60),
+                mondrian_playback::PlaybackRate::FORWARD_1X,
+            ),
+        ] {
+            let engine = mondrian_playback::PlaybackEngine::new(
+                grid,
+                mondrian_playback::PlaybackPolicy::default(),
+            )
+            .expect("valid grid");
+            assert_eq!(engine.snapshot().rate, rate);
+            let mut interval = HeadlessRealtimeIntervalTiming::for_engine(&engine).unwrap();
+            let period = engine.frame_period().unwrap();
+            for elapsed in [
+                period - Duration::from_nanos(1),
+                period,
+                period + Duration::from_nanos(1),
+            ] {
+                interval.total.observe(elapsed, interval.frame_period_ns);
+            }
+            assert_eq!(interval.total.observations, 3);
+            assert_eq!(interval.total.above_frame_interval, 1);
+            assert_eq!(interval.frame_period_ns, Some(period.as_nanos()));
+        }
     }
 
     #[test]

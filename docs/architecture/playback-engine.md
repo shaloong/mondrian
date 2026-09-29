@@ -2111,7 +2111,14 @@ through the declared recovery path while preventing deadline renewal loops or
 multi-frame clock stalls.
 
 Realtime candidate, successor, and lookahead loops expose bounded aggregate
-stage timings and terminal diagnostics. They do not emit one log record per
+stage timings and terminal diagnostics. Each interval records the Playback
+Engine's frame period from its bound rational grid and active signed rate,
+rounded up once to a nanosecond. Stage durations are compared at nanosecond
+precision against that recorded period, not against a fixed nominal frame
+rate or the microsecond display value. The period is a diagnostic budget;
+Frame Demand deadlines and Clock Master observations remain the execution
+authority. Before any interval is observed, its period is absent rather than
+fabricated. They do not emit one log record per
 poll: synchronous stderr/file collectors can otherwise become part of the
 presentation critical path and fabricate the clock displacement that the
 qualification is intended to measure.

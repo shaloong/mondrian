@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn frame_period_uses_the_bound_grid_and_active_signed_rate() {
+    for (grid, rate, period_ns) in [
+        (Rational::new(1, 24), PlaybackRate::FORWARD_1X, 41_666_667),
+        (
+            Rational::new(1001, 30000),
+            PlaybackRate::FORWARD_1X,
+            33_366_667,
+        ),
+        (Rational::new(1, 60), PlaybackRate::FORWARD_1X, 16_666_667),
+        (Rational::new(1, 60), PlaybackRate::REVERSE_1X, 16_666_667),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(2, 1).unwrap(),
+            8_333_334,
+        ),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(-2, 1).unwrap(),
+            8_333_334,
+        ),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(1, 2).unwrap(),
+            33_333_334,
+        ),
+        (
+            Rational::new(1001, 24000),
+            PlaybackRate::new(1, 2).unwrap(),
+            83_416_667,
+        ),
+    ] {
+        let mut engine = PlaybackEngine::new(grid, PlaybackPolicy::default()).unwrap();
+        engine.rate = rate;
+        let before = engine.snapshot();
+        assert_eq!(engine.frame_period(), Ok(Duration::from_nanos(period_ns)));
+        assert_eq!(
+            engine.snapshot(),
+            before,
+            "a diagnostic budget cannot advance transport"
+        );
+    }
+}
+
+#[test]
+fn frame_period_fails_closed_when_duration_cannot_be_represented() {
+    let mut engine =
+        PlaybackEngine::new(Rational::new(i64::MAX, 1), PlaybackPolicy::default()).unwrap();
+    engine.rate = PlaybackRate::new(1, u16::MAX).unwrap();
+    let before = engine.snapshot();
+    assert_eq!(
+        engine.frame_period(),
+        Err(PlaybackError::TransportArithmeticOverflow)
+    );
+    assert_eq!(engine.snapshot(), before);
+}
+
+#[test]
 fn authoritative_monotonic_timestamp_addition_fails_closed_on_overflow() {
     assert_eq!(
         MonotonicTimestamp::ZERO.checked_add(Duration::from_millis(5)),
