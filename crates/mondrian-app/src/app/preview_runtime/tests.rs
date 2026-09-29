@@ -6117,6 +6117,12 @@ fn resident_persistent_layer_keeps_cold_source_on_the_opposite_session_owner() {
 
 #[test]
 fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() {
+    for capacity in [7, 8] {
+        assert_covered_source_worker_can_prepare_cold(capacity);
+    }
+}
+
+fn assert_covered_source_worker_can_prepare_cold(capacity: usize) {
     let (mut state, root) = state_with_sequential_invalid_video_assets();
     let mut ids = Vec::new();
     for name in ["third.mp4", "overlay.mp4"] {
@@ -6145,7 +6151,9 @@ fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() 
     state.observe_video_preroll_at_wall(delivered, 1, 1, true, true, Instant::now());
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     synchronize_visual_program_for_state(&service, &state);
-    service.frame_store.replace(test_cpu_frame_store(8, 640 * 1024 * 1024, 6));
+    service
+        .frame_store
+        .replace(test_cpu_frame_store(capacity, 640 * 1024 * 1024, 6));
     let mut opened = test_preview_decode_diagnostics(
         PreviewDecodeAccessMode::PlaybackCursor,
         PreviewHardwareDecodeDecision::GpuResidentNative,
@@ -6201,6 +6209,12 @@ fn covered_source_worker_can_prepare_cold_before_the_other_workers_far_window() 
         "a covered worker cannot wait for the other worker's full far window"
     );
     assert_eq!(service.jobs.diagnostics().queued_prefetch_jobs, 2);
+    for key in near.iter().take(2) {
+        assert!(
+            service.frame_store.borrow_mut().media_frame(key).is_some(),
+            "cold admission must preserve the closest complete picture"
+        );
+    }
     let preparing = service.future_media_window.borrow().diagnostics();
     assert_eq!(preparing.retained_cold_preparation_media_frames, 3);
     assert_eq!(preparing.retained_cold_activation_media_frames, 0);

@@ -549,6 +549,35 @@ struct FutureMediaPrefixPlan {
     admission_limit_reached: bool,
 }
 
+impl FutureMediaPrefixPlan {
+    fn retain_frontier_guards(
+        &mut self,
+        nearest: &[PlannedFutureMediaRequest],
+        resident_keys: &mut HashSet<MediaPreviewKey>,
+        resident_recency_order: &mut Vec<MediaPreviewKey>,
+    ) {
+        // The closest complete picture and the candidate missing picture
+        // retain their complete resident closures. Intermediate inputs on
+        // another owner stay ordinary evictable Store entries. The cold
+        // owner's separate source coverage will acquire its own exact guards.
+        debug_assert_eq!(self.resident_guards.len(), resident_recency_order.len());
+        let guards = std::mem::take(&mut self.resident_guards);
+        let keys = std::mem::take(resident_recency_order);
+        resident_keys.clear();
+        for (guard, key) in guards.into_iter().zip(keys) {
+            let closest = self
+                .first_media_frame
+                .as_ref()
+                .is_some_and(|requests| requests.iter().any(|request| request.key == key));
+            if closest || nearest.iter().any(|request| request.key == key) {
+                resident_keys.insert(key.clone());
+                resident_recency_order.push(key);
+                self.resident_guards.push(guard);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FutureMediaPrefetchReadiness {
     bounded_cold_activation_ready: bool,
@@ -1612,6 +1641,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 continue;
             }
             plan.window_proven_blank = false;
+            if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) {
+                plan.retain_frontier_guards(
+                    &requests,
+                    &mut resident_keys,
+                    &mut resident_recency_order,
+                );
+            }
 
             let mut trial_resident_guards = Vec::new();
             let mut missing = Vec::new();
@@ -1696,6 +1732,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) && !frame_ready {
                 break;
             }
+        }
+        if matches!(scope, FutureMediaPrefixScope::FirstMissingFrame) && ready_prefix {
+            // With no missing picture, only the closest complete closure is
+            // needed here; source coverage protects the blocked worker's inputs.
+            plan.retain_frontier_guards(&[], &mut resident_keys, &mut resident_recency_order);
         }
         // Near-to-far lookup necessarily touches the Store LRU in the wrong
         // direction. Re-touch the accepted prefix far-to-near so later

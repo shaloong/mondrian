@@ -2049,6 +2049,13 @@ that must open the new source. Missing farther inputs on an independent worker
 cannot indefinitely defer that open. This source projection uses the same
 canonical visual lowering and physical Frame Store admission; it is resource
 coverage, never evidence that a complete picture is Ready.
+The first-missing-picture plan retains the full closest picture and the full
+candidate frontier through admission. Already-ready intermediate pictures on
+other workers remain evictable Store entries; they cannot become an incidental
+reservation against cold headroom. Selected source coverage independently
+protects every source input needed while that worker opens the cold Session.
+An entirely ready window needs only its closest full-picture guards in this
+frontier plan. The ordinary complete-window planner keeps its full prefix guards.
 
 The coverage duration is the finite upper bound of the existing observed
 Playback Session open/replacement and startup latency buckets, divided by the
