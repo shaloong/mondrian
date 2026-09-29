@@ -1882,24 +1882,28 @@ impl PreviewDecodeSession {
         let native_decoder = {
             // SAFETY: These source parameters remain owned throughout setup.
             let raw = unsafe { &*parameters.as_ptr() };
-            let direct_prores = codec_id == ffmpeg::codec::Id::PRORES
-                && matches!(raw.codec_tag.swap_bytes(), 0x61703468 | 0x61703478)
+            let direct_codec = ((codec_id == ffmpeg::codec::Id::PRORES
+                && matches!(raw.codec_tag.swap_bytes(), 0x61703468 | 0x61703478))
+                || (codec_id == ffmpeg::codec::Id::HEVC
+                    && raw.profile == ffmpeg::ffi::FF_PROFILE_HEVC_MAIN_10
+                    && raw.format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32
+                    && raw.color_range == ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG))
                 && hardware_decode_request.prefers_gpu_residency()
                 && backend != PreviewDecodeBackend::Software
                 && !field_processing.requires_cpu_decode()
                 && hardware_decode_plan.probe.candidate_backend
                     == Some(HwAccelBackend::VideoToolbox);
-            if direct_prores {
+            if direct_codec {
                 let range = source_color.range.resolve_for_frame(
                     crate::decoder::decoded_video_range_from_ffmpeg(raw.color_range.into()),
                 );
                 Some(
-                    PreviewCodec::videotoolbox_prores(&parameters, stream_tb, range).map_err(
-                        |error| MondrianError::DecodeFailed {
+                    PreviewCodec::videotoolbox(&parameters, stream_tb, range).map_err(|error| {
+                        MondrianError::DecodeFailed {
                             asset_id: path.display().to_string(),
-                            reason: format!("direct VideoToolbox ProRes setup failed: {error}"),
-                        },
-                    )?,
+                            reason: format!("direct VideoToolbox codec setup failed: {error}"),
+                        }
+                    })?,
                 )
             } else {
                 None
@@ -3897,6 +3901,93 @@ fn packet_source_execution_family_matches(
 #[cfg(test)]
 mod session_topology_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires actual VideoToolbox and the sixty-frame Main10 motion/B fixture"]
+    fn direct_main10_session_preserves_seek_cancel_and_reopen_authority() {
+        let path = PathBuf::from(
+            std::env::var("MONDRIAN_HEVC_VT_TEST_MEDIA_PATH").expect("explicit Main10 fixture"),
+        );
+        let mut context = PreviewDecodeSessionContext::new();
+        let request_for = |index| {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                SourceSampleTarget::covering(mondrian_core::TimelineTime::new(index, 30).unwrap()),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec2100Pq,
+                    DecodedVideoRange::Limited,
+                ),
+            )
+            .with_field_processing(PreviewSourceFieldProcessing::Progressive)
+            .with_fingerprint(MediaFileFingerprint::capture(&path))
+            .with_hardware_decode_request(PreviewHardwareDecodeRequest::RequireGpuResident);
+            request.representation = PreviewDecodeRepresentation::NativeSurface;
+            request
+        };
+        for index in [0, 1, 17, 59, 2, 29, 0] {
+            let outcome = context.decode_cancellable(request_for(index), || false).unwrap();
+            let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+                panic!("Main10 native demand must never fall back to CPU")
+            };
+            assert_eq!(
+                frame.diagnostics.path,
+                PreviewDecodePath::InProcessVideoToolboxNative
+            );
+            assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                frame.diagnostics.requested_pts
+            );
+            assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::P010);
+            assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
+            assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
+            assert!(!frame.diagnostics.cpu_resident);
+            assert!(frame.handle.cv_pixel_buffer().is_some());
+            drop(frame);
+            assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        }
+        assert!(matches!(
+            context.decode_cancellable(request_for(3), || true).unwrap(),
+            PreviewDecodeOutcome::Canceled(_)
+        ));
+        let observer = context.execution_observer.clone();
+        let canceled = context
+            .decode_cancellable(request_for(5), move || {
+                observer.snapshot().stage == PreviewDecodeExecutionStage::FrameMaterialization
+            })
+            .unwrap();
+        assert!(matches!(canceled, PreviewDecodeOutcome::Canceled(_)));
+        assert!(context
+            .sessions
+            .playback
+            .iter()
+            .flatten()
+            .all(|session| session.last_pts.is_none()));
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) =
+            context.decode_cancellable(request_for(5), || false).unwrap()
+        else {
+            panic!("Main10 native retry")
+        };
+        assert!(frame.diagnostics.seek_performed);
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) =
+            context.decode_cancellable(request_for(0), || false).unwrap()
+        else {
+            panic!("Main10 native reopen")
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Opened
+        );
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        eprintln!("Main10 production session: seven seeks, before/mid cancellation, retry, reopen, zero output residual");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

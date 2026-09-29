@@ -968,14 +968,20 @@ fn decoded_native_surface_format(
     decoded: &ffmpeg::util::frame::video::Video,
 ) -> std::result::Result<DecodedVideoSurfaceFormat, PreviewNativeFrameMaterializationError> {
     #[cfg(target_os = "macos")]
-    if decoded.format() == ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX
-        && super::native_frame::ffmpeg_cv_pixel_buffer_format(decoded)?
-            == u32::from_be_bytes(*b"s4as")
-    {
-        // CoreVideo's three full-resolution planes have no FFmpeg software
-        // format in the current linked runtime. Preserve the real layout;
-        // never fabricate AVHWFramesContext::sw_format to enable import.
-        return Ok(DecodedVideoSurfaceFormat::Yuva444sp16);
+    if decoded.format() == ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX {
+        // The retained CoreVideo allocation supplies the real storage layout.
+        // Direct native owners have no AVHWFramesContext; never fabricate one
+        // or infer eight-bit storage from that context's absence.
+        let pixel = super::native_frame::ffmpeg_cv_pixel_buffer_format(decoded)?;
+        match pixel {
+            value if value == u32::from_be_bytes(*b"s4as") => {
+                return Ok(DecodedVideoSurfaceFormat::Yuva444sp16);
+            }
+            value if value == u32::from_be_bytes(*b"x420") => {
+                return Ok(DecodedVideoSurfaceFormat::P010);
+            }
+            _ => {}
+        }
     }
     // SAFETY: decoded owns the AVFrame and its hw_frames_ctx for this borrow.
     let hardware_frames_context = unsafe { (*decoded.as_ptr()).hw_frames_ctx };

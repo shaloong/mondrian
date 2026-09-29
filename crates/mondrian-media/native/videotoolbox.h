@@ -1,11 +1,11 @@
-#ifndef MONDRIAN_VIDEOTOOLBOX_PRORES_H
-#define MONDRIAN_VIDEOTOOLBOX_PRORES_H
+#ifndef MONDRIAN_VIDEOTOOLBOX_H
+#define MONDRIAN_VIDEOTOOLBOX_H
 #include <stddef.h>
 #include <stdint.h>
 
 /* One worker exclusively owns a decoder. Calls must not overlap. The adapter
  * owns no demux, seek, cache, playback clock, or color interpretation policy. */
-typedef struct MdnProResDecoder MdnProResDecoder;
+typedef struct MdnVtDecoder MdnVtDecoder;
 typedef struct {
     int32_t status;
     uint32_t stage;
@@ -27,23 +27,31 @@ enum {
 typedef struct {
     uint32_t width, height, codec;
     uint32_t primaries, transfer, matrix;
-} MdnProResContract;
+} MdnVtContract;
 typedef struct {
-    /* +1 CVPixelBuffer reference; release with mdn_prores_surface_release. */
+    /* +1 CVPixelBuffer reference; release with mdn_vt_surface_release. */
     void *pixel_buffer;
     size_t allocation_bytes;
     uint32_t width, height, pixel_format, callback_count;
     uint32_t hardware_observed;
-} MdnProResOutput;
+} MdnVtOutput;
 
-/* Explicit CICP and limited-range 16-bit 4444 output. Hardware is required;
+typedef struct {
+    const uint8_t *bytes;
+    size_t size;
+} MdnVtParameterSet;
+
+/* Explicit CICP and limited-range native output. Hardware is required;
  * successful output additionally carries the observed property, not intent. */
-MdnProResDecoder *mdn_prores_create(const MdnProResContract *, MdnVtError *);
+MdnVtDecoder *mdn_vt_create(const MdnVtContract *,
+    const MdnVtParameterSet *, size_t count, int nal_length, MdnVtError *);
+int mdn_vt_finish(MdnVtDecoder *, MdnVtError *);
+int mdn_vt_reset(MdnVtDecoder *, MdnVtError *);
 /* Packet PTS is an exact rational, not a floating-point timestamp. */
-int mdn_prores_decode(MdnProResDecoder *, const uint8_t *, size_t,
+int mdn_vt_decode(MdnVtDecoder *, const uint8_t *, size_t,
                      int64_t pts_value, int32_t pts_scale,
-                     MdnProResOutput *, MdnVtError *);
+                     MdnVtOutput *, MdnVtError *);
 /* Consumes the decoder even on error. No callback state survives this call. */
-int mdn_prores_close(MdnProResDecoder *, MdnVtError *);
-void mdn_prores_surface_release(void *);
+int mdn_vt_close(MdnVtDecoder *, MdnVtError *);
+void mdn_vt_surface_release(void *);
 #endif

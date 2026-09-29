@@ -48,7 +48,7 @@ mod native_frame;
 mod playback_ring;
 mod seek_index;
 #[cfg(target_os = "macos")]
-mod videotoolbox_prores;
+mod videotoolbox;
 
 pub use decode_contract::{
     CameraRawDecodeIntent, PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence,

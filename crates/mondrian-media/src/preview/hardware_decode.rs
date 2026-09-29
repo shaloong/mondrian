@@ -418,7 +418,7 @@ impl PreviewHardwareDecodePlan {
             let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
             self.probe.selected_backend = backend;
             self.probe.native_decoder_active = true;
-            self.probe.hardware_decode_observed = backend_hardware_execution_observation(backend);
+            self.probe.hardware_decode_observed = self.observed_hardware_execution(backend);
             self.probe.zero_copy_active = false;
             self.probe.frame_residency = DecodedFrameResidency::CpuRgba;
             self.probe.gpu_frame_handle_kind = None;
@@ -443,14 +443,7 @@ impl PreviewHardwareDecodePlan {
         self.probe.selected_backend = backend;
         self.probe.decoder_adapter_available = true;
         self.probe.native_decoder_active = true;
-        self.probe.hardware_decode_observed =
-            if self.native_decode_path == PreviewDecodePath::InProcessVideoToolboxNative {
-                // The direct adapter publishes a frame only after querying the
-                // actual VT session's UsingHardwareAcceleratedVideoDecoder property.
-                Some(true)
-            } else {
-                backend_hardware_execution_observation(backend)
-            };
+        self.probe.hardware_decode_observed = self.observed_hardware_execution(backend);
         self.probe.zero_copy_active = kind != DecodedGpuFrameHandleKind::CudaDeviceMemory;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
@@ -459,6 +452,16 @@ impl PreviewHardwareDecodePlan {
             backend.as_str(),
             self.native_decode_path.as_str()
         );
+    }
+
+    fn observed_hardware_execution(&self, backend: HwAccelBackend) -> Option<bool> {
+        if self.native_decode_path == PreviewDecodePath::InProcessVideoToolboxNative {
+            // This adapter publishes only after querying the actual session's
+            // public UsingHardwareAcceleratedVideoDecoder property.
+            Some(true)
+        } else {
+            backend_hardware_execution_observation(backend)
+        }
     }
 
     pub(super) fn device_context_probe_for_plan(

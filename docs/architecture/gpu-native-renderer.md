@@ -1789,8 +1789,11 @@ address outputs; this proves error-path ownership, not physical device qualifica
 The opt-in `native_decode_pixel_parity` integration test feeds explicit fixtures
 through the production isolated demux and both compact CPU YUV and native decode.
 Linux uses CUDA fixtures. macOS requires tagged HEVC 10-bit 4:2:0, 4:2:2 and 4:4:4
-fixtures and verifies observed VideoToolbox hardware decode, CVPixelBuffer
-residency, and P010/P210/P410 surfaces. Both routes use the same Viewer input, Program
+fixtures and verifies CVPixelBuffer residency and P010/P210/P410 surfaces.
+The direct Main10 P010 and ProRes 4444 routes additionally require the actual
+session's observed hardware property; FFmpeg-managed VideoToolbox sessions retain
+unobserved execution rather than inferring it from their surfaces. A separate
+Main10 motion/B fixture checks temporal identity across GOP seeks. Both routes use the same Viewer input, Program
 Output, and monitor stages at seek targets across GOP boundaries. The existing
 typed readback implementation can borrow a presentation lease without detaching
 its ownership; the test keeps that lease until copy completion and consumes

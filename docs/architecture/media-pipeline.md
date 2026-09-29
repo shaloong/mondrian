@@ -4342,6 +4342,34 @@ materialization path, without a fabricated FFmpeg hardware-frame context.
 Renderer retirement retains this source through real GPU completion. Unified
 allocation accounting uses the native buffer allocation once.
 
+### macOS HEVC Main10 admission evidence
+
+The same private VideoToolbox adapter admits progressive, single-layer HEVC
+Main10 4:2:0 with explicit limited range, chroma location and supported CICP.
+CoreMedia creates the format description from the source VPS/SPS/PPS, without
+overwriting coded color metadata with the caller's expected values. Successful
+output requires actual `x420` ten-bit bi-planar geometry, IOSurface ownership,
+matching CVPixelBuffer color attachments and the session's observed hardware
+property. Other HEVC sampling families retain the FFmpeg path and its explicit
+unobserved execution state.
+
+A bounded SPS prefix supplies the coded reorder capacity; it is never inferred
+from a short sample or a fixed number of B frames. The shared `PreviewCodec`
+orders the returned owning frames by exact stream PTS and drains the remaining
+tail at EOF. Each access unit must contain one picture with valid length framing;
+changed in-band parameter sets or new extradata fail closed. Native failure
+poisons the session. Seek flush consumes the old temporal session before creating
+another from the same frozen source description; old retained frame owners
+remain valid independently. Demux, seek policy, candidate selection, cancellation
+and materialization stay in `PreviewDecodeSession`.
+
+Physical tests compare every Y/Cb/Cr sample of sixty distinct motion/B frames to
+software decode, including EOF, temporal reset and buffers retained after close.
+Those tests explicitly read native pixels as an oracle; they do not establish
+production zero-copy residency or sustained playback qualification by themselves.
+The separate production Viewer comparison uses isolated demux, real Metal imports,
+GOP seeks and the unchanged half-float tolerance.
+
 ### Native decoder output and observed hardware execution
 
 `native_decoder_active` proves output through the selected FFmpeg native decoder
@@ -4358,7 +4386,7 @@ HEVC session creation requests
 `EnableHardwareAcceleratedVideoDecoder`, not the require-hardware property,
 and successful output does not independently query execution. The adapter must
 not inspect private decoder storage to obtain that property. In contrast, the
-direct macOS ProRes adapter above publishes native output only after its actual
+direct macOS ProRes/Main10 adapter above publishes native output only after its actual
 session property proves hardware execution; that observation is `Some(true)`.
 
 `PreviewDecodeExecutionPath::NativeSurface` and `NativeCpuTransfer` preserve this

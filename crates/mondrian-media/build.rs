@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        build_videotoolbox_prores();
+        build_videotoolbox();
     }
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_0)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_1)");
@@ -117,18 +117,18 @@ fn parse_define(text: &str, name: &str) -> Option<u32> {
 }
 
 /// Compile the small public-API codec adapter with the selected macOS SDK.
-fn build_videotoolbox_prores() {
+fn build_videotoolbox() {
     use std::process::Command;
 
-    println!("cargo:rerun-if-changed=native/videotoolbox_prores.c");
-    println!("cargo:rerun-if-changed=native/videotoolbox_prores.h");
+    println!("cargo:rerun-if-changed=native/videotoolbox.c");
+    println!("cargo:rerun-if-changed=native/videotoolbox.h");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
     println!("cargo:rerun-if-env-changed=SDKROOT");
     let target = std::env::var("TARGET").expect("Cargo target is required");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output is required"));
-    let object = output.join("videotoolbox_prores.o");
-    let archive = output.join("libmondrian_videotoolbox_prores.a");
+    let object = output.join("videotoolbox.o");
+    let archive = output.join("libmondrian_videotoolbox.a");
     let mut compiler = Command::new("xcrun");
     compiler.args([
         "--sdk",
@@ -143,7 +143,7 @@ fn build_videotoolbox_prores() {
         "-Wextra",
         "-Werror",
         "-c",
-        "native/videotoolbox_prores.c",
+        "native/videotoolbox.c",
         "-o",
     ]);
     compiler.arg(&object);
@@ -165,7 +165,7 @@ fn build_videotoolbox_prores() {
         "archive VideoToolbox adapter"
     );
     println!("cargo:rustc-link-search=native={}", output.display());
-    println!("cargo:rustc-link-lib=static=mondrian_videotoolbox_prores");
+    println!("cargo:rustc-link-lib=static=mondrian_videotoolbox");
     for framework in ["CoreFoundation", "CoreMedia", "CoreVideo", "VideoToolbox"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

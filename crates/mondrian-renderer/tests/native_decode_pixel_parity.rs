@@ -61,6 +61,17 @@ fn cpu_and_cuda_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "requires real Metal, explicit demux worker and a 30 fps Main10 PQ motion/B fixture"]
+fn cpu_and_native_main10_motion_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_MAIN10_MOTION_FIXTURE",
+        [(DecodedVideoSurfaceFormat::P010, ColorSpace::Rec2100Pq)],
+        1.0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "requires real Metal, explicit demux worker, and tagged HEVC 4:2:0/4:2:2/4:4:4 fixtures"]
 fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     compare_macos_videotoolbox_fixtures(
@@ -132,15 +143,18 @@ fn transparent_prores4444_viewer_output_is_zero_across_seeks() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn compare_macos_videotoolbox_fixtures(
+fn compare_macos_videotoolbox_fixtures<const N: usize>(
     fixture_env: &str,
-    cases: [(DecodedVideoSurfaceFormat, ColorSpace); 3],
+    cases: [(DecodedVideoSurfaceFormat, ColorSpace); N],
     expected_alpha: f32,
 ) -> Result<()> {
     mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
     let fixtures = std::env::var_os(fixture_env).with_context(|| fixture_env.to_owned())?;
     let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
-    anyhow::ensure!(paths.len() == cases.len(), "expected three tagged fixtures");
+    anyhow::ensure!(
+        paths.len() == cases.len(),
+        "fixture count differs from tagged cases"
+    );
     let context = pollster::block_on(GpuContext::new())?;
     anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
     let mut runtime =
@@ -384,7 +398,10 @@ fn measure_with_resource_observer(
                         Some(f.diagnostics.decoded_video_sampling.bit_depth),
                         expected.fixed_bit_depth()
                     );
-                    if expected == DecodedVideoSurfaceFormat::Yuva444sp16 {
+                    if matches!(
+                        expected,
+                        DecodedVideoSurfaceFormat::P010 | DecodedVideoSurfaceFormat::Yuva444sp16
+                    ) {
                         assert_eq!(
                             f.diagnostics.path,
                             PreviewDecodePath::InProcessVideoToolboxNative

@@ -5,16 +5,18 @@ use crate::decoder::DecodedVideoRange;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-/// Explicit source contract. Only limited-range ProRes 4444/4444 XQ is accepted.
+pub(super) mod hevc;
+
+/// Explicit source contract for limited-range ProRes 4444/XQ or HEVC Main10.
 /// CICP values must come from the resolved source contract, never defaults.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub(super) struct VideoToolboxProResContract {
-    /// Encoded width, before display cropping.
+pub(super) struct VideoToolboxContract {
+    /// Decoded visible width, before presentation orientation.
     pub width: u32,
-    /// Encoded height, before display cropping.
+    /// Decoded visible height, before presentation orientation.
     pub height: u32,
-    /// CoreMedia big-endian FourCC (`ap4h` or `ap4x`).
+    /// CoreMedia big-endian FourCC (`ap4h`, `ap4x` or `hvc1`).
     pub codec: u32,
     /// CICP color primaries (1 or 9).
     pub primaries: u32,
@@ -26,9 +28,9 @@ pub(super) struct VideoToolboxProResContract {
 
 /// Native stage and OSStatus are retained for structured rejection diagnostics.
 #[derive(Debug, Clone, Copy, Default, thiserror::Error)]
-#[error("VideoToolbox ProRes stage {stage} failed with status {status}")]
+#[error("VideoToolbox stage {stage} failed with status {status}")]
 #[repr(C)]
-pub(super) struct VideoToolboxProResError {
+pub(super) struct VideoToolboxError {
     /// Apple OSStatus, or adapter rejection code.
     pub status: i32,
     /// Adapter stage from the native codec boundary.
@@ -51,58 +53,122 @@ impl Drop for NativeOutput {
     fn drop(&mut self) {
         // SAFETY: The adapter transfers one retained reference, including on
         // any path rejected by Rust. Release accepts null and consumes it once.
-        unsafe { mdn_prores_surface_release(self.pixel_buffer) };
+        unsafe { mdn_vt_surface_release(self.pixel_buffer) };
     }
 }
 
+#[repr(C)]
+struct NativeParameterSet {
+    bytes: *const u8,
+    size: usize,
+}
+
 unsafe extern "C" {
-    fn mdn_prores_create(
-        contract: *const VideoToolboxProResContract,
-        error: *mut VideoToolboxProResError,
+    fn mdn_vt_create(
+        contract: *const VideoToolboxContract,
+        sets: *const NativeParameterSet,
+        count: usize,
+        nal_length: i32,
+        error: *mut VideoToolboxError,
     ) -> *mut c_void;
-    fn mdn_prores_decode(
+    fn mdn_vt_decode(
         decoder: *mut c_void,
         data: *const u8,
         size: usize,
         pts_value: i64,
         pts_scale: i32,
         output: *mut NativeOutput,
-        error: *mut VideoToolboxProResError,
+        error: *mut VideoToolboxError,
     ) -> i32;
-    fn mdn_prores_close(decoder: *mut c_void, error: *mut VideoToolboxProResError) -> i32;
-    fn mdn_prores_surface_release(surface: *mut c_void);
+    fn mdn_vt_finish(decoder: *mut c_void, error: *mut VideoToolboxError) -> i32;
+    fn mdn_vt_reset(decoder: *mut c_void, error: *mut VideoToolboxError) -> i32;
+    fn mdn_vt_close(decoder: *mut c_void, error: *mut VideoToolboxError) -> i32;
+    fn mdn_vt_surface_release(surface: *mut c_void);
 }
 
 /// One exclusively owned decoder. Successful packets return independent owners;
 /// consuming shutdown therefore cannot invalidate outstanding frame leases.
 #[derive(Debug)]
-pub(super) struct VideoToolboxProResDecoder {
+pub(super) struct VideoToolboxDecoder {
     pointer: Option<NonNull<c_void>>,
-    contract: VideoToolboxProResContract,
+    contract: VideoToolboxContract,
 }
 
 // SAFETY: Moving exclusive ownership does not overlap calls. VideoToolbox does
 // not require the session's creation thread; callbacks synchronize in C. The
 // pointer deliberately remains !Sync and decoding requires an exclusive borrow.
-unsafe impl Send for VideoToolboxProResDecoder {}
+unsafe impl Send for VideoToolboxDecoder {}
 
-impl VideoToolboxProResDecoder {
+impl VideoToolboxDecoder {
     /// Require hardware decoding with an explicit limited-range source contract.
     pub(super) fn new(
-        contract: VideoToolboxProResContract,
+        contract: VideoToolboxContract,
         range: DecodedVideoRange,
-    ) -> Result<Self, VideoToolboxProResError> {
+    ) -> Result<Self, VideoToolboxError> {
+        Self::create(contract, range, None)
+    }
+
+    pub(super) fn new_hevc(
+        contract: VideoToolboxContract,
+        range: DecodedVideoRange,
+        configuration: &hevc::HevcConfiguration,
+    ) -> Result<Self, VideoToolboxError> {
+        Self::create(contract, range, Some(configuration))
+    }
+
+    fn create(
+        contract: VideoToolboxContract,
+        range: DecodedVideoRange,
+        configuration: Option<&hevc::HevcConfiguration>,
+    ) -> Result<Self, VideoToolboxError> {
         if range != DecodedVideoRange::Limited {
-            return Err(VideoToolboxProResError { status: -70001, stage: 11 });
+            return Err(VideoToolboxError { status: -70001, stage: 11 });
         }
-        let mut error = VideoToolboxProResError::default();
-        // SAFETY: Both arguments live through the synchronous creation call.
-        let pointer = unsafe { mdn_prores_create(&contract, &mut error) };
+        let sets: Vec<_> = configuration
+            .into_iter()
+            .flat_map(|configuration| &configuration.parameter_sets)
+            .map(|bytes| NativeParameterSet { bytes: bytes.as_ptr(), size: bytes.len() })
+            .collect();
+        let mut error = VideoToolboxError::default();
+        // SAFETY: Descriptors and their bytes live through creation. CoreMedia
+        // constructs and owns the format description before returning.
+        let pointer = unsafe {
+            mdn_vt_create(
+                &contract,
+                sets.as_ptr(),
+                sets.len(),
+                configuration.map_or(0, |c| c.length_size as i32),
+                &mut error,
+            )
+        };
         let pointer = NonNull::new(pointer).ok_or(error)?;
         Ok(Self { pointer: Some(pointer), contract })
     }
 
-    /// Decode one complete intra packet at an exact rational presentation time.
+    pub(super) fn finish(&mut self) -> Result<(), VideoToolboxError> {
+        let mut error = VideoToolboxError::default();
+        // SAFETY: Exclusive live session; the adapter joins every callback.
+        let success = unsafe { mdn_vt_finish(self.pointer.unwrap().as_ptr(), &mut error) };
+        if success == 0 {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn reset(&mut self) -> Result<(), VideoToolboxError> {
+        let mut error = VideoToolboxError::default();
+        // SAFETY: Exclusive live session. Old temporal work is consumed before
+        // new session creation; retained output allocations remain independent.
+        let success = unsafe { mdn_vt_reset(self.pointer.unwrap().as_ptr(), &mut error) };
+        if success == 0 {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Decode one complete packet at an exact rational presentation time.
     /// Native completion is awaited before returning. A codec failure
     /// poisons the session; the caller must consume it rather than retry it.
     pub(super) fn decode_packet(
@@ -110,14 +176,14 @@ impl VideoToolboxProResDecoder {
         packet: &[u8],
         pts_value: i64,
         pts_scale: i32,
-    ) -> Result<VideoToolboxProResFrame, VideoToolboxProResError> {
+    ) -> Result<VideoToolboxFrame, VideoToolboxError> {
         let mut output = NativeOutput::default();
-        let mut error = VideoToolboxProResError::default();
+        let mut error = VideoToolboxError::default();
         let pointer = self.pointer.expect("live decoder before consuming close");
         // SAFETY: Exclusive decoder borrow, live packet, initialized out fields.
         // Native code copies compressed bytes and joins all callbacks on return.
         let success = unsafe {
-            mdn_prores_decode(
+            mdn_vt_decode(
                 pointer.as_ptr(),
                 packet.as_ptr(),
                 packet.len(),
@@ -134,28 +200,33 @@ impl VideoToolboxProResDecoder {
             || output.allocation_bytes == 0
             || output.width != self.contract.width
             || output.height != self.contract.height
-            || output.pixel_format != u32::from_be_bytes(*b"s4as")
+            || output.pixel_format
+                != if self.contract.codec == u32::from_be_bytes(*b"hvc1") {
+                    u32::from_be_bytes(*b"x420")
+                } else {
+                    u32::from_be_bytes(*b"s4as")
+                }
             || output.callback_count != 1
             || output.hardware_observed != 1
         {
-            return Err(VideoToolboxProResError { status: -70003, stage: 9 });
+            return Err(VideoToolboxError { status: -70003, stage: 9 });
         }
-        Ok(VideoToolboxProResFrame { output, contract: self.contract })
+        Ok(VideoToolboxFrame { output, contract: self.contract })
     }
 
     /// Consume the session and join callbacks even when shutdown reports error.
-    pub(super) fn close(mut self) -> Result<(), VideoToolboxProResError> {
+    pub(super) fn close(mut self) -> Result<(), VideoToolboxError> {
         self.close_inner()
     }
 
-    fn close_inner(&mut self) -> Result<(), VideoToolboxProResError> {
+    fn close_inner(&mut self) -> Result<(), VideoToolboxError> {
         let Some(pointer) = self.pointer.take() else {
             return Ok(());
         };
-        let mut error = VideoToolboxProResError::default();
+        let mut error = VideoToolboxError::default();
         // SAFETY: Taking the sole pointer makes native consuming close exactly
         // once, including failure and the subsequent Rust destructor.
-        if unsafe { mdn_prores_close(pointer.as_ptr(), &mut error) } == 0 {
+        if unsafe { mdn_vt_close(pointer.as_ptr(), &mut error) } == 0 {
             Err(error)
         } else {
             Ok(())
@@ -163,22 +234,22 @@ impl VideoToolboxProResDecoder {
     }
 }
 
-impl Drop for VideoToolboxProResDecoder {
+impl Drop for VideoToolboxDecoder {
     fn drop(&mut self) {
         if let Err(error) = self.close_inner() {
-            tracing::warn!(%error, "VideoToolbox ProRes decoder drop failed");
+            tracing::warn!(%error, "VideoToolbox decoder drop failed");
         }
     }
 }
 
-/// Independently retained immutable s4as surface, with observed hardware decode.
+/// Independently retained immutable native surface, with observed hardware decode.
 #[derive(Debug)]
-pub(super) struct VideoToolboxProResFrame {
+pub(super) struct VideoToolboxFrame {
     output: NativeOutput,
-    contract: VideoToolboxProResContract,
+    contract: VideoToolboxContract,
 }
 
-impl VideoToolboxProResFrame {
+impl VideoToolboxFrame {
     /// Move the retained surface into the shared AVFrame candidate carrier.
     /// This does not invoke an FFmpeg decoder, invent a software pixel layout,
     /// or create an AVHWFramesContext. Only proven progressive sources may use
@@ -189,7 +260,7 @@ impl VideoToolboxProResFrame {
         duration: i64,
         time_base: ffmpeg_next::Rational,
         field_order: ffmpeg_next::ffi::AVFieldOrder,
-    ) -> Result<ffmpeg_next::util::frame::video::Video, VideoToolboxProResError> {
+    ) -> Result<ffmpeg_next::util::frame::video::Video, VideoToolboxError> {
         use ffmpeg_next::ffi;
         if pts == ffi::AV_NOPTS_VALUE
             || duration < 0
@@ -197,12 +268,12 @@ impl VideoToolboxProResFrame {
             || time_base.denominator() <= 0
             || field_order != ffi::AVFieldOrder::AV_FIELD_PROGRESSIVE
         {
-            return Err(VideoToolboxProResError { status: -70001, stage: 11 });
+            return Err(VideoToolboxError { status: -70001, stage: 11 });
         }
         // SAFETY: Fresh AVFrame allocation; null is checked before dereference.
         let raw = unsafe { ffi::av_frame_alloc() };
         let Some(raw) = NonNull::new(raw) else {
-            return Err(VideoToolboxProResError { status: -70002, stage: 9 });
+            return Err(VideoToolboxError { status: -70002, stage: 9 });
         };
         // SAFETY: Video owns this allocation from here, including error returns.
         let mut frame = unsafe { ffmpeg_next::util::frame::video::Video::wrap(raw.as_ptr()) };
@@ -223,7 +294,7 @@ impl VideoToolboxProResFrame {
         if buffer.is_null() {
             // SAFETY: av_buffer_create leaves ownership with its caller on error.
             drop(unsafe { Box::from_raw(owner) });
-            return Err(VideoToolboxProResError { status: -70002, stage: 9 });
+            return Err(VideoToolboxError { status: -70002, stage: 9 });
         }
         // SAFETY: Sole mutable AVFrame owner; buffer now owns the +1 surface.
         unsafe {
@@ -268,7 +339,7 @@ unsafe extern "C" fn release_av_frame_surface(opaque: *mut c_void, _data: *mut u
     // final AVBuffer unref consumes its unique box once; frame clones share it.
     // The callback may run on another thread: output pixels are immutable and
     // CoreVideo release is thread safe; no thread-affine decoder is in the box.
-    drop(unsafe { Box::from_raw(opaque.cast::<VideoToolboxProResFrame>()) });
+    drop(unsafe { Box::from_raw(opaque.cast::<VideoToolboxFrame>()) });
 }
 
 #[cfg(test)]
@@ -276,7 +347,7 @@ mod tests {
     use super::*;
 
     fn fixture_packet() -> (
-        VideoToolboxProResContract,
+        VideoToolboxContract,
         ffmpeg_next::ffi::AVFieldOrder,
         Vec<u8>,
     ) {
@@ -290,7 +361,7 @@ mod tests {
         let parameters = stream.parameters();
         // SAFETY: Owned parameters remain live for this immutable metadata read.
         let raw = unsafe { &*parameters.as_ptr() };
-        let contract = VideoToolboxProResContract {
+        let contract = VideoToolboxContract {
             width: raw.width.try_into().unwrap(),
             height: raw.height.try_into().unwrap(),
             codec: raw.codec_tag.swap_bytes(),
@@ -325,7 +396,7 @@ mod tests {
             let mut changed = packet.clone();
             changed[offset] = value;
             let mut decoder =
-                VideoToolboxProResDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
+                VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
             let result = decoder.decode_packet(&changed, 0, 30);
             assert!(
                 result.is_err(),
@@ -340,7 +411,7 @@ mod tests {
 
     #[test]
     fn missing_color_metadata_is_rejected_before_session_creation() {
-        let contract = VideoToolboxProResContract {
+        let contract = VideoToolboxContract {
             width: 1920,
             height: 1080,
             codec: u32::from_be_bytes(*b"ap4h"),
@@ -348,12 +419,11 @@ mod tests {
             transfer: 0,
             matrix: 1,
         };
-        let error =
-            VideoToolboxProResDecoder::new(contract, DecodedVideoRange::Limited).unwrap_err();
+        let error = VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap_err();
         assert_eq!(error.stage, 11);
         assert_ne!(error.status, 0);
         for range in [DecodedVideoRange::Full, DecodedVideoRange::Unknown] {
-            assert!(VideoToolboxProResDecoder::new(contract, range).is_err());
+            assert!(VideoToolboxDecoder::new(contract, range).is_err());
         }
     }
 
@@ -363,8 +433,7 @@ mod tests {
         use ffmpeg_next as ffmpeg;
         let (contract, field_order, packet) = fixture_packet();
         let data = packet.as_slice();
-        let mut decoder =
-            VideoToolboxProResDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
+        let mut decoder = VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
         let first = decoder.decode_packet(data, 0, 30).unwrap();
         let second = decoder.decode_packet(data, 1, 30).unwrap();
         assert_ne!(first.output.pixel_buffer, second.output.pixel_buffer);
@@ -451,8 +520,7 @@ mod tests {
         drop(clone);
         assert_eq!(family.outstanding(), 0);
         assert_eq!(session.outstanding(), 0);
-        let mut decoder =
-            VideoToolboxProResDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
+        let mut decoder = VideoToolboxDecoder::new(contract, DecodedVideoRange::Limited).unwrap();
         assert!(decoder.decode_packet(&[0, 1, 2, 3], 0, 30).is_err());
         assert!(decoder.decode_packet(data, 0, 30).is_err());
         decoder.close().unwrap();
