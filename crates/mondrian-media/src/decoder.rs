@@ -1150,6 +1150,8 @@ pub enum DecodedVideoSurfaceFormat {
     P412,
     /// 16-bit P416 two-plane YUV 4:4:4 surface.
     P416,
+    /// Full-resolution sixteen-bit Y, interleaved CbCr, and straight alpha planes.
+    Yuva444sp16,
     /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
     Y210,
     /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
@@ -1213,7 +1215,7 @@ pub enum DecodedVideoSurfaceChromaSubsampling {
 /// Shader-visible plane organization of a decoded surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecodedVideoSurfacePlaneLayout {
-    /// Luma and an interleaved CbCr plane.
+    /// Luma and an interleaved CbCr plane, optionally followed by full-resolution alpha.
     SemiPlanar,
     /// Independent luma, Cb, and Cr planes, optionally followed by Alpha.
     Planar,
@@ -2154,6 +2156,7 @@ impl DecodedVideoSurfaceFormat {
             Self::P410 => "P410",
             Self::P412 => "P412",
             Self::P416 => "P416",
+            Self::Yuva444sp16 => "Yuva444sp16",
             Self::Y210 => "Y210",
             Self::Y212 => "Y212",
             Self::Xv30 => "Xv30",
@@ -2229,6 +2232,15 @@ impl DecodedVideoSurfaceFormat {
                     native_gpu_payload: true,
                 }
             }
+            Self::Yuva444sp16 => DecodedVideoSurfaceDescriptor {
+                color_model: Ycbcr,
+                chroma_subsampling: Some(Cs444),
+                plane_layout: SemiPlanar,
+                numeric_encoding: Unorm16 { most_significant_bits: false },
+                component_bit_depth: 16,
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
             Self::Y210 | Self::Y212 | Self::Xv30 | Self::Xv36 => {
                 let (chroma_subsampling, plane_layout, component_bit_depth) = match self {
                     Self::Y210 => (Cs422, PackedYuv422, 10),

@@ -1890,6 +1890,8 @@ pub enum GpuNativeDecodedFrameTextureFormat {
     P412,
     /// 16-bit P416 two-plane YCbCr 4:4:4 surface.
     P416,
+    /// Sixteen-bit Y, interleaved CbCr, and straight alpha planes at full resolution.
+    Yuva444sp16,
     /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
     Y210,
     /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
@@ -1922,6 +1924,7 @@ impl GpuNativeDecodedFrameTextureFormat {
             Self::P410 => "P410",
             Self::P412 => "P412",
             Self::P416 => "P416",
+            Self::Yuva444sp16 => "Yuva444sp16",
             Self::Y210 => "Y210",
             Self::Y212 => "Y212",
             Self::Xv30 => "Xv30",
@@ -1953,6 +1956,7 @@ impl GpuNativeDecodedFrameTextureFormat {
             Self::P410 => DecodedVideoSurfaceFormat::P410,
             Self::P412 => DecodedVideoSurfaceFormat::P412,
             Self::P416 => DecodedVideoSurfaceFormat::P416,
+            Self::Yuva444sp16 => DecodedVideoSurfaceFormat::Yuva444sp16,
             Self::Y210 => DecodedVideoSurfaceFormat::Y210,
             Self::Y212 => DecodedVideoSurfaceFormat::Y212,
             Self::Xv30 => DecodedVideoSurfaceFormat::Xv30,
@@ -1980,6 +1984,7 @@ impl TryFrom<DecodedVideoSurfaceFormat> for GpuNativeDecodedFrameTextureFormat {
             DecodedVideoSurfaceFormat::P410 => Ok(Self::P410),
             DecodedVideoSurfaceFormat::P412 => Ok(Self::P412),
             DecodedVideoSurfaceFormat::P416 => Ok(Self::P416),
+            DecodedVideoSurfaceFormat::Yuva444sp16 => Ok(Self::Yuva444sp16),
             DecodedVideoSurfaceFormat::Y210 => Ok(Self::Y210),
             DecodedVideoSurfaceFormat::Y212 => Ok(Self::Y212),
             DecodedVideoSurfaceFormat::Xv30 => Ok(Self::Xv30),

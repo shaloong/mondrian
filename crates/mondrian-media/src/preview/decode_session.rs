@@ -5,6 +5,7 @@
 //! typed frame materialization, and final cancellation publication. The
 //! parent module exposes only the request/outcome contract and session reset.
 
+use super::codec::PreviewCodec;
 use super::demux_source::{
     PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSeek, PreviewPacketSource,
     PreviewPacketSourceOpen, PreviewPacketSourceOpenError,
@@ -1006,7 +1007,7 @@ struct PreviewDecodeSession {
     playback_ring: PreviewPlaybackRing,
     /// Session-owned progressive/pass-through or BWDIF field processor.
     field_processor: super::field_processing::PreviewFieldProcessingSession,
-    decoder: ffmpeg::decoder::Video,
+    decoder: PreviewCodec,
     scaler: Option<ffmpeg::software::scaling::Context>,
     scaler_format_contract: Option<(
         ffmpeg::util::format::pixel::Pixel,
@@ -1322,6 +1323,10 @@ impl RetainedDecodedFrame {
 
     fn reserved_bytes(&self) -> usize {
         let frame = self.frame();
+        #[cfg(target_os = "macos")]
+        if let Some(bytes) = super::native_frame::ffmpeg_cv_pixel_buffer_allocation_bytes(frame) {
+            return bytes;
+        }
         let plane_bytes = (0..frame.planes()).fold(0usize, |total, plane| {
             total.saturating_add(
                 frame.stride(plane).saturating_mul(frame.plane_height(plane) as usize),
@@ -1330,9 +1335,9 @@ impl RetainedDecodedFrame {
         if plane_bytes > 0 {
             return plane_bytes;
         }
-        // Hardware frames often expose no CPU linesize. Charge a conservative
-        // four bytes per coded pixel so the byte bound remains meaningful in
-        // addition to the independent retained-surface count.
+        // Backends without an allocation-size query may expose no CPU linesize.
+        // Keep the existing fallback charge alongside their independent retained
+        // surface count; CoreVideo uses its actual allocation size above.
         (frame.width() as usize)
             .saturating_mul(frame.height() as usize)
             .saturating_mul(4)
@@ -1873,10 +1878,41 @@ impl PreviewDecodeSession {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        let native_decoder = {
+            // SAFETY: These source parameters remain owned throughout setup.
+            let raw = unsafe { &*parameters.as_ptr() };
+            let direct_prores = codec_id == ffmpeg::codec::Id::PRORES
+                && matches!(raw.codec_tag.swap_bytes(), 0x61703468 | 0x61703478)
+                && hardware_decode_request.prefers_gpu_residency()
+                && backend != PreviewDecodeBackend::Software
+                && !field_processing.requires_cpu_decode()
+                && hardware_decode_plan.probe.candidate_backend
+                    == Some(HwAccelBackend::VideoToolbox);
+            if direct_prores {
+                let range = source_color.range.resolve_for_frame(
+                    crate::decoder::decoded_video_range_from_ffmpeg(raw.color_range.into()),
+                );
+                Some(
+                    PreviewCodec::videotoolbox_prores(&parameters, stream_tb, range).map_err(
+                        |error| MondrianError::DecodeFailed {
+                            asset_id: path.display().to_string(),
+                            reason: format!("direct VideoToolbox ProRes setup failed: {error}"),
+                        },
+                    )?,
+                )
+            } else {
+                None
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native_decoder: Option<PreviewCodec> = None;
+
         let mut hardware_decode_context_state = None;
         let mut hardware_device_context = None;
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
-        let hardware_decoder = if !field_processing.requires_cpu_decode()
+        let hardware_decoder = if native_decoder.is_none()
+            && !field_processing.requires_cpu_decode()
             && hardware_decode_plan.should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
@@ -1972,26 +2008,30 @@ impl PreviewDecodeSession {
             None
         };
 
-        let decoder = match hardware_decoder {
+        let decoder = match native_decoder {
             Some(decoder) => decoder,
-            None => {
-                interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
-                match preopened_software_decoder {
-                    Some(decoder) => decoder,
-                    None => preview_decode_context_from_parameters(
-                        parameters,
-                        software_threading,
-                        path,
-                    )?
-                    .decoder()
-                    .video()
-                    .map_err(|error| MondrianError::DecodeFailed {
-                        asset_id: path.display().to_string(),
-                        reason: error.to_string(),
-                    })?,
+            None => PreviewCodec::Ffmpeg(match hardware_decoder {
+                Some(decoder) => decoder,
+                None => {
+                    interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
+                    match preopened_software_decoder {
+                        Some(decoder) => decoder,
+                        None => preview_decode_context_from_parameters(
+                            parameters,
+                            software_threading,
+                            path,
+                        )?
+                        .decoder()
+                        .video()
+                        .map_err(|error| MondrianError::DecodeFailed {
+                            asset_id: path.display().to_string(),
+                            reason: error.to_string(),
+                        })?,
+                    }
                 }
-            }
+            }),
         };
+        hardware_decode_plan.native_decode_path = decoder.native_decode_path();
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
@@ -2158,9 +2198,7 @@ impl PreviewDecodeSession {
         // only after the interrupted decode operation has returned.
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
-        unsafe {
-            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
-        }
+        self.decoder.flush();
         self.decoder.skip_frame(ffmpeg::codec::discard::Discard::Default);
         self.last_pts = None;
         self.duplicate_decoded_pts = None;
@@ -2727,9 +2765,7 @@ impl PreviewDecodeSession {
         }
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
-        unsafe {
-            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
-        }
+        self.decoder.flush();
         self.reached_eof = false;
         self.last_pts = None;
         self.duplicate_decoded_pts = None;
@@ -3862,6 +3898,126 @@ fn packet_source_execution_family_matches(
 mod session_topology_tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires real VideoToolbox and an explicit sixteen-frame ProRes 4444 fixture"]
+    fn direct_prores_session_preserves_seek_cancel_and_reopen_authority() {
+        let path = PathBuf::from(
+            std::env::var("MONDRIAN_PRORES_VT_SESSION_MEDIA_PATH")
+                .expect("explicit sixteen-frame 30 fps fixture is required"),
+        );
+        ensure_ffmpeg_initialized(&path).unwrap();
+        let mut context = PreviewDecodeSessionContext::new();
+        let request_for = |index| {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                SourceSampleTarget::covering(mondrian_core::TimelineTime::new(index, 30).unwrap()),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                ),
+            )
+            .with_field_processing(PreviewSourceFieldProcessing::Progressive)
+            .with_fingerprint(MediaFileFingerprint::capture(&path))
+            .with_hardware_decode_request(PreviewHardwareDecodeRequest::RequireGpuResident);
+            request.representation = PreviewDecodeRepresentation::NativeSurface;
+            request
+        };
+        let mut backward_seeks = 0;
+        let mut previous_index = 0;
+        let mut forward_reuses = 0;
+        for index in [0, 1, 15, 2, 0] {
+            let outcome = context.decode_cancellable(request_for(index), || false).unwrap();
+            let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+                panic!("native request must never return a CPU fallback");
+            };
+            assert_eq!(
+                frame.diagnostics.path,
+                PreviewDecodePath::InProcessVideoToolboxNative
+            );
+            assert_eq!(
+                frame.diagnostics.hw_accel_backend,
+                HwAccelBackend::VideoToolbox
+            );
+            assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                frame.diagnostics.requested_pts
+            );
+            assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::Yuva444sp16);
+            assert!(!frame.diagnostics.cpu_resident);
+            assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
+            assert!(frame.handle.cv_pixel_buffer().is_some());
+            eprintln!(
+                "native session frame={index} seek={} forward_reused={}",
+                frame.diagnostics.seek_performed, frame.diagnostics.forward_reused
+            );
+            if index < previous_index && frame.diagnostics.seek_performed {
+                backward_seeks += 1;
+            }
+            previous_index = index;
+            forward_reuses += usize::from(frame.diagnostics.forward_reused);
+            drop(frame);
+            assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+            if index == 15 {
+                // Selecting the final frame can finish before demux EOF.
+                // An out-of-extent request must actually drain to EOF and fail
+                // exact selection, without substituting the final picture.
+                let session = context.sessions.playback.iter_mut().flatten().next().unwrap();
+                let beyond_end = session.decode_at(
+                    SourceSampleTarget::covering(mondrian_core::TimelineTime::new(16, 30).unwrap()),
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    PreviewDecodeAdaptiveHints::default(),
+                    &|| false,
+                );
+                assert!(beyond_end.is_err());
+                assert!(session.reached_eof);
+            }
+        }
+        assert!(backward_seeks > 0, "must exercise a real backward seek");
+        assert!(forward_reuses > 0);
+        assert!(matches!(
+            context.decode_cancellable(request_for(3), || true).unwrap(),
+            PreviewDecodeOutcome::Canceled(_)
+        ));
+        let observer = context.execution_observer.clone();
+        let canceled = context
+            .decode_cancellable(request_for(5), move || {
+                observer.snapshot().stage == PreviewDecodeExecutionStage::FrameMaterialization
+            })
+            .unwrap();
+        assert!(matches!(canceled, PreviewDecodeOutcome::Canceled(_)));
+        assert!(context
+            .sessions
+            .playback
+            .iter()
+            .flatten()
+            .all(|session| session.last_pts.is_none()));
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        let outcome = context.decode_cancellable(request_for(5), || false).unwrap();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+            panic!("native retry")
+        };
+        assert!(frame.diagnostics.seek_performed);
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        let outcome = context.decode_cancellable(request_for(0), || false).unwrap();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+            panic!("native reopen")
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Opened
+        );
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+    }
+
     #[test]
     fn prores_default_threading_outputs_each_packet_without_future_frames() {
         let directory = tempfile::tempdir().expect("ProRes fixture directory");
@@ -4358,5 +4514,69 @@ mod scrub_target_tests {
         let index = PreviewSeekIndex::from_probe_keyframes(vec![-41, 79]);
         assert_eq!(index.keyframe_at_or_before(7), Some(-41));
         assert_eq!(policy.decode_target_pts(7), 7);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_storage_tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferCreate(
+            allocator: *const c_void,
+            width: usize,
+            height: usize,
+            format: u32,
+            attributes: *const c_void,
+            output: *mut *mut c_void,
+        ) -> i32;
+        fn CVPixelBufferGetDataSize(buffer: *const c_void) -> usize;
+        fn CVPixelBufferRelease(buffer: *const c_void);
+    }
+
+    struct PixelBuffer(*mut c_void);
+
+    impl Drop for PixelBuffer {
+        fn drop(&mut self) {
+            // SAFETY: This guard owns the successful Create reference.
+            unsafe { CVPixelBufferRelease(self.0) };
+        }
+    }
+
+    #[test]
+    fn retained_corevideo_frame_charges_actual_high_bit_allocation() {
+        let mut pointer = std::ptr::null_mut();
+        // SAFETY: Valid output pointer and public 16-bit packed 4444 format.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                std::ptr::null(),
+                64,
+                48,
+                u32::from_be_bytes(*b"y416"),
+                std::ptr::null(),
+                &mut pointer,
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(!pointer.is_null());
+        let owner = PixelBuffer(pointer);
+        // SAFETY: Owner retains the live pixel buffer throughout the test.
+        let actual = unsafe { CVPixelBufferGetDataSize(owner.0) };
+        assert!(actual >= 64 * 48 * 8);
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX);
+        frame.set_width(64);
+        frame.set_height(48);
+        // SAFETY: The test's owner outlives this borrowed native-frame fixture.
+        // No AVBuffer is installed, so AVFrame destruction does not release it.
+        unsafe {
+            (*frame.as_mut_ptr()).data[3] = owner.0.cast();
+        }
+        let retained = RetainedDecodedFrame(frame);
+        assert_eq!(retained.reserved_bytes(), actual);
+        drop(retained);
+        drop(owner);
     }
 }

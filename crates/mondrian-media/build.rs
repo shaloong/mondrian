@@ -9,6 +9,9 @@
 use std::path::PathBuf;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_videotoolbox_prores();
+    }
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_0)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_1)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_8_0)");
@@ -111,4 +114,59 @@ fn parse_version_header(include_dir: &std::path::Path) -> Option<(u32, u32)> {
 fn parse_define(text: &str, name: &str) -> Option<u32> {
     let line = text.lines().find(|line| line.starts_with(&format!("#define {name}")))?;
     line.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// Compile the small public-API codec adapter with the selected macOS SDK.
+fn build_videotoolbox_prores() {
+    use std::process::Command;
+
+    println!("cargo:rerun-if-changed=native/videotoolbox_prores.c");
+    println!("cargo:rerun-if-changed=native/videotoolbox_prores.h");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    let target = std::env::var("TARGET").expect("Cargo target is required");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output is required"));
+    let object = output.join("videotoolbox_prores.o");
+    let archive = output.join("libmondrian_videotoolbox_prores.a");
+    let mut compiler = Command::new("xcrun");
+    compiler.args([
+        "--sdk",
+        "macosx",
+        "clang",
+        "-target",
+        &target,
+        "-std=c11",
+        "-O2",
+        "-fPIC",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-c",
+        "native/videotoolbox_prores.c",
+        "-o",
+    ]);
+    compiler.arg(&object);
+    if let Ok(version) = std::env::var("MACOSX_DEPLOYMENT_TARGET") {
+        compiler.arg(format!("-mmacosx-version-min={version}"));
+    }
+    assert!(
+        compiler.status().expect("execute macOS clang").success(),
+        "compile VideoToolbox adapter"
+    );
+    assert!(
+        Command::new("xcrun")
+            .args(["--sdk", "macosx", "ar", "rcs"])
+            .arg(archive)
+            .arg(object)
+            .status()
+            .expect("execute macOS archiver")
+            .success(),
+        "archive VideoToolbox adapter"
+    );
+    println!("cargo:rustc-link-search=native={}", output.display());
+    println!("cargo:rustc-link-lib=static=mondrian_videotoolbox_prores");
+    for framework in ["CoreFoundation", "CoreMedia", "CoreVideo", "VideoToolbox"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
 }

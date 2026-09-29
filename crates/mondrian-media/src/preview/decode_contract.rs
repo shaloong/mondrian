@@ -109,6 +109,8 @@ pub enum PreviewNativeSurfaceHint {
     Yuv444p12,
     /// A 16-bit 4:4:4 source may decode to a platform-native surface.
     Yuv444p16,
+    /// A ProRes 4444 straight-alpha source may decode to a native YUVA surface.
+    Yuva444p12,
 }
 
 /// Compact CPU YUV representation conservatively inferred from a probed source.
@@ -509,10 +511,18 @@ impl PreviewDecodeSource {
         self.source_extent
     }
 
-    /// Whether this source is eligible to request an opaque native output.
+    /// Whether this source has a supported native color and alpha contract.
     pub const fn permits_native_output(&self) -> bool {
-        matches!(self.alpha_presence, PreviewDecodeAlphaPresence::Opaque)
-            && self.native_surface_hint.is_some()
+        match self.alpha_presence {
+            PreviewDecodeAlphaPresence::Opaque => self.native_surface_hint.is_some(),
+            PreviewDecodeAlphaPresence::Present => {
+                matches!(
+                    self.native_surface_hint,
+                    Some(PreviewNativeSurfaceHint::Yuva444p12)
+                )
+            }
+            PreviewDecodeAlphaPresence::Unknown => false,
+        }
     }
 }
 
@@ -1045,9 +1055,9 @@ const fn native_surface_hint_from_pixel_format(
         PixelFormat::Yuv444p10le => Some(PreviewNativeSurfaceHint::Yuv444p10),
         PixelFormat::Yuv444p12le => Some(PreviewNativeSurfaceHint::Yuv444p12),
         PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
+        PixelFormat::Yuva444p12le => Some(PreviewNativeSurfaceHint::Yuva444p12),
         PixelFormat::Yuv422p
         | PixelFormat::Yuv444p
-        | PixelFormat::Yuva444p12le
         | PixelFormat::Gbrp10le
         | PixelFormat::Gbrp12le
         | PixelFormat::Gbrp16le
@@ -1078,6 +1088,13 @@ fn native_surface_hint_from_stream(
 ) -> Option<PreviewNativeSurfaceHint> {
     let surface = native_surface_hint_from_pixel_format(pixel_format)?;
     match surface {
+        PreviewNativeSurfaceHint::Yuva444p12 => matches!(
+            stream.codec,
+            VideoCodec::ProRes(
+                mondrian_core::ProResVariant::R4444 | mondrian_core::ProResVariant::R4444Xq
+            )
+        )
+        .then_some(surface),
         PreviewNativeSurfaceHint::Nv12 => match &stream.codec {
             VideoCodec::H264 => (!matches!(
                 stream.codec_profile,
@@ -1317,7 +1334,33 @@ mod tests {
     }
 
     #[test]
-    fn prores_4444_alpha_requires_cpu_decode_until_native_pixel_parity_is_proven() {
+    fn alpha_native_hint_requires_prores_4444_codec() {
+        for (codec, expected) in [
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444),
+                true,
+            ),
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444Xq),
+                true,
+            ),
+            (VideoCodec::ProRes(mondrian_core::ProResVariant::Hq), false),
+            (VideoCodec::H265, false),
+        ] {
+            let mut stream = video_stream(0, PixelFormat::Yuva444p12le, true);
+            stream.codec = codec;
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/alpha.mov"),
+                exact_fingerprint(17),
+                &stream,
+            )
+            .unwrap();
+            assert_eq!(source.permits_native_output(), expected);
+        }
+    }
+
+    #[test]
+    fn prores_4444_alpha_retains_native_and_compact_cpu_contracts() {
         let mut prores = video_stream(6, PixelFormat::Yuva444p12le, true);
         prores.codec = VideoCodec::ProRes(mondrian_core::ProResVariant::R4444);
         let source = PreviewDecodeSource::from_probed_stream(
@@ -1327,8 +1370,11 @@ mod tests {
         )
         .expect("ProRes 4444 remains CPU-decodable");
         assert_eq!(source.alpha_presence(), PreviewDecodeAlphaPresence::Present);
-        assert_eq!(source.native_surface_hint(), None);
-        assert!(!source.permits_native_output());
+        assert_eq!(
+            source.native_surface_hint(),
+            Some(PreviewNativeSurfaceHint::Yuva444p12)
+        );
+        assert!(source.permits_native_output());
         let hint = source.compact_cpu_yuv_hint().expect("compact straight-alpha CPU carrier");
         assert_eq!(hint, PreviewCompactCpuYuvHint::Yuva444p12le);
         assert_eq!(hint.retained_bytes_per_pixel(), 8);

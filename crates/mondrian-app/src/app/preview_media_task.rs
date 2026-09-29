@@ -1205,11 +1205,12 @@ fn decode_media_preview_inner(
     let execution_id = job.execution_id;
     let render_cache_source_fingerprint =
         super::preview_render_cache_identity::canonical_media_source_fingerprint(&job.key).ok();
-    let hardware_decode_request = if job.key.source_has_alpha() {
-        PreviewHardwareDecodeRequest::Auto
-    } else {
-        job.hardware_decode_request
-    };
+    let hardware_decode_request =
+        if job.key.source_has_alpha() && !job.key.decode.source().permits_native_output() {
+            PreviewHardwareDecodeRequest::Auto
+        } else {
+            job.hardware_decode_request
+        };
     let decode_outcome = decode_media_preview_for_access_mode(
         &job.key.decode,
         access_mode,
@@ -1318,7 +1319,9 @@ fn decode_media_preview_inner(
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
-            if job.key.source_has_alpha() {
+            if job.key.source_has_alpha()
+                && !frame.surface_format.descriptor().is_some_and(|surface| surface.has_alpha)
+            {
                 return media_preview_alpha_failure(
                     job,
                     queue_wait_us,

@@ -70,6 +70,7 @@ fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result
             (DecodedVideoSurfaceFormat::P210, ColorSpace::Rec709),
             (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec709),
         ],
+        1.0,
     )
 }
 
@@ -84,6 +85,49 @@ fn cpu_and_videotoolbox_hdr_viewer_pixels_agree_across_gop_seeks() -> Result<()>
             (DecodedVideoSurfaceFormat::P210, ColorSpace::Rec2100Pq),
             (DecodedVideoSurfaceFormat::P410, ColorSpace::Rec2100Hlg),
         ],
+        1.0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker and tagged 30 fps SDR/PQ/HLG ProRes 4444 alpha fixtures"]
+fn cpu_and_prores4444_alpha_viewer_pixels_agree_across_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_PRORES_ALPHA_FIXTURES",
+        [
+            (DecodedVideoSurfaceFormat::Yuva444sp16, ColorSpace::Rec709),
+            (
+                DecodedVideoSurfaceFormat::Yuva444sp16,
+                ColorSpace::Rec2100Pq,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Yuva444sp16,
+                ColorSpace::Rec2100Hlg,
+            ),
+        ],
+        0.5,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker and tagged 30 fps SDR/PQ/HLG ProRes 4444 zero-alpha fixtures"]
+fn transparent_prores4444_viewer_output_is_zero_across_seeks() -> Result<()> {
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_PRORES_ZERO_ALPHA_FIXTURES",
+        [
+            (DecodedVideoSurfaceFormat::Yuva444sp16, ColorSpace::Rec709),
+            (
+                DecodedVideoSurfaceFormat::Yuva444sp16,
+                ColorSpace::Rec2100Pq,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Yuva444sp16,
+                ColorSpace::Rec2100Hlg,
+            ),
+        ],
+        0.0,
     )
 }
 
@@ -91,11 +135,12 @@ fn cpu_and_videotoolbox_hdr_viewer_pixels_agree_across_gop_seeks() -> Result<()>
 fn compare_macos_videotoolbox_fixtures(
     fixture_env: &str,
     cases: [(DecodedVideoSurfaceFormat, ColorSpace); 3],
+    expected_alpha: f32,
 ) -> Result<()> {
     mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
     let fixtures = std::env::var_os(fixture_env).with_context(|| fixture_env.to_owned())?;
     let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
-    anyhow::ensure!(paths.len() == cases.len(), "expected three HEVC fixtures");
+    anyhow::ensure!(paths.len() == cases.len(), "expected three tagged fixtures");
     let context = pollster::block_on(GpuContext::new())?;
     anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
     let mut runtime =
@@ -107,7 +152,7 @@ fn compare_macos_videotoolbox_fixtures(
             let cpu = measure_with_resource_observer(
                 &path,
                 false,
-                None,
+                Some(surface),
                 color,
                 &context,
                 &mut runtime,
@@ -122,6 +167,18 @@ fn compare_macos_videotoolbox_fixtures(
                 &mut runtime,
                 |_, _, _| {},
             )?;
+            for output in cpu.iter().chain(&native) {
+                let tolerance = if expected_alpha == 0.5 { 0.01 } else { 1e-5 };
+                anyhow::ensure!(output
+                    .chunks_exact(4)
+                    .all(|pixel| (pixel[3] - expected_alpha).abs() < tolerance));
+                if expected_alpha == 0.0 {
+                    anyhow::ensure!(
+                        output.iter().all(|value| value.abs() < 1e-5),
+                        "transparent source leaked hidden RGB into composite output"
+                    );
+                }
+            }
             anyhow::ensure!(cpu.len() == native.len());
             for (index, (cpu, native)) in cpu.iter().zip(&native).enumerate() {
                 anyhow::ensure!(cpu.len() == native.len());
@@ -323,7 +380,17 @@ fn measure_with_resource_observer(
                 if let Some(expected) = expected_native_surface {
                     assert_eq!(f.handle_kind(), DecodedGpuFrameHandleKind::CVPixelBuffer);
                     assert_eq!(f.surface_format, expected);
-                    assert_eq!(f.diagnostics.decoded_video_sampling.bit_depth, 10);
+                    assert_eq!(
+                        Some(f.diagnostics.decoded_video_sampling.bit_depth),
+                        expected.fixed_bit_depth()
+                    );
+                    if expected == DecodedVideoSurfaceFormat::Yuva444sp16 {
+                        assert_eq!(
+                            f.diagnostics.path,
+                            PreviewDecodePath::InProcessVideoToolboxNative
+                        );
+                        assert_eq!(f.diagnostics.hardware_decode_observed, Some(true));
+                    }
                 }
                 (
                     f.width,
@@ -406,6 +473,26 @@ fn measure_with_resource_observer(
         if !record.fallback_reasons.is_empty() {
             bail!("unexpected fallback {:?}", record.fallback_reasons);
         }
+        if native {
+            anyhow::ensure!(record.residency.native_decoder_gpu_layers == 1);
+            anyhow::ensure!(record.residency.cpu_upload_layers == 0);
+            anyhow::ensure!(record.residency.gpu_input_failures == 0);
+            anyhow::ensure!(record.stage_diagnostics.upload_stages == 0);
+            anyhow::ensure!(record.stage_diagnostics.readback_stages == 0);
+        }
+        if native
+            && expected_native_surface == Some(DecodedVideoSurfaceFormat::Yuva444sp16)
+            && index == 5
+        {
+            // Release the caller and decoder owners before the queue barrier.
+            // The production import completion retain must cover final GPU use.
+            drop(layers);
+            decoder.clear();
+            eprintln!(
+                "ProRes native sources retained after decoder clear: {}",
+                runtime.native_import_retained_source_count()
+            );
+        }
         let output = runtime.take_presentation_output(&mut record)?;
         let plan = GpuColorFrameReadbackPlan::encoded_rgba16float(output.handle().clone())
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
@@ -432,10 +519,19 @@ fn measure_with_resource_observer(
             .unpack_mapped_rgba16float(&mapped)
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         anyhow::ensure!(pixels.iter().all(|v| v.is_finite()));
-        anyhow::ensure!(pixels.chunks_exact(4).all(|p| (p[3] - 1.0).abs() < 1e-5));
+        if expected_native_surface != Some(DecodedVideoSurfaceFormat::Yuva444sp16) {
+            anyhow::ensure!(pixels.chunks_exact(4).all(|p| (p[3] - 1.0).abs() < 1e-5));
+        }
         drop(mapped);
         buffer.unmap();
         drop(output);
+        if native
+            && expected_native_surface == Some(DecodedVideoSurfaceFormat::Yuva444sp16)
+            && index == 5
+        {
+            anyhow::ensure!(runtime.native_import_retained_source_count() == 0);
+            anyhow::ensure!(decoder.native_outputs_released());
+        }
         observe(width, height, runtime.resource_pool_diagnostics());
         samples.push(pixels);
     }

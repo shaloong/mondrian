@@ -542,7 +542,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 bump(&self.metrics.decode_in_process_cpu_frames);
             }
-            PreviewDecodePath::InProcessFfmpegNative => {}
+            PreviewDecodePath::InProcessFfmpegNative
+            | PreviewDecodePath::InProcessVideoToolboxNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 bump(&self.metrics.decode_external_ffmpeg_cpu_rgba_frames);
             }

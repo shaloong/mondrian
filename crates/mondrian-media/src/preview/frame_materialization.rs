@@ -785,6 +785,7 @@ fn materialize_decoded_frame_inner(
                 source_color,
                 hardware_decode_plan.codec_id,
                 session_output_lease,
+                hardware_decode_plan.native_decode_path,
             ) {
                 Ok(frame) => {
                     hardware_decode_plan.mark_gpu_resident_native_observed(frame.handle_kind());
@@ -846,11 +847,12 @@ fn materialize_decoded_frame_inner(
     )
 }
 
-fn materialize_native_decoded_frame(
+pub(super) fn materialize_native_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     source_color: PreviewSourceColorContract,
     codec_id: ffmpeg::codec::Id,
     session_output_lease: Option<PreviewDecodeSessionOutputLease>,
+    decode_path: PreviewDecodePath,
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     use ffmpeg::util::format::pixel::Pixel;
 
@@ -922,7 +924,7 @@ fn materialize_native_decoded_frame(
         handle,
         surface_format,
         sampling,
-        PreviewDecodeDiagnostics::new(PreviewDecodePath::InProcessFfmpegNative),
+        PreviewDecodeDiagnostics::new(decode_path),
     )?)
 }
 
@@ -965,6 +967,16 @@ fn resolve_codec_defined_native_chroma_location(
 fn decoded_native_surface_format(
     decoded: &ffmpeg::util::frame::video::Video,
 ) -> std::result::Result<DecodedVideoSurfaceFormat, PreviewNativeFrameMaterializationError> {
+    #[cfg(target_os = "macos")]
+    if decoded.format() == ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX
+        && super::native_frame::ffmpeg_cv_pixel_buffer_format(decoded)?
+            == u32::from_be_bytes(*b"s4as")
+    {
+        // CoreVideo's three full-resolution planes have no FFmpeg software
+        // format in the current linked runtime. Preserve the real layout;
+        // never fabricate AVHWFramesContext::sw_format to enable import.
+        return Ok(DecodedVideoSurfaceFormat::Yuva444sp16);
+    }
     // SAFETY: decoded owns the AVFrame and its hw_frames_ctx for this borrow.
     let hardware_frames_context = unsafe { (*decoded.as_ptr()).hw_frames_ctx };
     if hardware_frames_context.is_null() {

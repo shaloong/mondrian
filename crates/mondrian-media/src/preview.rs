@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod cancellation;
+mod codec;
 mod decode_contract;
 mod decode_session;
 mod decoded_frame;
@@ -46,6 +47,8 @@ mod hardware_decode;
 mod native_frame;
 mod playback_ring;
 mod seek_index;
+#[cfg(target_os = "macos")]
+mod videotoolbox_prores;
 
 pub use decode_contract::{
     CameraRawDecodeIntent, PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence,
@@ -131,7 +134,7 @@ use native_frame::parse_ffmpeg_d3d11_texture;
 use native_frame::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
 pub use native_frame::{
     FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, PreviewNativeDecodedFrame,
+    FfmpegNativeDecodedFrameResourceError, PreviewCvPixelBuffer, PreviewNativeDecodedFrame,
     PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource,
 };
@@ -224,6 +227,8 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuYuv,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
     InProcessFfmpegNative,
+    /// Direct public VideoToolbox decoder returned a retained native surface.
+    InProcessVideoToolboxNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
     ExternalFfmpegCpuRgba,
     /// Playback cursor reused a frame from its session-local forward ring.
@@ -1272,6 +1277,7 @@ impl PreviewDecodePath {
             Self::InProcessCameraRawDng => "InProcessCameraRawDng",
             Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
+            Self::InProcessVideoToolboxNative => "InProcessVideoToolboxNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
         }
@@ -1528,7 +1534,11 @@ impl PreviewDecodeDiagnostics {
             cache_hit: path == PreviewDecodePath::PlaybackSessionRingHit,
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
-            cpu_resident: path != PreviewDecodePath::InProcessFfmpegNative,
+            cpu_resident: !matches!(
+                path,
+                PreviewDecodePath::InProcessFfmpegNative
+                    | PreviewDecodePath::InProcessVideoToolboxNative
+            ),
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
@@ -1573,6 +1583,7 @@ impl PreviewDecodeDiagnostics {
             hardware_decode_observed: (!matches!(
                 path,
                 PreviewDecodePath::InProcessFfmpegNative
+                    | PreviewDecodePath::InProcessVideoToolboxNative
                     | PreviewDecodePath::PlaybackSessionRingHit
             ))
             .then_some(false),
@@ -2076,7 +2087,7 @@ enum DecodedVideoReceive {
 }
 
 fn receive_decoded_video_frame(
-    decoder: &mut ffmpeg::decoder::Video,
+    decoder: &mut codec::PreviewCodec,
     interrupt_state: &PreviewDecodeInterruptState,
     path: &Path,
 ) -> Result<DecodedVideoReceive> {
@@ -2103,7 +2114,7 @@ fn receive_decoded_video_frame(
         Err(ffmpeg::Error::Eof) => Ok(DecodedVideoReceive::EndOfStream),
         Err(error) => Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
-            reason: format!("FFmpeg receive_frame failed: {error}"),
+            reason: format!("preview codec receive_frame failed: {error}"),
         }),
     }
 }

@@ -1631,6 +1631,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn yuva444sp16_shader_preserves_straight_alpha_and_hidden_color() {
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .expect("valid GPU qualification policy");
+        let Some(context) = policy
+            .admit_adapter("native-yuva444sp16", crate::GpuContext::new().await)
+            .expect("GPU adapter admission")
+        else {
+            return;
+        };
+        if !policy
+            .admit_capability(
+                "native-yuva444sp16",
+                "16-bit normalized planes",
+                context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+            )
+            .expect("16-bit plane admission")
+        {
+            return;
+        }
+        let texture = |format| {
+            context.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("native-yuva444sp16-plane"),
+                size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let luma = texture(wgpu::TextureFormat::R16Unorm);
+        let chroma = texture(wgpu::TextureFormat::Rg16Unorm);
+        let alpha = texture(wgpu::TextureFormat::R16Unorm);
+        write_test_texture(
+            &context.queue,
+            &luma,
+            2,
+            2,
+            4,
+            bytemuck::cast_slice(&[4096_u16, 60160, 32128, 18112]),
+        );
+        write_test_texture(
+            &context.queue,
+            &chroma,
+            2,
+            2,
+            8,
+            bytemuck::cast_slice(&[32768_u16; 8]),
+        );
+        write_test_texture(
+            &context.queue,
+            &alpha,
+            2,
+            2,
+            4,
+            bytemuck::cast_slice(&[65535_u16, 0, 32768, 0]),
+        );
+        let handle = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(809),
+            ColorFrameDescriptor {
+                width: 2,
+                height: 2,
+                color_space: ColorSpace::Rec709.into(),
+                domain: ColorFrameDomain::Source,
+                encoding: ColorFrameEncoding::EncodedFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            product_gpu_working_texture_format(),
+            "native-yuva444sp16-output",
+        )
+        .expect("output handle");
+        let extent = GpuNativeVideoExtent { width: 2, height: 2 };
+        let plan = GpuNativeYuvDecodePlan::new(
+            GpuNativeDecodedFrameTextureFormat::Yuva444sp16,
+            extent,
+            extent,
+            extent,
+            GpuNativeDecodedFrameVideoSampling {
+                range: GpuVideoRange::Limited,
+                matrix: ColorMatrixCoefficients::Bt709,
+                transfer: ColorTransferCharacteristic::Bt709,
+                bit_depth: 16,
+                chroma_location: GpuVideoChromaLocation::Unspecified,
+            },
+            handle,
+        )
+        .expect("three-plane sampling contract");
+        let decoder = GpuNativeYuvDecoder::new(&context.device);
+        let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
+        let y = luma.create_view(&Default::default());
+        let uv = chroma.create_view(&Default::default());
+        let a = alpha.create_view(&Default::default());
+        let mut planes =
+            GpuNativeYuvPlaneViews { luma: &y, chroma: &uv, chroma_v: &uv, alpha: None };
+        assert!(decoder.prepare_pass(&context.device, &plan, planes).is_err());
+        planes.alpha = Some(&a);
+        let prepared = decoder
+            .prepare_pass(&context.device, &plan, planes)
+            .expect("three-plane bindings");
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        decoder.record(&mut encoder, &plan, &prepared, &output).expect("record decode");
+        let readback_plan =
+            crate::GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
+                .expect("readback plan");
+        let readback = crate::GpuColorFrameReadback::record_copy(
+            &context.device,
+            &mut encoder,
+            &readback_plan,
+            &output,
+        )
+        .expect("readback");
+        context.queue.submit([encoder.finish()]);
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = readback_plan.unpack_mapped_rgba32float(&mapped).expect("pixels");
+        readback.unmap();
+        for (index, pixel) in actual.chunks_exact(4).enumerate() {
+            let expected = [0.0_f32, 1.0, 0.5, 0.25][index];
+            for channel in &pixel[..3] {
+                assert!((*channel - expected).abs() < 0.0015, "{index}: {pixel:?}");
+            }
+            let coverage = [1.0_f32, 0.0, 32768.0 / 65535.0, 0.0][index];
+            assert!((pixel[3] - coverage).abs() < 0.001, "{index}: {pixel:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn nv12_shader_decodes_limited_range_on_real_wgpu_device() {
         let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
             .unwrap_or_else(|error| panic!("invalid GPU color qualification policy: {error}"));

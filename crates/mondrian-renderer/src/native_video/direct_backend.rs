@@ -25,6 +25,7 @@ use crate::{
 pub(crate) struct DirectNativeYuvTextures {
     pub(crate) luma: wgpu::Texture,
     pub(crate) chroma: wgpu::Texture,
+    pub(crate) alpha: Option<wgpu::Texture>,
 }
 
 #[cfg(target_os = "linux")]
@@ -295,6 +296,10 @@ where
                 let luma_view = textures.luma.create_view(&wgpu::TextureViewDescriptor::default());
                 let chroma_view =
                     textures.chroma.create_view(&wgpu::TextureViewDescriptor::default());
+                let alpha_view = textures
+                    .alpha
+                    .as_ref()
+                    .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
                 self.yuv_decoder
                     .prepare_pass(
                         &self.device,
@@ -303,7 +308,7 @@ where
                             luma: &luma_view,
                             chroma: &chroma_view,
                             chroma_v: &chroma_view,
-                            alpha: None,
+                            alpha: alpha_view.as_ref(),
                         },
                     )
                     .map_err(|error| backend_rejected(error.to_string()))?

@@ -334,7 +334,7 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
             chroma_format,
             "mondrian.native-video.vulkan-chroma",
         )?;
-        Ok(DirectNativeYuvTextures { luma, chroma })
+        Ok(DirectNativeYuvTextures { luma, chroma, alpha: None })
     }
 }
 

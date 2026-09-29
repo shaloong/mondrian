@@ -20,6 +20,7 @@ struct PreviewHardwareDecodeCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreviewHardwareDecodePlan {
     pub(super) codec_id: ffmpeg::codec::Id,
+    pub(super) native_decode_path: PreviewDecodePath,
     pub(super) request: PreviewHardwareDecodeRequest,
     pub(super) decision: PreviewHardwareDecodeDecision,
     pub(super) probe: HwAccelProbe,
@@ -79,6 +80,7 @@ impl PreviewHardwareDecodePlan {
         );
         Self {
             codec_id,
+            native_decode_path: PreviewDecodePath::InProcessFfmpegNative,
             request,
             decision,
             probe,
@@ -441,13 +443,21 @@ impl PreviewHardwareDecodePlan {
         self.probe.selected_backend = backend;
         self.probe.decoder_adapter_available = true;
         self.probe.native_decoder_active = true;
-        self.probe.hardware_decode_observed = backend_hardware_execution_observation(backend);
+        self.probe.hardware_decode_observed =
+            if self.native_decode_path == PreviewDecodePath::InProcessVideoToolboxNative {
+                // The direct adapter publishes a frame only after querying the
+                // actual VT session's UsingHardwareAcceleratedVideoDecoder property.
+                Some(true)
+            } else {
+                backend_hardware_execution_observation(backend)
+            };
         self.probe.zero_copy_active = kind != DecodedGpuFrameHandleKind::CudaDeviceMemory;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
         self.probe.reason = format!(
-            "{} FFmpeg decoder produced a retained native surface",
-            backend.as_str()
+            "{} {} decoder produced a retained native surface",
+            backend.as_str(),
+            self.native_decode_path.as_str()
         );
     }
 

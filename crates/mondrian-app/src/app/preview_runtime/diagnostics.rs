@@ -1434,7 +1434,8 @@ impl PreviewDecodeAccessModeProfile {
             | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 self.in_process_cpu_frames = self.in_process_cpu_frames.saturating_add(1);
             }
-            PreviewDecodePath::InProcessFfmpegNative => {}
+            PreviewDecodePath::InProcessFfmpegNative
+            | PreviewDecodePath::InProcessVideoToolboxNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 self.external_ffmpeg_cpu_rgba_frames =
                     self.external_ffmpeg_cpu_rgba_frames.saturating_add(1);

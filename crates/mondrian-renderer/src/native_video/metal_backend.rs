@@ -3,9 +3,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use mondrian_media::{
-    DecodedGpuFrameHandleKind, FfmpegNativeDecodedFrameResource, PreviewNativeDecodedFrame,
-};
+use mondrian_media::{DecodedGpuFrameHandleKind, PreviewNativeDecodedFrame};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     kCVPixelFormatType_420YpCbCr10BiPlanarFullRange as CV_420_YPCBCR10_BIPLANAR_FULL_RANGE,
@@ -19,8 +17,8 @@ use objc2_core_video::{
     kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange as CV_444_YPCBCR10_BIPLANAR_VIDEO_RANGE,
     kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange as CV_444_YPCBCR16_BIPLANAR_VIDEO_RANGE,
     CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
-    CVPixelBufferGetWidthOfPlane,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
 };
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 
@@ -112,6 +110,7 @@ impl MetalNativeVideoImportBackend {
                 GpuNativeDecodedFrameTextureFormat::P216,
                 GpuNativeDecodedFrameTextureFormat::P410,
                 GpuNativeDecodedFrameTextureFormat::P416,
+                GpuNativeDecodedFrameTextureFormat::Yuva444sp16,
             ]);
         }
         let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
@@ -240,28 +239,91 @@ impl DirectNativeYuvPlaneAdapter for MetalNativeYuvPlaneAdapter {
                 native_frame.handle_kind()
             )));
         }
-        let resource =
-            native_frame.handle.resource::<FfmpegNativeDecodedFrameResource>().ok_or_else(
-                || rejected("CVPixelBuffer frame has no retained FFmpeg resource".to_owned()),
-            )?;
-        let pixel_buffer_ptr = resource
+        let surface = native_frame
+            .handle
             .cv_pixel_buffer()
-            .map_err(|error| rejected(error.to_string()))?
-            .cast::<CVPixelBuffer>();
-        // SAFETY: The FFmpeg native resource retains this CVPixelBuffer for the
-        // entire import call.
+            .ok_or_else(|| rejected("CVPixelBuffer frame has no retained surface".to_owned()))?;
+        let pixel_buffer_ptr = surface.as_ptr().cast::<CVPixelBuffer>();
+        // SAFETY: The owner-bound borrow retains this immutable CVPixelBuffer
+        // for the entire import call, regardless of the decoder implementation.
         let pixel_buffer = unsafe { pixel_buffer_ptr.as_ref() };
-        if CVPixelBufferGetPlaneCount(pixel_buffer) != 2 {
+        let has_alpha =
+            plan.source_texture_format == GpuNativeDecodedFrameTextureFormat::Yuva444sp16;
+        if CVPixelBufferGetPlaneCount(pixel_buffer) != if has_alpha { 3 } else { 2 } {
             return Err(rejected(
-                "CVPixelBuffer is not a two-plane YCbCr surface".to_owned(),
+                "CVPixelBuffer plane count does not match its YCbCr format".to_owned(),
             ));
         }
         let actual_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
         let plane_formats = metal_plane_formats(plan.source_texture_format, actual_format)?;
+        let plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+        let mut extents = [(0, 0); 3];
+        for (plane, extent) in extents[..plane_count].iter_mut().enumerate() {
+            *extent = (
+                CVPixelBufferGetWidthOfPlane(pixel_buffer, plane),
+                CVPixelBufferGetHeightOfPlane(pixel_buffer, plane),
+            );
+        }
+        validate_plane_extents(
+            plan.source_texture_format,
+            (
+                CVPixelBufferGetWidth(pixel_buffer),
+                CVPixelBufferGetHeight(pixel_buffer),
+            ),
+            &extents[..plane_count],
+        )?;
         let luma = wrap_plane(device, &self.cache, pixel_buffer, 0, plane_formats.0)?;
         let chroma = wrap_plane(device, &self.cache, pixel_buffer, 1, plane_formats.1)?;
-        Ok(DirectNativeYuvTextures { luma, chroma })
+        let alpha = if has_alpha {
+            Some(wrap_plane(
+                device,
+                &self.cache,
+                pixel_buffer,
+                2,
+                plane_formats.0,
+            )?)
+        } else {
+            None
+        };
+        Ok(DirectNativeYuvTextures { luma, chroma, alpha })
     }
+}
+
+/// Validate the storage grid before wrapping textures. Visible cropping is
+/// handled by the shared sampling plan; these dimensions describe the actual
+/// CVPixelBuffer allocation, including its full-resolution alpha plane.
+fn validate_plane_extents(
+    format: GpuNativeDecodedFrameTextureFormat,
+    storage: (usize, usize),
+    planes: &[(usize, usize)],
+) -> Result<(), GpuNativeDecodedFrameImportError> {
+    use mondrian_media::DecodedVideoSurfaceChromaSubsampling::{Cs420, Cs422, Cs444};
+    let descriptor = format
+        .physical_descriptor()
+        .ok_or_else(|| rejected("native YCbCr surface has no physical descriptor".to_owned()))?;
+    let expected_chroma = match descriptor.chroma_subsampling {
+        Some(Cs420) => (storage.0.div_ceil(2), storage.1.div_ceil(2)),
+        Some(Cs422) => (storage.0.div_ceil(2), storage.1),
+        Some(Cs444) => storage,
+        None => {
+            return Err(rejected(
+                "native YCbCr surface has no chroma grid".to_owned(),
+            ))
+        }
+    };
+    let expected_count = if descriptor.has_alpha { 3 } else { 2 };
+    if storage.0 == 0
+        || storage.1 == 0
+        || planes.len() != expected_count
+        || planes[0] != storage
+        || planes[1] != expected_chroma
+        || (descriptor.has_alpha && planes[2] != storage)
+    {
+        return Err(rejected(format!(
+            "CVPixelBuffer {format:?} plane extents {planes:?} do not match storage {storage:?}"
+        )));
+    }
+    Ok(())
 }
 
 type MetalPlaneFormat = (MTLPixelFormat, wgpu::TextureFormat);
@@ -326,6 +388,14 @@ fn metal_plane_formats(
         }
         GpuNativeDecodedFrameTextureFormat::P416
             if actual == CV_444_YPCBCR16_BIPLANAR_VIDEO_RANGE =>
+        {
+            Ok((
+                (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
+                (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
+            ))
+        }
+        GpuNativeDecodedFrameTextureFormat::Yuva444sp16
+            if actual == u32::from_be_bytes(*b"s4as") =>
         {
             Ok((
                 (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
@@ -428,4 +498,56 @@ fn wrap_plane(
 
 fn rejected(reason: String) -> GpuNativeDecodedFrameImportError {
     GpuNativeDecodedFrameImportError::BackendRejected { reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metal_plane_extents_follow_sampling_and_alpha_grid() {
+        let storage = (1921, 1081);
+        for (format, planes) in [
+            (
+                GpuNativeDecodedFrameTextureFormat::P010,
+                vec![storage, (961, 541)],
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::P210,
+                vec![storage, (961, 1081)],
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::P416,
+                vec![storage, storage],
+            ),
+            (
+                GpuNativeDecodedFrameTextureFormat::Yuva444sp16,
+                vec![storage; 3],
+            ),
+        ] {
+            validate_plane_extents(format, storage, &planes).expect("correct storage grid");
+        }
+        let format = GpuNativeDecodedFrameTextureFormat::Yuva444sp16;
+        for planes in [
+            vec![storage, storage],
+            vec![storage, (961, 1081), storage],
+            vec![storage, storage, (961, 541)],
+            vec![(1920, 1080), storage, storage],
+        ] {
+            assert!(validate_plane_extents(format, storage, &planes).is_err());
+        }
+        assert!(validate_plane_extents(format, (0, 1081), &[(0, 1081); 3]).is_err());
+    }
+
+    #[test]
+    fn metal_s4as_cannot_be_imported_as_packed_or_alpha_free_yuv() {
+        let s4as = u32::from_be_bytes(*b"s4as");
+        assert!(metal_plane_formats(GpuNativeDecodedFrameTextureFormat::Yuva444sp16, s4as).is_ok());
+        assert!(metal_plane_formats(GpuNativeDecodedFrameTextureFormat::P416, s4as).is_err());
+        assert!(metal_plane_formats(
+            GpuNativeDecodedFrameTextureFormat::Yuva444sp16,
+            u32::from_be_bytes(*b"y416"),
+        )
+        .is_err());
+    }
 }

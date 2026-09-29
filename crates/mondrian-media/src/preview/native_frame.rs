@@ -163,6 +163,70 @@ impl PreviewNativeDecodedFrame {
     }
 }
 
+/// Borrowed immutable CoreVideo pixel buffer, kept alive by its decoder owner.
+///
+/// The lifetime prevents an importer from retaining this view past its owner.
+/// GPU submission still requires retaining the frame lease through completion.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewCvPixelBuffer<'a> {
+    pointer: NonNull<c_void>,
+    owner: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> PreviewCvPixelBuffer<'a> {
+    /// Borrow a decoder-owned CoreVideo pixel buffer without copying pixels.
+    ///
+    /// # Safety
+    /// `pointer` must refer to a live CVPixelBuffer for all of `'a`. Its owner
+    /// must prevent release, pool reuse, and pixel mutation during this borrow.
+    pub unsafe fn from_raw(pointer: NonNull<c_void>) -> Self {
+        Self { pointer, owner: std::marker::PhantomData }
+    }
+
+    /// Access the native pointer while the owner-bound borrow remains live.
+    pub fn as_ptr(self) -> NonNull<c_void> {
+        self.pointer
+    }
+}
+
+/// Actual CoreVideo allocation held by an FFmpeg native frame. This is the
+/// retained-window charge for the one shared allocation, not an additional
+/// CPU allocation alongside its GPU view.
+#[cfg(target_os = "macos")]
+pub(super) fn ffmpeg_cv_pixel_buffer_allocation_bytes(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> Option<usize> {
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferGetDataSize(buffer: *const c_void) -> usize;
+    }
+    // SAFETY: Only immutable frame metadata is read during this borrow.
+    let raw = NonNull::new(unsafe { frame.as_ptr() }.cast_mut())?;
+    let pointer = parse_ffmpeg_cv_pixel_buffer(raw, frame.format()).ok()?;
+    // SAFETY: The borrowed immutable native AVFrame retains this CVPixelBuffer
+    // throughout the query. CoreVideo reports its actual layout and padding.
+    let bytes = unsafe { CVPixelBufferGetDataSize(pointer.as_ptr()) };
+    (bytes > 0).then_some(bytes)
+}
+
+/// Actual FourCC of the retained CoreVideo allocation, independent of FFmpeg's
+/// software-format mapping (which does not represent every CoreVideo layout).
+#[cfg(target_os = "macos")]
+pub(super) fn ffmpeg_cv_pixel_buffer_format(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> Result<u32, FfmpegNativeDecodedFrameResourceError> {
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferGetPixelFormatType(buffer: *const c_void) -> u32;
+    }
+    // SAFETY: The borrowed AVFrame retains its immutable native surface.
+    let raw = NonNull::new(unsafe { frame.as_ptr() }.cast_mut())
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingCvPixelBuffer)?;
+    let pointer = parse_ffmpeg_cv_pixel_buffer(raw, frame.format())?;
+    // SAFETY: The parsed pointer is retained for this frame borrow.
+    Ok(unsafe { CVPixelBufferGetPixelFormatType(pointer.as_ptr()) })
+}
+
 /// Backend-owned native decoder resource retained by a preview frame.
 ///
 /// Implementations own the concrete decoder surface or registry lease. Dropping
@@ -175,11 +239,17 @@ pub trait PreviewNativeDecodedFrameResource: fmt::Debug + Any + Send + Sync {
     /// Process-local backend identity. This is never an OS handle.
     fn handle_id(&self) -> NonZeroU64;
 
+    /// Borrow a CoreVideo surface when this resource owns one. Other native
+    /// backends expose their own typed handle capabilities instead.
+    fn cv_pixel_buffer(&self) -> Option<PreviewCvPixelBuffer<'_>> {
+        None
+    }
+
     /// Type-erased access for the matching renderer import backend.
     fn as_any(&self) -> &dyn Any;
 }
 
-static NEXT_FFMPEG_NATIVE_FRAME_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_NATIVE_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// FFmpeg-owned reference to one native hardware-decoded frame.
 ///
@@ -221,7 +291,7 @@ impl FfmpegNativeDecodedFrameResource {
         let kind = decoded_handle_kind_from_hardware_pixel(pixel_format).ok_or(
             FfmpegNativeDecodedFrameResourceError::UnsupportedPixelFormat { pixel_format },
         )?;
-        let id = next_ffmpeg_native_frame_id()?;
+        let id = next_native_frame_id()?;
         // SAFETY: frame.as_ptr() is valid for this borrow. av_frame_clone creates
         // an independently owned AVFrame whose buffer references are retained.
         let retained = unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) };
@@ -441,6 +511,13 @@ impl PreviewNativeDecodedFrameResource for FfmpegNativeDecodedFrameResource {
         self.id
     }
 
+    fn cv_pixel_buffer(&self) -> Option<PreviewCvPixelBuffer<'_>> {
+        let pointer = FfmpegNativeDecodedFrameResource::cv_pixel_buffer(self).ok()?;
+        // SAFETY: The retained immutable AVFrame owns this CVPixelBuffer for
+        // the full resource borrow. No decoder pool can recycle its reference.
+        Some(unsafe { PreviewCvPixelBuffer::from_raw(pointer) })
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -599,9 +676,9 @@ pub enum FfmpegNativeDecodedFrameResourceError {
     },
 }
 
-fn next_ffmpeg_native_frame_id(
-) -> std::result::Result<NonZeroU64, FfmpegNativeDecodedFrameResourceError> {
-    let raw = NEXT_FFMPEG_NATIVE_FRAME_ID
+fn next_native_frame_id() -> std::result::Result<NonZeroU64, FfmpegNativeDecodedFrameResourceError>
+{
+    let raw = NEXT_NATIVE_FRAME_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
@@ -964,6 +1041,14 @@ impl PreviewNativeDecodedFrameHandle {
         self.resource.handle_id()
     }
 
+    /// Borrow a CoreVideo surface through the backend-independent owner lease.
+    pub fn cv_pixel_buffer(&self) -> Option<PreviewCvPixelBuffer<'_>> {
+        if self.kind() != DecodedGpuFrameHandleKind::CVPixelBuffer {
+            return None;
+        }
+        self.resource.cv_pixel_buffer()
+    }
+
     /// Access the concrete resource only from its matching import backend.
     pub fn resource<R>(&self) -> Option<&R>
     where
@@ -1283,5 +1368,97 @@ mod drm_descriptor_tests {
             unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0,
             "original ownership remains live"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod cv_owner_tests {
+    use super::*;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferCreate(
+            allocator: *const c_void,
+            width: usize,
+            height: usize,
+            format: u32,
+            attributes: *const c_void,
+            output: *mut *mut c_void,
+        ) -> i32;
+        fn CVPixelBufferGetWidth(buffer: *const c_void) -> usize;
+        fn CVPixelBufferRelease(buffer: *const c_void);
+    }
+
+    #[derive(Debug)]
+    struct NativeOwner {
+        pointer: NonNull<c_void>,
+        releases: Arc<AtomicUsize>,
+    }
+
+    // SAFETY: This fixture owns an immutable CVPixelBuffer; CoreVideo reference
+    // ownership may be released on any thread. No mutable pixels are exposed.
+    unsafe impl Send for NativeOwner {}
+    // SAFETY: Shared access only borrows the same immutable owned buffer.
+    unsafe impl Sync for NativeOwner {}
+
+    impl Drop for NativeOwner {
+        fn drop(&mut self) {
+            // SAFETY: This owner holds the +1 reference returned by Create.
+            unsafe { CVPixelBufferRelease(self.pointer.as_ptr()) };
+            self.releases.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PreviewNativeDecodedFrameResource for NativeOwner {
+        fn handle_kind(&self) -> DecodedGpuFrameHandleKind {
+            DecodedGpuFrameHandleKind::CVPixelBuffer
+        }
+
+        fn handle_id(&self) -> NonZeroU64 {
+            NonZeroU64::new(1).unwrap()
+        }
+
+        fn cv_pixel_buffer(&self) -> Option<PreviewCvPixelBuffer<'_>> {
+            // SAFETY: Self retains the immutable buffer for the entire borrow.
+            Some(unsafe { PreviewCvPixelBuffer::from_raw(self.pointer) })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn cv_pixel_buffer_borrow_uses_native_owner_and_final_lease_release() {
+        let mut pointer = std::ptr::null_mut();
+        // SAFETY: Valid output pointer, default allocator, and a public BGRA
+        // pixel format. Successful creation returns one owned reference.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                std::ptr::null(),
+                4,
+                2,
+                u32::from_be_bytes(*b"BGRA"),
+                std::ptr::null(),
+                &mut pointer,
+            )
+        };
+        assert_eq!(status, 0, "CoreVideo fixture allocation");
+        let pointer = NonNull::new(pointer).expect("allocated pixel buffer");
+        let releases = Arc::new(AtomicUsize::new(0));
+        let handle = PreviewNativeDecodedFrameHandle::new(NativeOwner {
+            pointer,
+            releases: releases.clone(),
+        });
+        assert!(handle.resource::<FfmpegNativeDecodedFrameResource>().is_none());
+        let retained = handle.clone();
+        drop(handle);
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
+        let view = retained.cv_pixel_buffer().expect("native CoreVideo capability");
+        assert_eq!(view.as_ptr(), pointer);
+        // SAFETY: The borrowed view is still bound to retained's live owner.
+        assert_eq!(unsafe { CVPixelBufferGetWidth(view.as_ptr().as_ptr()) }, 4);
+        drop(retained);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
     }
 }
