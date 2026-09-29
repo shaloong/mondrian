@@ -1001,6 +1001,12 @@ or prolong the other's LUT residency. The logical charge used here is
 cache-admission evidence, not allocator, GPU-memory, Working Set, or RSS
 measurement.
 
+Within one visual Program, cloned Clip Effect program handles charge their
+shared internal allocation once and each handle separately. Independently
+prepared allocations are charged separately even when their contents match;
+this accounting does not deduplicate across Preview and Export owners or
+change either owner's residency grant.
+
 The same ownership boundary applies to Effect pixels. Preview's retained
 `TimelineCompositeScratch` owns one `EffectExecutionSession` and binds it at the
 sole Preview generation activation/invalidation seam. Export's job-local
