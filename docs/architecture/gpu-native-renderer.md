@@ -1644,10 +1644,35 @@ retain the original 16x16 shader and dispatch. Per-frame runtime evidence
 records which variant executed, and CPU-reference tests cover low-entropy,
 high-entropy, floating-point excursion, vector, and tail-pixel inputs.
 
-The producer uses the bounded asynchronous Viewer timestamp-query ring. It
-reports complete-frame and per-stage GPU timestamps separately from CPU
-command-recording time, and records composite, fusion, color-stage, scope,
-presentation-lease, fallback, blocker, and output-format evidence. A warm
+The producer uses the bounded asynchronous Viewer timestamp-query ring.
+Headless production device creation requests the supported frame-timing
+features. When both timestamp and encoder timestamp features are available,
+the existing encoder-marker mode is used. Otherwise, basic timestamp support
+can time the actual render/compute passes through the same production
+`GpuCommandEncoder` interface. No empty marker passes or alternate renderer are
+introduced. Native-import prefix timing still requires its encoder feature pair;
+frame timing support does not imply prefix timing support.
+
+The pass mode has 16 query slots and at most 256 measured passes per frame in
+the Headless owner. Query overflow drops timing coverage while recording the
+unchanged workload. First/last real pass timestamps bracket the recorded Viewer
+command scope, including intervening encoder copies/clears. Leading/trailing
+unmeasured commands, commands across an unmeasured stage boundary, conflicting
+timestamp writes and invalid stage order produce typed coverage errors instead
+of partial execution samples. Queue `write_buffer`/`write_texture` traffic,
+decode work and presentation are outside this encoder timing span; it is not
+all queue traffic or end-to-end Viewer latency. Semantic stage markers are
+shared across both timing modes.
+
+Submitted query ownership remains live until actual work completion. The owner
+then submits query resolution/readback in a separate command buffer; GPU queue
+order alone cannot substitute for observing measured work completion on the
+M4 Metal stage-counter path. Collection is asynchronous and nonblocking.
+Incomplete scopes publish no execution sample but still retire their submitted
+query slot through completion. The producer reports command-scope and per-stage
+GPU timestamps separately from CPU command-recording time, and records
+composite, fusion, color-stage, scope, presentation-lease, fallback, blocker,
+and output-format evidence. A warm
 snapshot and measured snapshot of the texture pool, OCIO shader/static
 pipeline/backend caches, and scopes resources prove that the measured interval
 does not allocate or prepare new GPU resources. Missing timestamp support,

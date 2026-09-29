@@ -3028,9 +3028,11 @@ conflicting explicit locations are rejected. This rule is confined to the
 actual 4:2:2 sampling grid, not inferred from a platform or filename. ProRes
 Proxy/LT/Standard/HQ with a proven 10-bit 4:2:2 format may enter the existing
 native codec/device/import capability checks. This is candidate admission,
-not hardware-execution evidence; ProRes 4444 remains excluded pending native
-pixel parity. 4:4:4 permits unspecified chroma location because no
-subsampled grid origin exists. This remains
+not hardware-execution evidence. On macOS, progressive ProRes 4444/4444 XQ
+with an explicit limited-range source contract may enter the direct
+VideoToolbox codec adapter described below. Other profiles and platforms retain
+their existing admission checks. 4:4:4 permits unspecified chroma location
+because no subsampled grid origin exists. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but
 missing sampling facts must not escape the media native-frame constructor.
@@ -4311,18 +4313,34 @@ only, not original-native-media qualification.
 
 ### macOS ProRes 4444 admission evidence
 
-Native ProRes 4444 remains inadmissible until pixel parity is demonstrated.
-On an Apple M4/macOS 26.4.1 snapshot, a diagnostic using public
-`VTDecompressionSession` APIs directly (without FFmpeg hardware download or
-Mondrian materialization) observed hardware decoding and an IOSurface-backed
-Metal texture, but reproduced large localized Cb/Cr differences against software
-decode. Requesting RGBA Half did not eliminate the differences. API availability,
-requested hardware decoding, and successful texture creation cannot replace
-pixel parity. This single-frame observation narrows the producer boundary; it
-does not establish a universal driver defect or a performance qualification.
-The provisional probe and hashes remain external evidence under the macOS audit
-scratch directory. Production continues to report software CPU YUV decoding and
-an explicit upload for this source family.
+The macOS production adapter now admits progressive ProRes 4444/4444 XQ
+(`ap4h`/`ap4x`) with explicit limited range and supported CICP values. It uses
+public `VTDecompressionSession` APIs through `PreviewCodec` within the existing
+`PreviewDecodeSession`; packet selection, seek, cancellation, retained candidates
+and materialization remain in that shared owner. The adapter does not create a
+second Preview, Playback or color interpreter.
+
+The decoder requests `s4as`: three 16-bit planes containing Y, interleaved Cb/Cr
+and straight alpha. The earlier packed `y416` diagnostic reproduced localized
+chroma differences and remains failed evidence; RGBA Half did not remedy them.
+The production tri-planar route was admitted after full-frame CPU/native Viewer
+pixel comparisons for SDR, PQ and HLG, across seeks and alpha cases, including
+4444 XQ. Maximum differences remained within the existing `1/1024` threshold;
+alpha-zero hidden RGB and GPU resource retirement were checked separately.
+These local M4/macOS 26.4.1 results do not qualify other devices, physical HDR
+Viewer behavior or the complete commercial workload matrix.
+
+Each compressed intra packet is checked for frame bounds, version, extent,
+progressive scan, 4:4:4 chroma, alpha mode and matching CICP header values before
+submission. Missing or contradictory source facts fail closed. The native
+adapter owns compressed bytes through callback completion, verifies output
+plane geometry, IOSurface identity and color attachments, and queries the actual
+session's public `UsingHardwareAcceleratedVideoDecoder` property before
+publishing a frame. Decode failure poisons the session; consuming close joins
+callbacks. An `AVBufferRef` owns the retained CVPixelBuffer in the shared AVFrame
+materialization path, without a fabricated FFmpeg hardware-frame context.
+Renderer retirement retains this source through real GPU completion. Unified
+allocation accounting uses the native buffer allocation once.
 
 ### Native decoder output and observed hardware execution
 
@@ -4333,10 +4351,15 @@ observed hardware execution, `Some(false)` for observed software execution, or
 GPU residency converts an unobserved execution into hardware proof. The explicit
 hardware-only FFmpeg acceleration backends establish hardware work from their
 decoder output; VideoToolbox can also output CVPixelBuffer from software decode.
-Its current AVHWDeviceContext adapter therefore retains `None`: the supported
-FFmpeg hardware-device interface does not expose the owning session's public
-UsingHardware property. The adapter must not inspect private decoder storage to
-obtain that property.
+The FFmpeg AVHWDeviceContext route therefore retains `None`: its supported
+hardware-device interface does not expose the owning session's public
+UsingHardware property. In [FFmpeg 8.1.2](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/videotoolbox.c#L845),
+HEVC session creation requests
+`EnableHardwareAcceleratedVideoDecoder`, not the require-hardware property,
+and successful output does not independently query execution. The adapter must
+not inspect private decoder storage to obtain that property. In contrast, the
+direct macOS ProRes adapter above publishes native output only after its actual
+session property proves hardware execution; that observation is `Some(true)`.
 
 `PreviewDecodeExecutionPath::NativeSurface` and `NativeCpuTransfer` preserve this
 observation with the original physical frame, including cache/ring reuse. Viewer
