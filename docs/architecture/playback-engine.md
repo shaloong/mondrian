@@ -1708,8 +1708,8 @@ Logging alone is not evidence.
 `PlaybackEvidenceCollector` is the shared bounded Interface for production UI
 and headless/perf Adapters. It consumes only Engine-created
 `FrameDeliveryApplication`; callers cannot separately supply acceptance,
-snapshot, target, or timestamp. Every fallible timestamp/phase calculation is
-preflighted before collector mutation. Schema v5 retains exact signed rate
+snapshot, consumed demand, or timestamp. Every fallible timestamp/phase calculation is
+preflighted before collector mutation. Schema v7 retains exact signed rate
 transitions and at most 4,096 detailed
 tail events and a deterministic 4,096-sample whole-run reservoir per
 latency/phase-error metric.
@@ -1722,6 +1722,19 @@ Detailed-event eviction is expected bounded retention, remains reported, and is
 not reclassified as observation loss. A gate may use the exact maximum, a
 declared reservoir percentile, or aggregate counters, but cannot infer failure
 merely because old diagnostic events were intentionally evicted.
+
+Each terminal Delivery event retains the signed nanosecond offset between its
+actual completion observation and the consumed Engine demand's deadline, plus
+the same-instant Clock Master, signed target phase error, uncertainty, and
+conservative proven error. Negative offsets precede the deadline; zero is its
+exact boundary. Untimed and rejected deliveries have no deadline offset, and
+rejected authority cannot borrow the replacement demand's Clock evidence.
+Late outcomes retain this detail without entering the accepted-presentable
+phase percentiles. This distinguishes deadline expiry from Clock uncertainty
+when investigating a rejected realtime picture. An already-visible artifact
+may have preceded its later terminal observation; the offset alone does not
+prove its physical visibility time. No Adapter supplies or recomputes this
+evidence, and no old-schema compatibility path is maintained during Alpha.
 
 For an accepted `Ready` or `Degraded` delivery, the exact target PTS and active
 Clock phase use the same checked floor-nanosecond grid. Evidence records

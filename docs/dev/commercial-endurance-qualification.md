@@ -593,8 +593,11 @@ local_media_smoke <fixtures> <new-output> 300 1920x1080 recovery 2
 `all` runs the three production phases for 15–900 measured seconds each;
 `playback` runs Preview/Audio with seek/cache for 15–1800 seconds.
 `export` runs the same second phase alone, and `recovery` runs the same third
-phase alone for focused diagnosis. One or two
-video sources contribute for the entire Timeline. The Sequence authored
+phase alone for focused diagnosis. The layer argument selects one video source
+or that source plus an overlay: ordinary playback/export phases use the PNG
+alpha overlay, while recovery uses the moving video overlay. Record the actual
+probe and representation rather than treating the layer count as a count of
+moving video decoders. The Sequence authored
 Preview scale is explicitly 1.0; completed GPU output dimensions and the
 runtime Full quality are checked after each accepted interval. Original
 source decode resolution remains unchanged; output resolution is explicit in
@@ -619,6 +622,11 @@ execution and verifier owners prove consuming closure.
 Playback-only observation has no Export completion grace. Its measured finish
 is distinct from the phase safety deadline: the final complete interval and
 queued native memory samples may close after the measured finish, while still
-bounded by that original phase deadline. Preview worker and coordinator
+bounded by that original phase deadline. Local report schema 2 serializes
+`playback_before_close.evidence` directly as the production
+`PlaybackEvidenceReport` object (currently schema 7), including exact per-event
+deadline offsets and terminal Clock phase evidence. It is not a Debug string,
+and Alpha consumers do not retain an old-string parser or compatibility alias.
+Preview worker and coordinator
 diagnostics are captured once before consuming shutdown; they are separate
 owner observations, not a globally atomic failure-frame snapshot.

@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 6;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 7;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,13 @@ pub enum PlaybackEvidenceEventKind {
         target_frame: i64,
         kind: FrameDeliveryKind,
         accepted: bool,
+        /// Exact completion minus the consumed demand's deadline. Negative is
+        /// before the deadline; zero is the boundary. Untimed or rejected
+        /// deliveries have no offset.
+        deadline_offset_ns: Option<i128>,
+        /// Engine-authenticated phase at this completion, including Late and
+        /// other terminal outcomes excluded from presentable aggregates.
+        clock_phase: Option<PlaybackDeliveryClockPhaseEvidence>,
     },
     /// A user seek began.
     SeekStarted { kind: PlaybackSeekKind },
@@ -119,6 +126,19 @@ pub struct PlaybackEvidenceEvent {
     pub epoch: u64,
     /// Typed event payload.
     pub kind: PlaybackEvidenceEventKind,
+}
+
+/// Exact per-delivery Clock evidence, without percentile quantization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackDeliveryClockPhaseEvidence {
+    /// Authoritative Clock Master at completion.
+    pub master: ClockMaster,
+    /// Clock phase minus the exact target on the Engine's floor-nanosecond grid.
+    pub signed_point_error_ns: i128,
+    /// Conservative uncertainty of that same observation.
+    pub uncertainty_ns: u128,
+    /// Absolute point error plus uncertainty, before rounding.
+    pub proven_error_ns: u128,
 }
 
 /// Stable percentile summary in microseconds.
@@ -623,7 +643,21 @@ impl PlaybackEvidenceCollector {
         let completed_at = delivery.completed_at();
         let snapshot = application.snapshot();
         self.validate_timestamp(completed_at)?;
-        let prepared_phase_evidence = prepare_delivery_phase_evidence(&application)?;
+        let clock_phase = prepare_delivery_clock_phase_evidence(&application)?;
+        let prepared_phase_evidence = prepare_delivery_phase_evidence(&application, clock_phase)?;
+        let deadline_offset_ns = application
+            .demand()
+            .and_then(|demand| demand.deadline)
+            .map(|deadline| {
+                let completed_ns = i128::try_from(completed_at.duration_since_origin().as_nanos())
+                    .map_err(|_| PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+                let deadline_ns = i128::try_from(deadline.duration_since_origin().as_nanos())
+                    .map_err(|_| PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+                completed_ns
+                    .checked_sub(deadline_ns)
+                    .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
+            })
+            .transpose()?;
 
         self.advance_time(completed_at)?;
         if application.accepted() {
@@ -639,6 +673,8 @@ impl PlaybackEvidenceCollector {
                 target_frame: identity.target_frame,
                 kind: delivery.kind(),
                 accepted: application.accepted(),
+                deadline_offset_ns,
+                clock_phase,
             },
         );
         let matching_active = if application.accepted() {
@@ -969,6 +1005,7 @@ fn duration_us(value: std::time::Duration) -> u64 {
 
 fn prepare_delivery_phase_evidence(
     application: &FrameDeliveryApplication,
+    clock_phase: Option<PlaybackDeliveryClockPhaseEvidence>,
 ) -> Result<PreparedDeliveryPhaseEvidence, PlaybackEvidenceError> {
     let delivery = application.delivery();
     if !application.accepted()
@@ -980,14 +1017,7 @@ fn prepare_delivery_phase_evidence(
         return Ok(PreparedDeliveryPhaseEvidence::NotPresentable);
     }
 
-    let target = application
-        .target()
-        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
-    let identity = delivery.identity();
-    if target.frame != identity.target_frame {
-        return Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence);
-    }
-    let Some(phase) = application.clock_phase() else {
+    let Some(phase) = clock_phase else {
         return if matches!(
             application.snapshot().state,
             TransportState::Playing | TransportState::Recovering
@@ -997,6 +1027,29 @@ fn prepare_delivery_phase_evidence(
             Ok(PreparedDeliveryPhaseEvidence::NotApplicable)
         };
     };
+    Ok(PreparedDeliveryPhaseEvidence::Proven {
+        master: phase.master,
+        point_error_us: ns_to_us_ceil(phase.signed_point_error_ns.unsigned_abs())?,
+        uncertainty_us: ns_to_us_ceil(phase.uncertainty_ns)?,
+        proven_error_us: ns_to_us_ceil(phase.proven_error_ns)?,
+    })
+}
+
+fn prepare_delivery_clock_phase_evidence(
+    application: &FrameDeliveryApplication,
+) -> Result<Option<PlaybackDeliveryClockPhaseEvidence>, PlaybackEvidenceError> {
+    if !application.accepted() {
+        return Ok(None);
+    }
+    let delivery = application.delivery();
+    let demand = application
+        .demand()
+        .filter(|demand| demand.identity() == delivery.identity())
+        .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
+    let identity = delivery.identity();
+    let Some(phase) = application.clock_phase() else {
+        return Ok(None);
+    };
     if phase.epoch() != identity.epoch
         || phase.observed_at() != delivery.completed_at()
         || application.snapshot().clock_master != Some(phase.master())
@@ -1004,7 +1057,7 @@ fn prepare_delivery_phase_evidence(
         return Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence);
     }
 
-    let target_ns = timeline_position_ns_floor(target)
+    let target_ns = timeline_position_ns_floor(demand.target)
         .map_err(|_| PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
     let signed_point_error = phase
         .phase_ns()
@@ -1014,12 +1067,12 @@ fn prepare_delivery_phase_evidence(
     let proven_error_ns = point_error_ns
         .checked_add(phase.uncertainty_ns())
         .ok_or(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)?;
-    Ok(PreparedDeliveryPhaseEvidence::Proven {
+    Ok(Some(PlaybackDeliveryClockPhaseEvidence {
         master: phase.master(),
-        point_error_us: ns_to_us_ceil(point_error_ns)?,
-        uncertainty_us: ns_to_us_ceil(phase.uncertainty_ns())?,
-        proven_error_us: ns_to_us_ceil(proven_error_ns)?,
-    })
+        signed_point_error_ns: signed_point_error,
+        uncertainty_ns: phase.uncertainty_ns(),
+        proven_error_ns,
+    }))
 }
 
 fn ns_to_us_ceil(nanos: u128) -> Result<u64, PlaybackEvidenceError> {
@@ -1131,7 +1184,18 @@ mod tests {
                 audio_handoff: None,
                 audio_clock_fallback: None,
             },
-            target: Some(target),
+            demand: Some(FrameDemand {
+                epoch,
+                sequence_id: None,
+                timeline_revision: 1,
+                quality_revision: 1,
+                sequence: FrameDemandSequence(sequence),
+                target,
+                kind: FrameDemandKind::TimedPlayback,
+                deadline: None,
+                late_presentation_grace_ns: 0,
+                preview_scale: PreviewResolutionScale::Full,
+            }),
             clock_phase: master_and_phase.map(|(master, phase_ns, uncertainty_ns)| {
                 PlaybackClockPhaseObservation {
                     epoch,
@@ -1433,6 +1497,103 @@ mod tests {
     }
 
     #[test]
+    fn delivery_event_preserves_exact_deadline_boundaries_and_terminal_phase() {
+        let epoch = PlaybackEpoch(16);
+        let mut collector = PlaybackEvidenceCollector::default();
+        for (sequence, completed_ns, kind) in [
+            (1, 4, FrameDeliveryKind::Ready),
+            (2, 5, FrameDeliveryKind::Degraded),
+            (3, 6, FrameDeliveryKind::Late),
+        ] {
+            let mut application = delivery_application(
+                epoch,
+                sequence,
+                FramePosition::new(0, Rational::new(1, 25)),
+                at_ns(completed_ns),
+                Some((ClockMaster::AudioDevice, -19_000_000, 1_000_001)),
+            );
+            application.demand.as_mut().unwrap().deadline = Some(at_ns(5));
+            application.delivery =
+                FrameDeliveryCandidate::for_demand(application.delivery.identity(), kind)
+                    .complete_at(at_ns(completed_ns));
+            collector.observe_delivery(application).expect("terminal evidence");
+        }
+        let report = collector.report();
+        for (event, expected_offset) in report.events.iter().zip([-1, 0, 1]) {
+            let PlaybackEvidenceEventKind::Delivery { deadline_offset_ns, clock_phase, .. } =
+                event.kind
+            else {
+                panic!("expected delivery event");
+            };
+            assert_eq!(deadline_offset_ns, Some(expected_offset));
+            assert_eq!(
+                clock_phase,
+                Some(PlaybackDeliveryClockPhaseEvidence {
+                    master: ClockMaster::AudioDevice,
+                    signed_point_error_ns: -19_000_000,
+                    uncertainty_ns: 1_000_001,
+                    proven_error_ns: 20_000_001,
+                })
+            );
+        }
+        assert_eq!(report.deliveries.ready, 1);
+        assert_eq!(report.deliveries.degraded, 1);
+        assert_eq!(report.deliveries.late, 1);
+        assert_eq!(
+            report.delivery_phase_error.audio_device.proven_error.count, 2,
+            "Late detail must not contaminate accepted-presentable percentiles"
+        );
+    }
+
+    #[test]
+    fn rejected_delivery_does_not_acquire_current_deadline_or_clock_evidence() {
+        let mut engine = crate::PlaybackEngine::default();
+        engine.play(100, at(0)).expect("play");
+        let demand = engine.pending_frame_demand().expect("original demand");
+        engine
+            .seek(FramePosition::new(2, demand.target.time_base), at(1))
+            .expect("replacement demand");
+        let application = engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(demand.identity(), FrameDeliveryKind::Ready)
+                    .complete_at(at(2)),
+            )
+            .expect("reject stale epoch");
+        assert!(!application.accepted());
+        assert!(application.demand().is_none());
+        let mut collector = PlaybackEvidenceCollector::default();
+        collector.observe_delivery(application).expect("rejected evidence");
+        assert!(matches!(
+            collector.report().events[0].kind,
+            PlaybackEvidenceEventKind::Delivery {
+                accepted: false,
+                deadline_offset_ns: None,
+                clock_phase: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mismatched_consumed_demand_fails_before_evidence_mutation() {
+        let mut application = delivery_application(
+            PlaybackEpoch(17),
+            1,
+            FramePosition::new(0, Rational::new(1, 25)),
+            at_ns(1),
+            Some((ClockMaster::Synthetic, 0, 0)),
+        );
+        application.demand.as_mut().unwrap().quality_revision += 1;
+        let mut collector = PlaybackEvidenceCollector::default();
+        let before = collector.report();
+        assert_eq!(
+            collector.observe_delivery(application),
+            Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
+        );
+        assert_eq!(collector.report(), before);
+    }
+
+    #[test]
     fn phase_error_uses_ceil_microseconds_at_the_twenty_millisecond_boundary() {
         let epoch = PlaybackEpoch(10);
         let mut collector = PlaybackEvidenceCollector::default();
@@ -1500,19 +1661,23 @@ mod tests {
         let epoch = PlaybackEpoch(13);
         let mut collector = PlaybackEvidenceCollector::default();
         let before = collector.report();
-        let result = collector.observe_delivery(delivery_application(
-            epoch,
-            1,
-            FramePosition::new(i64::MAX, Rational::new(i64::from(i32::MAX), 1)),
-            at_ns(1),
-            Some((ClockMaster::Synthetic, i128::MIN, 0)),
-        ));
-
-        assert_eq!(
-            result,
-            Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
-        );
-        assert_eq!(collector.report(), before);
+        for kind in [FrameDeliveryKind::Ready, FrameDeliveryKind::Late] {
+            let mut application = delivery_application(
+                epoch,
+                1,
+                FramePosition::new(i64::MAX, Rational::new(i64::from(i32::MAX), 1)),
+                at_ns(1),
+                Some((ClockMaster::Synthetic, i128::MIN, 0)),
+            );
+            application.delivery =
+                FrameDeliveryCandidate::for_demand(application.delivery.identity(), kind)
+                    .complete_at(at_ns(1));
+            assert_eq!(
+                collector.observe_delivery(application),
+                Err(PlaybackEvidenceError::InvalidDeliveryPhaseEvidence)
+            );
+            assert_eq!(collector.report(), before);
+        }
     }
 
     #[test]

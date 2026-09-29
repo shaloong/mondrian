@@ -184,7 +184,7 @@ fn run_profile(
     } else {
         "local-media-production-profile-v2"
     };
-    let mut report = json!({"schema_version":1,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
+    let mut report = json!({"schema_version":2,"profile":profile,"status":"NotRun","commercial_qualification":false,"duration_72h_qualified":false,"physical_surface_qualified":false,"physical_reference_output_qualified":false,"hdr_surface_qualified":false,"original_native_media_qualified":false,"proxy_control":proxy_control,"phase_seconds":phase_seconds,"hard_deadline_seconds":hard_deadline_seconds,"memory_stop_bytes":MEMORY_LIMIT,"maximum_artifacts_per_phase":MAXIMUM_ARTIFACTS,"maximum_retained_artifact_bytes_per_phase":MAXIMUM_RETAINED_ARTIFACT_BYTES,"program_resolution":settings.resolution,"video_layers":settings.video_layers,"selected_phases":settings.phases,"fixtures":[],"phases":[]});
     report["program_frame_rate"] = if proxy_control {
         json!({"numerator": 24, "denominator": 1})
     } else {
@@ -625,7 +625,7 @@ fn run_phase(
         report["playback_before_close"] = json!({
             "engine": format!("{:?}", state.playback_engine.snapshot()),
             "audio": format!("{:?}", state.audio_playback_snapshot()),
-            "evidence": format!("{:?}", state.playback_evidence_report()),
+            "evidence": state.playback_evidence_report(),
         });
     }
     report["latest_gpu_execution"] = serde_json::to_value(

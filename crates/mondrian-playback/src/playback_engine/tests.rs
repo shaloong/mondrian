@@ -108,7 +108,7 @@ fn engine_application_binds_delivery_target_snapshot_and_same_instant_phase() {
 
     assert!(application.accepted());
     assert_eq!(application.delivery(), delivery);
-    assert_eq!(application.target(), Some(demand.target));
+    assert_eq!(application.demand(), Some(demand));
     assert_eq!(application.snapshot(), engine.snapshot());
     assert_eq!(phase.epoch(), demand.epoch);
     assert_eq!(phase.master(), ClockMaster::Synthetic);

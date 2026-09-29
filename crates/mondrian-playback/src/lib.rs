@@ -579,7 +579,7 @@ pub struct FrameDeliveryApplication {
     delivery: FrameDelivery,
     accepted: bool,
     snapshot: PlaybackSnapshot,
-    target: Option<FramePosition>,
+    demand: Option<FrameDemand>,
     clock_phase: Option<PlaybackClockPhaseObservation>,
 }
 
@@ -599,9 +599,10 @@ impl FrameDeliveryApplication {
         self.snapshot
     }
 
-    /// Exact accepted demand target, absent for rejected stale authority.
-    pub const fn target(&self) -> Option<FramePosition> {
-        self.target
+    /// Exact demand consumed by this application, including its deadline.
+    /// Rejected stale authority carries no current-demand evidence.
+    pub const fn demand(&self) -> Option<FrameDemand> {
+        self.demand
     }
 
     /// Clock phase at the same completion instant, when a Clock Master exists.
@@ -1830,7 +1831,7 @@ impl PlaybackEngine {
                 delivery,
                 accepted: false,
                 snapshot: self.snapshot(),
-                target: None,
+                demand: None,
                 clock_phase: None,
             });
         }
@@ -1840,7 +1841,7 @@ impl PlaybackEngine {
                 delivery,
                 accepted: false,
                 snapshot: self.snapshot(),
-                target: None,
+                demand: None,
                 clock_phase: None,
             });
         }
@@ -1851,7 +1852,7 @@ impl PlaybackEngine {
                 delivery,
                 accepted: false,
                 snapshot: self.snapshot(),
-                target: None,
+                demand: None,
                 clock_phase: None,
             });
         };
@@ -1868,7 +1869,7 @@ impl PlaybackEngine {
                 delivery,
                 accepted: true,
                 snapshot: self.snapshot(),
-                target: Some(active_demand.target),
+                demand: Some(active_demand),
                 clock_phase: None,
             });
         }
@@ -1936,7 +1937,7 @@ impl PlaybackEngine {
             delivery,
             accepted: true,
             snapshot: self.snapshot(),
-            target: Some(active_demand.target),
+            demand: Some(active_demand),
             clock_phase,
         })
     }
