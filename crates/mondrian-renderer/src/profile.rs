@@ -6,7 +6,8 @@
 //! render time.
 
 use crate::gpu_command::{
-    GpuPassTimestampLayout, GpuPassTimestampReceipt, GpuPassTimestampRecorder,
+    GpuLeadingCopyTimestampAnchor, GpuPassTimestampLayout, GpuPassTimestampReceipt,
+    GpuPassTimestampRecorder,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -432,6 +433,7 @@ pub struct GpuTimestampQueryRing {
     next_id: u64,
     discarded_samples: u64,
     pass_timestamps: bool,
+    pass_leading_copy_anchor: Option<GpuLeadingCopyTimestampAnchor>,
 }
 
 struct GpuTimestampQuerySlot {
@@ -481,6 +483,7 @@ impl GpuTimestampQueryRing {
             next_id: 1,
             discarded_samples: 0,
             pass_timestamps: false,
+            pass_leading_copy_anchor: None,
         })
     }
 
@@ -513,6 +516,7 @@ impl GpuTimestampQueryRing {
             next_id: 1,
             discarded_samples: 0,
             pass_timestamps: true,
+            pass_leading_copy_anchor: Some(GpuLeadingCopyTimestampAnchor::new(device)),
         })
     }
 
@@ -533,7 +537,12 @@ impl GpuTimestampQueryRing {
         let query_set = self.slots[token.slot].timer.query_set.clone();
         Ok(Some((
             token,
-            GpuPassTimestampRecorder::new(encoder, query_set, token),
+            GpuPassTimestampRecorder::new(
+                encoder,
+                query_set,
+                self.pass_leading_copy_anchor.as_ref().expect("pass anchor").clone(),
+                token,
+            ),
         )))
     }
 

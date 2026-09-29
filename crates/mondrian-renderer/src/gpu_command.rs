@@ -1,9 +1,10 @@
 //! Shared command recording for production passes and bounded GPU telemetry.
 //!
-//! A recorder attaches counters to actual passes. It exposes no raw encoder:
-//! copies outside the first/last pass and incomplete stage boundaries cannot
-//! silently become a complete frame measurement. Recording always continues
-//! when telemetry runs out of queries.
+//! A recorder attaches counters to actual passes. On pass-boundary-only GPUs,
+//! a measured one-workgroup pass anchors copies before the first work pass so
+//! their execution is included in the frame interval. Trailing copies and
+//! incomplete stage boundaries cannot silently become a complete measurement.
+//! Recording always continues when telemetry runs out of queries.
 
 use crate::profile::{GpuTimestampStageMarker, GpuTimestampToken};
 
@@ -189,7 +190,7 @@ impl GpuCommandEncoder for wgpu::CommandEncoder {
 pub enum GpuPassTimestampCoverageError {
     /// No real render or compute pass was recorded.
     NoPass,
-    /// A copy or clear precedes the first pass.
+    /// A copy or clear precedes the first measured boundary.
     LeadingCommands,
     /// A copy or clear follows the last pass.
     TrailingCommands,
@@ -231,8 +232,49 @@ impl GpuPassTimestampReceipt {
 pub struct GpuPassTimestampRecorder<'a> {
     encoder: &'a mut wgpu::CommandEncoder,
     query_set: wgpu::QuerySet,
+    leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
     token: GpuTimestampToken,
     coverage: PassCoverage,
+}
+
+#[derive(Clone)]
+pub(crate) struct GpuLeadingCopyTimestampAnchor {
+    pipeline: wgpu::ComputePipeline,
+    binding: wgpu::BindGroup,
+    _output: wgpu::Buffer,
+}
+
+impl GpuLeadingCopyTimestampAnchor {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian_gpu_leading_copy_timestamp_anchor"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> output: array<u32>;
+                 @compute @workgroup_size(1) fn main() { output[0] = 1u; }"
+                    .into(),
+            ),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mondrian_gpu_leading_copy_timestamp_anchor"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian_gpu_leading_copy_timestamp_anchor_output"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian_gpu_leading_copy_timestamp_anchor_binding"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: output.as_entire_binding() }],
+        });
+        Self { pipeline, binding, _output: output }
+    }
 }
 
 struct PassCoverage {
@@ -319,14 +361,42 @@ impl<'a> GpuPassTimestampRecorder<'a> {
     pub(crate) fn new(
         encoder: &'a mut wgpu::CommandEncoder,
         query_set: wgpu::QuerySet,
+        leading_copy_anchor: GpuLeadingCopyTimestampAnchor,
         token: GpuTimestampToken,
     ) -> Self {
         let capacity = query_set.count();
         Self {
             encoder,
             query_set,
+            leading_copy_anchor,
             token,
             coverage: PassCoverage::new(capacity),
+        }
+    }
+
+    fn anchor_leading_copy(&mut self) {
+        if self.coverage.next_query != 0 {
+            return;
+        }
+        // Metal exposes timestamp writes at pass boundaries on this device.
+        // A one-workgroup storage write makes the pass execute on Metal; an
+        // empty pass may be elided and leave its beginning query at zero.
+        // Subsequent real passes close the interval after the copy.
+        // The anchor consumes bounded query capacity, and the ordinary stage
+        // coverage checks still reject a copy without a following work pass.
+        if let Some((start, end)) = self.coverage.pass(false) {
+            let mut pass = self.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mondrian_gpu_leading_copy_timestamp_anchor"),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &self.query_set,
+                    beginning_of_pass_write_index: Some(start),
+                    end_of_pass_write_index: Some(end),
+                }),
+            });
+            pass.set_pipeline(&self.leading_copy_anchor.pipeline);
+            pass.set_bind_group(0, &self.leading_copy_anchor.binding, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            drop(pass);
         }
     }
 
@@ -384,6 +454,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         destination_offset: wgpu::BufferAddress,
         size: Option<wgpu::BufferAddress>,
     ) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.copy_buffer_to_buffer(
             source,
@@ -400,6 +471,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         destination: wgpu::TexelCopyTextureInfo<'_>,
         size: wgpu::Extent3d,
     ) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.copy_buffer_to_texture(source, destination, size);
     }
@@ -410,6 +482,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         destination: wgpu::TexelCopyBufferInfo<'_>,
         size: wgpu::Extent3d,
     ) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.copy_texture_to_buffer(source, destination, size);
     }
@@ -420,6 +493,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         destination: wgpu::TexelCopyTextureInfo<'_>,
         size: wgpu::Extent3d,
     ) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.copy_texture_to_texture(source, destination, size);
     }
@@ -430,6 +504,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
         offset: wgpu::BufferAddress,
         size: Option<wgpu::BufferAddress>,
     ) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.clear_buffer(buffer, offset, size);
     }
@@ -464,6 +539,7 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
     }
 
     fn clear_texture(&mut self, texture: &wgpu::Texture, range: &wgpu::ImageSubresourceRange) {
+        self.anchor_leading_copy();
         self.coverage.unmeasured_command();
         self.encoder.clear_texture(texture, range);
     }

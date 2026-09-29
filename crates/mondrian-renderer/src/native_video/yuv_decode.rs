@@ -1686,14 +1686,19 @@ mod tests {
             &context.device,
             &context.queue,
             1,
-            1,
+            2,
         )
         .expect("bounded pass timestamp ring");
+        // Start with a fresh query slot: an elided empty anchor previously
+        // returned zero here, then stale timestamps after slot reuse.
+        assert_yuva444sp16_pixels(
+            &context,
+            Some((&mut ring, Some(CoverageError::LeadingCommands))),
+        );
         for _ in 0..9 {
             assert_yuva444sp16_pixels(&context, Some((&mut ring, None)));
         }
         for error in [
-            CoverageError::LeadingCommands,
             CoverageError::TrailingCommands,
             CoverageError::QueryCapacity,
         ] {
@@ -1701,7 +1706,7 @@ mod tests {
             // The same slot must become usable after incomplete work completes.
             assert_yuva444sp16_pixels(&context, Some((&mut ring, None)));
         }
-        assert_eq!(ring.discarded_samples(), 3);
+        assert_eq!(ring.discarded_samples(), 2);
     }
 
     fn assert_yuva444sp16_pixels(
@@ -1814,9 +1819,11 @@ mod tests {
                 .record(&mut recorder, &plan, &prepared, &output)
                 .expect("production decode");
             if *expected_error == Some(Error::QueryCapacity) {
-                decoder
-                    .record(&mut recorder, &plan, &prepared, &output)
-                    .expect("query exhaustion must still execute production decode");
+                for _ in 0..2 {
+                    decoder
+                        .record(&mut recorder, &plan, &prepared, &output)
+                        .expect("query exhaustion must still execute production decode");
+                }
             }
             for stage in [
                 GpuTimestampStageMarker::AfterWorkingComposite,
@@ -1832,10 +1839,12 @@ mod tests {
                 recorder.clear_buffer(&scratch, 0, None);
             }
             let receipt = recorder.finish();
-            assert_eq!(receipt.coverage().err(), *expected_error);
+            let expected_receipt_error =
+                expected_error.filter(|error| *error != Error::LeadingCommands);
+            assert_eq!(receipt.coverage().err(), expected_receipt_error);
             assert_eq!(
                 ring.finish_pass_frame(receipt).expect("end pass scope"),
-                expected_error.is_none()
+                expected_receipt_error.is_none()
             );
             Some(token)
         } else {
@@ -1862,7 +1871,9 @@ mod tests {
             ));
             let samples =
                 ring.finish_all(&context.device).expect("consume measured work and resolve");
-            if expected_error.is_some() {
+            if expected_error.is_some_and(|error| {
+                error != crate::gpu_command::GpuPassTimestampCoverageError::LeadingCommands
+            }) {
                 assert!(
                     samples.is_empty(),
                     "incomplete scope must not produce a timing sample"
@@ -1871,6 +1882,10 @@ mod tests {
                 assert_eq!(samples.len(), 1);
                 assert_eq!(samples[0].token, token);
                 assert!(samples[0].elapsed_us > 0);
+                assert!(
+                    samples[0].elapsed_us < 10_000_000,
+                    "GPU timestamp must be a frame interval"
+                );
                 assert_eq!(
                     samples[0].stages.through_working_composite_us,
                     samples[0].elapsed_us

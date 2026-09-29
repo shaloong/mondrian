@@ -1649,15 +1649,20 @@ Headless production device creation requests the supported frame-timing
 features. When both timestamp and encoder timestamp features are available,
 the existing encoder-marker mode is used. Otherwise, basic timestamp support
 can time the actual render/compute passes through the same production
-`GpuCommandEncoder` interface. No empty marker passes or alternate renderer are
-introduced. Native-import prefix timing still requires its encoder feature pair;
+`GpuCommandEncoder` interface. A leading copy receives one measured compute
+workgroup with a storage write before that copy, because an empty Metal pass
+can be elided and leave its timestamp at zero. This instrumentation executes
+only in pass-timestamp mode and its cost remains in the GPU interval; it adds
+no rendering or color authority. Native-import prefix timing still requires
+its encoder feature pair;
 frame timing support does not imply prefix timing support.
 
 The pass mode has 16 query slots and at most 256 measured passes per frame in
 the Headless owner. Query overflow drops timing coverage while recording the
-unchanged workload. First/last real pass timestamps bracket the recorded Viewer
-command scope, including intervening encoder copies/clears. Leading/trailing
-unmeasured commands, commands across an unmeasured stage boundary, conflicting
+unchanged workload. The first measured boundary and final real pass timestamp
+bracket the recorded Viewer command scope, including leading plane uploads and
+intervening encoder copies/clears. Trailing unmeasured commands, commands
+across an unmeasured stage boundary, conflicting
 timestamp writes and invalid stage order produce typed coverage errors instead
 of partial execution samples. Queue `write_buffer`/`write_texture` traffic,
 decode work and presentation are outside this encoder timing span; it is not
