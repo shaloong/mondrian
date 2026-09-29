@@ -276,7 +276,7 @@ impl CpuYuvUploadRuntime {
 
     /// Bind every transfer buffer used by this candidate to asynchronous remap
     /// and worker-pool return after its command buffer completes.
-    pub(crate) fn finish_candidate(&self, encoder: &wgpu::CommandEncoder) {
+    pub(crate) fn finish_candidate(&self, encoder: &dyn crate::gpu_command::GpuCommandEncoder) {
         let (uploads, returned_sender) = {
             let mut state = self.state.lock();
             (
@@ -288,11 +288,15 @@ impl CpuYuvUploadRuntime {
             let buffer = upload.prepared.buffer;
             let returned_sender = returned_sender.clone();
             let callback_buffer = buffer.clone();
-            encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Write, .., move |result| {
-                if result.is_ok() {
-                    let _ = returned_sender.send(callback_buffer);
-                }
-            });
+            encoder.map_buffer_on_submit(
+                &buffer,
+                wgpu::MapMode::Write,
+                Box::new(move |result| {
+                    if result.is_ok() {
+                        let _ = returned_sender.send(callback_buffer);
+                    }
+                }),
+            );
         }
     }
 
@@ -322,7 +326,7 @@ impl CpuYuvUploadRuntime {
     fn upload(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         frame: &Arc<CpuYuvFrame>,
     ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
         if !self.prepare(frame)? {
@@ -738,7 +742,7 @@ pub(crate) trait CpuYuvPlaneUpload {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         frame: &Arc<CpuYuvFrame>,
     ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError>;
     fn prepare_planes(
@@ -755,7 +759,7 @@ impl CpuYuvPlaneUpload for CpuYuvUploadRuntime {
         &self,
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         frame: &Arc<CpuYuvFrame>,
     ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
         self.upload(device, encoder, frame)
@@ -865,7 +869,7 @@ impl CpuYuvPlaneUpload for QueueCpuYuvUploadRuntime {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _encoder: &mut wgpu::CommandEncoder,
+        _encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         frame: &Arc<CpuYuvFrame>,
     ) -> Result<(CpuYuvUploadedPlaneViews, bool), CpuYuvMaterializationError> {
         let mut state = self.state.lock();
@@ -999,7 +1003,7 @@ pub(crate) fn record_cpu_yuv_frame(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<CpuYuvMaterializationRecord, CpuYuvMaterializationError> {
     let source_color_space = frame
         .source_color
@@ -1515,7 +1519,7 @@ fn copy_plane_to_mapped(
 }
 
 fn record_prepared_plane_copy(
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     buffer: &wgpu::Buffer,
     texture: &wgpu::Texture,
     plane: PreparedPlaneCopy,

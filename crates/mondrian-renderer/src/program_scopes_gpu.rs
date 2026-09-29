@@ -219,7 +219,7 @@ impl GpuProgramScopesRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input_view: &wgpu::TextureView,
         input_width: u32,
         input_height: u32,

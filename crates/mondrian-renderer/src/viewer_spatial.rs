@@ -370,7 +370,7 @@ impl GpuViewerSpatialRuntime {
     pub fn record_for_presentation(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
@@ -405,7 +405,7 @@ impl GpuViewerSpatialRuntime {
     pub fn record(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
@@ -755,7 +755,7 @@ impl GpuViewerSpatialPipeline {
     fn record_downsample(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         input_width: u32,
         input_height: u32,
@@ -778,7 +778,7 @@ impl GpuViewerSpatialPipeline {
     fn record_lanczos(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         input_size: (u32, u32),
         output: &wgpu::TextureView,
@@ -804,7 +804,7 @@ impl GpuViewerSpatialPipeline {
     fn record_pass(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         output: &wgpu::TextureView,
         uniforms: &SpatialUniforms,

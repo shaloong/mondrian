@@ -43,8 +43,8 @@ use mondrian_renderer::{
     color::RenderColorStageDiagnostics,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     product_gpu_working_texture_device_features,
-    profile::gpu_timestamp_query_device_features,
-    profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
+    profile::{gpu_frame_timestamp_query_device_features, gpu_timestamp_query_device_features},
+    profile::{GpuTimestampQueryRing, GpuTimestampToken},
     request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
     GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
@@ -57,6 +57,7 @@ use mondrian_renderer::{
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
+const HEADLESS_GPU_TIMESTAMP_MAX_PASSES: u32 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessGpuStartupStage {
     ProgressStarted,
@@ -178,6 +179,9 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub gpu_completion_observed: bool,
     /// Deferred timestamp token, absent if unsupported or the bounded ring discarded it.
     pub gpu_timestamp_token: Option<u64>,
+    /// Actual pass commands lacked a complete GPU timing boundary.
+    pub gpu_timestamp_coverage_error:
+        Option<mondrian_renderer::gpu_command::GpuPassTimestampCoverageError>,
     /// CPU attribution inside the renderer record call.
     pub cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings>,
     /// Session-qualified native-import candidate coverage, derived once from
@@ -819,27 +823,10 @@ struct HeadlessGpuStageMarker<'a> {
 impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn mondrian_renderer::gpu_command::GpuCommandEncoder,
         stage: ViewerGpuExecutionGpuStage,
     ) -> Result<(), String> {
-        let marker = match stage {
-            ViewerGpuExecutionGpuStage::WorkingComposite => {
-                GpuTimestampStageMarker::AfterWorkingComposite
-            }
-            ViewerGpuExecutionGpuStage::Spatial => GpuTimestampStageMarker::AfterSpatial,
-            ViewerGpuExecutionGpuStage::ProgramOutputBoundary => {
-                GpuTimestampStageMarker::AfterProgramOutputBoundary
-            }
-            ViewerGpuExecutionGpuStage::ProgramScopes => {
-                GpuTimestampStageMarker::AfterProgramScopes
-            }
-            ViewerGpuExecutionGpuStage::SignalMonitoring => {
-                GpuTimestampStageMarker::AfterSignalMonitoring
-            }
-            ViewerGpuExecutionGpuStage::MonitorAdaptation => {
-                GpuTimestampStageMarker::AfterMonitorAdaptation
-            }
-        };
+        let marker = stage.timestamp_marker();
         self.ring
             .mark_stage(encoder, self.token, marker)
             .map_err(|error| error.to_string())
@@ -913,7 +900,7 @@ impl HeadlessViewerGpuAdapter {
                 let supported_features = adapter.features();
                 let raw_adapter_info = adapter.get_info();
                 let viewer_suffix_timing_features =
-                    gpu_timestamp_query_device_features(supported_features);
+                    gpu_frame_timestamp_query_device_features(supported_features);
                 let working_texture_features =
                     product_gpu_working_texture_device_features(&adapter)
                         .map_err(HeadlessViewerGpuError::from)?;
@@ -966,7 +953,15 @@ impl HeadlessViewerGpuAdapter {
                     &device,
                     &queue,
                     HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
-                );
+                )
+                .or_else(|| {
+                    GpuTimestampQueryRing::new_for_passes(
+                        &device,
+                        &queue,
+                        HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
+                        HEADLESS_GPU_TIMESTAMP_MAX_PASSES,
+                    )
+                });
                 startup.as_mut().expect("created progress guard").install_runtime(
                     ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
                         &adapter, &device, &queue, policy,
@@ -1347,12 +1342,17 @@ impl HeadlessViewerGpuAdapter {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
         });
+        let pass_timestamps = self
+            .timestamp_ring
+            .as_ref()
+            .is_some_and(GpuTimestampQueryRing::uses_pass_timestamps);
         let timestamp_token_result = self
             .timestamp_ring
             .as_mut()
+            .filter(|ring| !ring.uses_pass_timestamps())
             .map(|ring| ring.begin_frame(&self.device, &mut encoder))
             .transpose();
-        if self.timestamp_ring.is_some() {
+        if self.timestamp_ring.is_some() && !pass_timestamps {
             // `GpuTimestampQueryRing::begin_frame` performs the existing
             // non-blocking telemetry poll. Reservation has not committed an
             // in-flight Viewer owner beyond the bounded submission capacity,
@@ -1365,7 +1365,7 @@ impl HeadlessViewerGpuAdapter {
                 &mut self.native_import_gpu_timing,
             );
         }
-        let timestamp_token = timestamp_token_result
+        let mut timestamp_token = timestamp_token_result
             .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?
             .flatten();
         let heterogeneous_inputs = frame.take_heterogeneous_gpu_inputs();
@@ -1393,19 +1393,39 @@ impl HeadlessViewerGpuAdapter {
             program_scopes: None,
             signal_monitoring: None,
         };
-        let record_result =
-            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-                let mut stage_marker = HeadlessGpuStageMarker { ring, token };
-                self.runtime.record_with_stage_marker(
-                    &self.device,
-                    &self.queue,
-                    &mut encoder,
-                    request,
-                    Some(&mut stage_marker),
-                )
-            } else {
-                self.runtime.record(&self.device, &self.queue, &mut encoder, request)
-            };
+        let mut timestamp_coverage_error = None;
+        let record_result = if pass_timestamps {
+            let ring = self.timestamp_ring.as_mut().expect("selected pass ring");
+            let scope = ring.begin_pass_frame(&self.device, &mut encoder);
+            collect_headless_native_import_gpu_timings_after_device_poll(
+                &mut self.runtime,
+                &mut self.native_import_gpu_timing,
+            );
+            match scope.map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))? {
+                Some((token, mut recorder)) => {
+                    timestamp_token = Some(token);
+                    let result =
+                        self.runtime.record(&self.device, &self.queue, &mut recorder, request);
+                    let receipt = recorder.finish();
+                    timestamp_coverage_error = receipt.coverage().err();
+                    ring.finish_pass_frame(receipt)
+                        .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+                    result
+                }
+                None => self.runtime.record(&self.device, &self.queue, &mut encoder, request),
+            }
+        } else if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+            let mut stage_marker = HeadlessGpuStageMarker { ring, token };
+            self.runtime.record_with_stage_marker(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                request,
+                Some(&mut stage_marker),
+            )
+        } else {
+            self.runtime.record(&self.device, &self.queue, &mut encoder, request)
+        };
         let mut record = match record_result {
             Ok(record) => record,
             Err(error) => {
@@ -1427,7 +1447,8 @@ impl HeadlessViewerGpuAdapter {
                 return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
         };
-        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
+        if !pass_timestamps
+            && let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
             && let Err(error) = ring.finish_frame(&mut encoder, token)
         {
             drop(record);
@@ -1498,7 +1519,10 @@ impl HeadlessViewerGpuAdapter {
                 record_submit_us,
                 completion_wait_us: 0,
                 gpu_completion_observed: false,
-                gpu_timestamp_token: timestamp_token.map(|token| token.id()),
+                gpu_timestamp_token: timestamp_token
+                    .filter(|_| timestamp_coverage_error.is_none())
+                    .map(|token| token.id()),
+                gpu_timestamp_coverage_error: timestamp_coverage_error,
                 cpu_stage_timings: Some(record.cpu_stage_timings),
                 native_import_gpu_timing_receipt,
                 compositing_diagnostics: Some(record.compositing_diagnostics),

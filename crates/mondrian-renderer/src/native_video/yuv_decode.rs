@@ -1000,7 +1000,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     /// Record one decode draw into the plan's encoded source resource.
     pub fn record(
         &self,
-        encoder: &mut impl crate::gpu_command::GpuCommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuNativeYuvDecodePlan,
         prepared: &GpuNativeYuvPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,

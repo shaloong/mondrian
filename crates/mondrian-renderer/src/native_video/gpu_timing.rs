@@ -364,7 +364,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn begin_import(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         decode_fence_ready_at_admission: Option<bool>,
     ) -> NativeVideoImportGpuTimingProbe {
         let candidate_token = self.active_candidate.as_ref().map(|active| active.token);
@@ -402,7 +402,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn mark_after_yuv(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         self.mark(
@@ -414,7 +414,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn mark_after_input_color(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         self.mark(
@@ -426,7 +426,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn finish_recording(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         let NativeVideoImportGpuTimingProbeDisposition::Recording(token) = &probe.disposition
@@ -567,7 +567,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
         marker: NativeVideoImportGpuTimestampMarker,
     ) {
@@ -755,7 +755,7 @@ impl NativeVideoImportGpuTimestampRing {
 
     fn begin(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     ) -> Result<NativeVideoImportGpuTimestampAdmission, String> {
         let Some(slot) = self
             .slots
@@ -769,7 +769,7 @@ impl NativeVideoImportGpuTimestampRing {
         };
         let token = NativeVideoImportGpuTimestampToken { id: self.next_id, slot };
         self.next_id = next_id;
-        self.slots[slot].timer.begin(encoder);
+        self.slots[slot].timer.begin(encoder)?;
         self.slots[slot].state =
             NativeVideoImportGpuTimestampSlotState::Recording { token, next_query_index: 1 };
         Ok(NativeVideoImportGpuTimestampAdmission::Recording(token))
@@ -777,7 +777,7 @@ impl NativeVideoImportGpuTimestampRing {
 
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         token: NativeVideoImportGpuTimestampToken,
         marker: NativeVideoImportGpuTimestampMarker,
     ) -> Result<(), String> {
@@ -790,7 +790,7 @@ impl NativeVideoImportGpuTimestampRing {
                 token: active,
                 next_query_index,
             } if *active == token && *next_query_index == expected => {
-                slot.timer.mark(encoder, marker);
+                slot.timer.mark(encoder, marker)?;
                 *next_query_index = next_query_index.saturating_add(1);
                 Ok(())
             }
@@ -803,11 +803,11 @@ impl NativeVideoImportGpuTimestampRing {
 
     fn finish(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         token: NativeVideoImportGpuTimestampToken,
     ) -> Result<(), String> {
         self.validate_recording_complete(token)?;
-        self.slots[token.slot].timer.finish(encoder);
+        self.slots[token.slot].timer.finish(encoder)?;
         Ok(())
     }
 
@@ -976,32 +976,36 @@ impl NativeVideoImportGpuTimestampTimer {
         }
     }
 
-    fn begin(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.query_set, 0);
+    fn begin(&self, encoder: &mut dyn crate::gpu_command::GpuCommandEncoder) -> Result<(), String> {
+        encoder.write_timestamp(&self.query_set, 0)
     }
 
     fn mark(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         marker: NativeVideoImportGpuTimestampMarker,
-    ) {
-        encoder.write_timestamp(&self.query_set, marker.query_index());
+    ) -> Result<(), String> {
+        encoder.write_timestamp(&self.query_set, marker.query_index())
     }
 
-    fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn finish(
+        &self,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+    ) -> Result<(), String> {
         encoder.resolve_query_set(
             &self.query_set,
             0..NATIVE_IMPORT_TIMESTAMP_COUNT,
             &self.resolve_buffer,
             0,
-        );
+        )?;
         encoder.copy_buffer_to_buffer(
             &self.resolve_buffer,
             0,
             &self.readback_buffer,
             0,
-            NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES,
+            Some(NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES),
         );
+        Ok(())
     }
 
     fn map_async(&self) -> Receiver<Result<(), wgpu::BufferAsyncError>> {

@@ -5225,7 +5225,7 @@ pub(crate) struct OcioGpuWgpuRenderPassRecorder;
 
 impl OcioGpuWgpuRenderPassRecorder {
     pub(crate) fn record(
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &OcioGpuWgpuRenderPassNodePlan,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,

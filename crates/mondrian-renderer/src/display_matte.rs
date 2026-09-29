@@ -206,7 +206,7 @@ impl GpuDisplayMattePipeline {
     pub(crate) fn record(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         pool: &GpuColorFrameWgpuResourcePool,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,

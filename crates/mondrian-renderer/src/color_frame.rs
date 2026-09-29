@@ -3196,7 +3196,7 @@ impl GpuColorFrameReadback {
     /// The caller must keep the lease alive until the submitted copy completes.
     pub fn record_presentation_copy(
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
         output: &ViewerGpuPresentationOutputLease,
     ) -> Result<wgpu::Buffer, GpuColorFrameReadbackError> {
@@ -3206,7 +3206,7 @@ impl GpuColorFrameReadback {
     /// Create a MAP_READ buffer and record a texture-to-buffer copy into the encoder.
     pub fn record_copy(
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
         resource: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
     ) -> Result<wgpu::Buffer, GpuColorFrameReadbackError> {
@@ -3232,7 +3232,7 @@ impl GpuColorFrameReadback {
 
     fn record_copy_unchecked(
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
         resource: &GpuColorFrameWgpuResource,
     ) -> wgpu::Buffer {

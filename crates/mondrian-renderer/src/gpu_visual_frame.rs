@@ -398,7 +398,7 @@ impl GpuVisualFrameExecutor {
         session: &mut crate::color::GpuColorExecutionSession,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuVisualFrameRequest<'_>,
     ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
         let runtime = session.runtime_mut();
@@ -576,7 +576,7 @@ impl GpuVisualFrameExecutor {
         runtime: &mut RenderGpuOutputBoundaryRuntime,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: &GpuVisualFrameRequest<'_>,
         source: &GpuVisualSourceLayer,
         compositing_diagnostics: &mut GpuCompositingDiagnostics,
@@ -697,7 +697,7 @@ impl GpuVisualFrameExecutor {
         runtime: &mut RenderGpuOutputBoundaryRuntime,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: &GpuVisualFrameRequest<'_>,
         input: &GpuVisualTransitionInput,
         compositing_diagnostics: &mut GpuCompositingDiagnostics,

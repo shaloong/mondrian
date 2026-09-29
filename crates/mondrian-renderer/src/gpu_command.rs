@@ -63,6 +63,29 @@ pub trait GpuCommandEncoder {
         size: Option<wgpu::BufferAddress>,
     );
 
+    /// Bind a whole-buffer map to completion of the actual recorded submission.
+    fn map_buffer_on_submit(
+        &self,
+        buffer: &wgpu::Buffer,
+        mode: wgpu::MapMode,
+        callback: Box<dyn FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static>,
+    );
+
+    /// Record a semantic stage boundary; plain encoders need no instrumentation.
+    fn mark_stage(&mut self, stage: GpuTimestampStageMarker);
+
+    /// Write an encoder counter when that recording mode is supported.
+    fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, index: u32) -> Result<(), String>;
+
+    /// Resolve query data in an explicitly completed measurement's encoder.
+    fn resolve_query_set(
+        &mut self,
+        query_set: &wgpu::QuerySet,
+        range: std::ops::Range<u32>,
+        destination: &wgpu::Buffer,
+        offset: wgpu::BufferAddress,
+    ) -> Result<(), String>;
+
     /// Clear selected texture subresources.
     fn clear_texture(&mut self, texture: &wgpu::Texture, range: &wgpu::ImageSubresourceRange);
 }
@@ -129,13 +152,40 @@ impl GpuCommandEncoder for wgpu::CommandEncoder {
         self.clear_buffer(buffer, offset, size);
     }
 
+    fn map_buffer_on_submit(
+        &self,
+        buffer: &wgpu::Buffer,
+        mode: wgpu::MapMode,
+        callback: Box<dyn FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static>,
+    ) {
+        self.map_buffer_on_submit(buffer, mode, .., callback);
+    }
+
+    fn mark_stage(&mut self, _stage: GpuTimestampStageMarker) {}
+
+    fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, index: u32) -> Result<(), String> {
+        self.write_timestamp(query_set, index);
+        Ok(())
+    }
+
+    fn resolve_query_set(
+        &mut self,
+        query_set: &wgpu::QuerySet,
+        range: std::ops::Range<u32>,
+        destination: &wgpu::Buffer,
+        offset: wgpu::BufferAddress,
+    ) -> Result<(), String> {
+        self.resolve_query_set(query_set, range, destination, offset);
+        Ok(())
+    }
+
     fn clear_texture(&mut self, texture: &wgpu::Texture, range: &wgpu::ImageSubresourceRange) {
         self.clear_texture(texture, range);
     }
 }
 
 /// Why recorded commands cannot yield a complete pass-boundary measurement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum GpuPassTimestampCoverageError {
     /// No real render or compute pass was recorded.
     NoPass,
@@ -382,6 +432,35 @@ impl GpuCommandEncoder for GpuPassTimestampRecorder<'_> {
     ) {
         self.coverage.unmeasured_command();
         self.encoder.clear_buffer(buffer, offset, size);
+    }
+
+    fn map_buffer_on_submit(
+        &self,
+        buffer: &wgpu::Buffer,
+        mode: wgpu::MapMode,
+        callback: Box<dyn FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static>,
+    ) {
+        self.encoder.map_buffer_on_submit(buffer, mode, .., callback);
+    }
+
+    fn mark_stage(&mut self, stage: GpuTimestampStageMarker) {
+        self.coverage.mark(stage);
+    }
+
+    fn write_timestamp(&mut self, _query_set: &wgpu::QuerySet, _index: u32) -> Result<(), String> {
+        self.coverage.reject(GpuPassTimestampCoverageError::ConflictingTimestampWrites);
+        Err("encoder timestamp writes are unavailable inside a measured pass scope".to_owned())
+    }
+
+    fn resolve_query_set(
+        &mut self,
+        _query_set: &wgpu::QuerySet,
+        _range: std::ops::Range<u32>,
+        _destination: &wgpu::Buffer,
+        _offset: wgpu::BufferAddress,
+    ) -> Result<(), String> {
+        self.coverage.reject(GpuPassTimestampCoverageError::ConflictingTimestampWrites);
+        Err("query resolution must occur after measured pass scope completion".to_owned())
     }
 
     fn clear_texture(&mut self, texture: &wgpu::Texture, range: &wgpu::ImageSubresourceRange) {

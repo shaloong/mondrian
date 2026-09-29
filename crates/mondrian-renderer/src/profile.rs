@@ -50,6 +50,12 @@ pub fn gpu_timestamp_query_device_features(supported: wgpu::Features) -> wgpu::F
     }
 }
 
+/// Frame timing uses encoder boundaries when supported, otherwise actual passes.
+/// This does not establish complete coverage; the consuming recording receipt does.
+pub fn gpu_frame_timestamp_query_device_features(supported: wgpu::Features) -> wgpu::Features {
+    (supported & wgpu::Features::TIMESTAMP_QUERY) | gpu_timestamp_query_device_features(supported)
+}
+
 /// Reusable two-point GPU timer for a caller that waits for one submission.
 ///
 /// This timer owns separate resolve and CPU-readback buffers. `begin` and
@@ -320,8 +326,12 @@ impl GpuTimestampStageTimer {
         encoder.write_timestamp(&self.query_set, 0);
     }
 
-    fn mark(&self, encoder: &mut wgpu::CommandEncoder, marker: GpuTimestampStageMarker) {
-        encoder.write_timestamp(&self.query_set, marker.query_index());
+    fn mark(
+        &self,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        marker: GpuTimestampStageMarker,
+    ) -> Result<(), String> {
+        encoder.write_timestamp(&self.query_set, marker.query_index())
     }
 
     fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -553,6 +563,11 @@ impl GpuTimestampQueryRing {
         Ok(slot.layout.is_some())
     }
 
+    /// Whether frame work must be recorded through actual pass boundaries.
+    pub const fn uses_pass_timestamps(&self) -> bool {
+        self.pass_timestamps
+    }
+
     /// Poll completed maps and begin one frame timestamp without waiting.
     pub fn begin_frame(
         &mut self,
@@ -595,7 +610,7 @@ impl GpuTimestampQueryRing {
     /// Record one ordered Viewer stage marker without submitting or waiting.
     pub fn mark_stage(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         token: GpuTimestampToken,
         marker: GpuTimestampStageMarker,
     ) -> Result<(), GpuTimestampRingError> {
@@ -610,7 +625,9 @@ impl GpuTimestampQueryRing {
             GpuTimestampSlotState::Recording { token: active, next_query_index }
                 if *active == token && *next_query_index == expected =>
             {
-                slot.timer.mark(encoder, marker);
+                slot.timer
+                    .mark(encoder, marker)
+                    .map_err(GpuTimestampRingError::EncoderCommand)?;
                 *next_query_index = next_query_index.saturating_add(1);
                 Ok(())
             }
@@ -775,6 +792,9 @@ impl GpuTimestampQueryRing {
 /// Failure in the bounded asynchronous timestamp-query ring.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuTimestampRingError {
+    /// A requested encoder command is unavailable in this recording scope.
+    #[error("GPU timestamp encoder command rejected: {0}")]
+    EncoderCommand(String),
     /// The caller used an encoder boundary with a pass ring, or vice versa.
     #[error("GPU timestamp recording API does not match the ring mode")]
     RecordingMode,
@@ -830,8 +850,8 @@ pub enum GpuTimestampReadError {
 #[cfg(test)]
 mod tests {
     use super::{
-        gpu_timestamp_query_device_features, GpuTimestampQueryRing, GpuTimestampRingError,
-        GpuTimestampStageMarker,
+        gpu_frame_timestamp_query_device_features, gpu_timestamp_query_device_features,
+        GpuTimestampQueryRing, GpuTimestampRingError, GpuTimestampStageMarker,
     };
 
     #[test]
@@ -841,6 +861,19 @@ mod tests {
         let required =
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         assert_eq!(gpu_timestamp_query_device_features(required), required);
+    }
+
+    #[test]
+    fn frame_timestamp_features_admit_actual_pass_support() {
+        let pass = wgpu::Features::TIMESTAMP_QUERY;
+        let encoder = wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        assert!(gpu_frame_timestamp_query_device_features(wgpu::Features::empty()).is_empty());
+        assert!(gpu_frame_timestamp_query_device_features(encoder).is_empty());
+        assert_eq!(gpu_frame_timestamp_query_device_features(pass), pass);
+        assert_eq!(
+            gpu_frame_timestamp_query_device_features(pass | encoder),
+            pass | encoder
+        );
     }
 
     #[test]

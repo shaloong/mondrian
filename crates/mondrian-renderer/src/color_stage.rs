@@ -574,7 +574,7 @@ pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Prepared OCIO fullscreen render pipeline.
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
@@ -600,7 +600,7 @@ pub struct RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Load operation for the output color attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
@@ -685,7 +685,7 @@ pub(crate) struct RenderGpuFusedInputBackend {
 impl RenderGpuFusedInputBackend {
     pub(crate) fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::BindGroup,
         output: &wgpu::TextureView,
     ) {
@@ -1046,7 +1046,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let Self { frame_ids, frame_table, resource_pool, .. } = self;
@@ -1068,7 +1068,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         width: u32,
         height: u32,
         working_color_space: WorkingColorSpace,
@@ -1096,7 +1096,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         left: &GpuColorFrameHandle,
         right: &GpuColorFrameHandle,
         progress: f32,
@@ -1358,7 +1358,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
         engine: ColorEngine,
         gpu_options: RenderColorTransformGpuOptions,
@@ -1467,7 +1467,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         width: u32,
         height: u32,
         working_color_space: WorkingColorSpace,
@@ -3008,7 +3008,7 @@ pub struct RenderGpuOutputStageBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Prepared OCIO fullscreen render pipeline.
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
@@ -3354,7 +3354,7 @@ impl RenderGpuOutputStageResourcePlan {
     pub fn record_readback_wgpu(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     ) -> Result<Option<wgpu::Buffer>, RenderGpuOutputStageReadbackError> {
         let Some(readback) = &self.readback else {
@@ -4014,7 +4014,7 @@ impl RenderGpuColorPassSchedule {
 
     fn record_wgpu(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
@@ -4041,7 +4041,7 @@ impl RenderGpuColorPassSchedule {
     pub fn record_wgpu_from_resources(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_input_layout: &OcioGpuWgpuPreparedWrapperInputLayout,

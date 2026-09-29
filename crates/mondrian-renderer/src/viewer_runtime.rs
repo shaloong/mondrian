@@ -153,12 +153,27 @@ pub enum ViewerGpuExecutionGpuStage {
     SignalMonitoring,
 }
 
+impl ViewerGpuExecutionGpuStage {
+    /// Hardware attribution boundary matching this production execution stage.
+    pub fn timestamp_marker(self) -> crate::profile::GpuTimestampStageMarker {
+        use crate::profile::GpuTimestampStageMarker as Marker;
+        match self {
+            Self::WorkingComposite => Marker::AfterWorkingComposite,
+            Self::Spatial => Marker::AfterSpatial,
+            Self::ProgramOutputBoundary => Marker::AfterProgramOutputBoundary,
+            Self::MonitorAdaptation => Marker::AfterMonitorAdaptation,
+            Self::ProgramScopes => Marker::AfterProgramScopes,
+            Self::SignalMonitoring => Marker::AfterSignalMonitoring,
+        }
+    }
+}
+
 /// Adapter hook for writing GPU markers without coupling execution to a profiler.
 pub trait ViewerGpuExecutionStageMarker {
     /// Write one ordered marker into the active Viewer command encoder.
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         stage: ViewerGpuExecutionGpuStage,
     ) -> Result<(), String>;
 }
@@ -721,7 +736,7 @@ impl ViewerGpuExecutionRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
         self.record_with_stage_marker(device, queue, encoder, request, None)
@@ -732,7 +747,7 @@ impl ViewerGpuExecutionRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
         stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
@@ -821,7 +836,7 @@ impl ViewerGpuExecutionRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         mut request: ViewerGpuExecutionRequest<'_>,
         mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
@@ -1387,9 +1402,10 @@ fn validate_signal_monitor_contract(
 
 fn mark_gpu_stage(
     marker: &mut Option<&mut dyn ViewerGpuExecutionStageMarker>,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     stage: ViewerGpuExecutionGpuStage,
 ) -> Result<(), ViewerGpuExecutionError> {
+    encoder.mark_stage(stage.timestamp_marker());
     if let Some(marker) = marker.as_deref_mut() {
         marker.mark(encoder, stage).map_err(ViewerGpuExecutionError::StageMarker)?;
     }
@@ -1855,7 +1871,7 @@ fn prepare_composite<'a>(
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<PreparedComposite<'a>, ViewerGpuExecutionError> {
     let mut prepared = PreparedComposite {
         gpu_input_handles: Vec::new(),
@@ -1978,7 +1994,7 @@ fn prepare_transition_input<'a>(
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<Option<PreparedCompositeLayer<'a>>, ViewerGpuExecutionError> {
     if weight <= 0.0 {
         return Ok(None);
@@ -2021,7 +2037,7 @@ fn prepare_source_layer<'a>(
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<PreparedCompositeLayer<'a>, ViewerGpuExecutionError> {
     match source_layer {
         crate::ViewerGpuSourceLayer::Media {
@@ -2482,7 +2498,7 @@ fn execute_prepared_composite_nodes<'a>(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<(Vec<PreparedCompositeLayer<'a>>, GpuCompositingDiagnostics), ViewerGpuExecutionError> {
     let nodes = std::mem::take(&mut prepared.nodes);
     let mut layers = Vec::with_capacity(nodes.len());
@@ -2555,7 +2571,7 @@ fn materialize_transition_source<'a>(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     diagnostics: &mut GpuCompositingDiagnostics,
 ) -> Result<Option<GpuColorFrameHandle>, ViewerGpuExecutionError> {
     let Some(layer) = layer else {
@@ -2608,7 +2624,7 @@ fn record_external_domain_effect(
     frame_seed: i64,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<usize, ViewerGpuExecutionError> {
     let record = runtime
         .record_wgpu_effect_domain_round_trip(
@@ -2686,7 +2702,7 @@ fn record_cpu_yuv_video_layer(
     color_runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<crate::cpu_yuv::CpuYuvMaterializationRecord, ViewerGpuExecutionError> {
     crate::cpu_yuv::record_cpu_yuv_frame(
         &native_runtime.cpu_yuv_decoder,
@@ -2717,7 +2733,7 @@ fn record_gpu_input_layer(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
 ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
     runtime.record_wgpu_input_stage_owned_backend(
         &source.input_transform,

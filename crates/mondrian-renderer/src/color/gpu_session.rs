@@ -23,7 +23,7 @@ pub struct GpuColorBackendContext<'a> {
     /// Queue used for uploads and later submission.
     pub queue: &'a wgpu::Queue,
     /// Encoder receiving the color pass.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Load operation for the output target.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
@@ -137,7 +137,7 @@ impl GpuColorExecutionSession {
     pub fn record_readback(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
     ) -> Result<wgpu::Buffer, GpuColorSessionReadbackError> {
         let resource = self.runtime.frame_table().get(&plan.handle)?;

@@ -433,6 +433,8 @@ struct HeadlessViewerGpuExecutionSummary {
     duplicate_gpu_timestamp_samples: usize,
     duplicate_gpu_timestamp_ownership: usize,
     missing_gpu_timestamp_frames: usize,
+    gpu_timestamp_coverage_errors:
+        Vec<mondrian_renderer::gpu_command::GpuPassTimestampCoverageError>,
     discarded_gpu_timestamp_frames: u64,
     fallback_count: usize,
     fallback_reasons: Vec<String>,
@@ -543,6 +545,9 @@ impl HeadlessViewerGpuExecutionSummary {
             self.signal_monitoring_samples_us.push(timings.signal_monitoring_us);
             self.monitor_adaptation_samples_us.push(timings.monitor_adaptation_us);
             self.display_calibration_samples_us.push(timings.display_calibration_us);
+        }
+        if let Some(error) = execution.gpu_timestamp_coverage_error {
+            self.gpu_timestamp_coverage_errors.push(error);
         }
         if let Some(token) = execution.gpu_timestamp_token {
             if !self.expected_gpu_timestamp_tokens.insert(token) {
@@ -1323,6 +1328,7 @@ fn headless_gpu_summary_separates_execution_publication_and_terminal_rejection()
             completion_wait_us: 1,
             gpu_completion_observed: true,
             gpu_timestamp_token: Some(token),
+            gpu_timestamp_coverage_error: None,
             cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
             native_import_gpu_timing_receipt: None,
             compositing_diagnostics: None,
@@ -1439,6 +1445,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
                 completion_wait_us: 1,
                 gpu_completion_observed: true,
                 gpu_timestamp_token: Some(u64::from(width) << 32 | u64::from(height)),
+                gpu_timestamp_coverage_error: None,
                 cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
                 native_import_gpu_timing_receipt: None,
                 compositing_diagnostics: None,
@@ -2457,6 +2464,8 @@ struct PreviewExternalPlaybackGateReport {
     gpu_presented_unique_frame_completions: usize,
     gpu_timestamped_frames: usize,
     gpu_missing_timestamp_frames: usize,
+    gpu_timestamp_coverage_errors:
+        Vec<mondrian_renderer::gpu_command::GpuPassTimestampCoverageError>,
     gpu_discarded_timestamp_frames: u64,
     gpu_execution_p95_limit_us: u64,
     gpu_execution_p95_observed_us: u64,
@@ -6477,6 +6486,7 @@ fn evaluate_external_playback_gates(
         gpu_presented_unique_frame_completions: headless_gpu.presented_unique_frame_completions,
         gpu_timestamped_frames: headless_gpu.gpu_duration_samples_us.len(),
         gpu_missing_timestamp_frames: headless_gpu.missing_gpu_timestamp_frames,
+        gpu_timestamp_coverage_errors: headless_gpu.gpu_timestamp_coverage_errors.clone(),
         gpu_discarded_timestamp_frames: headless_gpu.discarded_gpu_timestamp_frames,
         gpu_execution_p95_limit_us,
         gpu_execution_p95_observed_us,

@@ -153,7 +153,7 @@ impl GpuDisplayCalibrationRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         calibration: Arc<DisplayCalibrationLut3d>,
         output_format: GpuColorFrameTextureFormat,
@@ -449,7 +449,7 @@ impl GpuDisplayCalibrationPipeline {
     /// Record one monitor calibration draw.
     pub fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuDisplayCalibrationPlan,
         prepared: &GpuDisplayCalibrationPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
