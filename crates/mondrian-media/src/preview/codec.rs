@@ -81,6 +81,15 @@ impl PreviewCodec {
             ));
         }
         let is_hevc = parameters.id() == ffmpeg::codec::Id::HEVC;
+        let codec_tag = raw.codec_tag.swap_bytes();
+        let prores_chroma = if parameters.id() == ffmpeg::codec::Id::PRORES {
+            super::videotoolbox::prores_chroma_format_for_tag(codec_tag)
+        } else {
+            None
+        };
+        if !is_hevc && prores_chroma.is_none() {
+            return Err(PreviewCodecError::Packet("unsupported native codec tag"));
+        }
         let hevc = if is_hevc {
             let source_chroma =
                 super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format).ok_or(
@@ -120,14 +129,16 @@ impl PreviewCodec {
             codec: if is_hevc {
                 u32::from_be_bytes(*b"hvc1")
             } else {
-                raw.codec_tag.swap_bytes()
+                codec_tag
             },
             primaries: raw.color_primaries as u32,
             transfer: raw.color_trc as u32,
             matrix: raw.color_space as u32,
-            chroma_format_idc: hevc
-                .as_ref()
-                .map_or(3, |configuration| configuration.chroma_format_idc),
+            chroma_format_idc: if let Some(configuration) = &hevc {
+                configuration.chroma_format_idc
+            } else {
+                prores_chroma.expect("validated ProRes tag")
+            },
         };
         Ok(Self::VideoToolbox(VideoToolboxCodec {
             decoder: Some(match &hevc {
@@ -377,7 +388,7 @@ impl PreviewCodec {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod native_hevc_tests {
+mod native_codec_tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::ffi::c_void;
@@ -405,6 +416,47 @@ mod native_hevc_tests {
         let index = stream.index();
         let packets = input.packets().filter(|(s, _)| s.index() == index).map(|(_, p)| p).collect();
         (parameters, time_base, packets)
+    }
+
+    #[test]
+    #[ignore = "requires actual VideoToolbox and a tagged progressive ProRes422 fixture"]
+    fn prores422_native_packet_metadata_conflicts_poison_decoder() {
+        ffmpeg::init().unwrap();
+        let path = std::env::var("MONDRIAN_PRORES422_VT_TEST_MEDIA_PATH")
+            .expect("explicit tagged progressive ProRes422 fixture");
+        let mut input = ffmpeg::format::input(&path).unwrap();
+        let stream = input.streams().best(ffmpeg::media::Type::Video).unwrap();
+        let parameters = stream.parameters();
+        let time_base = stream.time_base();
+        let index = stream.index();
+        let packet = input.packets().find(|(s, _)| s.index() == index).unwrap().1;
+        let original = packet.data().unwrap();
+        assert_eq!(&original[4..8], b"icpf");
+        for (header_offset, altered, expected_status) in [
+            (12, (original[20] & 0x3f) | 0xc0, -70012),
+            (17, original[25] | 1, -70015),
+            (14, if original[22] == 1 { 9 } else { 1 }, -70013),
+        ] {
+            let mut bytes = original.to_vec();
+            bytes[8 + header_offset] = altered;
+            let mut conflict = ffmpeg::Packet::copy(&bytes);
+            conflict.set_pts(packet.pts());
+            conflict.set_duration(packet.duration());
+            let mut codec = PreviewCodec::videotoolbox(
+                &parameters,
+                time_base,
+                crate::DecodedVideoRange::Limited,
+            )
+            .unwrap();
+            assert!(matches!(
+                codec.send_packet(&conflict),
+                Err(PreviewCodecError::VideoToolbox(
+                    super::super::videotoolbox::VideoToolboxError { status, stage: 11 }
+                )) if status == expected_status
+            ));
+            codec.flush();
+            assert!(codec.send_packet(&packet).is_err(), "poison survives reset");
+        }
     }
 
     fn hash_pixels(frame: &ffmpeg::util::frame::video::Video) -> [u8; 32] {

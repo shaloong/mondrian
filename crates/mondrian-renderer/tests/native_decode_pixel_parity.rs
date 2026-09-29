@@ -155,7 +155,7 @@ fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
             (DecodedVideoSurfaceFormat::P210, colors[index % 3])
         }),
         1.0,
-        PreviewDecodePath::InProcessFfmpegNative,
+        PreviewDecodePath::InProcessVideoToolboxNative,
     )
 }
 
@@ -189,7 +189,7 @@ fn prores422_matched_reconstruction_uses_the_same_viewer_color_path() -> Result<
             true,
             Some((
                 DecodedVideoSurfaceFormat::P210,
-                PreviewDecodePath::InProcessFfmpegNative,
+                PreviewDecodePath::InProcessVideoToolboxNative,
             )),
             None,
             color,

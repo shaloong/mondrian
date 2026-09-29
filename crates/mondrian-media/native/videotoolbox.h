@@ -27,7 +27,7 @@ enum {
 typedef struct {
     uint32_t width, height, codec;
     uint32_t primaries, transfer, matrix;
-    /* HEVC SPS chroma_format_idc (1/2/3); ProRes 4444 always uses 3. */
+    /* HEVC SPS chroma_format_idc (1/2/3); ProRes 422 uses 2, 4444 uses 3. */
     uint32_t chroma_format_idc;
 } MdnVtContract;
 typedef struct {

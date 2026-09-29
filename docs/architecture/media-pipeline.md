@@ -3028,8 +3028,9 @@ conflicting explicit locations are rejected. This rule is confined to the
 actual 4:2:2 sampling grid, not inferred from a platform or filename. ProRes
 Proxy/LT/Standard/HQ with a proven 10-bit 4:2:2 format may enter the existing
 native codec/device/import capability checks. This is candidate admission,
-not hardware-execution evidence. On macOS, progressive ProRes 4444/4444 XQ
-with an explicit limited-range source contract may enter the direct
+not hardware-execution evidence. On macOS, progressive ProRes 422
+Proxy/LT/Standard/HQ and ProRes 4444/4444 XQ with an explicit limited-range
+source contract may enter the direct
 VideoToolbox codec adapter described below. Other profiles and platforms retain
 their existing admission checks. 4:4:4 permits unspecified chroma location
 because no subsampled grid origin exists. This remains
@@ -4316,6 +4317,27 @@ CUDA handle validation, Vulkan allocation/adoption, and the device-to-device
 plane copy; this work must not be recorded as source-contract validation or as
 a zero-cost bridge. A generated fixture proves this software route and timing
 only, not original-native-media qualification.
+
+### macOS ProRes 422 direct decode evidence
+
+The same exclusive `PreviewCodec`/VideoToolbox adapter now accepts the four
+progressive ProRes 422 variants. It requests a two-plane `x422` CVPixelBuffer,
+validates real plane extents, strides, IOSurface identity and color attachments,
+and publishes P210 only when the session reports actual hardware decoding.
+Every compressed intra packet must prove 4:2:2 chroma, no alpha, progressive
+scan, unchanged extent and matching CICP before it reaches VideoToolbox.
+Conflicting packet metadata poisons the decoder, and seek reset cannot unpoison
+it. This reuses the sole Preview candidate/session owner and the shared Metal
+YUV/OCIO/Program Output path; it creates no platform color interpretation.
+
+On the M4/macOS 26.4.1 development host, the direct path rendered Proxy
+SDR/PQ/HLG and HQ SDR hardware samples with zero Float16 pixel difference
+against byte-exact compact CPU captures of those same `x422` codes. The App
+short Preview gate observed hardware decode, GPU completion, color contract,
+zero CPU pixel transfer and consuming closure for 1080p Proxy SDR/PQ/HLG.
+Independent FFmpeg software reconstruction still differs from VideoToolbox
+in the existing ProRes 422 test. That unresolved comparison does not become
+Passed from the matched-sample or short Preview results.
 
 ### macOS ProRes 4444 admission evidence
 

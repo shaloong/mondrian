@@ -315,6 +315,12 @@ hardware decode. A separate public-API hardware-observed P216 candidate also
 failed the unchanged tolerance and was removed. Neither route is qualified by
 successful decode or lifecycle receipts alone.
 
+The subsequent direct VideoToolbox `x422` route preserves P210 sampling and
+reports the decoder session's observed hardware property. The unchanged
+twelve-fixture comparison still failed all 72 seeks (maximum 0.009521484),
+now with 72 observed hardware frames. The discrepancy is therefore not
+resolved by proving hardware execution.
+
 FFmpeg 8.1.2's ProRes software reconstruction clips ten-bit samples to
 4–1019; the observed native outputs extend beyond that interval. Diagnostic
 clipping before GPU interpolation reduced, but did not eliminate, the Viewer
@@ -346,13 +352,12 @@ cargo test --locked -p mondrian-renderer --all-features -j 2 \
 ```
 
 On the M4, four observed-hardware captures (Proxy SDR/PQ/HLG and HQ SDR)
-passed all six seeks with zero encoded Float16 Viewer pixel difference. This
-shows that the two production Viewer input paths agree for identical decoded
-codes. It does not prove which independent ProRes decoder is the reference,
-erase the existing cross-decoder failure, or qualify VideoToolbox hardware
-execution in the FFmpeg native owner, which still reports that status as
-unknown. Keep the source/capture provenance and raw byte hashes with the
-external test evidence.
+passed all six seeks with zero encoded Float16 Viewer pixel difference. The
+direct production owner now independently reports `Some(true)` for each
+sample. This shows that the two production Viewer input paths agree for
+identical decoded codes. It does not prove which independent ProRes decoder is
+the reference or erase the existing cross-decoder failure. Keep the
+source/capture provenance and raw byte hashes with the external test evidence.
 
 Keep the independent-decoder test explicitly Failed until reconstruction
 fidelity is resolved. Its ignored default state is NotRun, never Passed.

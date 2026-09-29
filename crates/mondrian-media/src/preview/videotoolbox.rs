@@ -7,7 +7,25 @@ use std::ptr::NonNull;
 
 pub(super) mod hevc;
 
-/// Explicit source contract for limited-range ProRes 4444/XQ or ten-bit HEVC.
+/// CoreMedia ProRes sampling derived from the proved stream FourCC.
+pub(super) const fn prores_chroma_format_for_tag(codec: u32) -> Option<u32> {
+    match codec {
+        value
+            if value == u32::from_be_bytes(*b"apco")
+                || value == u32::from_be_bytes(*b"apcs")
+                || value == u32::from_be_bytes(*b"apcn")
+                || value == u32::from_be_bytes(*b"apch") =>
+        {
+            Some(2)
+        }
+        value if value == u32::from_be_bytes(*b"ap4h") || value == u32::from_be_bytes(*b"ap4x") => {
+            Some(3)
+        }
+        _ => None,
+    }
+}
+
+/// Explicit source contract for limited-range ProRes or ten-bit HEVC.
 /// CICP values must come from the resolved source contract, never defaults.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -16,7 +34,7 @@ pub(super) struct VideoToolboxContract {
     pub width: u32,
     /// Decoded visible height, before presentation orientation.
     pub height: u32,
-    /// CoreMedia big-endian FourCC (`ap4h`, `ap4x` or `hvc1`).
+    /// CoreMedia big-endian FourCC (supported `ap*` ProRes or `hvc1`).
     pub codec: u32,
     /// CICP color primaries (1 or 9).
     pub primaries: u32,
@@ -24,7 +42,7 @@ pub(super) struct VideoToolboxContract {
     pub transfer: u32,
     /// CICP matrix coefficients (1 or 9).
     pub matrix: u32,
-    /// Validated HEVC SPS chroma_format_idc (1/2/3); ProRes 4444 uses 3.
+    /// Validated HEVC SPS chroma_format_idc (1/2/3); ProRes 422 uses 2 and 4444 uses 3.
     pub chroma_format_idc: u32,
 }
 
@@ -213,6 +231,8 @@ impl VideoToolboxDecoder {
                         3 => u32::from_be_bytes(*b"x444"),
                         _ => return Err(VideoToolboxError { status: -70001, stage: 9 }),
                     }
+                } else if self.contract.chroma_format_idc == 2 {
+                    u32::from_be_bytes(*b"x422")
                 } else {
                     u32::from_be_bytes(*b"s4as")
                 }

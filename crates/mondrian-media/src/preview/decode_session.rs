@@ -1883,7 +1883,8 @@ impl PreviewDecodeSession {
             // SAFETY: These source parameters remain owned throughout setup.
             let raw = unsafe { &*parameters.as_ptr() };
             let direct_codec = ((codec_id == ffmpeg::codec::Id::PRORES
-                && matches!(raw.codec_tag.swap_bytes(), 0x61703468 | 0x61703478))
+                && super::videotoolbox::prores_chroma_format_for_tag(raw.codec_tag.swap_bytes())
+                    .is_some())
                 || (codec_id == ffmpeg::codec::Id::HEVC
                     && super::videotoolbox::hevc::source_chroma_format(raw.profile, raw.format)
                         .is_some()

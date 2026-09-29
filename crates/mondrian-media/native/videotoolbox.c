@@ -46,7 +46,16 @@ static CFMutableDictionaryRef dictionary(void) {
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 }
 
+static int prores422(uint32_t codec) {
+    return codec == kCMVideoCodecType_AppleProRes422Proxy ||
+        codec == kCMVideoCodecType_AppleProRes422LT ||
+        codec == kCMVideoCodecType_AppleProRes422 ||
+        codec == kCMVideoCodecType_AppleProRes422HQ;
+}
+
 static OSType output_pixel(const MdnVtContract *contract) {
+    if (prores422(contract->codec))
+        return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
     if (contract->codec != kCMVideoCodecType_HEVC)
         return kCVPixelFormatType_444YpCbCr16VideoRange_16A_TriPlanar;
     switch (contract->chroma_format_idc) {
@@ -87,8 +96,12 @@ MdnVtDecoder *mdn_vt_create(const MdnVtContract *contract,
     if (!contract || !contract->width || !contract->height ||
         contract->width > INT32_MAX || contract->height > INT32_MAX ||
         contract->chroma_format_idc < 1 || contract->chroma_format_idc > 3 ||
-        (contract->codec != kCMVideoCodecType_HEVC && contract->chroma_format_idc != 3) ||
-        (contract->codec != kCMVideoCodecType_AppleProRes4444 &&
+        (prores422(contract->codec) && contract->chroma_format_idc != 2) ||
+        ((contract->codec == kCMVideoCodecType_AppleProRes4444 ||
+          contract->codec == kCMVideoCodecType_AppleProRes4444XQ) &&
+         contract->chroma_format_idc != 3) ||
+        (!prores422(contract->codec) &&
+         contract->codec != kCMVideoCodecType_AppleProRes4444 &&
          contract->codec != kCMVideoCodecType_AppleProRes4444XQ &&
          contract->codec != kCMVideoCodecType_HEVC)) {
         fail(error, MDN_VT_ARGUMENT, 0); return NULL;
@@ -187,9 +200,9 @@ static int validate_packet_contract(const MdnVtContract *contract,
         return fail(error, MDN_VT_METADATA, MDN_VT_PACKET_EXTENT_CHANGED);
     if ((header[12] >> 2) & 3)
         return fail(error, MDN_VT_METADATA, MDN_VT_PACKET_SCAN_UNSUPPORTED);
-    if ((header[12] & 0xc0) != 0xc0)
+    if ((header[12] & 0xc0) != (prores422(contract->codec) ? 0x80 : 0xc0))
         return fail(error, MDN_VT_METADATA, MDN_VT_PACKET_CHROMA_UNSUPPORTED);
-    if ((header[17] & 0x0f) > 2)
+    if ((header[17] & 0x0f) > (prores422(contract->codec) ? 0 : 2))
         return fail(error, MDN_VT_METADATA, MDN_VT_PACKET_ALPHA_UNSUPPORTED);
     if (header[14] != contract->primaries || header[15] != contract->transfer ||
         header[16] != contract->matrix)
@@ -252,8 +265,9 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
     if (status) goto done;
     stage = MDN_VT_SURFACE;
     int hevc = decoder->contract.codec == kCMVideoCodecType_HEVC;
+    int is422 = prores422(decoder->contract.codec);
     OSType expected_pixel = output_pixel(&decoder->contract);
-    size_t planes = hevc ? 2 : 3;
+    size_t planes = hevc || is422 ? 2 : 3;
     if (CVPixelBufferGetPixelFormatType(image) != expected_pixel ||
         CVPixelBufferGetWidth(image) != decoder->contract.width ||
         CVPixelBufferGetHeight(image) != decoder->contract.height ||
@@ -261,7 +275,7 @@ int mdn_vt_decode(MdnVtDecoder *decoder, const uint8_t *bytes, size_t size,
         status = -70001; goto done;
     }
     for (size_t plane = 0; plane < planes; plane++) {
-        size_t width = hevc && plane && decoder->contract.chroma_format_idc != 3 ?
+        size_t width = (hevc || is422) && plane && decoder->contract.chroma_format_idc != 3 ?
             (decoder->contract.width + 1) / 2 : decoder->contract.width;
         size_t height = hevc && plane && decoder->contract.chroma_format_idc == 1 ?
             (decoder->contract.height + 1) / 2 : decoder->contract.height;
