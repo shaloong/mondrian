@@ -217,17 +217,37 @@ impl PreviewWorkWatch {
         }
         #[cfg(not(windows))]
         {
+            let started = Instant::now();
             let gate = lock_unpoisoned(&self.shared.wait_gate);
-            if self.revision() != observed {
-                return self.revision();
+            let acquired = Instant::now();
+            let (revision, timed_out) = if self.revision() != observed {
+                let revision = self.revision();
+                drop(gate);
+                (revision, false)
+            } else {
+                let (gate, result) = self
+                    .shared
+                    .changed
+                    .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let revision = self.revision();
+                drop(gate);
+                (revision, result.timed_out())
+            };
+            let finished = Instant::now();
+            if finished.duration_since(started) > timeout.saturating_add(Duration::from_millis(10))
+            {
+                tracing::warn!(
+                    requested_wait_us = timeout.as_micros(),
+                    total_us = finished.duration_since(started).as_micros(),
+                    lock_acquisition_us = acquired.duration_since(started).as_micros(),
+                    wait_and_reacquire_us = finished.duration_since(acquired).as_micros(),
+                    revision_changed = revision != observed,
+                    timed_out,
+                    "Preview work revision wait exceeded requested timeout"
+                );
             }
-            let (gate, _) = self
-                .shared
-                .changed
-                .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            drop(gate);
-            self.revision()
+            revision
         }
     }
 
