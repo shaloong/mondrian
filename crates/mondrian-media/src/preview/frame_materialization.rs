@@ -47,6 +47,11 @@ fn compact_yuv_layout(
             CpuYuvSampleFormat::Unorm16Lsb12,
             CpuYuvChromaPlaneLayout::Planar,
         ),
+        Pixel::YUV420P16LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
         Pixel::YUV422P10LE => (
             CpuYuvChromaSubsampling::Cs422,
             CpuYuvSampleFormat::Unorm16Lsb10,
@@ -55,6 +60,11 @@ fn compact_yuv_layout(
         Pixel::YUV422P12LE => (
             CpuYuvChromaSubsampling::Cs422,
             CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P16LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16,
             CpuYuvChromaPlaneLayout::Planar,
         ),
         Pixel::YUV422P => (
@@ -75,6 +85,11 @@ fn compact_yuv_layout(
         Pixel::YUV444P12LE | Pixel::YUVA444P12LE => (
             CpuYuvChromaSubsampling::Cs444,
             CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P16LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16,
             CpuYuvChromaPlaneLayout::Planar,
         ),
         Pixel::NV12 => (

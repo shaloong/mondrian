@@ -257,6 +257,37 @@ production zero-readback/performance claims require the separate owner counters.
 These short development tests do not replace physical HDR, sustained playback
 or sealed commercial qualification. Ignored tests remain NotRun unless invoked.
 
+## macOS sixteen-bit planar CPU YUV diagnostic
+
+The opt-in `sixteen_bit_planar_420_422_444_share_compact_viewer_color_path`
+test requires nine lossless FFV1 fixtures ordered SDR 4:2:0/4:2:2/4:4:4,
+then PQ in the same grid order, then HLG. Each needs at least 31 frames with
+identical Y samples and constant identical Cb/Cr values across the three
+grids. Source and decoded raw planes must match byte-for-byte, including
+nonzero low component bits. Bind full range/matrix/primaries/transfer CICP
+before FFV1 encoding and verify all four fields in each demuxed stream;
+FFmpeg `setparams` can attach them without a pixel transform. Bind
+`MONDRIAN_PLANAR_16_FIXTURES` to these nine colon-separated paths and
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to the current production worker. The
+test passes matching resolved SDR/PQ/HLG identity into the Viewer; it does
+not independently qualify App-level automatic interpretation.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  sixteen_bit_planar_420_422_444_share_compact_viewer_color_path \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The test uses actual FFmpeg software decode, compact immutable CPU planes,
+the production CPU upload worker, Metal YUV/OCIO/composite/monitor stages,
+six seek samples per fixture, and consuming demux/renderer teardown. It
+checks that no CPU working-frame fallback or native hardware claim replaces
+the compact path. Encoded Float16 Viewer readback compares each chroma grid
+with the same full-precision source, retaining the existing `1/1024` bound.
+This short diagnostic is not a hardware decode, physical HDR, or sustained
+performance qualification. Default ignored status remains NotRun.
+
 ## macOS ProRes 422 reconstruction diagnostic
 
 The opt-in Renderer test

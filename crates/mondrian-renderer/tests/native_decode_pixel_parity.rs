@@ -7,7 +7,8 @@ use mondrian_core::{
 };
 use mondrian_media::preview::*;
 use mondrian_media::{
-    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSurfaceFormat, MediaFileFingerprint,
+    CpuYuvChromaPlanes, CpuYuvSampleFormat, DecodedGpuFrameHandleKind, DecodedVideoRange,
+    DecodedVideoSurfaceFormat, MediaFileFingerprint,
 };
 use mondrian_renderer::color::ProgramOutputBoundary as RenderOutputColorBoundary;
 use mondrian_renderer::*;
@@ -69,6 +70,74 @@ fn cpu_and_native_main10_motion_viewer_pixels_agree_across_gop_seeks() -> Result
         1.0,
         PreviewDecodePath::InProcessVideoToolboxNative,
     )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real Metal, explicit demux worker and nine lossless CICP-tagged sixteen-bit FFV1 planar fixtures"]
+fn sixteen_bit_planar_420_422_444_share_compact_viewer_color_path() -> Result<()> {
+    mondrian_core::ensure_mondrian_default_ocio_loaded().map_err(anyhow::Error::msg)?;
+    let fixtures = std::env::var_os("MONDRIAN_PLANAR_16_FIXTURES")
+        .context("explicit sixteen-bit planar fixtures")?;
+    let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+    anyhow::ensure!(
+        paths.len() == 9,
+        "expected three chroma grids in SDR, PQ and HLG"
+    );
+    let context = pollster::block_on(GpuContext::new())?;
+    anyhow::ensure!(context.adapter.get_info().backend == wgpu::Backend::Metal);
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    anyhow::ensure!(runtime
+        .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
+    let result = (|| -> Result<()> {
+        let mut reference = None;
+        for (i, path) in paths.iter().enumerate() {
+            let surface = match i % 3 {
+                0 => DecodedVideoSurfaceFormat::Yuv420p16le,
+                1 => DecodedVideoSurfaceFormat::Yuv422p16le,
+                _ => DecodedVideoSurfaceFormat::Yuv444p16le,
+            };
+            let color = match i / 3 {
+                0 => ColorSpace::Rec709,
+                1 => ColorSpace::Rec2100Pq,
+                _ => ColorSpace::Rec2100Hlg,
+            };
+            let pixels = measure_with_resource_observer(
+                path,
+                false,
+                None,
+                Some(surface),
+                color,
+                &context,
+                &mut runtime,
+                |_, _, _| {},
+            )?;
+            if i % 3 == 0 {
+                reference = Some(pixels);
+            } else {
+                let expected = reference.as_ref().context("missing 4:2:0 reference")?;
+                anyhow::ensure!(pixels.len() == expected.len());
+                for (sample, (expected, actual)) in expected.iter().zip(&pixels).enumerate() {
+                    anyhow::ensure!(actual.len() == expected.len());
+                    let max = expected
+                        .iter()
+                        .zip(actual)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0_f32, f32::max);
+                    eprintln!(
+                        "{color:?} {surface:?} sample {sample}: maximum pixel difference {max}"
+                    );
+                    anyhow::ensure!(max <= 1.0 / 1024.0, "planar grid color disagreement: {max}");
+                }
+            }
+        }
+        Ok(())
+    })();
+    let closure = retirement::retire_runtime(&context.device, runtime);
+    result?;
+    closure?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -219,6 +288,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
                 &path,
                 false,
                 Some((surface, expected_native_decode_path)),
+                None,
                 color,
                 &context,
                 &mut runtime,
@@ -228,6 +298,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
                 &path,
                 true,
                 Some((surface, expected_native_decode_path)),
+                None,
                 color,
                 &context,
                 &mut runtime,
@@ -331,6 +402,7 @@ fn measure(
         path,
         native,
         expected_native_surface.map(|surface| (surface, PreviewDecodePath::InProcessFfmpegNative)),
+        None,
         ColorSpace::Rec709,
         context,
         runtime,
@@ -357,6 +429,7 @@ fn compact_uhd_frames_reuse_the_standard_working_set() -> Result<()> {
     let result = measure_with_resource_observer(
         Path::new(&path),
         false,
+        None,
         None,
         ColorSpace::Rec709,
         &context,
@@ -386,6 +459,7 @@ fn measure_with_resource_observer(
     path: &Path,
     native: bool,
     expected_native_surface: Option<(DecodedVideoSurfaceFormat, PreviewDecodePath)>,
+    expected_cpu_surface: Option<DecodedVideoSurfaceFormat>,
     source_color: ColorSpace,
     context: &GpuContext,
     runtime: &mut ViewerGpuExecutionRuntime,
@@ -492,6 +566,24 @@ fn measure_with_resource_observer(
                 assert!(
                     !f.diagnostics.native_decoder_active && !f.diagnostics.temporal_approximation
                 );
+                if let Some(expected) = expected_cpu_surface {
+                    assert_eq!(f.surface_format(), expected);
+                    assert_eq!(f.sample_format, CpuYuvSampleFormat::Unorm16);
+                    assert_eq!(f.video_sampling.bit_depth, 16);
+                    assert_eq!(f.diagnostics.decoded_video_sampling.bit_depth, 16);
+                    let luma = f.luma_plane();
+                    assert!(luma.data()[..f.width as usize * 2]
+                        .chunks_exact(2)
+                        .any(|bytes| bytes[0] != 0));
+                    match f.chroma_planes() {
+                        CpuYuvChromaPlanes::Planar { cb, cr } => {
+                            assert!(cb.data()[0] != 0 && cr.data()[0] != 0);
+                        }
+                        CpuYuvChromaPlanes::Interleaved(_) => {
+                            bail!("planar source became interleaved")
+                        }
+                    }
+                }
                 (
                     f.width,
                     f.height,
@@ -556,6 +648,18 @@ fn measure_with_resource_observer(
         if !record.fallback_reasons.is_empty() {
             bail!("unexpected fallback {:?}", record.fallback_reasons);
         }
+        if expected_cpu_surface.is_some() {
+            anyhow::ensure!(record.residency.cpu_upload_layers == 0);
+            anyhow::ensure!(record.residency.gpu_input_layers == 1);
+            anyhow::ensure!(record.residency.native_decoder_gpu_layers == 0);
+            anyhow::ensure!(record.residency.gpu_input_failures == 0);
+            anyhow::ensure!(record.stage_diagnostics.upload_stages == 1);
+            anyhow::ensure!(record.stage_diagnostics.readback_stages == 0);
+            anyhow::ensure!(record.residency.native_video_import.is_some_and(|facts| {
+                facts.decoder_residency == mondrian_media::DecodedFrameResidency::CpuYuv
+                    && facts.decoder_handle_kind.is_none()
+            }));
+        }
         if native {
             anyhow::ensure!(record.residency.native_decoder_gpu_layers == 1);
             anyhow::ensure!(record.residency.cpu_upload_layers == 0);
@@ -602,6 +706,16 @@ fn measure_with_resource_observer(
             .unpack_mapped_rgba16float(&mapped)
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         anyhow::ensure!(pixels.iter().all(|v| v.is_finite()));
+        if expected_cpu_surface.is_some() {
+            let (minimum, maximum) = pixels.chunks_exact(4).map(|pixel| pixel[0]).fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(minimum, maximum), red| (minimum.min(red), maximum.max(red)),
+            );
+            anyhow::ensure!(
+                maximum - minimum > 1.0 / 128.0,
+                "sixteen-bit source collapsed to a constant Viewer output"
+            );
+        }
         if expected_native_surface != Some(DecodedVideoSurfaceFormat::Yuva444sp16) {
             anyhow::ensure!(pixels.chunks_exact(4).all(|p| (p[3] - 1.0).abs() < 1e-5));
         }

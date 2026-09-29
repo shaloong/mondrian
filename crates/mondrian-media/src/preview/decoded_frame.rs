@@ -71,6 +71,8 @@ pub enum CpuYuvSampleFormat {
     Unorm16Lsb10,
     /// Twelve-bit code values retained right-aligned in 16-bit component words.
     Unorm16Lsb12,
+    /// Sixteen-bit code values retained in their original component words.
+    Unorm16,
     /// Ten-bit code values retained left-aligned in P010 component words.
     Unorm16Msb10,
 }
@@ -80,7 +82,7 @@ impl CpuYuvSampleFormat {
     pub const fn bytes_per_component(self) -> usize {
         match self {
             Self::Unorm8 => 1,
-            Self::Unorm16Lsb10 | Self::Unorm16Lsb12 | Self::Unorm16Msb10 => 2,
+            Self::Unorm16Lsb10 | Self::Unorm16Lsb12 | Self::Unorm16 | Self::Unorm16Msb10 => 2,
         }
     }
 
@@ -90,6 +92,7 @@ impl CpuYuvSampleFormat {
             Self::Unorm8 => 8,
             Self::Unorm16Lsb10 | Self::Unorm16Msb10 => 10,
             Self::Unorm16Lsb12 => 12,
+            Self::Unorm16 => 16,
         }
     }
 }

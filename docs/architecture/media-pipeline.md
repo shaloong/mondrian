@@ -3782,14 +3782,15 @@ sampling. Fused YUV reconstruction and OCIO allocate one Renderer-owned Working
 texture; no encoded RGB intermediate is allocated. Linux CUDA imports additionally
 charge their padded interop storage buffer to the active working-set budget.
 
-An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
+An exact probed planar 8/10/12/16-bit 4:2:0, 4:2:2, or 4:4:4 source, or
 semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
 `CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU
 materialization. Media retains an independently reference-counted immutable
 FFmpeg `AVFrame` with its native luma/chroma planes and explicit row strides.
 Planar samples retain separate Cb/Cr planes; NV12/P010 retain their interleaved
-plane. P010 preserves most-significant-bit alignment, while planar ten/twelve-bit
-samples remain least-significant-bit aligned. Both use the existing Renderer
+plane. P010 preserves most-significant-bit alignment, planar ten/twelve-bit
+samples remain least-significant-bit aligned, and planar sixteen-bit samples
+retain their complete component words. All use the existing Renderer
 YUV sampling and OCIO input transform, with no parallel color interpretation. It does not repack or interleave roughly 33 MiB for every UHD frame.
 The reservation includes conservative FFmpeg row alignment and rounded-up
 4:2:0 chroma extents, while actual Frame Store accounting uses retained plane
@@ -4194,7 +4195,7 @@ Required native requests fail before this fallback; CPU-addressable requests
 continue to receive their typed RGBA/float payload. This reduces pixel
 materialization without altering quality, deadlines, or cache budgets.
 
-The compact software route retains FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2,
+The compact software route retains FFmpeg planar 8/10/12/16-bit 4:2:0, 4:2:2,
 and 4:4:4 without an intermediate CPU RGB image. Probe admission and decoded
 surface validation agree on these layouts. Full-resolution 4:4:4 chroma does
 not acquire an invented subsampled chroma location. Planning charges each
@@ -4223,6 +4224,11 @@ Twelve-bit planar samples retain their original right-aligned
 16-bit words, including ProRes 4444 decoder output. The source hint, physical
 surface descriptor, and compact payload agree on the effective twelve-bit depth;
 no ten-bit quantization or CPU RGBA conversion is introduced.
+Sixteen-bit planar sources similarly retain all component bits in their
+original FFmpeg planes. The same CPU upload worker uses R16/Rg16 texture
+storage and the existing shared YUV/OCIO stages; a probed sixteen-bit source
+does not acquire a second matrix, range, or transfer interpretation. A
+CPU-addressable consumer still receives its typed high-precision RGBA path.
 
 Compact CPU payload accounting charges the retained FFmpeg image buffer
 references, including vertical allocation alignment and inter-plane padding.
