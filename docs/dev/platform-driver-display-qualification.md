@@ -228,6 +228,48 @@ binds the row/source/release/build identity, target artifact metadata, one
 machine report, before/after environment snapshots, and exactly one normalized
 report/raw-evidence/source-replay set for every required owner lane.
 
+## macOS ProRes 422 reconstruction diagnostic
+
+The opt-in Renderer test
+`cpu_and_native_prores422_viewer_pixels_agree_across_seeks` exercises the
+production CPU and VideoToolbox/CVPixelBuffer/Metal Viewer paths at the existing
+`1/1024` float-output tolerance. Set `WGPU_BACKEND=metal`,
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to the built production worker, and
+`MONDRIAN_MACOS_PRORES422_FIXTURES` to twelve colon-separated motion fixtures.
+Order the fixtures by Proxy, LT, Standard, HQ, with SDR Rec.709, PQ, HLG within
+each profile. Use 1080p30, at least 60 frames, 10-bit 4:2:2, explicit CICP and
+limited range; preserve source extent and include reconstruction overshoot.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  cpu_and_native_prores422_viewer_pixels_agree_across_seeks \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+On the 16 GB M4/macOS 26.4.1 development machine, the 2026-09-30 diagnostic
+failed all 72 profile/color/seek comparisons through the existing P210 path.
+Observed maximum component errors were about 0.0068–0.0095. That path reports
+hardware execution as unknown; native surface residency is not proof of
+hardware decode. A separate public-API hardware-observed P216 candidate also
+failed the unchanged tolerance and was removed. Neither route is qualified by
+successful decode or lifecycle receipts alone.
+
+FFmpeg 8.1.2's ProRes software reconstruction clips ten-bit samples to
+4–1019; the observed native outputs extend beyond that interval. Diagnostic
+clipping before GPU interpolation reduced, but did not eliminate, the Viewer
+disagreement. The clipping experiment was removed; no production sample bounds,
+quality settings or acceptance thresholds were changed. See the
+[FFmpeg reconstruction implementation](https://ffmpeg.org/doxygen/8.1/proresdsp_8c_source.html).
+This is an implementation comparison, not a claim that Apple's reconstruction
+violates the codec specification.
+
+Keep this test explicitly Failed until reconstruction fidelity is resolved.
+Its ignored default state is NotRun, never Passed. Record all individual seek
+differences, exact worst RGBA components, actual path/hardware evidence, fixture
+hashes and complete logs. These development diagnostics do not qualify physical
+HDR presentation, relative performance or the sealed commercial matrix.
+
 ## Matrix resolution
 
 After all rows are collected, construct one strict

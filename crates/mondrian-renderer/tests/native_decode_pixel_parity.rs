@@ -72,6 +72,24 @@ fn cpu_and_native_main10_motion_viewer_pixels_agree_across_gop_seeks() -> Result
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "requires real Metal, explicit demux worker and twelve ProRes422 profile/color motion fixtures"]
+fn cpu_and_native_prores422_viewer_pixels_agree_across_seeks() -> Result<()> {
+    let colors = [
+        ColorSpace::Rec709,
+        ColorSpace::Rec2100Pq,
+        ColorSpace::Rec2100Hlg,
+    ];
+    compare_macos_videotoolbox_fixtures(
+        "MONDRIAN_MACOS_PRORES422_FIXTURES",
+        std::array::from_fn::<_, 12, _>(|index| {
+            (DecodedVideoSurfaceFormat::P210, colors[index % 3])
+        }),
+        1.0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "requires real Metal, explicit demux worker, and tagged HEVC 4:2:0/4:2:2/4:4:4 fixtures"]
 fn cpu_and_videotoolbox_decoded_viewer_pixels_agree_across_gop_seeks() -> Result<()> {
     compare_macos_videotoolbox_fixtures(
@@ -162,6 +180,7 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
     anyhow::ensure!(runtime
         .reconfigure_resource_grant(ViewerGpuExecutionResourceGrant::professional_realtime()));
     let result = (|| -> Result<()> {
+        let mut pixel_failures = Vec::new();
         for (path, (surface, color)) in paths.into_iter().zip(cases) {
             let cpu = measure_with_resource_observer(
                 &path,
@@ -182,6 +201,10 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
                 |_, _, _| {},
             )?;
             for output in cpu.iter().chain(&native) {
+                anyhow::ensure!(
+                    output.iter().all(|value| value.is_finite()),
+                    "Viewer output contains a non-finite component"
+                );
                 let tolerance = if expected_alpha == 0.5 { 0.01 } else { 1e-5 };
                 anyhow::ensure!(output
                     .chunks_exact(4)
@@ -196,18 +219,27 @@ fn compare_macos_videotoolbox_fixtures<const N: usize>(
             anyhow::ensure!(cpu.len() == native.len());
             for (index, (cpu, native)) in cpu.iter().zip(&native).enumerate() {
                 anyhow::ensure!(cpu.len() == native.len());
-                let max =
-                    cpu.iter().zip(native).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+                let (maximum_offset, max) = cpu
+                    .iter()
+                    .zip(native)
+                    .enumerate()
+                    .map(|(offset, (a, b))| (offset, (a - b).abs()))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .context("empty Viewer output")?;
+                let pixel_offset = maximum_offset / 4 * 4;
                 eprintln!(
-                    "{} {color:?} seek sample {index}: maximum float output difference {max}",
-                    path.display()
+                    "{} {color:?} seek sample {index}: maximum float output difference {max}, rgba_offset={maximum_offset}, cpu={:?}, native={:?}",
+                    path.display(), &cpu[pixel_offset..pixel_offset + 4], &native[pixel_offset..pixel_offset + 4]
                 );
-                anyhow::ensure!(
-                    max <= 1.0 / 1024.0,
-                    "CPU/VideoToolbox Viewer pixel disagreement: {max}"
-                );
+                if max > 1.0 / 1024.0 {
+                    pixel_failures.push(format!("{} sample {index}: {max}", path.display()));
+                }
             }
         }
+        anyhow::ensure!(
+            pixel_failures.is_empty(),
+            "CPU/VideoToolbox Viewer pixel disagreement: {pixel_failures:?}"
+        );
         Ok(())
     })();
     let closure = retirement::retire_runtime(&context.device, runtime);
@@ -391,6 +423,10 @@ fn measure_with_resource_observer(
                 assert!(!f.diagnostics.hardware_decode_cpu_transfer_observed);
                 assert!(!f.diagnostics.temporal_approximation);
                 assert_eq!(f.diagnostics.zero_copy_active, cfg!(target_os = "macos"));
+                eprintln!(
+                    "native sampling evidence: surface={:?}, path={:?}, observed_hardware={:?}",
+                    f.surface_format, f.diagnostics.path, f.diagnostics.hardware_decode_observed
+                );
                 if let Some(expected) = expected_native_surface {
                     assert_eq!(f.handle_kind(), DecodedGpuFrameHandleKind::CVPixelBuffer);
                     assert_eq!(f.surface_format, expected);
