@@ -1604,13 +1604,8 @@ fn authoring_session_rotation_clears_decoded_media_residency() {
 }
 
 fn unique_preview_test_root(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "{name}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos()
-    ))
+    crate::app::test_fixture::create_root(&std::env::temp_dir(), name)
+        .expect("claim isolated Preview fixture root")
 }
 
 fn rec709_video_media_info(file_size: u64) -> MediaInfo {
