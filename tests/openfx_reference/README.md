@@ -80,3 +80,8 @@ cargo test -p mondrian-app --all-features --test openfx_host \
 The latter interrupts a five-second native render and confirms the retired
 session cannot be reused. It qualifies supervised cancellation for the session
 API; production Effect cancellation and combined memory grants remain separate.
+
+The normal and optional SessionProbe scenarios additionally hold two Source
+image handles, release the first, then read and release the second before the
+official Basic implementation fetches Source again. This checks action-scoped
+input ownership and prevents image release from freeing session pixel storage.

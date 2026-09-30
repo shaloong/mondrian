@@ -24,6 +24,37 @@ void property(const void* handle, const char* name, int value) {
   gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &props);
   gPropHost->propSetInt(props, name, 0, value);
 }
+// Hold two legal Source image handles simultaneously, release one, then read
+// and release the other. Repeated fetch/release must not consume session pixels
+// or invalidate an independent handle before the Render action completes.
+bool sourceImageLifetimes(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle source = nullptr;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK) {
+    return false;
+  }
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  OfxPropertySetHandle first = nullptr, second = nullptr;
+  if (gEffectHost->clipGetImage(source, time, nullptr, &first) != kOfxStatOK) { return false; }
+  if (gEffectHost->clipGetImage(source, time, nullptr, &second) != kOfxStatOK) {
+    gEffectHost->clipReleaseImage(first);
+    return false;
+  }
+  void* firstData = nullptr;
+  void* secondData = nullptr;
+  bool valid = gPropHost->propGetPointer(first, kOfxImagePropData, 0, &firstData) == kOfxStatOK &&
+               gPropHost->propGetPointer(second, kOfxImagePropData, 0, &secondData) == kOfxStatOK &&
+               firstData && secondData;
+  OfxRGBAColourF saved{};
+  if (valid) { saved = *static_cast<OfxRGBAColourF*>(firstData); }
+  valid = gEffectHost->clipReleaseImage(first) == kOfxStatOK && valid;
+  if (valid) {
+    const auto& pixel = *static_cast<const OfxRGBAColourF*>(secondData);
+    valid = pixel.r == saved.r && pixel.g == saved.g && pixel.b == saved.b && pixel.a == saved.a;
+  }
+  valid = gEffectHost->clipReleaseImage(second) == kOfxStatOK && valid;
+  return valid;
+}
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -53,6 +84,9 @@ OfxStatus probe(const char* action, const void* handle,
   } else if (operation == kOfxImageEffectActionRender) {
     auto& state = actions.at(handle);
     if (state.changing) { return kOfxStatFailed; }
+    if ((selected == "normal" || selected == "optional") && !sourceImageLifetimes(handle, in)) {
+      return kOfxStatFailed;
+    }
     ++state.renders;
     if (selected == "hang") { std::this_thread::sleep_for(std::chrono::seconds(5)); }
     if (selected == "unfetched" && state.renders > 1) {

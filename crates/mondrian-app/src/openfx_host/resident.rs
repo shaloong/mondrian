@@ -1,6 +1,5 @@
 //! Exclusive supervised native session, bounded control packets and shared frames.
 use super::*;
-use mondrian_core::ExecutionCancellationToken;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
@@ -47,6 +46,17 @@ enum Response {
     Closed {},
 }
 
+fn check_owner(
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    deadline: Instant,
+) -> Result<(), OpenFxHostError> {
+    checkpoint()?;
+    if Instant::now() >= deadline {
+        return Err(OpenFxHostError::DeadlineExceeded);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ProcessOwner {
     child: Child,
@@ -55,15 +65,10 @@ struct ProcessOwner {
 impl ProcessOwner {
     fn check(
         &mut self,
-        cancellation: &ExecutionCancellationToken,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
         deadline: Instant,
     ) -> Result<(), OpenFxHostError> {
-        if cancellation.is_canceled() {
-            return Err(OpenFxHostError::Canceled);
-        }
-        if Instant::now() >= deadline {
-            return Err(OpenFxHostError::DeadlineExceeded);
-        }
+        check_owner(owner_checkpoint, deadline)?;
         if !self.active {
             return Err(unavailable("native session has been retired"));
         }
@@ -120,17 +125,17 @@ pub struct OpenFxFilterSession {
 impl OpenFxFilterSession {
     /// Prepare a pinned filter and fixed frame extent without loading it in the
     /// application. The child creates its native instance on the first render.
+    /// The borrowed owner checkpoint is polled during preparation and every
+    /// bounded transport wait; its cancellation/deadline authority is preserved.
     pub fn prepare(
         helper: &Path,
         inspection: &OpenFxBinaryInspection,
         identifier: &str,
         width: u32,
         height: u32,
-        cancellation: &ExecutionCancellationToken,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
-        if cancellation.is_canceled() {
-            return Err(OpenFxHostError::Canceled);
-        }
+        owner_checkpoint()?;
         if !helper.is_absolute() || !helper.is_file() {
             return Err(invalid("helper must be an absolute regular file"));
         }
@@ -174,7 +179,7 @@ impl OpenFxFilterSession {
         };
         let deadline = Instant::now() + DEADLINE;
         let mut control = loop {
-            process.check(cancellation, deadline)?;
+            process.check(owner_checkpoint, deadline)?;
             match listener.accept() {
                 Ok((stream, address)) if address.ip().is_loopback() => break stream,
                 Ok(_) => return Err(unavailable("native session peer is not local")),
@@ -194,7 +199,7 @@ impl OpenFxFilterSession {
             height,
             shared_path: file.path().to_path_buf(),
         };
-        let mut checkpoint = || process.check(cancellation, deadline);
+        let mut checkpoint = || process.check(owner_checkpoint, deadline);
         let connected: Response = read_packet(&mut control, &mut checkpoint)?;
         if !matches!(connected, Response::Connected { version: VERSION, nonce: ref value } if value == &nonce)
         {
@@ -208,6 +213,7 @@ impl OpenFxFilterSession {
                 "native session readiness envelope does not match",
             ));
         }
+        checkpoint()?;
         Ok(Self {
             process,
             control,
@@ -228,18 +234,20 @@ impl OpenFxFilterSession {
 
     /// Execute one complete authored frame. Cancellation, deadline, native or
     /// protocol failure retires the worker before an output can be published.
+    /// The owner checkpoint can return Canceled or DeadlineExceeded without
+    /// creating an adapter-owned token or cancellation thread.
     pub fn render(
         &mut self,
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxScalarValue>,
         frame: &OpenFxFloatFrame,
-        cancellation: &ExecutionCancellationToken,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
         if frame.width != self.width || frame.height != self.height {
             return Err(invalid("frame extent differs from the native session"));
         }
         validate_render_request(timing, parameters, frame)?;
-        let result = self.render_inner(timing, parameters, frame, cancellation);
+        let result = self.render_inner(timing, parameters, frame, owner_checkpoint);
         if result.is_err() {
             self.process.terminate()?;
         }
@@ -251,10 +259,10 @@ impl OpenFxFilterSession {
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxScalarValue>,
         frame: &OpenFxFloatFrame,
-        cancellation: &ExecutionCancellationToken,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
         let deadline = Instant::now() + DEADLINE;
-        self.process.check(cancellation, deadline)?;
+        self.process.check(owner_checkpoint, deadline)?;
         if sha256_file(&self.inspection.binary_path)? != self.inspection.binary_sha256 {
             return Err(invalid("OpenFX binary changed before render"));
         }
@@ -262,18 +270,23 @@ impl OpenFxFilterSession {
             .sequence
             .checked_add(1)
             .ok_or_else(|| unavailable("native session sequence exhausted"))?;
-        for (bytes, channel) in self.shared[..self.frame_bytes]
-            .chunks_exact_mut(4)
-            .zip(frame.pixels.iter().flatten())
+        // Check the owner at bounded copy intervals without a process syscall
+        // for every pixel block. The child is idle until the request is sent.
+        for (destination, source) in self.shared[..self.frame_bytes]
+            .chunks_mut(1024 * 1024)
+            .zip(frame.pixels.chunks(65536))
         {
-            bytes.copy_from_slice(&channel.to_ne_bytes());
+            check_owner(owner_checkpoint, deadline)?;
+            for (bytes, channel) in destination.chunks_exact_mut(4).zip(source.iter().flatten()) {
+                bytes.copy_from_slice(&channel.to_ne_bytes());
+            }
         }
         let request = Request::Render {
             sequence: self.sequence,
             timing: timing.clone(),
             parameters: parameters.clone(),
         };
-        let mut checkpoint = || self.process.check(cancellation, deadline);
+        let mut checkpoint = || self.process.check(owner_checkpoint, deadline);
         write_packet(&mut self.control, &request, &mut checkpoint)?;
         let response: Response = read_packet(&mut self.control, &mut checkpoint)?;
         match response {
@@ -293,9 +306,10 @@ impl OpenFxFilterSession {
         if sha256_file(&self.inspection.binary_path)? != self.inspection.binary_sha256 {
             return Err(invalid("OpenFX binary changed during render"));
         }
-        let pixels = self.shared[self.frame_bytes..]
-            .chunks_exact(16)
-            .map(|pixel| {
+        let mut pixels = Vec::with_capacity(frame.pixels.len());
+        for block in self.shared[self.frame_bytes..].chunks(1024 * 1024) {
+            checkpoint()?;
+            pixels.extend(block.chunks_exact(16).map(|pixel| {
                 let channel = |index| {
                     f32::from_ne_bytes([
                         pixel[index],
@@ -305,11 +319,12 @@ impl OpenFxFilterSession {
                     ])
                 };
                 [channel(0), channel(4), channel(8), channel(12)]
-            })
-            .collect::<Vec<_>>();
+            }));
+        }
         if pixels.iter().flatten().any(|channel| !channel.is_finite()) {
             return Err(unavailable("render output contains a nonfinite channel"));
         }
+        checkpoint()?;
         Ok(OpenFxFloatFrame { width: self.width, height: self.height, pixels })
     }
 
@@ -319,13 +334,9 @@ impl OpenFxFilterSession {
         if !self.process.active {
             return Ok(());
         }
-        let cancellation = ExecutionCancellationToken::new();
         let deadline = Instant::now() + RETIRE;
         let graceful = (|| {
             let mut checkpoint = || {
-                if cancellation.is_canceled() {
-                    return Err(OpenFxHostError::Canceled);
-                }
                 if Instant::now() >= deadline {
                     return Err(OpenFxHostError::DeadlineExceeded);
                 }
@@ -699,7 +710,7 @@ mod tests {
         let (mut sender, mut receiver) = pair();
         sender.write_all(&100_u32.to_be_bytes()).expect("header");
         sender.write_all(b"partial").expect("partial body");
-        let cancellation = ExecutionCancellationToken::new();
+        let cancellation = mondrian_core::ExecutionCancellationToken::new();
         let worker_token = cancellation.clone();
         let canceler = thread::spawn(move || {
             thread::sleep(POLL * 3);

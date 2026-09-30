@@ -403,7 +403,7 @@ packet begins, its remainder has a finite deadline. Responses are likewise
 bounded. Binary fingerprints remain verified before/after parent rendering and
 before child rendering; fingerprint optimization requires separate evidence.
 
-Parent I/O checkpoints observe the execution cancellation token, child status
+Parent I/O checkpoints borrow the owning execution checkpoint and observe child status
 and operation deadline. A canceled, failed, malformed or timed-out operation
 terminates and reaps the child before output publication or mapping retirement.
 Graceful shutdown drops the native instance before acknowledging closure, then
@@ -412,3 +412,26 @@ The exact physical native working-set grant and propagation from production
 Effect execution cancellation are pending integration with the factory seam.
 This transport does not add a process-global worker pool or sequential-state
 interpretation.
+
+Resident preparation and rendering now take the owning scheduler's borrowed
+checkpoint directly. Both core cancellation tokens and the effect executor's
+sticky deadline/cancellation control can drive the same transport. No adapter
+creates a mirror token or listener thread. Owner stops kill and reap the child
+before the shared mapping is released or a frame is returned; native hang
+qualification covers cancellation and a shorter owner deadline independently.
+
+Source image handles borrow the exclusive session input vector for their
+OFX action lifetime rather than allocating and copying a full raster per fetch.
+Only Output owns a separate image allocation, through RAII storage. The fixed
+extent and serialized native actions keep Source pointers stable. Multiple
+Source fetches therefore do not multiply raster storage; shared mapping,
+session input and retained output remain separate explicit allocations.
+
+Shared-frame copies poll the owner at one-MiB intervals and again immediately
+before returning preparation or rendered output. Qualification also transfers
+an asymmetric 257-by-257 raster spanning a full and partial copy block, then
+seeks and reverses its rows/pixels to reject stale or misordered Source data.
+
+This ownership follows the [official clipGetImage contract](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxImageEffect_8h.html):
+each fetch returns its own action-scoped handle, while underlying image data
+may be shared. Image handles must be released before that action returns.

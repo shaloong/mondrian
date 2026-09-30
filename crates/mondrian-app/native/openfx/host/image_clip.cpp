@@ -37,11 +37,15 @@ namespace MondrianOpenFx {
     const auto& state = clip.frameState();
     const int width = state.info.width;
     const int height = state.info.height;
-    // make some memory
-    _data = new OfxRGBAColourF[width * height];
-    std::fill(_data, _data + width * height, OfxRGBAColourF{0, 0, 0, 0});
-    if (!clip.isOutput()) {
-      std::copy(state.input.begin(), state.input.end(), _data);
+    if (clip.isOutput()) {
+      _ownedData = std::make_unique<OfxRGBAColourF[]>(size_t(width) * size_t(height));
+      _data = _ownedData.get();
+    } else {
+      // Source images are read-only in the OFX contract. The C property suite
+      // exposes a void pointer, but no extra raster copy is necessary for each
+      // fetch. This session's fixed extent and serialized native actions keep
+      // the input vector stable until every valid action-scoped image release.
+      _data = const_cast<OfxRGBAColourF*>(state.input.data());
     }
 
     // render scale x and y of 1.0
@@ -87,10 +91,7 @@ namespace MondrianOpenFx {
     setDoubleProperty(kOfxImagePropPixelAspectRatio, pixelAspectRatio);
   }
 
-  FrameImage::~FrameImage()
-  {
-    delete[] _data;
-  }
+  FrameImage::~FrameImage() = default;
 
   FilterClipInstance::FilterClipInstance(FilterEffectInstance* effect, OFX::Host::ImageEffect::ClipDescriptor *desc)
     : OFX::Host::ImageEffect::ClipInstance(effect, *desc)

@@ -248,7 +248,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         "uk.co.thefoundry.BasicGainPlugin",
         2,
         3,
-        &cancellation,
+        &mut checkpoint(&cancellation),
     )
     .expect("preview worker");
     let mut export = OpenFxFilterSession::prepare(
@@ -257,7 +257,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         "uk.co.thefoundry.BasicGainPlugin",
         2,
         3,
-        &cancellation,
+        &mut checkpoint(&cancellation),
     )
     .expect("export worker");
     let preview_id = preview.worker_process_id();
@@ -285,7 +285,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         timing.pixel_aspect_ratio = aspect;
         let values = BTreeMap::from([("scale".to_owned(), OpenFxScalarValue::Double(gain))]);
         let output = preview
-            .render(&timing, &values, &input, &cancellation)
+            .render(&timing, &values, &input, &mut checkpoint(&cancellation))
             .expect("resident render");
         assert_eq!(preview.worker_process_id(), preview_id);
         for (actual, source) in output.pixels.iter().zip(&input.pixels) {
@@ -294,7 +294,12 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             }
         }
         let unmodified = export
-            .render(&timing, &BTreeMap::new(), &input, &cancellation)
+            .render(
+                &timing,
+                &BTreeMap::new(),
+                &input,
+                &mut checkpoint(&cancellation),
+            )
             .expect("independent export");
         assert_eq!(unmodified, input);
         assert_eq!(export.worker_process_id(), export_id);
@@ -302,29 +307,34 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
     input.pixels.fill([0.5, -1.0, 3.0, 0.75]);
     assert_eq!(
         preview
-            .render(&timing, &BTreeMap::new(), &input, &cancellation)
+            .render(
+                &timing,
+                &BTreeMap::new(),
+                &input,
+                &mut checkpoint(&cancellation)
+            )
             .expect("changed input/defaults"),
         input
     );
     cancellation.cancel();
     assert!(matches!(
-        preview.render(&timing, &BTreeMap::new(), &input, &cancellation),
-        Err(OpenFxHostError::Canceled)
-    ));
-    assert!(matches!(
         preview.render(
             &timing,
             &BTreeMap::new(),
             &input,
-            &mondrian_core::ExecutionCancellationToken::new()
+            &mut checkpoint(&cancellation)
         ),
+        Err(OpenFxHostError::Canceled)
+    ));
+    assert!(matches!(
+        preview.render(&timing, &BTreeMap::new(), &input, &mut || Ok(())),
         Err(OpenFxHostError::Unavailable(_))
     ));
     // Retiring one consumer never releases the other consumer's worker/mapping.
     let live = mondrian_core::ExecutionCancellationToken::new();
     assert_eq!(
         export
-            .render(&timing, &BTreeMap::new(), &input, &live)
+            .render(&timing, &BTreeMap::new(), &input, &mut checkpoint(&live))
             .expect("surviving export"),
         input
     );
@@ -351,7 +361,7 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         "uk.co.thefoundry.BasicGainPlugin",
         1,
         1,
-        &cancellation,
+        &mut checkpoint(&cancellation),
     )
     .expect("resident worker");
     let token = cancellation.clone();
@@ -369,7 +379,12 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
     let input = OpenFxFloatFrame { width: 1, height: 1, pixels: vec![[0.25; 4]] };
     let started = std::time::Instant::now();
     assert!(matches!(
-        session.render(&timing, &BTreeMap::new(), &input, &cancellation),
+        session.render(
+            &timing,
+            &BTreeMap::new(),
+            &input,
+            &mut checkpoint(&cancellation)
+        ),
         Err(OpenFxHostError::Canceled)
     ));
     canceler.join().expect("canceler");
@@ -378,14 +393,133 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         "five-second native hang was interrupted"
     );
     assert!(matches!(
-        session.render(
-            &timing,
-            &BTreeMap::new(),
-            &input,
-            &mondrian_core::ExecutionCancellationToken::new()
-        ),
+        session.render(&timing, &BTreeMap::new(), &input, &mut || Ok(())),
         Err(OpenFxHostError::Unavailable(_))
     ));
     session.shutdown().expect("failed worker already reaped");
     assert_eq!(input.pixels, [[0.25; 4]]);
+}
+
+fn checkpoint(
+    token: &mondrian_core::ExecutionCancellationToken,
+) -> impl FnMut() -> Result<(), OpenFxHostError> + '_ {
+    || {
+        if token.is_canceled() {
+            Err(OpenFxHostError::Canceled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
+fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
+    use mondrian_effects::{EffectProcessorControl, EffectProcessorStopReason};
+    use std::time::{Duration, Instant};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("hang mode"),
+        "hang"
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
+    );
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspection");
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        1,
+        1,
+        &mut || Ok(()),
+    )
+    .expect("prepare worker");
+    let timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let input = OpenFxFloatFrame { width: 1, height: 1, pixels: vec![[0.25; 4]] };
+    let started = Instant::now();
+    let mut scheduler = || {
+        (started.elapsed() >= Duration::from_millis(150))
+            .then_some(EffectProcessorStopReason::DeadlineExpired)
+    };
+    let mut control = EffectProcessorControl::new(&mut scheduler);
+    let result = session.render(&timing, &BTreeMap::new(), &input, &mut || {
+        control.check().map_err(|_| OpenFxHostError::DeadlineExceeded)
+    });
+    assert!(matches!(result, Err(OpenFxHostError::DeadlineExceeded)));
+    assert_eq!(
+        control.stop_reason(),
+        Some(EffectProcessorStopReason::DeadlineExpired)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(matches!(
+        session.render(&timing, &BTreeMap::new(), &input, &mut || Ok(())),
+        Err(OpenFxHostError::Unavailable(_))
+    ));
+    session.shutdown().expect("failed worker reaped");
+    assert_eq!(input.pixels, [[0.25; 4]]);
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_REFERENCE_BINARY to the official Basic.ofx.bundle"]
+fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters() {
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic"),
+    );
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspection");
+    // More than one transport copy block, with a partial final block and row.
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        257,
+        257,
+        &mut || Ok(()),
+    )
+    .expect("resident worker");
+    let mut timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let mut input = OpenFxFloatFrame {
+        width: 257,
+        height: 257,
+        pixels: (0..257 * 257)
+            .map(|index| {
+                [
+                    (index % 257) as f32 / 128.0 - 0.5,
+                    (index / 257) as f32 / 128.0,
+                    1.0 + (index % 17) as f32 / 16.0,
+                    (index % 257) as f32 / 256.0,
+                ]
+            })
+            .collect(),
+    };
+    let gain = BTreeMap::from([("scale".to_owned(), OpenFxScalarValue::Double(1.5))]);
+    let output = session
+        .render(&timing, &gain, &input, &mut || Ok(()))
+        .expect("complete transfer");
+    assert_eq!(output.pixels.len(), input.pixels.len());
+    for (actual, source) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, source) in actual.iter().zip(source) {
+            assert_eq!(*actual, *source * 1.5);
+        }
+    }
+    input.pixels.reverse();
+    timing.frame = 41.0;
+    assert_eq!(
+        session
+            .render(&timing, &BTreeMap::new(), &input, &mut || Ok(()))
+            .expect("fresh borrowed Source raster"),
+        input
+    );
+    session.shutdown().expect("shutdown");
 }

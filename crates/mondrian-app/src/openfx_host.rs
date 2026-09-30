@@ -358,16 +358,16 @@ pub fn render_openfx_filter_frame(
     frame: &OpenFxFloatFrame,
 ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
     validate_render_request(timing, parameters, frame)?;
-    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut checkpoint = || Ok(());
     let mut session = OpenFxFilterSession::prepare(
         helper_executable,
         inspection,
         plugin_identifier,
         frame.width,
         frame.height,
-        &cancellation,
+        &mut checkpoint,
     )?;
-    let output = session.render(timing, parameters, frame, &cancellation)?;
+    let output = session.render(timing, parameters, frame, &mut checkpoint)?;
     session.shutdown()?;
     Ok(output)
 }
