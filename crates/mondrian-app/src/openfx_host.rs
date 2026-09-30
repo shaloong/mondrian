@@ -231,10 +231,19 @@ unsafe extern "C" {
         callback: unsafe extern "C" fn(*mut c_void, *const NativeParameterInfo) -> c_int,
         context: *mut c_void,
     ) -> c_int;
-    fn mondrian_openfx_render(
+    fn mondrian_openfx_session_create(
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        input: *const c_void,
+        frame_bytes: usize,
+        frame_info: *const NativeFrameInfo,
+        parameters: *const NativeParameter,
+        parameter_count: c_int,
+        session: *mut *mut c_void,
+    ) -> c_int;
+    fn mondrian_openfx_session_render(
+        session: *mut c_void,
         input: *const c_void,
         output: *mut c_void,
         frame_bytes: usize,
@@ -242,6 +251,79 @@ unsafe extern "C" {
         parameters: *const NativeParameter,
         parameter_count: c_int,
     ) -> c_int;
+    fn mondrian_openfx_session_destroy(session: *mut c_void);
+
+}
+
+// A native handle stays in the isolated child and is neither Send nor Sync.
+// Its owner destroys the instance before unloading its selected plugin binary.
+struct NativeSession(std::ptr::NonNull<c_void>);
+
+impl NativeSession {
+    fn create(
+        binary: &CString,
+        bundle: &CString,
+        identifier: &CString,
+        input: &[u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+    ) -> Result<Self, c_int> {
+        let mut pointer = std::ptr::null_mut();
+        // SAFETY: C strings, frame bytes and parameter names stay live throughout
+        // this call. The native host copies frame data and parameter values.
+        let status = unsafe {
+            mondrian_openfx_session_create(
+                binary.as_ptr(),
+                bundle.as_ptr(),
+                identifier.as_ptr(),
+                input.as_ptr().cast(),
+                input.len(),
+                info,
+                parameters.as_ptr(),
+                parameters.len() as c_int,
+                &mut pointer,
+            )
+        };
+        if status != 0 {
+            return Err(status);
+        }
+        std::ptr::NonNull::new(pointer).map(Self).ok_or(6)
+    }
+
+    fn render(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+    ) -> c_int {
+        if output.len() != input.len() {
+            return 2;
+        }
+        // SAFETY: The exclusive live handle serializes native actions. Disjoint
+        // input/output slices remain live and the host validates the exact extent
+        // before reading or writing. Parameter names outlive this synchronous call.
+        unsafe {
+            mondrian_openfx_session_render(
+                self.0.as_ptr(),
+                input.as_ptr().cast(),
+                output.as_mut_ptr().cast(),
+                input.len(),
+                info,
+                parameters.as_ptr(),
+                parameters.len() as c_int,
+            )
+        }
+    }
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        // SAFETY: This handle was created once, has no aliases and is retired once.
+        unsafe {
+            mondrian_openfx_session_destroy(self.0.as_ptr());
+        }
+    }
 }
 
 /// Describe the admitted Filter parameter schema in a supervised native child.
@@ -697,21 +779,18 @@ fn render_in_worker(request: &RenderRequest) -> Result<i32, OpenFxHostError> {
         last_frame: request.timing.last_frame,
         pixel_aspect_ratio: request.timing.pixel_aspect_ratio,
     };
-    // SAFETY: All C strings and the parameter array outlive this synchronous
-    // call. Native code runs only inside this supervised child process.
-    Ok(unsafe {
-        mondrian_openfx_render(
-            binary.as_ptr(),
-            bundle.as_ptr(),
-            identifier.as_ptr(),
-            input.as_ptr().cast(),
-            output.as_mut_ptr().cast(),
-            frame_bytes,
-            &frame_info,
-            native_parameters.as_ptr(),
-            native_parameters.len() as c_int,
-        )
-    })
+    let mut session = match NativeSession::create(
+        &binary,
+        &bundle,
+        &identifier,
+        input,
+        &frame_info,
+        &native_parameters,
+    ) {
+        Ok(session) => session,
+        Err(status) => return Ok(status),
+    };
+    Ok(session.render(input, output, &frame_info, &native_parameters))
 }
 
 fn validate_frame(width: u32, height: u32, pixels: usize) -> Result<usize, OpenFxHostError> {
@@ -913,6 +992,241 @@ fn unavailable(reason: impl Into<String>) -> OpenFxHostError {
 #[cfg(test)]
 mod shared_frame_tests {
     use super::*;
+
+    // Each native qualification runs in its own bounded child; test threads never
+    // change process-wide environment or load a native plugin in the supervisor.
+    fn qualification_child(test: &str, environment: &[(&str, &str)]) -> bool {
+        const CHILD: &str = "MONDRIAN_OPENFX_QUALIFICATION_CHILD";
+        if std::env::var(CHILD).ok().as_deref() == Some(test) {
+            return true;
+        }
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", test, "--ignored", "--nocapture"])
+            .env(CHILD, test)
+            .stdin(Stdio::null());
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("isolated native qualification child");
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            if let Some(status) = child.try_wait().expect("observe qualification child") {
+                assert!(status.success(), "native qualification failed: {status}");
+                return false;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("native qualification child exceeded deadline");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY to SessionProbe.ofx.bundle"]
+    fn native_session_enforces_independent_frame_and_action_contracts() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_session_enforces_independent_frame_and_action_contracts";
+        const MODE: &str = "MONDRIAN_OPENFX_SESSION_PROBE_MODE";
+        for mode in [
+            "normal",
+            "optional",
+            "required",
+            "temporal",
+            "instance_required",
+            "become_required",
+            "unfetched",
+        ] {
+            if !qualification_child(TEST, &[(MODE, mode)]) {
+                continue;
+            }
+            let mode = std::env::var(MODE).expect("probe scenario");
+            let path = PathBuf::from(
+                std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                    .expect("SessionProbe binary is required"),
+            );
+            let path = resolve_openfx_binary(&path).expect("probe binary");
+            let bundle_path = path
+                .ancestors()
+                .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+                .expect("probe bundle");
+            let identifier = "uk.co.thefoundry.BasicGainPlugin";
+            let description = describe_in_worker(&DescribeRequest {
+                binary_path: path.clone(),
+                bundle_path: bundle_path.to_path_buf(),
+                binary_sha256: sha256_file(&path).expect("probe fingerprint"),
+                plugin_identifier: identifier.to_owned(),
+            })
+            .expect("probe description");
+            let descriptor_rejected = matches!(mode.as_str(), "required" | "temporal");
+            if descriptor_rejected {
+                assert!(matches!(
+                    description,
+                    DescribeResponse::Rejected { status: 7, .. }
+                ));
+            } else {
+                assert!(matches!(description, DescribeResponse::Success { .. }));
+            }
+            let binary = native_string(&path).expect("binary path");
+            let bundle = native_string(bundle_path).expect("bundle path");
+            let identifier = CString::new(identifier).expect("identifier");
+            let name = CString::new("scale").expect("parameter");
+            let info = NativeFrameInfo {
+                width: 1,
+                height: 1,
+                frame: 0.0,
+                frame_rate: 24.0,
+                first_frame: 0.0,
+                last_frame: 100.0,
+                pixel_aspect_ratio: 1.0,
+            };
+            let input =
+                [0.25_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>();
+            let parameters = |gain| [NativeParameter { name: name.as_ptr(), kind: 1, value: gain }];
+            let created = NativeSession::create(
+                &binary,
+                &bundle,
+                &identifier,
+                &input,
+                &info,
+                &parameters(1.5),
+            );
+            if descriptor_rejected || mode == "instance_required" {
+                assert_eq!(created.err(), Some(7));
+                return;
+            }
+            let mut session = created.expect("admitted probe session");
+            let mut output = vec![0xa5; input.len()];
+            assert_eq!(
+                session.render(&input, &mut output, &info, &parameters(1.5)),
+                0
+            );
+            assert_eq!(
+                output,
+                [0.375_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
+            );
+            output.fill(0xa5);
+            let status = session.render(&input, &mut output, &info, &parameters(2.0));
+            if matches!(mode.as_str(), "unfetched" | "become_required") {
+                assert_eq!(status, if mode == "unfetched" { 5 } else { 7 });
+                assert_eq!(output, vec![0xa5; input.len()]);
+                assert_eq!(
+                    session.render(&input, &mut output, &info, &parameters(1.0)),
+                    2
+                );
+            } else {
+                assert_eq!(status, 0);
+                assert_eq!(
+                    output,
+                    [0.5_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
+                );
+            }
+            return;
+        }
+    }
+
+    #[test]
+    #[ignore = "set MONDRIAN_OPENFX_REFERENCE_BINARY to the official Basic.ofx.bundle"]
+    fn official_basic_native_session_reuses_authored_frames_in_supervised_child() {
+        if !qualification_child(
+            "openfx_host::shared_frame_tests::official_basic_native_session_reuses_authored_frames_in_supervised_child", &[],
+        ) { return; }
+        let path = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY")
+                .expect("official Basic binary is required"),
+        );
+        let path = resolve_openfx_binary(&path).expect("reference binary path");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("reference bundle");
+        let binary = native_string(&path).expect("native binary path");
+        let bundle = native_string(bundle_path).expect("native bundle path");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("scale").expect("parameter name");
+        let mut info = NativeFrameInfo {
+            width: 2,
+            height: 3,
+            frame: 1.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let original = [[-0.25_f32, 0.5, 2.0, 0.25]; 6];
+        let encode = |pixels: &[[f32; 4]]| {
+            pixels
+                .iter()
+                .flat_map(|pixel| pixel.iter().flat_map(|value| value.to_ne_bytes()))
+                .collect::<Vec<_>>()
+        };
+        let mut input = encode(&original);
+        let parameters = |gain| [NativeParameter { name: name.as_ptr(), kind: 1, value: gain }];
+        // Repeated destruction/recreation also checks cache handler ownership.
+        for _ in 0..3 {
+            let mut session = NativeSession::create(
+                &binary,
+                &bundle,
+                &identifier,
+                &input,
+                &info,
+                &parameters(1.5),
+            )
+            .expect("create native session");
+            for (frame, gain, aspect) in [
+                (1.0, 1.5, 1.0),
+                (1.0, 2.0, 1.0),
+                (42.0, 0.75, 1.2),
+                (0.0, 1.25, 1.0),
+            ] {
+                info.frame = frame;
+                info.pixel_aspect_ratio = aspect;
+                let mut output = vec![0xa5; input.len()];
+                assert_eq!(
+                    session.render(&input, &mut output, &info, &parameters(gain)),
+                    0
+                );
+                let expected = original.map(|mut pixel| {
+                    for channel in &mut pixel {
+                        *channel *= gain as f32;
+                    }
+                    pixel
+                });
+                assert_eq!(output, encode(&expected));
+            }
+            // Omitted controls use descriptor defaults, never prior-frame values.
+            let replacement = [[0.5_f32, -1.0, 3.0, 0.75]; 6];
+            let changed_input = encode(&replacement);
+            let mut output = vec![0xa5; changed_input.len()];
+            assert_eq!(session.render(&changed_input, &mut output, &info, &[]), 0);
+            assert_eq!(output, changed_input);
+            info.width = 3;
+            let mut output = vec![0xa5; input.len()];
+            assert_ne!(
+                session.render(&input, &mut output, &info, &parameters(1.0)),
+                0
+            );
+            assert_eq!(output, vec![0xa5; input.len()]);
+            info.width = 2;
+            assert_ne!(
+                session.render(&input, &mut output, &info, &parameters(1.0)),
+                0,
+                "failed instance is retired"
+            );
+        }
+        // Nonfinite input cannot produce or retain a usable native instance.
+        input[..4].copy_from_slice(&f32::NAN.to_ne_bytes());
+        assert!(NativeSession::create(
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters(1.0)
+        )
+        .is_err());
+    }
 
     #[test]
     fn worker_rejects_truncated_and_oversized_shared_frames_before_native_loading() {

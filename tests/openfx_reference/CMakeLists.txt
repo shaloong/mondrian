@@ -47,3 +47,20 @@ set_target_properties(Basic PROPERTIES
 file(MAKE_DIRECTORY "${OPENFX_BUNDLE_DIR}/Contents")
 configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
   "${OPENFX_BUNDLE_DIR}/Contents/Info.plist" COPYONLY)
+
+# Instrumented test fixture is separate from the untouched official reference.
+set(OPENFX_PROBE_BUNDLE_DIR "${CMAKE_BINARY_DIR}/SessionProbe.ofx.bundle")
+set(OPENFX_PROBE_BINARY_DIR "${OPENFX_PROBE_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
+add_library(SessionProbe MODULE session_probe.cpp)
+target_compile_features(SessionProbe PRIVATE cxx_std_17)
+target_include_directories(SessionProbe PRIVATE
+  "${OPENFX_SOURCE_DIR}" "${OPENFX_SOURCE_DIR}/include"
+  "${OPENFX_SOURCE_DIR}/Examples/include")
+set_target_properties(SessionProbe PROPERTIES PREFIX "" SUFFIX ".ofx"
+  LIBRARY_OUTPUT_DIRECTORY "${OPENFX_PROBE_BINARY_DIR}"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${OPENFX_PROBE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY "${OPENFX_PROBE_BINARY_DIR}"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OPENFX_PROBE_BINARY_DIR}")
+file(MAKE_DIRECTORY "${OPENFX_PROBE_BUNDLE_DIR}/Contents")
+configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
+  "${OPENFX_PROBE_BUNDLE_DIR}/Contents/Info.plist" COPYONLY)

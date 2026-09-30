@@ -32,8 +32,8 @@ namespace MondrianOpenFx {
 
   FilterEffectInstance::FilterEffectInstance(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
                                      OFX::Host::ImageEffect::Descriptor& desc,
-                                     const std::string& context)
-                                     : OFX::Host::ImageEffect::Instance(plugin,desc,context,false)
+                                     const std::string& context, FrameState& frameState)
+                                     : OFX::Host::ImageEffect::Instance(plugin,desc,context,false), _frameState(frameState)
   {
   }
 
@@ -82,8 +82,8 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectSize(double& xSize, double& ySize) const
   {
-    xSize = gWidth;
-    ySize = gHeight;
+    xSize = _frameState.info.width;
+    ySize = _frameState.info.height;
   }
 
   // get the project offset in CANONICAL pixels, we are at 0,0
@@ -95,31 +95,31 @@ namespace MondrianOpenFx {
 
   void FilterEffectInstance::getProjectExtent(double& xSize, double& ySize) const
   {
-    xSize = gWidth;
-    ySize = gHeight;
+    xSize = _frameState.info.width;
+    ySize = _frameState.info.height;
   }
 
   double FilterEffectInstance::getProjectPixelAspectRatio() const
   {
-    return gPixelAspectRatio;
+    return _frameState.info.pixel_aspect_ratio;
   }
 
   // we are only 25 frames
   double FilterEffectInstance::getEffectDuration() const
   {
-    return gLastFrame - gFirstFrame;
+    return _frameState.info.last_frame - _frameState.info.first_frame;
   }
 
   double FilterEffectInstance::getFrameRate() const
   {
-    return gFrameRate;
+    return _frameState.info.frame_rate;
   }
 
   /// This is called whenever a param is changed by the plugin so that
   /// the recursive instanceChangedAction will be fed the correct frame
   double FilterEffectInstance::getFrameRecursive() const
   {
-    return gFrame;
+    return _frameState.info.frame;
   }
 
   /// This is called whenever a param is changed by the plugin so that
@@ -190,7 +190,7 @@ namespace MondrianOpenFx {
   /// time as being passed to an action (eg render)
   double  FilterEffectInstance::timeLineGetTime()
   {
-    return gFrame;
+    return _frameState.info.frame;
   }
 
   /// set the timeline to a specific time
@@ -201,8 +201,8 @@ namespace MondrianOpenFx {
   /// get the first and last times available on the effect's timeline
   void  FilterEffectInstance::timeLineGetBounds(double &t1, double &t2)
   {
-    t1 = gFirstFrame;
-    t2 = gLastFrame;
+    t1 = _frameState.info.first_frame;
+    t2 = _frameState.info.last_frame;
   }
 
 }

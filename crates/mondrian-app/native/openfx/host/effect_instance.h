@@ -4,14 +4,18 @@
 #ifndef HOST_DEMO_EFFECT_INSTANCE_H
 #define HOST_DEMO_EFFECT_INSTANCE_H
 
+#include "frame_state.h"
+
 namespace MondrianOpenFx {
 
   // class definition
   class FilterEffectInstance : public OFX::Host::ImageEffect::Instance {
+    FrameState& _frameState;
   public:
+    const FrameState& frameState() const { return _frameState; }
     FilterEffectInstance(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
                      OFX::Host::ImageEffect::Descriptor& desc,
-                     const std::string& context);
+                     const std::string& context, FrameState& frameState);
 
     ////////////////////////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////

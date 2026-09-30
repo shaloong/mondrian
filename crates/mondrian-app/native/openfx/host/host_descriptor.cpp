@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 // ofx
 #include "ofxCore.h"
@@ -66,7 +67,9 @@ namespace MondrianOpenFx
                                                       OFX::Host::ImageEffect::Descriptor& desc,
                                                       const std::string& context)
   {
-    return new FilterEffectInstance(plugin, desc, context);
+    if (!clientData) { throw std::invalid_argument("filter frame state is missing"); }
+    return new FilterEffectInstance(plugin, desc, context,
+        *static_cast<FrameState*>(clientData));
   }
 
   /// Override this to create a descriptor, this makes the 'root' descriptor

@@ -31,3 +31,36 @@ pixel aspect ratio, preservation of negative/HDR/alpha values, and equality
 between direct host and compiled effect-graph output.
 The result qualifies this example and this host subset only; other vendors,
 contexts, pixel formats, and controls require separate evidence.
+
+Native reuse is qualified separately in a supervised test child:
+
+```sh
+cargo test -p mondrian-app --all-features --lib \
+  official_basic_native_session_reuses_authored_frames_in_supervised_child \
+  -- --ignored --nocapture
+```
+
+This checks repeated native session creation/destruction, same-frame parameter
+edits, seeks, changing input/PAR, omitted-control defaults and poisoned-handle
+retirement. It does not replace the product worker or cross-vendor matrix.
+
+The build also creates a separate `SessionProbe.ofx.bundle`. Its small owned
+wrapper includes the untouched official example from the external checkout;
+upstream notices and license remain attached. This fixture checks render-action
+flags and change-action grouping, advertises required/optional sequential or
+temporal contracts, and can deliberately return success without producing a
+new output. Neither fixture is packaged with Mondrian.
+
+Set `MONDRIAN_OPENFX_SESSION_PROBE_BINARY` to its platform binary and run:
+
+```sh
+cargo test -p mondrian-app --all-features --lib \
+  native_session_enforces_independent_frame_and_action_contracts \
+  -- --ignored --nocapture
+```
+
+Seven supervised scenarios qualify normal and optional sequential execution,
+required sequential and temporal rejection, instance-level admission changes,
+runtime contract changes, and stale-output rejection. The probe independently
+rejects any begin/render/end action falsely claiming sequential execution or
+any parameter-change action outside a nonempty begin/end group.

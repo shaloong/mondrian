@@ -60,16 +60,30 @@ int mondrian_openfx_describe(
 #endif
     ;
 
-int mondrian_openfx_render(
-    const char* binary,
-    const char* bundle,
-    const char* identifier,
-    const void* input,
-    void* output,
-    size_t frame_bytes,
+// Handles are owned by one supervised child. Calls on a handle are serialized.
+struct MondrianOpenFxSession;
+
+int mondrian_openfx_session_create(
+    const char* binary, const char* bundle, const char* identifier,
+    const void* input, size_t frame_bytes,
     const struct MondrianOpenFxFrameInfo* frame_info,
-    const struct MondrianOpenFxParameter* parameters,
-    int parameter_count)
+    const struct MondrianOpenFxParameter* parameters, int parameter_count,
+    struct MondrianOpenFxSession** session)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
+int mondrian_openfx_session_render(
+    struct MondrianOpenFxSession* session, const void* input, void* output,
+    size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,
+    const struct MondrianOpenFxParameter* parameters, int parameter_count)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
+void mondrian_openfx_session_destroy(struct MondrianOpenFxSession* session)
 #ifdef __cplusplus
     noexcept
 #endif

@@ -79,7 +79,7 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::get(OfxTime time, double& d)
   {
-    return std::isfinite(time) && time == gFrame
+    return std::isfinite(time) && time == _effect->frameState().info.frame
         ? get(d) : kOfxStatErrMissingHostFeature;
   }
 
@@ -97,7 +97,7 @@ namespace MondrianOpenFx {
 
   OfxStatus DoubleParameter::set(OfxTime time, double value)
   {
-    return std::isfinite(time) && time == gFrame
+    return std::isfinite(time) && time == _effect->frameState().info.frame
         ? set(value) : kOfxStatErrMissingHostFeature;
   }
 
@@ -130,7 +130,7 @@ namespace MondrianOpenFx {
 
   OfxStatus BooleanParameter::get(OfxTime time, bool& b)
   {
-    return std::isfinite(time) && time == gFrame
+    return std::isfinite(time) && time == _effect->frameState().info.frame
         ? get(b) : kOfxStatErrMissingHostFeature;
   }
 
@@ -141,7 +141,7 @@ namespace MondrianOpenFx {
   }
 
   OfxStatus BooleanParameter::set(OfxTime time, bool value) {
-    return std::isfinite(time) && time == gFrame
+    return std::isfinite(time) && time == _effect->frameState().info.frame
         ? set(value) : kOfxStatErrMissingHostFeature;
   }
 

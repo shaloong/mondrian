@@ -340,3 +340,43 @@ Format and license references: [CLAP](https://github.com/free-audio/clap),
 [OpenFX](https://github.com/AcademySoftwareFoundation/openfx),
 [LV2](https://github.com/lv2/lv2), and
 [AAX](https://developer.avid.com/aax/).
+
+### Native OpenFX session ownership
+
+The C ABI creates, renders and destroys an opaque session exclusively inside a
+supervised child. A session owns frame facts and the input buffer, host, local
+PluginCache, ImageEffect API handler, selected binary and effect instance in
+that lifetime order. Destruction reverses the order. Neither selected rendering
+nor description registers stack-owned handlers in the process-global cache.
+Clips and scalar parameters read their owning instance's frame facts; no global
+mutable raster or timing variables remain.
+
+Reuse binds the exact raster extent. Every request applies a complete scalar
+snapshot; omitted controls revert to descriptor defaults. Validation precedes
+parameter mutation. Changed values are assigned before callbacks and bracketed
+with BeginInstanceChanged/InstanceChanged/EndInstanceChanged. Time changes use
+ChangeTime; edits at the same instant use ChangeUserEdited. Clip metadata changes
+also notify Source/Output and refresh preferences. Unsupported negotiated pixel
+contracts fail. The current independently evaluable route rejects required
+sequential rendering and temporal clip access at description, creation and
+render admission; optional sequential optimization remains legal. Begin/render/
+end actions explicitly report nonsequential execution during edits and seeks.
+The output allocation is reused and cleared, with a per-render
+fetch flag preventing publication of a previous frame. Native failures poison
+the handle; subsequent calls fail until the owner retires and recreates it.
+
+The ordinary product path still supervises a single-frame child. This native
+session seam prepares safe resident transport; it does not yet qualify a
+persistent product worker, worker cancellation, combined memory admission or
+vendor sequential-state support. The official Basic Gain child qualification
+covers repeated edits, seeks, changed input and pixel aspect, omitted defaults,
+nonfinite input, extent rejection and repeated native destruction/recreation.
+The separate product-worker test checks discovery and compiled-graph pixel
+parity with the same admitted Float32 Filter contract.
+
+An instrumented external Basic wrapper separately checks nonsequential action
+flags and nonempty change-action groups. Seven supervised cases cover normal
+and optional sequential requests, required sequence/temporal rejection,
+instance/runtime contract changes, and a plugin returning successful Render
+without fetching a new output. This hostile contract fixture complements the
+untouched official pixel reference; it is never part of the product package.
