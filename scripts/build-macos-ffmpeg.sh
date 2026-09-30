@@ -36,7 +36,8 @@ cd "$source_dir"
   --prefix="$prefix" --extra-version=mondrian-prores12 \
   --cc="${CC:-clang}" --cxx="${CXX:-clang++}" \
   --pkg-config="${PKG_CONFIG:-pkg-config}" \
-  --extra-cflags="${CFLAGS:-}" --extra-ldflags="${LDFLAGS:-}" \
+  --extra-cflags="${CFLAGS:-}" \
+  --extra-ldflags="${LDFLAGS:-} -Wl,-headerpad_max_install_names" \
   --enable-gpl --enable-version3 --enable-shared --disable-static --enable-pic \
   --disable-doc --disable-ffplay \
   --enable-libx264 --enable-libx265 --enable-libaom --enable-libdav1d \

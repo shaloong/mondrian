@@ -59,6 +59,28 @@ manifest; release packaging retains it as `FFMPEG_SOURCE`. Existing recursive
 private-dylib closure and `--verify-runtime` gates remain required after bundling.
 This build recipe alone is not a physical decoder or HDR qualification result.
 
+### Private app packaging
+
+The FFmpeg builder reserves Mach-O header space for dependency relocation.
+Use the release workflow's `scripts/package-macos-app.sh` to stage the app,
+sibling FFmpeg tools, bundle metadata and their union dylib closure. It requires
+`dylibbundler` on `PATH`, a new destination and explicit dependency search
+directories when nested libraries cannot resolve their own `@rpath` entries:
+
+```bash
+bash scripts/package-macos-app.sh target/debug/mondrian \
+  /tmp/mondrian-package/Mondrian.app 0.2.0 \
+  "$(brew --prefix)/lib" "$(brew --prefix openssl@3)/lib" "$(brew --prefix zlib)/lib"
+```
+
+Unresolved libraries abort without an interactive prompt. Every bundled image
+must have a valid ad-hoc signature and every non-system dependency must resolve
+inside `Contents/Frameworks`. The final `--verify-runtime` runs with a clean
+environment and packaged sibling tools. A local development bundle passing
+these checks does not establish release provenance, notarization, codec hardware
+qualification or commercial performance. Release packaging separately retains
+licenses, source and immutable qualification provenance.
+
 ## Profiles
 
 Dev profile uses light optimization for media/render debugging. Release enables LTO thin, high optimization, and symbol stripping.
