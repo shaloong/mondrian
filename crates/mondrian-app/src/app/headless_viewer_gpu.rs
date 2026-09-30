@@ -1501,6 +1501,9 @@ impl HeadlessViewerGpuAdapter {
         let record_submit_us = elapsed_us(started);
         tracing::debug!(
             submission_id = submission_id.get(),
+            playback_intent = ?frame.playback_intent(),
+            successor_preparation = frame.is_successor_preparation(),
+            heterogeneous,
             record_submit_us,
             cpu_stage_timings = ?record.cpu_stage_timings,
             "recorded Headless Viewer GPU submission"
@@ -2230,6 +2233,15 @@ impl HeadlessViewerGpuAdapter {
         owner.execution.completion_wait_us =
             duration_us(owner.completion_started_at, completion_observed_at);
         owner.execution.gpu_completion_observed = true;
+        tracing::debug!(
+            submission_id = submission_id.get(),
+            playback_intent = ?owner.frame.playback_intent(),
+            successor_preparation = owner.frame.is_successor_preparation(),
+            record_submit_us = owner.execution.record_submit_us,
+            completion_wait_us = owner.execution.completion_wait_us,
+            quarantine_reason = ?quarantine_reason,
+            "observed Headless Viewer GPU submission completion"
+        );
         let completion_error = self
             .runtime
             .retire_completed_native_import_sources()
