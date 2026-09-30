@@ -303,7 +303,13 @@ mod tests {
         }
     }
     impl EffectFloatProcessorFactory for ProbeFactory {
-        fn resident_bytes(&self, _: EffectFloatProcessorPreparation) -> Result<usize> {
+        fn resident_bytes(&self, request: EffectFloatProcessorPreparation) -> Result<usize> {
+            if request.width == 0 || request.height == 0 {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "fixture_sizing".to_owned(),
+                    reason: "native instance requires nonempty frames".to_owned(),
+                });
+            }
             Ok(self.resident_charge.unwrap_or(64))
         }
         fn prepare(
@@ -413,6 +419,33 @@ mod tests {
             .expect("prepare factory graph")
             .evaluate(TimelineTime::ZERO)
             .expect("compile factory graph")
+    }
+
+    #[test]
+    fn empty_scalar_frames_never_query_or_prepare_native_recipes() {
+        let factory = Arc::new(ProbeFactory::default());
+        let graph = graph(Arc::clone(&factory));
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(0));
+        for (width, height) in [(0, 0), (0, 2), (3, 0)] {
+            assert_eq!(
+                session
+                    .apply_compiled_rgba_f32(&[], width, height, &graph, 0)
+                    .expect("no pixels require no native instance"),
+                Vec::<[f32; 4]>::new()
+            );
+        }
+        assert_eq!(factory.created.load(Ordering::SeqCst), 0);
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        for node in &graph.graph().nodes {
+            if let EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Custom { key, .. }, ..
+            } = &node.kind
+            {
+                let status = effect_plugin_runtime_status(key).expect("status");
+                assert!(!status.disabled);
+                assert_eq!(status.last_error, None);
+            }
+        }
     }
 
     #[test]
@@ -611,6 +644,11 @@ mod tests {
         let factory = Arc::new(ProbeFactory::default());
         let graph = graph_with_tail(Arc::clone(&factory), true);
         let work = mixed_work(graph);
+        assert_eq!(
+            work.cpu_required_working_bytes(),
+            96,
+            "batch admission includes the active recipe"
+        );
         assert_eq!(work.cpu_nodes().len(), 2);
         assert_eq!(work.gpu_suffix().node_ids().len(), 1);
         let mut session = EffectExecutionSession::default();

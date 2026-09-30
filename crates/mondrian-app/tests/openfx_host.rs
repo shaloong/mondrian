@@ -15,7 +15,7 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     apply_compiled_effect_graph_rgba_f32, instantiate_effect_node, EffectFrameContext,
-    LutPreparationCache, PreparedEffectProgram,
+    EffectNodeExt, LutPreparationCache, PreparedEffectProgram,
 };
 
 fn product_executable() -> &'static Path {
@@ -522,4 +522,207 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
         input
     );
     session.shutdown().expect("shutdown");
+}
+
+fn authored_probe_graph(gpu_tail: bool) -> std::sync::Arc<mondrian_effects::CompiledEffectGraph> {
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
+    );
+    let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect probe");
+    let effect_type = register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("register probe");
+    let mut effects =
+        vec![instantiate_effect_node(effect_type).expect("authored native occurrence")];
+    if gpu_tail {
+        let mut correction = mondrian_effects::EffectNode::with_defaults(
+            mondrian_effects::EffectType::BasicCorrection,
+        );
+        correction
+            .set_static_value_by_parameter(
+                &mondrian_effects::EffectType::BasicCorrection
+                    .parameter_id("exposure")
+                    .expect("exposure"),
+                PropertyValue::Float(0.5),
+            )
+            .expect("GPU tail");
+        effects.push(correction);
+    }
+    let frame_context = EffectFrameContext::new(
+        Rational::FPS_24,
+        SampleAspectRatio::SQUARE,
+        TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(10, 24).expect("duration"),
+        )
+        .expect("range"),
+    )
+    .expect("frame context");
+    PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        &effects,
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        frame_context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("author probe")
+    .evaluate(TimelineTime::ZERO)
+    .expect("compile probe")
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=unfetched"]
+fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
+    use mondrian_effects::{EffectExecutionSession, EffectExecutionSessionConfig};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
+        "unfetched"
+    );
+    let graph = authored_probe_graph(false);
+    let input = [[-0.25, 1.5, 0.75, 0.5]];
+    // Two executor rasters plus five controlled host rasters must fit before
+    // any native session is constructed. The one-byte shortfall stays retryable.
+    let mut config = EffectExecutionSessionConfig {
+        max_working_bytes: 111,
+        ..EffectExecutionSessionConfig::default()
+    };
+    let mut session = EffectExecutionSession::new(config);
+    session.bind_generation(1);
+    assert!(session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 0).is_err());
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    config.max_working_bytes = 112;
+    session.reconfigure(config);
+    assert_eq!(
+        session
+            .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+            .expect("first native frame"),
+        input
+    );
+    assert_eq!(session.diagnostics().processor_instances, 1);
+    assert_eq!(session.diagnostics().processor_bytes, 80);
+    // The probe only omits Output on its second render in the same native
+    // instance. A fresh process per frame would incorrectly succeed here.
+    assert!(session.apply_compiled_rgba_f32(&input, 1, 1, &graph, 1).is_err());
+    assert_eq!(input, [[-0.25, 1.5, 0.75, 0.5]]);
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    session.bind_generation(2);
+    assert_eq!(
+        session
+            .apply_compiled_rgba_f32(&input, 1, 1, &graph, 0)
+            .expect("fresh generation"),
+        input
+    );
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
+fn authored_native_factory_observes_mixed_execution_deadline() {
+    use mondrian_effects::{
+        effect_plugin_runtime_status, EffectColorDomain, EffectExecutionEnvironment,
+        EffectExecutionLane, EffectExecutionLaneId, EffectExecutionSession,
+        EffectExecutionTransfer, EffectFrameExtent, EffectGraphExecutionBudget,
+        EffectGraphExecutionRequest, EffectProcessingBackend, EffectValueFormat,
+        EffectValueResidency, EffectWorkingPrecision, EffectWorkingPrecisions,
+        HeterogeneousCpuExecutionStopReason, PreparedHeterogeneousEffectWork,
+        PreparedHeterogeneousEffectWorkError,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("probe mode"),
+        "hang"
+    );
+    let graph = authored_probe_graph(true);
+    let key = graph
+        .graph()
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                op: mondrian_effects::EffectRenderOp::Custom { key, .. },
+                ..
+            } => Some(key.clone()),
+            _ => None,
+        })
+        .expect("native key");
+    let cpu = EffectExecutionLaneId::new(0);
+    let gpu = EffectExecutionLaneId::new(1);
+    let environment = EffectExecutionEnvironment::new(
+        Arc::from([
+            EffectExecutionLane::new(
+                cpu,
+                EffectProcessingBackend::Cpu,
+                EffectWorkingPrecisions::FLOAT32,
+                10,
+            ),
+            EffectExecutionLane::new(
+                gpu,
+                EffectProcessingBackend::Gpu,
+                EffectWorkingPrecisions::FLOAT32,
+                1,
+            ),
+        ]),
+        Arc::from([EffectExecutionTransfer::new(
+            cpu,
+            EffectWorkingPrecision::Float32,
+            gpu,
+            EffectWorkingPrecision::Float32,
+            2,
+        )]),
+    )
+    .expect("execution lanes");
+    let format = EffectValueFormat::new(
+        EffectWorkingPrecision::Float32,
+        EffectColorDomain::SceneLinearRgb,
+    );
+    let work = PreparedHeterogeneousEffectWork::prepare(
+        graph,
+        &environment,
+        EffectGraphExecutionRequest::new(
+            EffectFrameExtent::new(1, 1),
+            EffectValueResidency::new(cpu, format),
+            EffectValueResidency::new(gpu, format),
+            EffectGraphExecutionBudget::new(1024, 1024, 1024, 128, 256),
+        ),
+    )
+    .expect("mixed route");
+    let mut session = EffectExecutionSession::default();
+    session.bind_generation(42);
+    let input = [[0.25, 1.5, -0.75, 0.5]];
+    let started = Instant::now();
+    let result = work.execute_cpu_prefix_with_checkpoint(
+        &mut session,
+        42,
+        &input,
+        0,
+        WorkingColorSpace::LinearRec709,
+        &mut || {
+            (started.elapsed() >= Duration::from_millis(150))
+                .then_some(HeterogeneousCpuExecutionStopReason::DeadlineExpired)
+        },
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                reason: HeterogeneousCpuExecutionStopReason::DeadlineExpired,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "native five-second wait must honor the execution owner"
+    );
+    assert_eq!(input, [[0.25, 1.5, -0.75, 0.5]]);
+    assert_eq!(session.diagnostics().processor_instances, 0);
+    let status = effect_plugin_runtime_status(&key).expect("plugin status");
+    assert!(!status.disabled);
+    assert_eq!(status.last_error, None);
 }

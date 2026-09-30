@@ -408,9 +408,12 @@ and operation deadline. A canceled, failed, malformed or timed-out operation
 terminates and reaps the child before output publication or mapping retirement.
 Graceful shutdown drops the native instance before acknowledging closure, then
 verifies process exit; a stalled shutdown is killed/reaped under a short cap.
-The exact physical native working-set grant and propagation from production
-Effect execution cancellation are pending integration with the factory seam.
-This transport does not add a process-global worker pool or sequential-state
+The authored Filter definition now binds an immutable processor factory. Its
+instances belong exclusively to each execution Session and author EffectId;
+preparation/rendering borrow EffectProcessorControl and propagate the observed
+scheduler stop through the transport. Transport/native faults remain faults,
+including the adapter's own timeout without an observed owner stop. This
+transport does not add a process-global worker pool or sequential-state
 interpretation.
 
 Resident preparation and rendering now take the owning scheduler's borrowed
@@ -435,3 +438,46 @@ seeks and reverses its rows/pixels to reject stale or misordered Source data.
 This ownership follows the [official clipGetImage contract](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxImageEffect_8h.html):
 each fetch returns its own action-scoped handle, while underlying image data
 may be shared. Image handles must be released before that action returns.
+
+### Authored OpenFX execution instances and frame admission
+
+OpenFxProcessorFactory retains the helper path, pinned inspection and selected
+identifier, and starts no worker during graph evaluation. Each admitted native
+instance owns one OpenFxFilterSession. Parameter snapshots and exact frame
+context still come from the canonical author graph; edits and seeks do not use
+an alternate interpretation. The executor moves its atomic input stage into
+the host envelope, so this binding adds no input raster. Failures restore that
+stage before propagating the typed error; the caller's published frame remains
+unchanged. Session eviction, errors and generation barriers retire the child.
+
+The current controlled host-frame charge is five complete Float32 rasters:
+two shared mapping ranges, native session Source, native Output, and the
+returned output vector at peak. Shared physical pages are counted once. This
+charge is checked before worker creation, together with executor staging and
+live graph values. Heterogeneous preparation includes active recipe charges
+in cpu_required_working_bytes(), which Export's existing attempt contract
+consumes; the batch scheduler must not see pixel scratch alone. Frame sizing
+has the same extent/size validation as the transport.
+
+This logical frame grant excludes executable mappings, control-plane metadata
+and arbitrary plugin-private heaps. It is not a physical process RSS limit.
+Production retained-native grants remain zero until cross-owner persistent
+resource grants are qualified; factory-backed ephemeral execution already uses
+the same frame admission and owner cancellation. Standalone qualified Sessions
+with explicit retention reuse workers without definition-global mutable state.
+
+The SessionProbe authored-graph qualification returns no Output on its second
+native render. The first frame succeeds, the second fails and retires the
+instance, and a new generation succeeds with fresh state. This distinguishes
+native instance reuse from starting a new process every frame. The mixed
+CPU/GPU-prefix qualification interrupts the five-second native hang at the
+scheduler's deadline, preserves the input and leaves runtime quarantine empty.
+
+Cancellation qualification currently covers the temporal and heterogeneous
+CPU-prefix owner checkpoints. The ordinary scalar graph methods still use
+uncancelled control, and timeline_composite's ordinary media/solid/adjustment
+paths call those methods. Propagating the production owner through that path
+remains required; the factory binding alone does not qualify universal Preview
+or Export cancellation. The existing heterogeneous preparer also rejects a
+CPU-only graph ending with a GPU upload and no GPU dispatch suffix, so such a
+route must not be assumed to migrate native work off the ordinary path yet.

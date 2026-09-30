@@ -464,7 +464,9 @@ impl std::fmt::Debug for EffectExecutionModes {
 /// Longest resource lifetime and ownership scope required by an occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EffectResourceLifetime {
-    /// All resources are frame-local and require no preparation.
+    /// No immutable author-time resources or ordered continuity are required.
+    /// Execution owners may retain stateless processor instances as evictable
+    /// implementation caches; every frame remains independently executable.
     Frame,
     /// Immutable resources must be resolved once and retained by the prepared
     /// program.

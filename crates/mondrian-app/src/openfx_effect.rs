@@ -1,7 +1,7 @@
 //! Bind a described, installed OpenFX Filter to the shared visual effect graph.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mondrian_core::automation::{
@@ -12,15 +12,17 @@ use mondrian_core::{MondrianError, ParameterId};
 use mondrian_effects::{
     register_effect_definition, EffectCachePolicy, EffectColorDomainContract, EffectDefinition,
     EffectDefinitionError, EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
-    EffectGraphBuildError, EffectGraphTopology, EffectPluginContract, EffectResourceLifetime,
-    EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+    EffectFloatProcessorFactory, EffectFloatProcessorInstance, EffectFloatProcessorPreparation,
+    EffectGraphBuildError, EffectGraphTopology, EffectPluginContract, EffectProcessorControl,
+    EffectProcessorStopReason, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+    EffectTemporalInputExtent, EffectType,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterDescription,
+    describe_openfx_filter, OpenFxDoubleType, OpenFxFilterDescription, OpenFxFilterSession,
     OpenFxFloatFrame, OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
 };
 
@@ -50,6 +52,123 @@ struct BoundParameter {
 struct OpenFxGraphParameters {
     timing: OpenFxRenderTiming,
     values: BTreeMap<String, OpenFxScalarValue>,
+}
+
+/// A definition retains only an immutable selection, never a native instance.
+#[derive(Debug)]
+struct OpenFxProcessorFactory {
+    helper: PathBuf,
+    inspection: OpenFxBinaryInspection,
+    identifier: String,
+}
+
+#[derive(Debug)]
+struct OpenFxProcessorInstance {
+    session: OpenFxFilterSession,
+    width: u32,
+    height: u32,
+}
+
+fn processor_checkpoint(control: &mut EffectProcessorControl<'_>) -> Result<(), OpenFxHostError> {
+    control.check().map_err(|_| match control.stop_reason() {
+        Some(EffectProcessorStopReason::DeadlineExpired) => OpenFxHostError::DeadlineExceeded,
+        _ => OpenFxHostError::Canceled,
+    })
+}
+
+fn processor_host_error(
+    error: OpenFxHostError,
+    control: &EffectProcessorControl<'_>,
+) -> MondrianError {
+    if control.stop_reason().is_some() {
+        MondrianError::Cancelled
+    } else {
+        // An adapter transport timeout is a worker fault. Only an observed
+        // scheduler stop may report cancellation without runtime quarantine.
+        MondrianError::WorkflowStepFailed {
+            step_id: "openfx_filter_execution".to_owned(),
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
+    fn resident_bytes(
+        &self,
+        request: EffectFloatProcessorPreparation,
+    ) -> mondrian_core::Result<usize> {
+        OpenFxFilterSession::required_frame_storage(request.width, request.height).map_err(
+            |error| MondrianError::WorkflowStepFailed {
+                step_id: "openfx_filter_frame_contract".to_owned(),
+                reason: error.to_string(),
+            },
+        )
+    }
+
+    fn prepare(
+        &self,
+        request: EffectFloatProcessorPreparation,
+        control: &mut EffectProcessorControl<'_>,
+    ) -> mondrian_core::Result<Box<dyn EffectFloatProcessorInstance>> {
+        control.check()?;
+        let result = {
+            let mut checkpoint = || processor_checkpoint(control);
+            OpenFxFilterSession::prepare(
+                &self.helper,
+                &self.inspection,
+                &self.identifier,
+                request.width,
+                request.height,
+                &mut checkpoint,
+            )
+        };
+        let session = result.map_err(|error| processor_host_error(error, control))?;
+        Ok(Box::new(OpenFxProcessorInstance {
+            session,
+            width: request.width,
+            height: request.height,
+        }))
+    }
+}
+
+impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
+    fn process(
+        &mut self,
+        pixels: &mut Vec<[f32; 4]>,
+        params: &serde_json::Value,
+        _frame_seed: i64,
+        control: &mut EffectProcessorControl<'_>,
+    ) -> mondrian_core::Result<()> {
+        control.check()?;
+        let parameters: OpenFxGraphParameters =
+            serde_json::from_value(params.clone()).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "openfx_graph_parameters".to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+        // This vector is the executor's atomic stage. Moving it into the host
+        // envelope introduces no extra input raster or definition-global state.
+        let frame = OpenFxFloatFrame {
+            width: self.width,
+            height: self.height,
+            pixels: std::mem::take(pixels),
+        };
+        let result = {
+            let mut checkpoint = || processor_checkpoint(control);
+            self.session.render(
+                &parameters.timing,
+                &parameters.values,
+                &frame,
+                &mut checkpoint,
+            )
+        };
+        *pixels = frame.pixels;
+        let output = result.map_err(|error| processor_host_error(error, control))?;
+        control.check()?;
+        *pixels = output.pixels;
+        Ok(())
+    }
 }
 
 /// Describe and register one installed OpenFX Filter for Clip insertion.
@@ -213,33 +332,11 @@ fn build_definition(
         "{}.{}:{}",
         plugin.version_major, plugin.version_minor, inspection.binary_sha256
     );
-    let helper = helper_executable.to_path_buf();
-    let inspection = inspection.clone();
-    let identifier = description.identifier.clone();
-    let processor = Arc::new(
-        move |pixels: &mut Vec<[f32; 4]>, width, height, params: &serde_json::Value, _seed| {
-            let parameters: OpenFxGraphParameters = serde_json::from_value(params.clone())
-                .map_err(|error| MondrianError::WorkflowStepFailed {
-                    step_id: "openfx_graph_parameters".to_owned(),
-                    reason: error.to_string(),
-                })?;
-            let frame = OpenFxFloatFrame { width, height, pixels: std::mem::take(pixels) };
-            let output = render_openfx_filter_frame(
-                &helper,
-                &inspection,
-                &identifier,
-                &parameters.timing,
-                &parameters.values,
-                &frame,
-            )
-            .map_err(|error| MondrianError::WorkflowStepFailed {
-                step_id: "openfx_filter_render".to_owned(),
-                reason: error.to_string(),
-            })?;
-            *pixels = output.pixels;
-            Ok(())
-        },
-    );
+    let processor = Arc::new(OpenFxProcessorFactory {
+        helper: helper_executable.to_path_buf(),
+        inspection: inspection.clone(),
+        identifier: description.identifier.clone(),
+    });
     Ok(EffectDefinition::new(
         effect_type.key(),
         description.label,
@@ -256,7 +353,7 @@ fn build_definition(
         resource_lifetime: EffectResourceLifetime::Frame,
         topology: EffectGraphTopology::LinearChain,
     })
-    .with_custom_float_render_backend(
+    .with_custom_float_processor_factory(
         params_builder,
         None,
         EffectCachePolicy::Uncacheable,
@@ -301,6 +398,41 @@ mod tests {
     use mondrian_effects::{
         instantiate_effect_node, EffectFrameContext, LutPreparationCache, PreparedEffectProgram,
     };
+
+    #[test]
+    fn native_factory_sizes_controlled_frames_before_loading_a_binary() {
+        let request = EffectFloatProcessorPreparation {
+            effect_id: mondrian_core::EffectId::new(),
+            width: 2,
+            height: 3,
+        };
+        assert_eq!(
+            OpenFxFilterSession::required_frame_storage(request.width, request.height)
+                .expect("frame charge"),
+            5 * 2 * 3 * 16
+        );
+        assert!(OpenFxFilterSession::required_frame_storage(0, 1).is_err());
+        assert!(OpenFxFilterSession::required_frame_storage(u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn native_transport_faults_do_not_invent_scheduler_cancellation() {
+        let control = EffectProcessorControl::uncancelled();
+        assert!(matches!(
+            processor_host_error(OpenFxHostError::DeadlineExceeded, &control),
+            MondrianError::WorkflowStepFailed { .. }
+        ));
+        let mut deadline = || Some(EffectProcessorStopReason::DeadlineExpired);
+        let mut control = EffectProcessorControl::new(&mut deadline);
+        assert!(matches!(
+            processor_checkpoint(&mut control),
+            Err(OpenFxHostError::DeadlineExceeded)
+        ));
+        assert!(matches!(
+            processor_host_error(OpenFxHostError::DeadlineExceeded, &control),
+            MondrianError::Cancelled
+        ));
+    }
 
     #[test]
     fn described_filter_binds_author_values_and_exact_frame_time_into_shared_graph() {

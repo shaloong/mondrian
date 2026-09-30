@@ -79,9 +79,35 @@ cargo test -p mondrian-app --all-features --test openfx_host \
 
 The latter interrupts a five-second native render and confirms the retired
 session cannot be reused. It qualifies supervised cancellation for the session
-API; production Effect cancellation and combined memory grants remain separate.
+API. Authored Effect cancellation and the controlled host-frame charge now
+use the same execution-owned factory seam; physical native heaps and persistent
+production residency remain separate qualification.
 
 The normal and optional SessionProbe scenarios additionally hold two Source
 image handles, release the first, then read and release the second before the
 official Basic implementation fetches Source again. This checks action-scoped
 input ownership and prevents image release from freeing session pixel storage.
+
+Authored native factory qualifications (run separately because probe mode is
+chosen by the test command environment):
+
+```sh
+# MONDRIAN_OPENFX_SESSION_PROBE_MODE=unfetched
+cargo test -p mondrian-app --all-features --test openfx_host \
+  authored_native_factory_reuses_instances_and_rejects_stale_output \
+  -- --ignored --nocapture
+
+# MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang
+cargo test -p mondrian-app --all-features --test openfx_host \
+  authored_native_factory_observes_mixed_execution_deadline \
+  -- --ignored --nocapture
+```
+
+The reuse test also denies a one-byte-short frame grant before worker creation,
+then retries successfully without quarantining the definition. A new generation
+must get a fresh native instance after stale-output failure. The deadline test
+executes the authored Filter through the prepared CPU-prefix route, rather than
+calling the host session directly. Neither qualification requires a GPU device.
+When running all ignored integration tests in `hang` mode, skip the
+`authored_native_factory_reuses_instances_and_rejects_stale_output` test and
+run it separately in `unfetched` mode.

@@ -2651,9 +2651,28 @@ impl PreparedHeterogeneousEffectWork {
                 .checked_add(mask_auxiliary_bytes)
                 .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         }
-        let cpu_required_working_bytes = cpu_pixel_peak
+        let mut cpu_required_working_bytes = cpu_pixel_peak
             .checked_add(mask_auxiliary_bytes)
             .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
+        for (dispatch, &pixels) in cpu_dispatches.iter().zip(&cpu_pixel_reservations) {
+            let node = compiled.graph().node(dispatch.node).ok_or(
+                PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
+            )?;
+            if let EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } = &node.kind
+            {
+                let charge = crate::processor_residency::frame_processor_charge(
+                    op,
+                    frame_extent.width(),
+                    frame_extent.height(),
+                )?;
+                cpu_required_working_bytes = cpu_required_working_bytes.max(
+                    pixels
+                        .checked_add(charge)
+                        .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?,
+                );
+            }
+        }
         let shape_identity =
             heterogeneous_effect_shape_identity(&compiled, &plan, &cpu_nodes, &gpu_nodes)?;
         let cpu_frontier_retained_bytes = transfers.iter().try_fold(0_u64, |total, transfer| {
@@ -2721,11 +2740,13 @@ impl PreparedHeterogeneousEffectWork {
         self.cpu_frontier_retained_bytes
     }
 
-    /// Exact transient scalar bytes required by the prepared CPU prefix.
+    /// Peak controlled Float32 storage and processor charges for the CPU prefix.
     ///
-    /// This is implementation-private scratch in addition to graph-value
-    /// residency. A scheduler may compare it with the bound Session before
-    /// dispatch; execution repeats the check before allocating.
+    /// Includes graph values, kernel scratch, masks and the active processor's
+    /// declared charge. Immutable caller input is accounted by its own owner.
+    /// Schedulers must include this charge in attempt admission; execution
+    /// repeats the check before allocating. Optional resident siblings yield
+    /// to this cold-admitted work.
     pub const fn cpu_required_working_bytes(&self) -> usize {
         self.cpu_required_working_bytes
     }

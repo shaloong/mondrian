@@ -915,6 +915,11 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         });
     }
     validate_float_effect_graph(compiled, processor.is_some())?;
+    if input.is_empty() {
+        // There is no frame to size or execute. Native extent validation must
+        // not turn an empty request into a plugin fault or start a worker.
+        return Ok(Vec::new());
+    }
     let reservations =
         scalar_processor_reservations(compiled, width, height, session.max_working_bytes())?;
     if reservations.is_none() {
@@ -922,7 +927,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         // Retire them before identity/cache output copies as well.
         session.processors.clear();
     }
-    if compiled.graph().is_identity() || input.is_empty() || width == 0 || height == 0 {
+    if compiled.graph().is_identity() {
         return Ok(input.to_vec());
     }
     if let Some(cached) = get_cached_effect_output_f32(

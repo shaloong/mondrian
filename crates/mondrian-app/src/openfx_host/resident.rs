@@ -123,6 +123,21 @@ pub struct OpenFxFilterSession {
 }
 
 impl OpenFxFilterSession {
+    /// Peak controlled frame storage for this session: two shared rasters,
+    /// native Source and Output storage, and the returned Float32 raster.
+    ///
+    /// This is a logical frame charge, counted once for shared physical pages.
+    /// It excludes executable mappings, control metadata and arbitrary private
+    /// allocations made by the installed plugin; it is not a process RSS cap.
+    pub fn required_frame_storage(width: u32, height: u32) -> Result<usize, OpenFxHostError> {
+        let count = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| invalid("frame dimensions overflow"))?;
+        validate_frame(width, height, count)?
+            .checked_mul(5)
+            .ok_or_else(|| invalid("native frame storage overflows"))
+    }
+
     /// Prepare a pinned filter and fixed frame extent without loading it in the
     /// application. The child creates its native instance on the first render.
     /// The borrowed owner checkpoint is polled during preparation and every

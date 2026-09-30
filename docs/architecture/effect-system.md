@@ -1207,3 +1207,17 @@ Product retained-native grants remain closed until cross-owner resource
 coordination and the native factory's memory charge are qualified. These
 owner-local frame/processor proofs do not claim a global process-memory cap
 or enforcement of arbitrary third-party native heap allocations.
+
+Heterogeneous work preparation includes the active recipe's charge in its
+published cpu_required_working_bytes(), in addition to per-node pixel/mask
+reservations. Export attempt contracts and CPU batch admission therefore use
+the complete declared CPU-prefix peak, before dispatch. Mutable stateless
+execution instances are implementation caches under the Frame lifetime:
+they require neither immutable author-time resources nor ordered continuity,
+and eviction/recreation cannot change frame semantics.
+
+Empty scalar frames end after input/graph validation and before recipe sizing:
+there is no raster or native instance to admit. A native recipe that rejects a
+zero extent must therefore never quarantine the definition for an empty request.
+The empty-frame regression covers zero width, zero height and both zero under
+a zero-byte execution grant, with no sizing error or instance preparation.
