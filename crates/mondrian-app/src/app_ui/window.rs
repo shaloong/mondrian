@@ -6927,6 +6927,36 @@ fn prepare_viewer_gpu_preview(
             .unregister_external_texture(stale.artifact().texture_key());
         drop(stale);
     }
+    let program_scopes_requested =
+        session.role == AppUiWindowRole::Workspace && host.is_panel_active(PanelKind::Scopes);
+    let scopes_settings = host.video_scopes_settings();
+    let program_scopes_analysis_identity =
+        program_scopes_requested.then_some(scopes_settings.analysis_identity());
+    if !program_scopes_requested {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = false;
+    } else if (session.program_scopes_registered
+        && session.program_scopes_analysis_identity != program_scopes_analysis_identity)
+        || (!session.program_scopes_registered && !session.program_scopes_refresh_requested)
+    {
+        // Opening/changing Scopes must renew an already consumed still ticket
+        // before admission. Retire the old physical output first; Playback
+        // remains the sole authority and preserves timed playback deadlines.
+        tracing::debug!(
+            previous = ?session.program_scopes_analysis_identity,
+            requested = ?program_scopes_analysis_identity,
+            "Window Scopes analysis contract changed"
+        );
+        unregister_program_scopes_textures(session);
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
+        if let Err(error) = host.renew_still_frame_demand_after_output_retirement() {
+            tracing::error!(%error, "Window Scopes could not bind a new still ticket");
+            finish_prepare!();
+        }
+        session.program_scopes_refresh_requested = true;
+    }
     let Some(preparation) = host.viewer_gpu_preparation() else {
         finish_prepare!();
     };
@@ -6962,31 +6992,6 @@ fn prepare_viewer_gpu_preview(
         session.program_scopes_refresh_requested = false;
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         finish_prepare!();
-    }
-    let program_scopes_requested = host.is_panel_active(PanelKind::Scopes);
-    let scopes_settings = host.video_scopes_settings();
-    let program_scopes_analysis_identity =
-        program_scopes_requested.then_some(scopes_settings.analysis_identity());
-    if !program_scopes_requested {
-        unregister_program_scopes_textures(session);
-        session.program_scopes_refresh_requested = false;
-    }
-    if session.program_scopes_registered
-        && session.program_scopes_analysis_identity != program_scopes_analysis_identity
-    {
-        unregister_program_scopes_textures(session);
-        host.clear_external_viewer_frame();
-        session.program_scopes_refresh_requested = true;
-    }
-    if program_scopes_requested
-        && !session.program_scopes_registered
-        && !session.program_scopes_refresh_requested
-    {
-        // A Viewer frame may already be current when the user opens Scopes.
-        // Reissue that same candidate once so Program Output is still resident
-        // at the renderer boundary instead of measuring monitor output.
-        host.clear_external_viewer_frame();
-        session.program_scopes_refresh_requested = true;
     }
     let current_candidate = match preparation {
         ViewerGpuPreparation::Current => {
@@ -8089,6 +8094,10 @@ fn register_program_scopes_textures(
     }
     session.program_scopes_refresh_requested = false;
     session.program_scopes_analysis_identity = analysis_identity;
+    tracing::debug!(
+        ?analysis_identity,
+        "Window Program Output scopes registered"
+    );
     Ok(())
 }
 
@@ -8097,6 +8106,7 @@ fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
     if !session.program_scopes_registered {
         return;
     }
+    tracing::debug!("Window Program Output scopes unregistered");
     for raw_key in [
         crate::app_ui::scopes::HISTOGRAM_TEXTURE_KEY,
         crate::app_ui::scopes::WAVEFORM_TEXTURE_KEY,

@@ -11,7 +11,17 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use serde::{Deserialize, Serialize};
 
 const TOOLBAR_HEIGHT: f32 = 28.0;
-const CONTROL_COUNT: usize = 9;
+const SCOPE_CONTROLS: [ScopeControl; 9] = [
+    ScopeControl::Waveform,
+    ScopeControl::Scale,
+    ScopeControl::Tap,
+    ScopeControl::Skin,
+    ScopeControl::Targets,
+    ScopeControl::FalseColor,
+    ScopeControl::Zebra,
+    ScopeControl::Gamut,
+    ScopeControl::Layout,
+];
 
 /// Independent scope-pane layout selected by the operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -201,22 +211,10 @@ impl VideoScopesSurface {
         if !toolbar.contains(point) || toolbar.width <= 0.0 {
             return None;
         }
-        let index = (((point.x - toolbar.x) / toolbar.width) * CONTROL_COUNT as f32)
+        let index = (((point.x - toolbar.x) / toolbar.width) * SCOPE_CONTROLS.len() as f32)
             .floor()
-            .clamp(0.0, (CONTROL_COUNT - 1) as f32) as usize;
-        Some(
-            [
-                ScopeControl::Waveform,
-                ScopeControl::Scale,
-                ScopeControl::Tap,
-                ScopeControl::Skin,
-                ScopeControl::Targets,
-                ScopeControl::FalseColor,
-                ScopeControl::Zebra,
-                ScopeControl::Gamut,
-                ScopeControl::Layout,
-            ][index],
-        )
+            .clamp(0.0, (SCOPE_CONTROLS.len() - 1) as f32) as usize;
+        Some(SCOPE_CONTROLS[index])
     }
 
     fn changed_settings(&self, control: ScopeControl) -> VideoScopesSettings {
@@ -531,18 +529,8 @@ impl Widget for VideoScopesSurface {
         let gap = ctx.theme.spacing.sm;
         ctx.encoder.draw_rect(self.bounds, ctx.theme.colors.card, 0.0);
         let toolbar = self.toolbar_rect();
-        let control_width = toolbar.width / CONTROL_COUNT as f32;
-        for (index, control) in [
-            ScopeControl::Waveform,
-            ScopeControl::Scale,
-            ScopeControl::Tap,
-            ScopeControl::Skin,
-            ScopeControl::Targets,
-            ScopeControl::Layout,
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        let control_width = toolbar.width / SCOPE_CONTROLS.len() as f32;
+        for (index, control) in SCOPE_CONTROLS.into_iter().enumerate() {
             let rect = Rect::new(
                 toolbar.x + index as f32 * control_width,
                 toolbar.y,
@@ -601,6 +589,14 @@ impl Widget for VideoScopesSurface {
 
     fn hit_test(&self, point: Point) -> bool {
         self.bounds.contains(point)
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -739,6 +735,30 @@ mod tests {
         assert_eq!(settings.waveform_mode, WaveformMode::Luma);
         assert_eq!(settings.tap, ProgramScopesTap::ProgramOutput);
         assert_eq!(dispatched.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn painted_toolbar_labels_match_their_click_targets() {
+        let mut surface = VideoScopesSurface::new();
+        surface.layout(Rect::new(0.0, 0.0, 900.0, 300.0));
+        let theme = mondrian_ui_theme::ThemePreset::Dark.build();
+        let mut encoder = crate::test_utils::RecordingEncoder::default();
+        surface.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: surface.bounds,
+        });
+        let labels: Vec<_> =
+            encoder.texts.iter().filter(|text| text.position.y < TOOLBAR_HEIGHT).collect();
+        assert_eq!(
+            labels.len(),
+            9,
+            "all nine controls must have visible labels"
+        );
+        for label in labels {
+            let control = surface.control_at(label.position).expect("toolbar click target");
+            assert_eq!(label.text, surface.control_label(control));
+        }
     }
 
     #[test]
