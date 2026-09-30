@@ -83,6 +83,12 @@ render failure. A real official Basic Gain filter qualification covers all
 pixels in a nonuniform 4x4 frame at an authored gain of 1.5. Its reference
 binary remains outside the product tree. The host ABI uses OpenFX bottom-left
 pixel coordinates with negative row bytes over Mondrian's top-row-first frame.
+`tests/openfx_reference` builds that pinned upstream Basic source without
+Conan or vendoring the plugin. It checks the upstream commit at configure time
+and emits a platform bundle outside the product tree for the ignored real-host
+pixel test. Windows MinGW-built Basic passed the selected-binary host and
+compiled-graph comparison; macOS and Linux still require their own built
+fixture and native qualification run.
 `mondrian-app::openfx_effect` can now register one explicitly selected and
 described Filter as a Float32 CPU definition in the shared compiled visual
 effect graph. Stable parameter IDs derive from the plugin identifier and OFX
