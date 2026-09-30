@@ -121,6 +121,7 @@ pub fn resolve_display_snapshot(
         &monitor_profile_status,
         &hdr_status,
         &format!("{surface_format:?}"),
+        &format!("{surface_color_space:?}"),
         &format!("{resolved_output_color_space:?}"),
     );
     if let Some(blocker) = ocio_blocker {

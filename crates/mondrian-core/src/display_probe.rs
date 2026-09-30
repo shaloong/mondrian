@@ -364,6 +364,7 @@ pub fn compute_display_blockers(
     monitor_profile: &MonitorProfileStatus,
     hdr_status: &HdrStatus,
     surface_format: &str,
+    surface_color_space: &str,
     output_color_space: &str,
 ) -> Vec<DisplayOutputBlocker> {
     let mut blockers = Vec::new();
@@ -389,10 +390,16 @@ pub fn compute_display_blockers(
     let is_wide_gamut_output = output_color_space.contains("DisplayP3")
         || output_color_space.contains("Rec2020")
         || output_color_space.contains("Rec2100");
-    let is_srgb_only_surface =
-        surface_format.contains("UnormSrgb") && !surface_format.contains("Rgba16Float");
+    // Texture format defines storage/transfer, not presentation primaries.
+    // The native surface color-space contract must prove the wide-gamut carrier.
+    let surface_supports_wide_gamut =
+        matches!(
+            surface_color_space,
+            "DisplayP3" | "ExtendedDisplayP3" | "Bt2100Pq" | "Bt2100Hlg"
+        ) || (matches!(surface_color_space, "ExtendedSrgbLinear" | "ExtendedSrgb")
+            && surface_format == "Rgba16Float");
     if is_wide_gamut_output
-        && is_srgb_only_surface
+        && !surface_supports_wide_gamut
         && !matches!(hdr_status, HdrStatus::RequestedSurfaceUnsupported { .. })
     {
         // The surface is sRGB-only but the output needs wide gamut.
@@ -666,7 +673,7 @@ mod tests {
             reason: "not implemented".to_owned(),
         };
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec709");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec709");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "monitor_icc_profile_unsupported");
     }
@@ -678,7 +685,7 @@ mod tests {
             reason: "parse error".to_owned(),
         };
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec709");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec709");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "monitor_icc_profile_invalid");
     }
@@ -691,7 +698,8 @@ mod tests {
             reason: "no OCIO display/view match".to_owned(),
         };
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DisplayP3");
+        let blockers =
+            compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "DisplayP3");
         assert_eq!(blockers.len(), 2);
         assert!(blockers.iter().any(|b| b.code() == "monitor_icc_profile_unmapped"));
         assert!(blockers.iter().any(|b| b.code() == "unsupported_display_color_space"));
@@ -705,7 +713,7 @@ mod tests {
             surface_format: "Bgra8UnormSrgb".to_owned(),
             surface_color_space: "Srgb".to_owned(),
         };
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec709");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec709");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "unsupported_hdr_swapchain_or_edr");
     }
@@ -717,7 +725,13 @@ mod tests {
             mode: "HdrPq".to_owned(),
             reason: "unknown".to_owned(),
         };
-        let blockers = compute_display_blockers(&profile, &hdr, "Rgba16Float", "Rec2100Pq");
+        let blockers = compute_display_blockers(
+            &profile,
+            &hdr,
+            "Rgba16Float",
+            "ExtendedSrgbLinear",
+            "Rec2100Pq",
+        );
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "monitor_hdr_capability_unknown");
     }
@@ -726,7 +740,7 @@ mod tests {
     fn compute_blockers_sdr_no_blockers() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec709");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec709");
         assert!(blockers.is_empty());
     }
 
@@ -741,7 +755,13 @@ mod tests {
             mode: "HdrPq".to_owned(),
             reason: "unknown".to_owned(),
         };
-        let blockers = compute_display_blockers(&profile, &hdr, "Rgba16Float", "Rec2100Pq");
+        let blockers = compute_display_blockers(
+            &profile,
+            &hdr,
+            "Rgba16Float",
+            "ExtendedSrgbLinear",
+            "Rec2100Pq",
+        );
         assert_eq!(blockers.len(), 2);
         let codes: Vec<&str> = blockers.iter().map(|b| b.code()).collect();
         assert!(codes.contains(&"monitor_icc_profile_unsupported"));
@@ -767,7 +787,8 @@ mod tests {
             surface_format: "Bgra8UnormSrgb".to_owned(),
             surface_color_space: "Srgb".to_owned(),
         };
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec2100Pq");
+        let blockers =
+            compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec2100Pq");
         let codes: Vec<&str> = blockers.iter().map(|b| b.code()).collect();
         assert!(
             codes.contains(&"surface_contract_mismatch"),
@@ -783,7 +804,8 @@ mod tests {
     fn compute_blockers_wide_gamut_on_srgb_surface() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DisplayP3");
+        let blockers =
+            compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "DisplayP3");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "unsupported_display_color_space");
     }
@@ -792,15 +814,36 @@ mod tests {
     fn compute_blockers_wide_gamut_on_rgba16float_no_mismatch() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Rgba16Float", "DisplayP3");
+        let blockers = compute_display_blockers(
+            &profile,
+            &hdr,
+            "Rgba16Float",
+            "ExtendedSrgbLinear",
+            "DisplayP3",
+        );
         assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn wide_gamut_admission_uses_actual_surface_primaries_not_texture_format() {
+        let profile = MonitorProfileStatus::NotRequested;
+        let hdr = HdrStatus::NotRequested;
+        for format in ["Bgra8UnormSrgb", "Rgba16Float"] {
+            let p3 = compute_display_blockers(&profile, &hdr, format, "DisplayP3", "DisplayP3");
+            assert!(p3.is_empty(), "valid P3 surface was rejected: {p3:?}");
+            for unsupported in ["Srgb", "unknown"] {
+                let blockers =
+                    compute_display_blockers(&profile, &hdr, format, unsupported, "DisplayP3");
+                assert!(blockers.iter().any(|b| b.code() == "unsupported_display_color_space"));
+            }
+        }
     }
 
     #[test]
     fn compute_blockers_sdr_output_on_srgb_no_blockers() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Rec709");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "Srgb", "Rec709");
         assert!(blockers.is_empty());
     }
 }
