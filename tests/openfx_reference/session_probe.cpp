@@ -7,6 +7,8 @@
 #undef OfxGetPlugin
 #undef OfxGetNumberOfPlugins
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 #include <map>
 #include <string>
 
@@ -52,6 +54,7 @@ OfxStatus probe(const char* action, const void* handle,
     auto& state = actions.at(handle);
     if (state.changing) { return kOfxStatFailed; }
     ++state.renders;
+    if (selected == "hang") { std::this_thread::sleep_for(std::chrono::seconds(5)); }
     if (selected == "unfetched" && state.renders > 1) {
       return kOfxStatOK; // Deliberately do not produce this frame.
     }

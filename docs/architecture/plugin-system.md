@@ -365,10 +365,12 @@ The output allocation is reused and cleared, with a per-render
 fetch flag preventing publication of a previous frame. Native failures poison
 the handle; subsequent calls fail until the owner retires and recreates it.
 
-The ordinary product path still supervises a single-frame child. This native
-session seam prepares safe resident transport; it does not yet qualify a
-persistent product worker, worker cancellation, combined memory admission or
-vendor sequential-state support. The official Basic Gain child qualification
+The executable now exposes the resident native session protocol described below.
+The standalone single-frame API uses that protocol and retires its session after
+one frame. Definition callbacks still call that standalone API until factory
+binding, execution cancellation and coordinated native grants are integrated.
+Combined memory admission and vendor sequential-state support remain required.
+The official Basic Gain child qualification
 covers repeated edits, seeks, changed input and pixel aspect, omitted defaults,
 nonfinite input, extent rejection and repeated native destruction/recreation.
 The separate product-worker test checks discovery and compiled-graph pixel
@@ -380,3 +382,33 @@ and optional sequential requests, required sequence/temporal rejection,
 instance/runtime contract changes, and a plugin returning successful Render
 without fetching a new output. This hostile contract fixture complements the
 untouched official pixel reference; it is never part of the product package.
+
+### Resident OpenFX control and frame transport
+
+OpenFxFilterSession owns one supervised child, an ephemeral loopback listener,
+a control stream and an immutable two-frame shared mapping. The child proves a
+fresh random nonce and protocol version before receiving the selected binary or
+mapping path, validates the preparation envelope and exact file size, verifies
+the selected binary SHA-256 and reports readiness. Plugin stdout/stderr are not
+part of the protocol. Native initialization is deferred to the first authored
+frame; later requests retain that same instance and shared ranges.
+
+Control packets have a length prefix, strict typed JSON schema and a two-MiB
+limit checked before allocation. Header/body progress survives short socket
+poll timeouts. Every frame has a monotonically checked sequence; input belongs
+to the parent before submission and output becomes readable only after the
+matching successful response. The child has exclusive mapping access during
+native processing. Idle child reads may wait for the first packet byte; once a
+packet begins, its remainder has a finite deadline. Responses are likewise
+bounded. Binary fingerprints remain verified before/after parent rendering and
+before child rendering; fingerprint optimization requires separate evidence.
+
+Parent I/O checkpoints observe the execution cancellation token, child status
+and operation deadline. A canceled, failed, malformed or timed-out operation
+terminates and reaps the child before output publication or mapping retirement.
+Graceful shutdown drops the native instance before acknowledging closure, then
+verifies process exit; a stalled shutdown is killed/reaped under a short cap.
+The exact physical native working-set grant and propagation from production
+Effect execution cancellation are pending integration with the factory seam.
+This transport does not add a process-global worker pool or sequential-state
+interpretation.

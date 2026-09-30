@@ -64,3 +64,6 @@ set_target_properties(SessionProbe PROPERTIES PREFIX "" SUFFIX ".ofx"
 file(MAKE_DIRECTORY "${OPENFX_PROBE_BUNDLE_DIR}/Contents")
 configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
   "${OPENFX_PROBE_BUNDLE_DIR}/Contents/Info.plist" COPYONLY)
+
+find_package(Threads REQUIRED)
+target_link_libraries(SessionProbe PRIVATE Threads::Threads)

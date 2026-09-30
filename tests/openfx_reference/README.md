@@ -64,3 +64,19 @@ required sequential and temporal rejection, instance-level admission changes,
 runtime contract changes, and stale-output rejection. The probe independently
 rejects any begin/render/end action falsely claiming sequential execution or
 any parameter-change action outside a nonempty begin/end group.
+
+Resident process/mapping reuse is checked by the `official_basic_resident_sessions_reuse_workers_and_isolate_frames`
+integration test. Preview/Export test consumers keep different stable child
+identities across edits/seeks and changing inputs; cancellation of one consumer
+cannot retire the other. A separate native hang scenario uses the probe bundle:
+
+```sh
+# Set MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang in the test command environment.
+cargo test -p mondrian-app --all-features --test openfx_host \
+  resident_worker_cancellation_retires_and_reaps_a_hung_native_render \
+  -- --ignored --nocapture
+```
+
+The latter interrupts a five-second native render and confirms the retired
+session cannot be reused. It qualifies supervised cancellation for the session
+API; production Effect cancellation and combined memory grants remain separate.

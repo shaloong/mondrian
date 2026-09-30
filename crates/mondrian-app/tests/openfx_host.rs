@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
-    describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFloatFrame,
-    OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
+    describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterSession,
+    OpenFxFloatFrame, OpenFxHostError, OpenFxRenderTiming, OpenFxScalarValue,
 };
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::{
@@ -231,4 +231,161 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
     }
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_REFERENCE_BINARY to the official Basic.ofx.bundle"]
+fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic binary"),
+    );
+    let inspection =
+        inspect_openfx_binary(product_executable(), &binary).expect("inspect reference");
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut preview = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        2,
+        3,
+        &cancellation,
+    )
+    .expect("preview worker");
+    let mut export = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        2,
+        3,
+        &cancellation,
+    )
+    .expect("export worker");
+    let preview_id = preview.worker_process_id();
+    let export_id = export.worker_process_id();
+    assert_ne!(preview_id, export_id);
+    let mut timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let mut input = OpenFxFloatFrame {
+        width: 2,
+        height: 3,
+        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 6],
+    };
+    for (frame, gain, aspect) in [
+        (0.0, 1.5, 1.0),
+        (0.0, 2.0, 1.0),
+        (42.0, 0.75, 1.2),
+        (1.0, 1.25, 1.0),
+    ] {
+        timing.frame = frame;
+        timing.pixel_aspect_ratio = aspect;
+        let values = BTreeMap::from([("scale".to_owned(), OpenFxScalarValue::Double(gain))]);
+        let output = preview
+            .render(&timing, &values, &input, &cancellation)
+            .expect("resident render");
+        assert_eq!(preview.worker_process_id(), preview_id);
+        for (actual, source) in output.pixels.iter().zip(&input.pixels) {
+            for (actual, source) in actual.iter().zip(source) {
+                assert_eq!(*actual, *source * gain as f32);
+            }
+        }
+        let unmodified = export
+            .render(&timing, &BTreeMap::new(), &input, &cancellation)
+            .expect("independent export");
+        assert_eq!(unmodified, input);
+        assert_eq!(export.worker_process_id(), export_id);
+    }
+    input.pixels.fill([0.5, -1.0, 3.0, 0.75]);
+    assert_eq!(
+        preview
+            .render(&timing, &BTreeMap::new(), &input, &cancellation)
+            .expect("changed input/defaults"),
+        input
+    );
+    cancellation.cancel();
+    assert!(matches!(
+        preview.render(&timing, &BTreeMap::new(), &input, &cancellation),
+        Err(OpenFxHostError::Canceled)
+    ));
+    assert!(matches!(
+        preview.render(
+            &timing,
+            &BTreeMap::new(),
+            &input,
+            &mondrian_core::ExecutionCancellationToken::new()
+        ),
+        Err(OpenFxHostError::Unavailable(_))
+    ));
+    // Retiring one consumer never releases the other consumer's worker/mapping.
+    let live = mondrian_core::ExecutionCancellationToken::new();
+    assert_eq!(
+        export
+            .render(&timing, &BTreeMap::new(), &input, &live)
+            .expect("surviving export"),
+        input
+    );
+    export.shutdown().expect("native destruction and child reap");
+    export.shutdown().expect("idempotent shutdown");
+}
+
+#[test]
+#[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
+fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("hang fixture mode"),
+        "hang"
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
+    );
+    let inspection =
+        inspect_openfx_binary(product_executable(), &binary).expect("probe inspection");
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        1,
+        1,
+        &cancellation,
+    )
+    .expect("resident worker");
+    let token = cancellation.clone();
+    let canceler = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        token.cancel();
+    });
+    let timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 10.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let input = OpenFxFloatFrame { width: 1, height: 1, pixels: vec![[0.25; 4]] };
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        session.render(&timing, &BTreeMap::new(), &input, &cancellation),
+        Err(OpenFxHostError::Canceled)
+    ));
+    canceler.join().expect("canceler");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "five-second native hang was interrupted"
+    );
+    assert!(matches!(
+        session.render(
+            &timing,
+            &BTreeMap::new(),
+            &input,
+            &mondrian_core::ExecutionCancellationToken::new()
+        ),
+        Err(OpenFxHostError::Unavailable(_))
+    ));
+    session.shutdown().expect("failed worker already reaped");
+    assert_eq!(input.pixels, [[0.25; 4]]);
 }

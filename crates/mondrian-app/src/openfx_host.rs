@@ -1,5 +1,10 @@
 //! Supervised Float32 OpenFX filter execution for one selected native binary.
 
+mod resident;
+pub use resident::{
+    run_openfx_resident_worker, OpenFxFilterSession, OPENFX_RESIDENT_WORKER_ARGUMENT,
+};
+
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fs;
@@ -16,12 +21,10 @@ use crate::openfx_adapter::{
     resolve_openfx_binary, sha256_file, OpenFxBinaryInspection, OpenFxDiscoveryError,
 };
 
-/// Hidden product executable mode for one native Float32 filter render.
-pub const OPENFX_RENDER_WORKER_ARGUMENT: &str = "--internal-openfx-render-v1";
 /// Hidden product executable mode for selected filter description.
 pub const OPENFX_DESCRIBE_WORKER_ARGUMENT: &str = "--internal-openfx-describe-v1";
-const REQUEST_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_RENDER_REQUEST";
-const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_RENDER_RESPONSE";
+const REQUEST_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DESCRIBE_REQUEST";
+const RESPONSE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_DESCRIBE_RESPONSE";
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const MAX_PARAMETERS: usize = 4096;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -129,23 +132,12 @@ pub enum OpenFxHostError {
     /// The native render exceeded its supervised deadline.
     #[error("OpenFX native worker exceeded its deadline")]
     DeadlineExceeded,
+    /// The owning execution request was canceled before output publication.
+    #[error("OpenFX native worker request was canceled")]
+    Canceled,
     /// The native process exited without a valid result.
     #[error("OpenFX native worker failed: {0}")]
     WorkerFailed(String),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RenderRequest {
-    binary_path: PathBuf,
-    bundle_path: PathBuf,
-    binary_sha256: String,
-    plugin_identifier: String,
-    width: u32,
-    height: u32,
-    timing: OpenFxRenderTiming,
-    parameters: BTreeMap<String, OpenFxScalarValue>,
-    shared_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,13 +147,6 @@ struct DescribeRequest {
     bundle_path: PathBuf,
     binary_sha256: String,
     plugin_identifier: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RenderResponse {
-    Success,
-    Rejected { status: i32 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -372,79 +357,19 @@ pub fn render_openfx_filter_frame(
     parameters: &BTreeMap<String, OpenFxScalarValue>,
     frame: &OpenFxFloatFrame,
 ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
-    if !helper_executable.is_absolute() || !helper_executable.is_file() {
-        return Err(invalid("helper must be an absolute regular file"));
-    }
-    let frame_bytes = validate_frame(frame.width, frame.height, frame.pixels.len())?;
-    if frame.pixels.iter().flatten().any(|channel| !channel.is_finite()) {
-        return Err(invalid("OpenFX input contains a nonfinite channel"));
-    }
-    validate_timing(timing)?;
-    validate_parameters(parameters)?;
-    let bundle = verified_selection(inspection, plugin_identifier)?;
-    let staging = tempfile::tempdir()
-        .map_err(|error| unavailable(format!("render staging failed: {error}")))?;
-    let shared_file = tempfile::NamedTempFile::new_in(staging.path())
-        .map_err(|error| unavailable(format!("shared frame creation failed: {error}")))?;
-    shared_file
-        .as_file()
-        .set_len((frame_bytes * 2) as u64)
-        .map_err(|error| unavailable(format!("shared frame allocation failed: {error}")))?;
-    // SAFETY: this newly sized file is retained until the supervised child has
-    // exited and been reaped. The immutable layout contains two disjoint frames.
-    // Parent accesses pixels only before launch and after worker completion.
-    let mut shared =
-        unsafe { MmapOptions::new().len(frame_bytes * 2).map_mut(shared_file.as_file()) }
-            .map_err(|error| unavailable(format!("shared frame mapping failed: {error}")))?;
-    for (bytes, channel) in
-        shared[..frame_bytes].chunks_exact_mut(4).zip(frame.pixels.iter().flatten())
-    {
-        bytes.copy_from_slice(&channel.to_ne_bytes());
-    }
-    let request = RenderRequest {
-        binary_path: inspection.binary_path.clone(),
-        bundle_path: bundle,
-        binary_sha256: inspection.binary_sha256.clone(),
-        plugin_identifier: plugin_identifier.to_owned(),
-        width: frame.width,
-        height: frame.height,
-        timing: timing.clone(),
-        parameters: parameters.clone(),
-        shared_path: shared_file.path().to_path_buf(),
-    };
-    let response: RenderResponse = invoke_worker(
+    validate_render_request(timing, parameters, frame)?;
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let mut session = OpenFxFilterSession::prepare(
         helper_executable,
-        OPENFX_RENDER_WORKER_ARGUMENT,
-        staging.path(),
-        &request,
+        inspection,
+        plugin_identifier,
+        frame.width,
+        frame.height,
+        &cancellation,
     )?;
-    if let RenderResponse::Rejected { status } = response {
-        return Err(OpenFxHostError::WorkerFailed(format!(
-            "native status {status}"
-        )));
-    }
-    if sha256_file(&inspection.binary_path)? != inspection.binary_sha256 {
-        return Err(invalid("OpenFX binary changed during render"));
-    }
-    let bytes = &shared[frame_bytes..];
-    let pixels: Vec<[f32; 4]> = bytes
-        .chunks_exact(16)
-        .map(|pixel| {
-            let channel = |index| {
-                f32::from_ne_bytes([
-                    pixel[index],
-                    pixel[index + 1],
-                    pixel[index + 2],
-                    pixel[index + 3],
-                ])
-            };
-            [channel(0), channel(4), channel(8), channel(12)]
-        })
-        .collect();
-    if pixels.iter().flatten().any(|channel| !channel.is_finite()) {
-        return Err(unavailable("render output contains a nonfinite channel"));
-    }
-    Ok(OpenFxFloatFrame { width: frame.width, height: frame.height, pixels })
+    let output = session.render(timing, parameters, frame, &cancellation)?;
+    session.shutdown()?;
+    Ok(output)
 }
 
 fn invoke_worker<T: Serialize, R: DeserializeOwned>(
@@ -505,19 +430,6 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&response_bytes)
         .map_err(|error| unavailable(format!("OpenFX worker response is malformed: {error}")))
-}
-
-/// Run the native render entrypoint before graphics or media startup.
-pub fn run_openfx_render_worker() -> Result<(), OpenFxHostError> {
-    let (request, response_path): (RenderRequest, PathBuf) =
-        read_worker_request(OPENFX_RENDER_WORKER_ARGUMENT)?;
-    let status = render_in_worker(&request)?;
-    let response = if status == 0 {
-        RenderResponse::Success
-    } else {
-        RenderResponse::Rejected { status }
-    };
-    write_worker_response(&response_path, &response)
 }
 
 /// Describe one selected native Filter before graphics or media startup.
@@ -715,82 +627,17 @@ fn write_worker_response<T: Serialize>(
         .map_err(|error| unavailable(format!("render response write failed: {error}")))
 }
 
-fn render_in_worker(request: &RenderRequest) -> Result<i32, OpenFxHostError> {
-    let pixels = (request.width as usize)
-        .checked_mul(request.height as usize)
-        .ok_or_else(|| invalid("frame dimensions overflow"))?;
-    let frame_bytes = validate_frame(request.width, request.height, pixels)?;
-    let shared_file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&request.shared_path)
-        .map_err(|error| unavailable(format!("shared frame open failed: {error}")))?;
-    let metadata = shared_file
-        .metadata()
-        .map_err(|error| unavailable(format!("shared frame metadata failed: {error}")))?;
-    if !metadata.is_file() || metadata.len() != (frame_bytes * 2) as u64 {
-        return Err(invalid("shared frame has an invalid size"));
+fn validate_render_request(
+    timing: &OpenFxRenderTiming,
+    parameters: &BTreeMap<String, OpenFxScalarValue>,
+    frame: &OpenFxFloatFrame,
+) -> Result<(), OpenFxHostError> {
+    validate_frame(frame.width, frame.height, frame.pixels.len())?;
+    if frame.pixels.iter().flatten().any(|channel| !channel.is_finite()) {
+        return Err(invalid("OpenFX input contains a nonfinite channel"));
     }
-    // SAFETY: the parent retains this exact-sized file and does not access its
-    // frames while this child executes. Native code copies the input and writes
-    // at most frame_bytes to the disjoint output range during the synchronous call.
-    let mut shared = unsafe { MmapOptions::new().len(frame_bytes * 2).map_mut(&shared_file) }
-        .map_err(|error| unavailable(format!("shared frame mapping failed: {error}")))?;
-    validate_parameters(&request.parameters)?;
-    validate_timing(&request.timing)?;
-    verify_worker_binary(
-        &request.binary_path,
-        &request.bundle_path,
-        &request.binary_sha256,
-    )?;
-    let binary = native_string(&request.binary_path)?;
-    let bundle = native_string(&request.bundle_path)?;
-    let identifier = CString::new(request.plugin_identifier.as_str())
-        .map_err(|_| invalid("plugin identifier contains a null byte"))?;
-    let (input, output) = shared.split_at_mut(frame_bytes);
-    let names = request
-        .parameters
-        .keys()
-        .map(|name| {
-            CString::new(name.as_str()).map_err(|_| invalid("parameter name contains a null byte"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let native_parameters = request
-        .parameters
-        .values()
-        .zip(&names)
-        .map(|(value, name)| match value {
-            OpenFxScalarValue::Double(value) => {
-                NativeParameter { name: name.as_ptr(), kind: 1, value: *value }
-            }
-            OpenFxScalarValue::Boolean(value) => NativeParameter {
-                name: name.as_ptr(),
-                kind: 2,
-                value: f64::from(*value as u8),
-            },
-        })
-        .collect::<Vec<_>>();
-    let frame_info = NativeFrameInfo {
-        width: request.width as c_int,
-        height: request.height as c_int,
-        frame: request.timing.frame,
-        frame_rate: request.timing.frame_rate,
-        first_frame: request.timing.first_frame,
-        last_frame: request.timing.last_frame,
-        pixel_aspect_ratio: request.timing.pixel_aspect_ratio,
-    };
-    let mut session = match NativeSession::create(
-        &binary,
-        &bundle,
-        &identifier,
-        input,
-        &frame_info,
-        &native_parameters,
-    ) {
-        Ok(session) => session,
-        Err(status) => return Ok(status),
-    };
-    Ok(session.render(input, output, &frame_info, &native_parameters))
+    validate_timing(timing)?;
+    validate_parameters(parameters)
 }
 
 fn validate_frame(width: u32, height: u32, pixels: usize) -> Result<usize, OpenFxHostError> {
@@ -1226,33 +1073,5 @@ mod shared_frame_tests {
             &parameters(1.0)
         )
         .is_err());
-    }
-
-    #[test]
-    fn worker_rejects_truncated_and_oversized_shared_frames_before_native_loading() {
-        for size in [0, 16, 31, 33, 64] {
-            let file = tempfile::NamedTempFile::new().expect("shared file");
-            file.as_file().set_len(size).expect("set malformed extent");
-            let request = RenderRequest {
-                binary_path: PathBuf::from("never-loaded.ofx"),
-                bundle_path: PathBuf::from("never-loaded.ofx.bundle"),
-                binary_sha256: String::new(),
-                plugin_identifier: "test".to_owned(),
-                width: 1,
-                height: 1,
-                timing: OpenFxRenderTiming {
-                    frame: 0.0,
-                    frame_rate: 24.0,
-                    first_frame: 0.0,
-                    last_frame: 1.0,
-                    pixel_aspect_ratio: 1.0,
-                },
-                parameters: BTreeMap::new(),
-                shared_path: file.path().to_path_buf(),
-            };
-            assert!(
-                matches!(render_in_worker(&request), Err(OpenFxHostError::Invalid(reason)) if reason == "shared frame has an invalid size")
-            );
-        }
     }
 }
